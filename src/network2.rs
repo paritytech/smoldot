@@ -13,17 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const PROTOS: &[&str] = &[
-    "src/network/schema/api.v1.proto",
-    "src/network/schema/finality.v1.proto",
-    "src/network/schema/light.v1.proto",
-];
+/*********************************************************
+**   Prototype for a rewrite of the networking code     **
+**   Not ready yet                                      **
+*********************************************************/
 
-fn main() {
-    prost_build::compile_protos(PROTOS, &["src/network/schema"]).unwrap();
-    prost_build::compile_protos(
-        &["src/network2/libp2p/connection/noise/payload.proto"],
-        &["src"],
-    )
-    .unwrap();
-}
+pub mod leb128;
+pub mod libp2p;
