@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Transactions verification.
+//! Transactions validation.
 //!
 //! When the node is informed of a transaction, the first step is to perform a runtime function
 //! call with the `TaggedTransactionQueue_validate_transaction` entry point, passing the opaque
@@ -26,7 +26,7 @@ use crate::executor;
 
 use core::{convert::TryFrom as _, iter};
 
-/// Configuration for a transaction verification.
+/// Configuration for a transaction validation.
 pub struct Config<TTx> {
     /// Runtime used to check the transaction. Must be built using the Wasm code found at the
     /// `:code` key of the relevant block.
@@ -72,7 +72,7 @@ pub struct Success {
     pub logs: String,
 }
 
-/// Error that can happen during the verification.
+/// Error that can happen during the validation.
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
@@ -115,10 +115,10 @@ pub fn execute_block(
     .run()
 }
 
-/// Current state of the verification.
+/// Current state of the validation.
 #[must_use]
 pub enum Verify {
-    /// Verification is over.
+    /// Validation is over.
     Finished(Result<Success, Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
@@ -212,7 +212,7 @@ impl NextKey {
     }
 }
 
-/// Implementation detail of the verification. Shared by all the variants of [`Verify`] except
+/// Implementation detail of the validation. Shared by all the variants of [`Verify`] except
 /// [`Verify::Finished`].
 struct VerifyInner {
     /// Virtual machine running the call.
@@ -223,7 +223,7 @@ struct VerifyInner {
 }
 
 impl VerifyInner {
-    /// Continues the verification.
+    /// Continues the validation.
     fn run(mut self) -> Verify {
         loop {
             match self.vm.state() {
