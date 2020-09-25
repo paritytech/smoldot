@@ -112,6 +112,7 @@ pub mod metadata;
 #[allow(warnings)] // TODO: temporary because code has been copy-pasted from Substrate
 pub mod network;
 pub mod telemetry;
+pub mod transactions;
 pub mod trie;
 pub mod verify;
 pub mod wasm_bindings;
