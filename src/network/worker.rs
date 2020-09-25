@@ -431,15 +431,16 @@ impl Network {
                     request_id,
                     outcome: Err(_err),
                 }) => {
-                    match self.request_types.remove(&request_id).unwrap() {
-                        RequestTy::Block => {
+                    match self.request_types.remove(&request_id) {
+                        Some(RequestTy::Block) => {
                             // TODO: proper error
                             return Event::BlocksRequestFinished {
                                 id: request_id,
                                 result: Err(()),
                             };
                         }
-                        RequestTy::Call => todo!(),
+                        Some(RequestTy::Call) => todo!(),
+                        None => {} // TODO: hack to bypass https://github.com/paritytech/substrate-lite/issues/5
                     }
                 }
                 SwarmEvent::Behaviour(behaviour::BehaviourOut::InboundRequest { .. }) => {}
