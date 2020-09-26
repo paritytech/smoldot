@@ -35,15 +35,15 @@ use core::{
 };
 
 /// State of a single substream.
-pub struct Substream<TNow> {
+pub struct Substream<TNow, TProtoList, TProto> {
     /// Specialization for that substream.
-    ty: SubstreamTy<TNow>,
+    ty: SubstreamTy<TNow, TProtoList, TProto>,
 }
 
-enum SubstreamTy<TNow> {
+enum SubstreamTy<TNow, TProtoList, TProto> {
     /// Protocol negotiation is still in progress on this substream.
     Negotiating {
-        state: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
+        state: multistream_select::InProgress<TProtoList, TProto>,
         when_timeout: TNow,
     },
     NotificationsOut,

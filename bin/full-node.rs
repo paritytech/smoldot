@@ -615,14 +615,22 @@ async fn start_network2(
     mut to_network: mpsc::Receiver<ToNetwork>,
     mut to_sync: mpsc::Sender<ToSync>,
 ) -> impl Future<Output = ()> {
-    let mut network = substrate_lite::network2::libp2p::Network::<_, _, _, (), _>::new(
-        substrate_lite::network2::libp2p::Config {
-            noise_key: substrate_lite::network2::libp2p::NoiseKey::new(&[0; 32]), // TODO:
-            notification_protocols: core::iter::empty::<()>(),
-            request_protocols: Vec::new(),
-            tasks_executor,
-        },
-    );
+    // TODO: tokio instead?
+    // TODO: report listener opening error
+    // TODO: make address configurable
+    let tcp_listener = async_std::net::TcpListener::bind("0.0.0.0:30333")
+        .await
+        .ok();
+
+    let mut network =
+        substrate_lite::network2::libp2p::Connections::<_, _, _, (), _, std::time::Instant>::new(
+            substrate_lite::network2::libp2p::Config {
+                noise_key: substrate_lite::network2::libp2p::NoiseKey::new(&[0; 32]), // TODO:
+                notification_protocols: core::iter::empty::<()>(),
+                request_protocols: Vec::new(),
+                tasks_executor,
+            },
+        );
 
     let bootnodes = chain_spec
         .boot_nodes()
@@ -658,9 +666,17 @@ async fn start_network2(
 
     async move {
         loop {
-            match network.next_event().await {
-                substrate_lite::network2::libp2p::Event::Notification { .. } => todo!(),
-                substrate_lite::network2::libp2p::Event::RequestFinished { .. } => todo!(),
+            futures::select! {
+                event = network.next_event().fuse() => {
+                    match event {
+                        substrate_lite::network2::libp2p::Event::Notification { .. } => todo!(),
+                        substrate_lite::network2::libp2p::Event::RequestFinished { .. } => todo!(),
+                    }
+                },
+                incoming = async { if let Some(l) = tcp_listener.as_ref() { l.accept().await } else { loop { futures::pending!() } } }.fuse() => {
+                    // A new socket has been received from the TCP listener.
+                    todo!()
+                }
             }
         }
     }

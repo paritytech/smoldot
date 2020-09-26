@@ -15,12 +15,13 @@
 
 //! Collection of connections and connection attempts.
 //!
-//! This module provides the [`Network`] data structure that contains a collection of currently
-//! open connections, both in handshake mode or not, and pending outgoing connection attempts.
+//! This module provides the [`Connections`] data structure that contains a collection of
+//! currently open connections, both in handshake mode or not, and pending outgoing connection
+//! attempts.
 //!
 //! In addition to holding a collection of connections, this module provides a
 //! multithreading-friendly API. All methods accept `&self` rather than `&mut self`, making it
-//! possible to use the [`Network`] multiple times from multiple different threads
+//! possible to use the [`Connections`] multiple times from multiple different threads
 //! simultaneously.
 //!
 //! > **Note**: The process power required to encode and decode the encrypted networking
@@ -28,7 +29,7 @@
 //! >           client. In order to avoid running into a bottleneck when the number of peers is
 //! >           high, it is recommmended for the user to distribute the various sockets between
 //! >           multiple tasks (themselves distributed between multiple CPU cores), and share the
-//! >           [`Network`] object between all these tasks.
+//! >           [`Connections`] object between all these tasks.
 
 #![allow(unused)] // TODO: remove once code is used
 
@@ -48,7 +49,7 @@ pub use libp2p::{multiaddr, Multiaddr, PeerId};
 
 mod connection;
 
-/// Configuration to provide when building a [`Network`].
+/// Configuration to provide when building a [`Connections`].
 pub struct Config<PIter> {
     /// Key to use during the connection handshakes. Not the same thing as the libp2p key, but
     /// instead contains a signature made using the libp2p private key.
@@ -65,7 +66,7 @@ pub struct Config<PIter> {
 }
 
 /// Collection of network connections.
-pub struct Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
+pub struct Connections<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
     // TODO: SipHasher would be preferred here
     nodes: HashMap<PeerId, NodeInner<TUserData, TSocket>, fnv::FnvBuildHasher>,
 
@@ -95,16 +96,16 @@ struct NodeInner<TUserData, TSocket> {
 }
 
 impl<TUserData, TDialFut, TDialError, TSocket, TRq, TProtocol, TNow>
-    Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>
+    Connections<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>
 where
     TDialFut: Future<Output = Result<(TUserData, TSocket), TDialError>>,
     TSocket: AsyncRead + AsyncWrite + Send + 'static,
 {
-    /// Initializes the [`Network`].
+    /// Initializes the [`Connections`].
     pub fn new(config: Config<impl Iterator<Item = TProtocol>>) -> Self {
         let (test_tx, test_rx) = mpsc::channel(512);
 
-        Network {
+        Connections {
             nodes: HashMap::default(),
             noise_key: Arc::new(config.noise_key),
             dials: stream::FuturesUnordered::new(),
@@ -300,11 +301,11 @@ where
     }
 }
 
-/// Identifier of a connection within the [`Network`] object.
+/// Identifier of a connection within the [`Connections`] object.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(usize);
 
-/// Event that happened on the [`Network`].
+/// Event that happened on the [`Connections`].
 #[derive(Debug)]
 pub enum Event<'a, TUserData, TProtocol> {
     RequestFinished {
@@ -349,7 +350,7 @@ pub enum Node<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
 
 /// State of a node in the libp2p state machine.
 pub struct NodeNotConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
-    network: &'a mut Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>,
+    network: &'a mut Connections<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>,
     peer_id: &'a PeerId,
 }
 
@@ -363,7 +364,7 @@ impl<'a, T, TDialFut, TSocket, TRq, TProtocol, TNow>
 
 /// State of a node in the libp2p state machine.
 pub struct NodeConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
-    network: &'a mut Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>,
+    network: &'a mut Connections<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>,
     peer_id: &'a PeerId,
 }
 
