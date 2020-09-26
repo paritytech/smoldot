@@ -18,20 +18,26 @@
 //! This state machine tries to negotiate and apply the noise and yamux protocols on top of the
 //! connection.
 
-use core::iter;
+use core::{
+    fmt, iter,
+    ops::{Add, Sub},
+    time::Duration,
+};
 use libp2p::PeerId;
 
 pub use noise::{NoiseKey, UnsignedNoiseKey};
 
 mod multistream_select;
 mod noise;
+mod substream;
 mod yamux;
 
 // TODO: needs a timeout for the handshake
 
-pub struct Connection {
+pub struct Connection<TNow> {
     encryption: noise::Noise,
     yamux: yamux::Connection<Substream>,
+    marker: core::marker::PhantomData<TNow>, // TODO: remove
 }
 
 struct Substream {
@@ -48,32 +54,42 @@ enum SubstreamTy {
     RequestIn,
 }
 
-impl Connection {
-    /// Parse the content of `data`. Returns the new state of the connection and the number of
-    /// bytes read from `data`.
+impl<TNow> Connection<TNow>
+where
+    TNow: Clone + Add<Duration> + Sub<TNow, Output = Duration> + Ord,
+{
+    /// Reads data coming from the socket from `incoming_data`, updates the internal state machine,
+    /// and writes data destined to the socket to `outgoing_buffer`.
     ///
-    /// Returns an error in case of protocol error, in which case the connection should be
-    /// entirely shut down.
+    /// `incoming_data` should be `None` if the remote has closed their writing side.
     ///
-    /// If the number of bytes read is different from 0, you should immediately call this method
-    /// again with the remaining data.
-    pub fn inject_data(mut self, mut data: &[u8]) -> Result<usize, HandshakeError> {
+    /// The returned structure contains the number of bytes read and written from/to the two
+    /// buffers. Call this method in a loop until these two values are both 0 and
+    /// [`ReadWrite::event`] is `None`.
+    ///
+    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
+    ///
+    /// The current time must be passed via the `now` parameter. This is used internally in order
+    /// to keep track of ping times and timeouts. The returned structure optionally contains a
+    /// `TNow` representing the moment after which this method should be called again.
+    ///
+    /// If an error is returned, the socket should be entirely shut down.
+    pub fn read_write(
+        mut self,
+        now: TNow,
+        mut incoming_data: Option<&[u8]>,
+        mut outgoing_buffer: &mut [u8],
+    ) -> Result<ReadWrite<TNow>, Error> {
         let mut total_read = 0;
 
-        let num_read = self
-            .encryption
-            .inject_inbound_data(data)
-            .map_err(HandshakeError::Noise)?;
-        total_read += data.len();
-        data = &data[num_read..];
-
-        todo!()
-    }
-
-    /// Write to the given buffer the bytes that are ready to be sent out. Returns the number of
-    /// bytes written to `destination`.
-    pub fn write_out(mut self, mut destination: &mut [u8]) -> usize {
-        let mut total_written = 0;
+        if let Some(incoming_data) = incoming_data.as_mut() {
+            let num_read = self
+                .encryption
+                .inject_inbound_data(*incoming_data)
+                .map_err(Error::Noise)?;
+            total_read += incoming_data.len();
+            *incoming_data = &incoming_data[num_read..];
+        }
 
         /*loop {
             let mut buffer = encryption.prepare_buffer_encryption(destination);
@@ -107,8 +123,73 @@ impl Connection {
             }
         }*/
 
-        total_written
+        todo!()
     }
+
+    /// Send a request to the remote.
+    ///
+    /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
+    /// be generated on their side.
+    ///
+    /// After the remote has sent back a response, a [`Event::Response`] event will be generated
+    /// locally.
+    // TODO: pass protocol
+    // TODO: finish docs
+    pub fn start_request(&mut self, request: Vec<u8>) {
+        todo!()
+    }
+}
+
+impl<TNow> fmt::Debug for Connection<TNow> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // TODO: better debug
+        f.debug_struct("Connection").finish()
+    }
+}
+
+/// Outcome of [`Connection::read_write`].
+#[must_use]
+#[derive(Debug)]
+pub struct ReadWrite<TNow> {
+    /// Connection object yielded back.
+    pub connection: Connection<TNow>,
+
+    /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
+    /// should no longer be present the next time [`Connection::read_write`] is called.
+    pub read_bytes: usize,
+
+    /// Number of bytes written to the outgoing buffer. These bytes should be sent out to the
+    /// remote. The rest of the outgoing buffer is left untouched.
+    pub written_bytes: usize,
+
+    /// If `Some`, [`Connection::read_write`] should be called again when the point in time
+    /// reaches the value in the `Option`.
+    pub wake_up_after: Option<TNow>,
+
+    /// Event that happened on the connection.
+    pub event: Option<Event>,
+}
+
+/// Event that happened on the connection. See [`ReadWrite::event`].
+#[must_use]
+#[derive(Debug)]
+pub enum Event {
+    /// No more outgoing data will be emitted. The local writing side of the connection should be
+    /// closed.
+    // TODO: remove?
+    EndOfData,
+    /// Received a request in the context of a request-response protocol.
+    RequestIn {
+        // TODO: protocol: ...
+        /// Bytes of the request. Its interpretation is out of scope of this module.
+        request: Vec<u8>,
+    },
+    /// Received a response to a previously emitted request on a request-response protocol.
+    Response {
+        // TODO: user_data: ...
+        /// Bytes of the response. Its interpretation is out of scope of this module.
+        response: Vec<u8>,
+    },
 }
 
 #[derive(derive_more::From)]
@@ -119,7 +200,7 @@ pub enum Handshake {
     NoiseKeyRequired(NoiseKeyRequired),
     Success {
         remote_peer_id: PeerId,
-        connection: Connection,
+        connection: Connection<std::time::Instant>, // TODO: no for generic
     },
 }
 
@@ -280,6 +361,7 @@ impl HealthyHandshake {
                                 connection: Connection {
                                     encryption,
                                     yamux: yamux::Connection::new(),
+                                    marker: core::marker::PhantomData,
                                 },
                                 remote_peer_id: peer_id,
                             },
@@ -393,6 +475,7 @@ impl HealthyHandshake {
                                     connection: Connection {
                                         encryption,
                                         yamux: yamux::Connection::new(),
+                                        marker: core::marker::PhantomData,
                                     },
                                     remote_peer_id: peer_id,
                                 },
@@ -449,6 +532,13 @@ pub enum InjectDataOutcome<'c, 'd> {
         protocol_name: &'c str,
         request: &'d [u8],
     },
+}
+
+/// Error during a connection. The connection should be shut down.
+#[derive(Debug, derive_more::Display)]
+pub enum Error {
+    /// Error in the noise cipher. Data has most likely been corrupted.
+    Noise(noise::CipherError),
 }
 
 /// Error during a connection handshake. The connection should be shut down.

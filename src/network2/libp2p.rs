@@ -13,6 +13,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Collection of connections and connection attempts.
+//!
+//! This module provides the [`Network`] data structure that contains a collection of currently
+//! open connections, both in handshake mode or not, and pending outgoing connection attempts.
+//!
+//! In addition to holding a collection of connections, this module provides a
+//! multithreading-friendly API. All methods accept `&self` rather than `&mut self`, making it
+//! possible to use the [`Network`] multiple times from multiple different threads
+//! simultaneously.
+//!
+//! > **Note**: The process power required to encode and decode the encrypted networking
+//! >           communications is usually the main CPU consumption reason in a Substrate/Polkadot
+//! >           client. In order to avoid running into a bottleneck when the number of peers is
+//! >           high, it is recommmended for the user to distribute the various sockets between
+//! >           multiple tasks (themselves distributed between multiple CPU cores), and share the
+//! >           [`Network`] object between all these tasks.
+
 #![allow(unused)] // TODO: remove once code is used
 
 // TODO: this module uses the AsyncRead/AsyncWrite traits, which are unfortunately not no_std friendly
@@ -48,7 +65,8 @@ pub struct Config<PIter> {
 }
 
 /// Collection of network connections.
-pub struct Network<TUserData, TDialFut, TSocket, TRq, TProtocol> {
+pub struct Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
+    // TODO: SipHasher would be preferred here
     nodes: HashMap<PeerId, NodeInner<TUserData, TSocket>, fnv::FnvBuildHasher>,
 
     /// See [`Config::noise_key`]. Wrapped in an `Arc` for sharing between all the background
@@ -65,7 +83,7 @@ pub struct Network<TUserData, TDialFut, TSocket, TRq, TProtocol> {
     test_rx: mpsc::Receiver<()>,
 
     protocols: Vec<TProtocol>,
-    rq: PhantomData<TRq>,
+    rq: PhantomData<(TRq, TNow)>,
 }
 
 struct NodeInner<TUserData, TSocket> {
@@ -76,8 +94,8 @@ struct NodeInner<TUserData, TSocket> {
     user_data: Option<TUserData>,
 }
 
-impl<TUserData, TDialFut, TDialError, TSocket, TRq, TProtocol>
-    Network<TUserData, TDialFut, TSocket, TRq, TProtocol>
+impl<TUserData, TDialFut, TDialError, TSocket, TRq, TProtocol, TNow>
+    Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>
 where
     TDialFut: Future<Output = Result<(TUserData, TSocket), TDialError>>,
     TSocket: AsyncRead + AsyncWrite + Send + 'static,
@@ -98,11 +116,34 @@ where
         }
     }
 
+    /// Reads data coming from a socket from `incoming_data`, updates the internal state machine,
+    /// and writes data destined to the socket to `outgoing_buffer`.
+    ///
+    /// `incoming_data` should be `None` if the remote has closed their writing side.
+    ///
+    /// The returned structure contains the number of bytes read and written from/to the two
+    /// buffers. Call this method in a loop until these two values are both 0 and
+    /// [`ReadWrite::event`] is `None`.
+    ///
+    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
+    ///
+    /// The current time must be passed via the `now` parameter.
+    // TODO: comment about `now` monotonicity w.r.t. multiple threads
+    // TODO: comment about async-ness of the function
+    pub async fn read_write(
+        &self,
+        connection: ConnectionId,
+        now: TNow,
+        incoming_data: Option<&[u8]>,
+        outgoing_buffer: &mut [u8],
+    ) {
+    }
+
     /// Returns the state of a certain node in the libp2p state machine.
     pub fn node_mut(
         &mut self,
         peer_id: &PeerId,
-    ) -> Node<TUserData, TDialFut, TSocket, TRq, TProtocol> {
+    ) -> Node<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
         todo!()
     }
 
@@ -110,16 +151,16 @@ where
         self.dials.push(future);
     }
 
-    pub fn inject_inbound_connection(
+    pub fn add_inbound_connection(
         &mut self,
         user_data: TUserData,
         socket: TSocket,
         target: Multiaddr,
     ) {
-        self.inject_connection(user_data, socket, connection::Endpoint::Listener)
+        self.add_connection(user_data, socket, connection::Endpoint::Listener)
     }
 
-    fn inject_connection(
+    fn add_connection(
         &mut self,
         user_data: TUserData,
         mut socket: TSocket,
@@ -246,7 +287,7 @@ where
                 dial_result = self.dials.select_next_some() => {
                     match dial_result {
                         Ok((user_data, socket)) => {
-                            self.inject_connection(user_data, socket, connection::Endpoint::Dialer);
+                            self.add_connection(user_data, socket, connection::Endpoint::Dialer);
                         },
                         Err(_) => todo!(),
                     }
@@ -258,6 +299,10 @@ where
         }
     }
 }
+
+/// Identifier of a connection within the [`Network`] object.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionId(usize);
 
 /// Event that happened on the [`Network`].
 #[derive(Debug)]
@@ -295,21 +340,21 @@ pub enum StartRequestError {
 }
 
 /// State of a node in the libp2p state machine.
-pub enum Node<'a, TUserData, TDialFut, TSocket, TRq, TProtocol> {
+pub enum Node<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
     /// There isn't any healthy connect to this node.
-    NotConnected(NodeNotConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol>),
+    NotConnected(NodeNotConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>),
     /// There exists at least one healthy connection to this node.
-    Connected(NodeConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol>),
+    Connected(NodeConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>),
 }
 
 /// State of a node in the libp2p state machine.
-pub struct NodeNotConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol> {
-    network: &'a mut Network<TUserData, TDialFut, TSocket, TRq, TProtocol>,
+pub struct NodeNotConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
+    network: &'a mut Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>,
     peer_id: &'a PeerId,
 }
 
-impl<'a, T, TDialFut, TSocket, TRq, TProtocol>
-    NodeNotConnected<'a, T, TDialFut, TSocket, TRq, TProtocol>
+impl<'a, T, TDialFut, TSocket, TRq, TProtocol, TNow>
+    NodeNotConnected<'a, T, TDialFut, TSocket, TRq, TProtocol, TNow>
 {
     pub fn is_dialing(&self) -> bool {
         todo!()
@@ -317,13 +362,13 @@ impl<'a, T, TDialFut, TSocket, TRq, TProtocol>
 }
 
 /// State of a node in the libp2p state machine.
-pub struct NodeConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol> {
-    network: &'a mut Network<TUserData, TDialFut, TSocket, TRq, TProtocol>,
+pub struct NodeConnected<'a, TUserData, TDialFut, TSocket, TRq, TProtocol, TNow> {
+    network: &'a mut Network<TUserData, TDialFut, TSocket, TRq, TProtocol, TNow>,
     peer_id: &'a PeerId,
 }
 
-impl<'a, T, TDialFut, TSocket, TRq, TProtocol>
-    NodeConnected<'a, T, TDialFut, TSocket, TRq, TProtocol>
+impl<'a, T, TDialFut, TSocket, TRq, TProtocol, TNow>
+    NodeConnected<'a, T, TDialFut, TSocket, TRq, TProtocol, TNow>
 {
     pub fn user_data(&mut self) -> &mut T {
         todo!()
@@ -339,7 +384,7 @@ impl<'a, T, TDialFut, TSocket, TRq, TProtocol>
         self,
     ) -> (
         T,
-        NodeNotConnected<'a, T, TDialFut, TSocket, TRq, TProtocol>,
+        NodeNotConnected<'a, T, TDialFut, TSocket, TRq, TProtocol, TNow>,
     ) {
         todo!()
     }

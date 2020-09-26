@@ -194,6 +194,7 @@ pub struct Noise {
     rx_buffer_decrypted: Vec<u8>,
 }
 
+// TODO: switch a single `read_write` method, as for `Connection`
 impl Noise {
     /// Feeds data received from the wire.
     pub fn inject_inbound_data(&mut self, mut payload: &[u8]) -> Result<usize, CipherError> {
@@ -500,6 +501,7 @@ impl NoiseHandshake {
     }
 }
 
+// TODO: switch a single `read_write` method, as for `Connection`
 impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
     pub fn new(key: &NoiseKey, is_initiator: bool) -> Self {
