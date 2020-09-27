@@ -26,7 +26,7 @@
 
 // TODO: ^ finish docs
 
-use super::multistream_select;
+use super::{super::super::leb128, multistream_select};
 
 use core::{
     iter,
@@ -36,10 +36,11 @@ use core::{
 
 /// State of a single substream.
 pub struct Substream<TNow, TProtoList, TProto> {
-    /// Specialization for that substream.
+    /// Specialization for the substream.
     ty: SubstreamTy<TNow, TProtoList, TProto>,
 }
 
+/// Specialization for the substream.
 enum SubstreamTy<TNow, TProtoList, TProto> {
     /// Protocol negotiation is still in progress on this substream.
     Negotiating {
@@ -48,8 +49,17 @@ enum SubstreamTy<TNow, TProtoList, TProto> {
     },
     NotificationsOut,
     NotificationsIn,
-    RequestOut,
-    RequestIn,
+    // TODO: necessary?
+    RequestOutWaitLocal,
+    RequestOutSend,
+    /// Receiving a response to an outgoing request from the remote.
+    RequestOutReceive(leb128::Framed),
+    /// Receiving an incoming request from the remote.
+    RequestInReceive(leb128::Framed),
+    /// Request has been reported on the API layer. Waiting for 
+    // TODO: wait for which method to be called?
+    RequestInWaitLocal,
+    RequestInSend,
 }
 
 impl<TNow> Substream<TNow>
