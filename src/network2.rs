@@ -20,3 +20,5 @@
 
 pub mod leb128;
 pub mod libp2p;
+
+pub use ::libp2p::{Multiaddr, PeerId}; // TODO: redefine locally?

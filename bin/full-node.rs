@@ -623,7 +623,7 @@ async fn start_network2(
         .ok();
 
     let mut network =
-        substrate_lite::network2::libp2p::Connections::<_, _, _, (), _, std::time::Instant>::new(
+        substrate_lite::network2::libp2p::Network::<_, _, _, (), _, std::time::Instant>::new(
             substrate_lite::network2::libp2p::Config {
                 noise_key: substrate_lite::network2::libp2p::NoiseKey::new(&[0; 32]), // TODO:
                 notification_protocols: core::iter::empty::<()>(),
@@ -637,11 +637,11 @@ async fn start_network2(
         .iter()
         .map(|a| {
             let mut a = a
-                .parse::<substrate_lite::network2::libp2p::Multiaddr>()
+                .parse::<substrate_lite::network2::Multiaddr>()
                 .unwrap();
             let peer_id = match a.pop().unwrap() {
-                substrate_lite::network2::libp2p::multiaddr::Protocol::P2p(h) => {
-                    substrate_lite::network2::libp2p::PeerId::from_multihash(h).unwrap()
+                substrate_lite::network2::multiaddr::Protocol::P2p(h) => {
+                    substrate_lite::network2::PeerId::from_multihash(h).unwrap()
                 }
                 _ => panic!(),
             };

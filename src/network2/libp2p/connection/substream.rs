@@ -52,7 +52,7 @@ enum SubstreamTy<TNow, TProtoList, TProto> {
     RequestIn,
 }
 
-/*impl<TNow> Substream<TNow>
+impl<TNow> Substream<TNow>
 where
     TNow: Clone + Add<Duration> + Sub<TNow, Output = Duration> + Ord,
 {
@@ -134,4 +134,4 @@ where
 
         todo!()
     }
-}*/
+}
