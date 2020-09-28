@@ -21,7 +21,7 @@ pub fn decode<'a>(scale_encoded: &'a [u8]) -> Result<JustificationRef<'a>, Error
     match nom::combinator::all_consuming(justification)(scale_encoded) {
         Ok((_, justification)) => Ok(justification),
         Err(nom::Err::Failure((_, kind))) => Err(Error(kind)),
-        Err(_) => unreachable!()
+        Err(_) => unreachable!(),
     }
 }
 
