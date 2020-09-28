@@ -239,24 +239,12 @@ checksum = "c17772156ef2829aadc587461c7753af20b7e8db1529bc66855add962a3b35d3"
 
 [[package]]
 name = "async-tls"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95fd83426b89b034bf4e9ceb9c533c2f2386b813fd3dcae0a425ec6f1837d78a"
-dependencies = [
- "futures",
- "rustls 0.17.0",
- "webpki",
- "webpki-roots 0.19.0",
-]
-
-[[package]]
-name = "async-tls"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df097e3f506bec0e1a24f06bb3c962c228f36671de841ff579cb99f371772634"
 dependencies = [
  "futures",
- "rustls 0.18.0",
+ "rustls",
  "webpki",
  "webpki-roots 0.19.0",
 ]
@@ -1846,13 +1834,13 @@ version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "046a5201f6e471f22b22b394e4d084269ed1e28cf7300f7b49874385db84c7bd"
 dependencies = [
- "async-tls 0.8.0",
+ "async-tls",
  "either",
  "futures",
  "libp2p-core",
  "log",
  "quicksink",
- "rustls 0.18.0",
+ "rustls",
  "rw-stream-sink",
  "soketto",
  "url",
@@ -2728,19 +2716,6 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0d4a31f5d68413404705d6982529b0e11a9aacd4839d1d6222ee3b8cb4015e1"
-dependencies = [
- "base64 0.11.0",
- "log",
- "ring",
- "sct",
- "webpki",
-]
-
-[[package]]
-name = "rustls"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cac94b333ee2aac3284c5b8a1b7fb4dd11cba88c244e3fe33cdbd047af0eb693"
@@ -3119,7 +3094,7 @@ dependencies = [
  "app_dirs",
  "arrayvec 0.5.1",
  "async-std",
- "async-tls 0.7.0",
+ "async-tls",
  "async-trait",
  "atomic",
  "bitflags",
