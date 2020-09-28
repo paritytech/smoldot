@@ -110,7 +110,7 @@ wee_alloc = { version = "0.4.5", optional = true }
 # TODO:
 anyhow = "1.0.31"  # TODO: wasmtime returns these errors for some reason
 bitflags = "1.2.1"  # TODO: I hate bitflags
-blake2 = "0.8.1"  # TODO: should be merged with blake2-rfc
+blake2 = "0.9.0"  # TODO: should be merged with blake2-rfc
 bytes = "0.5.0"  # TODO: I hate bytes
 impl-serde = "0.2.3"  # TODO: that looks like a hack
 libp2p-wasm-ext = { version = "0.20.1", features = ["websocket"] }  # TODO: activating the "websocket" feature because the libp2p front doesn't provide a way; https://github.com/libp2p/rust-libp2p/pull/1718
