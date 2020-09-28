@@ -127,7 +127,7 @@ features = ["identify", "kad", "mdns", "mplex", "noise", "ping", "request-respon
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `wasmtime` feature
 # TODO: enable by default, but requires some nightly-only features
-wasmtime = { version = "0.18.0", default-features = false, optional = true }
+wasmtime = { version = "0.20.0", default-features = false, optional = true }
 
 [build-dependencies]
 prost-build = "0.6.1"
