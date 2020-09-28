@@ -3135,7 +3135,7 @@ dependencies = [
  "fnv",
  "futures",
  "futures-timer",
- "futures_codec 0.3.4",
+ "futures_codec 0.4.1",
  "hashbrown 0.7.2",
  "hex",
  "impl-serde 0.2.3",
