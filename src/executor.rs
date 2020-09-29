@@ -66,9 +66,9 @@
 //!     match vm.state() {
 //!         // Calling `runner.run()` is what actually executes WebAssembly code and updates
 //!         // the state.
-//!         substrate_lite::executor::State::ReadyToRun(runner) => runner.run(),
+//!         substrate_lite::executor::WasmVm::ReadyToRun(runner) => runner.run(),
 //!
-//!         substrate_lite::executor::State::Finished(value) => {
+//!         substrate_lite::executor::WasmVm::Finished(value) => {
 //!             // `value` here is an opaque blob of bytes returned by the runtime.
 //!             // In the case of a call to `"Core_version"`, we know that it must be empty.
 //!             assert!(value.is_empty());
@@ -78,12 +78,12 @@
 //!
 //!         // Errors can happen if the WebAssembly code panics or does something wrong.
 //!         // In a real-life situation, the host should obviously not panic in these situations.
-//!         substrate_lite::executor::State::NonConforming(_) |
-//!         substrate_lite::executor::State::Trapped => panic!("Error while executing code"),
+//!         substrate_lite::executor::WasmVm::NonConforming(_) |
+//!         substrate_lite::executor::WasmVm::Trapped => panic!("Error while executing code"),
 //!
 //!         // All the other variants correspond to function calls that the runtime might perform.
 //!         // `ExternalStorageGet` is shown here as an example.
-//!         substrate_lite::executor::State::ExternalStorageGet { storage_key, resolve, .. } => {
+//!         substrate_lite::executor::WasmVm::ExternalStorageGet { storage_key, resolve, .. } => {
 //!             println!("Runtime wants to read the storage at {:?}", storage_key);
 //!             // Injects the value into the virtual machine and updates the state.
 //!             resolve.finish_call(None); // Just a stub
@@ -101,9 +101,10 @@ mod externals;
 mod vm;
 
 pub use externals::{
-    ExternalsVm as WasmVm, ExternalsVmPrototype as WasmVmPrototype, NewErr, NonConformingErr,
-    ReadyToRun, Resume, State,
+    ExternalsVm as WasmVm, ExternalsVmPrototype as WasmVmPrototype, Finished, NewErr,
+    NonConformingErr, ReadyToRun,
 };
+// TODO: reexports ^ ? shouldn't we just make the module public?
 
 /// Runs the `Core_version` function using the given virtual machine prototype, and returns
 /// the output.
@@ -112,25 +113,26 @@ pub use externals::{
 // TODO: proper error
 pub fn core_version(vm_proto: WasmVmPrototype) -> Result<(CoreVersion, WasmVmPrototype), ()> {
     // TODO: is there maybe a better way to handle that?
-    let mut vm = vm_proto.run_no_param("Core_version").map_err(|_| ())?;
+    let mut vm: WasmVm = vm_proto
+        .run_no_param("Core_version")
+        .map_err(|_| ())?
+        .into();
 
-    let core_version = loop {
-        match vm.state() {
-            State::ReadyToRun(r) => r.run(),
-            State::Finished(data) => {
-                let decoded = CoreVersion::decode_all(&data).map_err(|_| ())?;
-                break decoded;
+    loop {
+        match vm {
+            WasmVm::ReadyToRun(r) => vm = r.run(),
+            WasmVm::Finished(finished) => {
+                let decoded = CoreVersion::decode_all(&finished.value()).map_err(|_| ())?;
+                return Ok((decoded, finished.into_prototype()));
             }
-            State::Trapped => return Err(()),
+            WasmVm::Trapped { .. } => return Err(()),
 
             // Since there are potential ambiguities we don't allow any storage access
             // or anything similar. The last thing we want is to have an infinite
             // recursion of runtime calls.
             _ => return Err(()),
         }
-    };
-
-    Ok((core_version, vm.into_prototype()))
+    }
 }
 
 /// Structure that the `CoreVersion` function returns.
