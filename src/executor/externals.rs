@@ -411,6 +411,89 @@ impl ReadyToRun {
                 };
             }
 
+            macro_rules! expect_pointer_size {
+                ($num:expr) => {{
+                    let val = match &params[$num] {
+                        vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
+                        _ => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy, // TODO:
+                                prototype: self.inner.into_prototype(),
+                            }
+                        },
+                    };
+
+                    let len = u32::try_from(val >> 32).unwrap();
+                    let ptr = u32::try_from(val & 0xffffffff).unwrap();
+
+                    match self.inner.vm.read_memory(ptr, len).map(|v| v.as_ref().to_vec()) { // TODO: no; keep the impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
+                        Ok(v) => v,
+                        Err(()) => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy, // TODO:
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    }
+                }}
+            }
+
+            macro_rules! expect_pointer_size_raw {
+                ($num:expr) => {{
+                    let val = match &params[$num] {
+                        vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
+                        _ => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy, // TODO:
+                                prototype: self.inner.into_prototype(),
+                            };
+                        }
+                    };
+
+                    let len = u32::try_from(val >> 32).unwrap();
+                    let ptr = u32::try_from(val & 0xffffffff).unwrap();
+                    (ptr, len)
+                }};
+            }
+
+            macro_rules! expect_pointer_constant_size {
+                ($num:expr, $size:expr) => {{
+                    let ptr = match params[$num] {
+                        vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
+                        _ => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy, // TODO:
+                                prototype: self.inner.into_prototype(),
+                            }
+                        },
+                    };
+
+                    match self.inner.vm.read_memory(ptr, $size).map(|v| v.as_ref().to_vec()) { // TODO: no; keep the impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
+                        Ok(v) => v,
+                        Err(()) => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy, // TODO:
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    }
+                }}
+            }
+
+            macro_rules! expect_u32 {
+                ($num:expr) => {{
+                    match &params[$num] {
+                        vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
+                        _ => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy,
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    }
+                }};
+            }
+
             // TODO: link to existing working code: https://github.com/paritytech/substrate-lite/blob/0699a302ef573e451fbb67beb8188c0d1b1d540d/src/executor/externals/externalities.rs
 
             // Handle the function calls.
@@ -418,26 +501,8 @@ impl ReadyToRun {
             // instead return an `ExternalVm` to the user.
             match externality {
                 Externality::ext_storage_set_version_1 => {
-                    let key = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    let value = match self.inner.expect_pointer_size(&params[1]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let key = expect_pointer_size!(0);
+                    let value = expect_pointer_size!(1);
                     return ExternalsVm::ExternalStorageSet(ExternalStorageSet {
                         key,
                         value: Some(value),
@@ -445,16 +510,7 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_storage_get_version_1 => {
-                    let key = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let key = expect_pointer_size!(0);
                     return ExternalsVm::ExternalStorageGet(ExternalStorageGet {
                         key,
                         calling: id,
@@ -465,37 +521,9 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_storage_read_version_1 => {
-                    let key = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    let (value_out_ptr, value_out_size) =
-                        match self.inner.expect_pointer_size_raw(&params[1]) {
-                            Ok(v) => v,
-                            Err(error) => {
-                                return ExternalsVm::NonConforming {
-                                    error,
-                                    prototype: self.inner.into_prototype(),
-                                }
-                            }
-                        };
-
-                    let offset = match params[2] {
-                        vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
-                        _ => {
-                            return ExternalsVm::NonConforming {
-                                error: NonConformingErr::WrongParamTy,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let key = expect_pointer_size!(0);
+                    let (value_out_ptr, value_out_size) = expect_pointer_size_raw!(1);
+                    let offset = expect_u32!(2);
                     return ExternalsVm::ExternalStorageGet(ExternalStorageGet {
                         key,
                         calling: id,
@@ -506,16 +534,7 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_storage_clear_version_1 => {
-                    let key = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let key = expect_pointer_size!(0);
                     return ExternalsVm::ExternalStorageSet(ExternalStorageSet {
                         key,
                         value: None,
@@ -523,16 +542,7 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_storage_exists_version_1 => {
-                    let key = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let key = expect_pointer_size!(0);
                     return ExternalsVm::ExternalStorageGet(ExternalStorageGet {
                         key,
                         calling: id,
@@ -543,16 +553,7 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_storage_clear_prefix_version_1 => {
-                    let prefix = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let prefix = expect_pointer_size!(0);
                     return ExternalsVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
                         prefix,
                         inner: self.inner,
@@ -570,42 +571,15 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_storage_next_key_version_1 => {
-                    let key = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let key = expect_pointer_size!(0);
                     return ExternalsVm::ExternalStorageNextKey(ExternalStorageNextKey {
                         key,
                         inner: self.inner,
                     });
                 }
                 Externality::ext_storage_append_version_1 => {
-                    let key = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    let value = match self.inner.expect_pointer_size(&params[1]) {
-                        Ok(k) => k,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let key = expect_pointer_size!(0);
+                    let value = expect_pointer_size!(1);
                     return ExternalsVm::ExternalStorageAppend(ExternalStorageAppend {
                         key,
                         value,
@@ -657,6 +631,7 @@ impl ReadyToRun {
                     };
                 }
                 Externality::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
+                    // TODO: clean up
                     #[derive(parity_scale_codec::Encode)]
                     enum EcdsaVerifyError {
                         BadRS,
@@ -664,25 +639,8 @@ impl ReadyToRun {
                         BadSignature,
                     }
 
-                    let sig = match self.inner.expect_constant_size_pointer(&params[0], 65) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    let msg = match self.inner.expect_constant_size_pointer(&params[1], 32) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
+                    let sig = expect_pointer_constant_size!(0, 65);
+                    let msg = expect_pointer_constant_size!(1, 32);
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
                         let rs = secp256k1::Signature::parse_slice(&sig[0..64])
@@ -729,162 +687,60 @@ impl ReadyToRun {
                     };
                 }
                 Externality::ext_hashing_keccak_256_version_1 => {
-                    let data = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
+                    let data = expect_pointer_size!(0);
 
                     let mut keccak = tiny_keccak::Keccak::v256();
                     keccak.update(&data);
                     let mut out = [0u8; 32];
                     keccak.finalize(&mut out);
 
-                    let dest_ptr = match self
-                        .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), 32)
-                    {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    self.inner.vm.write_memory(dest_ptr, &out).unwrap();
-                    self = ReadyToRun {
-                        resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(dest_ptr))),
-                        inner: self.inner,
-                    };
+                    match self.inner.alloc_write_and_return_pointer(iter::once(&out)) {
+                        ExternalsVm::ReadyToRun(r) => self = r,
+                        other => return other,
+                    }
                 }
                 Externality::ext_hashing_sha2_256_version_1 => todo!(),
                 Externality::ext_hashing_blake2_128_version_1 => {
-                    let data = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let data = expect_pointer_size!(0);
                     let out = blake2_rfc::blake2b::blake2b(16, &[], &data);
 
-                    let dest_ptr = match self
+                    match self
                         .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), 16)
+                        .alloc_write_and_return_pointer(iter::once(out.as_bytes()))
                     {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    self.inner
-                        .vm
-                        .write_memory(dest_ptr, out.as_bytes())
-                        .unwrap();
-                    self = ReadyToRun {
-                        resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(dest_ptr))),
-                        inner: self.inner,
-                    };
+                        ExternalsVm::ReadyToRun(r) => self = r,
+                        other => return other,
+                    }
                 }
                 Externality::ext_hashing_blake2_256_version_1 => {
-                    let data = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let data = expect_pointer_size!(0);
                     let out = blake2_rfc::blake2b::blake2b(32, &[], &data);
 
-                    let dest_ptr = match self
+                    match self
                         .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), 32)
+                        .alloc_write_and_return_pointer(iter::once(out.as_bytes()))
                     {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    self.inner
-                        .vm
-                        .write_memory(dest_ptr, out.as_bytes())
-                        .unwrap();
-                    self = ReadyToRun {
-                        resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(dest_ptr))),
-                        inner: self.inner,
-                    };
+                        ExternalsVm::ReadyToRun(r) => self = r,
+                        other => return other,
+                    }
                 }
                 Externality::ext_hashing_twox_64_version_1 => {
-                    let data = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
+                    let data = expect_pointer_size!(0);
 
                     let mut h0 = twox_hash::XxHash::with_seed(0);
                     h0.write(&data);
                     let r0 = h0.finish();
 
-                    let dest_ptr = match self
+                    match self
                         .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), 8)
+                        .alloc_write_and_return_pointer(iter::once(&r0.to_le_bytes()))
                     {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    self.inner
-                        .vm
-                        .write_memory(dest_ptr, &r0.to_le_bytes())
-                        .unwrap();
-                    self = ReadyToRun {
-                        resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(dest_ptr))),
-                        inner: self.inner,
-                    };
+                        ExternalsVm::ReadyToRun(r) => self = r,
+                        other => return other,
+                    }
                 }
                 Externality::ext_hashing_twox_128_version_1 => {
-                    let data = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
+                    let data = expect_pointer_size!(0);
 
                     let mut h0 = twox_hash::XxHash::with_seed(0);
                     let mut h1 = twox_hash::XxHash::with_seed(1);
@@ -893,33 +749,12 @@ impl ReadyToRun {
                     let r0 = h0.finish();
                     let r1 = h1.finish();
 
-                    let dest_ptr = match self
-                        .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), 16)
-                    {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    self.inner
-                        .vm
-                        .write_memory(dest_ptr, &r0.to_le_bytes())
-                        .unwrap();
-                    self.inner
-                        .vm
-                        .write_memory(dest_ptr + 8, &r1.to_le_bytes())
-                        .unwrap();
-
-                    self = ReadyToRun {
-                        resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(dest_ptr))),
-                        inner: self.inner,
-                    };
+                    match self.inner.alloc_write_and_return_pointer(
+                        iter::once(&r0.to_le_bytes()).chain(iter::once(&r1.to_le_bytes())),
+                    ) {
+                        ExternalsVm::ReadyToRun(r) => self = r,
+                        other => return other,
+                    }
                 }
                 Externality::ext_hashing_twox_256_version_1 => todo!(),
                 Externality::ext_offchain_index_set_version_1 => todo!(),
@@ -941,15 +776,7 @@ impl ReadyToRun {
                 Externality::ext_offchain_http_response_read_body_version_1 => todo!(),
                 Externality::ext_trie_blake2_256_root_version_1 => todo!(),
                 Externality::ext_trie_blake2_256_ordered_root_version_1 => {
-                    let encoded = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
+                    let encoded = expect_pointer_size!(0);
 
                     let elements = match Vec::<Vec<u8>>::decode_all(&encoded) {
                         Ok(e) => e,
@@ -970,25 +797,10 @@ impl ReadyToRun {
                     }
                     let out = trie.root_merkle_value(None);
 
-                    let dest_ptr = match self
-                        .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), 32)
-                    {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    self.inner.vm.write_memory(dest_ptr, &out).unwrap();
-                    self = ReadyToRun {
-                        resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(dest_ptr))),
-                        inner: self.inner,
-                    };
+                    match self.inner.alloc_write_and_return_pointer(iter::once(&out)) {
+                        ExternalsVm::ReadyToRun(r) => self = r,
+                        other => return other,
+                    }
                 }
                 Externality::ext_misc_chain_id_version_1 => {
                     // TODO: this parachain-related function always returns 42 at the moment
@@ -1015,16 +827,7 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_misc_print_utf8_version_1 => {
-                    let data = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let data = expect_pointer_size!(0);
                     let log_entry = match String::from_utf8(data) {
                         Ok(m) => m,
                         Err(_) => {
@@ -1041,16 +844,7 @@ impl ReadyToRun {
                     });
                 }
                 Externality::ext_misc_print_hex_version_1 => {
-                    let data = match self.inner.expect_pointer_size(&params[0]) {
-                        Ok(d) => d,
-                        Err(error) => {
-                            return ExternalsVm::NonConforming {
-                                error,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let data = expect_pointer_size!(0);
                     let log_entry = hex::encode(&data);
                     return ExternalsVm::LogEmit(LogEmit {
                         inner: self.inner,
@@ -1059,15 +853,7 @@ impl ReadyToRun {
                 }
                 Externality::ext_misc_runtime_version_version_1 => todo!(),
                 Externality::ext_allocator_malloc_version_1 => {
-                    let size = match params[0] {
-                        vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
-                        _ => {
-                            return ExternalsVm::NonConforming {
-                                error: NonConformingErr::WrongParamTy,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
+                    let size = expect_u32!(0);
 
                     let ptr = match self
                         .inner
@@ -1090,16 +876,7 @@ impl ReadyToRun {
                     };
                 }
                 Externality::ext_allocator_free_version_1 => {
-                    let pointer = match params[0] {
-                        vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
-                        _ => {
-                            return ExternalsVm::NonConforming {
-                                error: NonConformingErr::WrongParamTy,
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
+                    let pointer = expect_u32!(0);
                     match self
                         .inner
                         .allocator
@@ -1119,7 +896,25 @@ impl ReadyToRun {
                         inner: self.inner,
                     };
                 }
-                Externality::ext_logging_log_version_1 => todo!(),
+                Externality::ext_logging_log_version_1 => {
+                    let _log_level = expect_u32!(0);
+                    let _target = expect_pointer_size!(1);
+                    let message = expect_pointer_size!(2);
+                    let log_entry = match String::from_utf8(message) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy, // TODO: better error
+                                prototype: self.inner.into_prototype(),
+                            };
+                        }
+                    };
+
+                    return ExternalsVm::LogEmit(LogEmit {
+                        inner: self.inner,
+                        log_entry,
+                    });
+                }
             }
         }
     }
@@ -1719,64 +1514,61 @@ impl Inner {
             ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
         }
 
+        let ret_val = (u64::from(data_len) << 32) | u64::from(dest_ptr);
+        let ret_val = i64::from_ne_bytes(ret_val.to_ne_bytes());
+
         ReadyToRun {
             inner: self,
-            resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64({
-                (u64::from(data_len) << 32) | u64::from(dest_ptr)
-            }))),
+            resume_value: Some(vm::WasmValue::I64(ret_val)),
         }
         .into()
     }
 
-    /// Utility function that turns a pointer parameter into the memory content, or returns an error
-    /// if it is impossible.
-    // TODO: shouldn't return a Vec<u8> but a impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
-    fn expect_constant_size_pointer(
-        &self,
-        param: &vm::WasmValue,
-        memory_size: u32,
-    ) -> Result<Vec<u8>, NonConformingErr> {
-        let ptr = match param {
-            vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
-            _ => return Err(NonConformingErr::WrongParamTy),
+    /// Uses the memory allocator to allocate some memory for the given data, writes the data in
+    /// memory, and returns an [`ExternalsVm`] ready for the Wasm externality return.
+    ///
+    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    ///
+    /// # Panic
+    ///
+    /// Must only be called while the Wasm is handling an externality.
+    ///
+    fn alloc_write_and_return_pointer(
+        mut self,
+        data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+    ) -> ExternalsVm {
+        let mut data_len = 0u32;
+        for chunk in data.clone() {
+            data_len = data_len
+                .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
+        }
+
+        let dest_ptr = match self
+            .allocator
+            .allocate(&mut MemAccess(&mut self.vm), data_len)
+        {
+            Ok(p) => p,
+            // TODO: better error reporting
+            Err(_) => {
+                return ExternalsVm::Trapped {
+                    prototype: self.into_prototype(),
+                }
+            }
         };
-        // TODO: better error
-        Ok(self
-            .vm
-            .read_memory(ptr, memory_size)
-            .map_err(|_| NonConformingErr::WrongParamTy)?
-            .as_ref()
-            .to_vec())
-    }
 
-    /// Utility function that turns a parameter into a "pointer-size" parameter, or returns an
-    /// error if it is impossible.
-    fn expect_pointer_size_raw(
-        &self,
-        param: &vm::WasmValue,
-    ) -> Result<(u32, u32), NonConformingErr> {
-        let val = match param {
-            vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
-            _ => return Err(NonConformingErr::WrongParamTy),
-        };
+        let mut ptr_iter = dest_ptr;
+        for chunk in data {
+            let chunk = chunk.as_ref();
+            self.vm.write_memory(ptr_iter, chunk).unwrap();
+            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
+        }
 
-        let len = u32::try_from(val >> 32).unwrap();
-        let ptr = u32::try_from(val & 0xffffffff).unwrap();
-        Ok((ptr, len))
-    }
-
-    /// Utility function that turns a "pointer-size" parameter into the memory content, or
-    /// returns an error if it is impossible.
-    // TODO: shouldn't return a Vec<u8> but a impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
-    fn expect_pointer_size(&self, param: &vm::WasmValue) -> Result<Vec<u8>, NonConformingErr> {
-        let (ptr, len) = self.expect_pointer_size_raw(param)?;
-        // TODO: better error
-        Ok(self
-            .vm
-            .read_memory(ptr, len)
-            .map_err(|_| NonConformingErr::WrongParamTy)?
-            .as_ref()
-            .to_vec())
+        let ret_val = i32::from_ne_bytes(dest_ptr.to_ne_bytes());
+        ReadyToRun {
+            inner: self,
+            resume_value: Some(vm::WasmValue::I32(ret_val)),
+        }
+        .into()
     }
 
     /// Turns the virtual machine back into a prototype.
@@ -1923,18 +1715,6 @@ externalities! {
     ext_allocator_malloc_version_1,
     ext_allocator_free_version_1,
     ext_logging_log_version_1,
-}
-
-/// Utility function that "reinterprets" a u32 into a i32. That is, the underlying bits stay the
-/// same.
-fn reinterpret_u32_i32(val: u32) -> i32 {
-    i32::from_ne_bytes(val.to_ne_bytes())
-}
-
-/// Utility function that "reinterprets" a u64 into a i64. That is, the underlying bits stay the
-/// same.
-fn reinterpret_u64_i64(val: u64) -> i64 {
-    i64::from_ne_bytes(val.to_ne_bytes())
 }
 
 // Glue between the `allocator` module and the `vm` module.
