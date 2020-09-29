@@ -710,10 +710,7 @@ impl<TRq, TBl> StoragePrefixKeys<TRq, TBl> {
     }
 
     /// Injects the list of keys.
-    pub fn inject_keys(
-        self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> ProcessOne<TRq, TBl> {
+    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> ProcessOne<TRq, TBl> {
         let mut keys = keys
             .map(|k| k.as_ref().to_owned())
             .collect::<HashSet<_, fnv::FnvBuildHasher>>();

@@ -345,7 +345,7 @@ async fn start_sync(
                         process = resume.resume();
                     }
 
-                    full_optimistic::ProcessOne::FinalizedStorageGet(req) => {
+                    full_optimistic::ProcessOne::FinalizedStorageGet(mut req) => {
                         let value = finalized_block_storage
                             .get(&req.key_as_vec())
                             .map(|v| &v[..]);
@@ -360,7 +360,7 @@ async fn start_sync(
                             .map(|(k, _)| k);
                         process = req.inject_key(next_key);
                     }
-                    full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(req) => {
+                    full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(mut req) => {
                         // TODO: to_vec() :-/
                         let prefix = req.prefix().to_vec();
                         // TODO: to_vec() :-/

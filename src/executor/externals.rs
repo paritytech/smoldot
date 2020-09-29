@@ -208,7 +208,7 @@ pub enum ExternalsVm {
     /// Must set an storage value.
     #[from]
     ExternalStorageSet(ExternalStorageSet),
-    /// See documentation of [`ExternalsStorageAppend`].
+    /// See documentation of [`ExternalStorageAppend`].
     #[from]
     ExternalStorageAppend(ExternalStorageAppend),
     /// Must remove all the storage values starting with a certain prefix.
@@ -811,8 +811,14 @@ impl ReadyToRun {
                                 }
                             };
 
-                            self.inner.vm.write_memory(dest_ptr, &r0.to_le_bytes()).unwrap();
-                            self.inner.vm.write_memory(dest_ptr + 8, &r1.to_le_bytes()).unwrap();
+                            self.inner
+                                .vm
+                                .write_memory(dest_ptr, &r0.to_le_bytes())
+                                .unwrap();
+                            self.inner
+                                .vm
+                                .write_memory(dest_ptr + 8, &r1.to_le_bytes())
+                                .unwrap();
 
                             return ExternalsVm::ReadyToRun(ReadyToRun {
                                 resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(
@@ -1715,7 +1721,7 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 /// Report about a log entry being emitted.
 ///
 /// Use the implementation of [`fmt::Display`] to obtain the log entry. For exmaple, you can
-/// call [`core::string::ToString::to_string`] to turn it into a `String`.
+/// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
     inner: Inner,
     log_entry: String,
