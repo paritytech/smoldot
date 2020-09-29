@@ -345,13 +345,13 @@ async fn start_sync(
                         process = resume.resume();
                     }
 
-                    full_optimistic::ProcessOne::FinalizedStorageGet(mut req) => {
+                    full_optimistic::ProcessOne::FinalizedStorageGet(req) => {
                         let value = finalized_block_storage
                             .get(&req.key_as_vec())
                             .map(|v| &v[..]);
                         process = req.inject_value(value);
                     }
-                    full_optimistic::ProcessOne::FinalizedStorageNextKey(mut req) => {
+                    full_optimistic::ProcessOne::FinalizedStorageNextKey(req) => {
                         // TODO: to_vec() :-/
                         let next_key = finalized_block_storage
                             .range(req.key().to_vec()..)
@@ -360,7 +360,7 @@ async fn start_sync(
                             .map(|(k, _)| k);
                         process = req.inject_key(next_key);
                     }
-                    full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(mut req) => {
+                    full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(req) => {
                         // TODO: to_vec() :-/
                         let prefix = req.prefix().to_vec();
                         // TODO: to_vec() :-/

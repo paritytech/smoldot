@@ -797,10 +797,6 @@ impl ReadyToRun {
                             let r0 = h0.finish();
                             let r1 = h1.finish();
 
-                            // TODO: overhead
-                            let mut out_value = r0.to_le_bytes().to_vec();
-                            out_value.extend(&r1.to_le_bytes());
-
                             let dest_ptr = match self
                                 .inner
                                 .allocator
@@ -815,7 +811,9 @@ impl ReadyToRun {
                                 }
                             };
 
-                            self.inner.vm.write_memory(dest_ptr, &out_value).unwrap();
+                            self.inner.vm.write_memory(dest_ptr, &r0.to_le_bytes()).unwrap();
+                            self.inner.vm.write_memory(dest_ptr + 8, &r1.to_le_bytes()).unwrap();
+
                             return ExternalsVm::ReadyToRun(ReadyToRun {
                                 resume_value: Some(vm::WasmValue::I32(reinterpret_u32_i32(
                                     dest_ptr,
