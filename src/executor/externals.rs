@@ -359,7 +359,7 @@ impl ReadyToRun {
                 Externality::ext_crypto_ed25519_public_keys_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_sign_version_1 => todo!(),
-                Externality::ext_crypto_ed25519_verify_version_1 => todo!(),
+                Externality::ext_crypto_ed25519_verify_version_1 => 3,
                 Externality::ext_crypto_sr25519_public_keys_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_sign_version_1 => todo!(),
@@ -395,14 +395,14 @@ impl ReadyToRun {
                 Externality::ext_offchain_http_response_read_body_version_1 => todo!(),
                 Externality::ext_trie_blake2_256_root_version_1 => 1,
                 Externality::ext_trie_blake2_256_ordered_root_version_1 => 1,
-                Externality::ext_misc_chain_id_version_1 => todo!(),
-                Externality::ext_misc_print_num_version_1 => todo!(),
-                Externality::ext_misc_print_utf8_version_1 => todo!(),
-                Externality::ext_misc_print_hex_version_1 => todo!(),
-                Externality::ext_misc_runtime_version_version_1 => todo!(),
+                Externality::ext_misc_chain_id_version_1 => 0,
+                Externality::ext_misc_print_num_version_1 => 1,
+                Externality::ext_misc_print_utf8_version_1 => 1,
+                Externality::ext_misc_print_hex_version_1 => 1,
+                Externality::ext_misc_runtime_version_version_1 => 1,
                 Externality::ext_allocator_malloc_version_1 => 1,
                 Externality::ext_allocator_free_version_1 => 1,
-                Externality::ext_logging_log_version_1 => todo!(),
+                Externality::ext_logging_log_version_1 => 3,
             };
             if params.len() != expected_params_num {
                 return ExternalsVm::NonConforming {
@@ -629,11 +629,25 @@ impl ReadyToRun {
                 Externality::ext_crypto_ed25519_public_keys_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_sign_version_1 => todo!(),
-                Externality::ext_crypto_ed25519_verify_version_1 => todo!(),
+                Externality::ext_crypto_ed25519_verify_version_1 => {
+                    self = ReadyToRun {
+                        // TODO: wrong! this is a dummy implementation meaning that all
+                        // signature verifications are always successful
+                        resume_value: Some(vm::WasmValue::I32(1)),
+                        inner: self.inner,
+                    };
+                }
                 Externality::ext_crypto_sr25519_public_keys_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_sign_version_1 => todo!(),
-                Externality::ext_crypto_sr25519_verify_version_1 => todo!(),
+                Externality::ext_crypto_sr25519_verify_version_1 => {
+                    self = ReadyToRun {
+                        // TODO: wrong! this is a dummy implementation meaning that all
+                        // signature verifications are always successful
+                        resume_value: Some(vm::WasmValue::I32(1)),
+                        inner: self.inner,
+                    };
+                }
                 Externality::ext_crypto_sr25519_verify_version_2 => {
                     self = ReadyToRun {
                         // TODO: wrong! this is a dummy implementation meaning that all
@@ -642,7 +656,63 @@ impl ReadyToRun {
                         inner: self.inner,
                     };
                 }
-                Externality::ext_crypto_secp256k1_ecdsa_recover_version_1 => todo!(),
+                Externality::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
+                    #[derive(parity_scale_codec::Encode)]
+                    enum EcdsaVerifyError {
+                        BadRS,
+                        BadV,
+                        BadSignature,
+                    }
+
+                    let sig = match self.inner.expect_constant_size_pointer(&params[0], 65) {
+                        Ok(d) => d,
+                        Err(error) => {
+                            return ExternalsVm::NonConforming {
+                                error,
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    };
+
+                    let msg = match self.inner.expect_constant_size_pointer(&params[1], 32) {
+                        Ok(d) => d,
+                        Err(error) => {
+                            return ExternalsVm::NonConforming {
+                                error,
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    };
+
+                    let result = (|| -> Result<_, EcdsaVerifyError> {
+                        let rs = secp256k1::Signature::parse_slice(&sig[0..64])
+                            .map_err(|_| EcdsaVerifyError::BadRS)?;
+                        let v = secp256k1::RecoveryId::parse(if sig[64] > 26 {
+                            sig[64] - 27
+                        } else {
+                            sig[64]
+                        } as u8)
+                        .map_err(|_| EcdsaVerifyError::BadV)?;
+                        let pubkey = secp256k1::recover(
+                            &secp256k1::Message::parse_slice(&msg).unwrap(),
+                            &rs,
+                            &v,
+                        )
+                        .map_err(|_| EcdsaVerifyError::BadSignature)?;
+                        let mut res = [0u8; 64];
+                        res.copy_from_slice(&pubkey.serialize()[1..65]);
+                        Ok(res)
+                    })();
+                    let result_encoded = parity_scale_codec::Encode::encode(&result);
+
+                    match self
+                        .inner
+                        .alloc_write_and_return_pointer_size(iter::once(&result_encoded))
+                    {
+                        ExternalsVm::ReadyToRun(r) => self = r,
+                        other => return other,
+                    }
+                }
                 Externality::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => todo!(),
                 Externality::ext_crypto_start_batch_verify_version_1 => {
                     self = ReadyToRun {
@@ -920,10 +990,73 @@ impl ReadyToRun {
                         inner: self.inner,
                     };
                 }
-                Externality::ext_misc_chain_id_version_1 => todo!(),
-                Externality::ext_misc_print_num_version_1 => todo!(),
-                Externality::ext_misc_print_utf8_version_1 => todo!(),
-                Externality::ext_misc_print_hex_version_1 => todo!(),
+                Externality::ext_misc_chain_id_version_1 => {
+                    // TODO: this parachain-related function always returns 42 at the moment
+                    self = ReadyToRun {
+                        resume_value: Some(vm::WasmValue::I32(42)),
+                        inner: self.inner,
+                    };
+                }
+                Externality::ext_misc_print_num_version_1 => {
+                    let num = match params[0] {
+                        vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
+                        _ => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy,
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    };
+
+                    let log_entry = format!("{}", num);
+                    return ExternalsVm::LogEmit(LogEmit {
+                        inner: self.inner,
+                        log_entry,
+                    });
+                }
+                Externality::ext_misc_print_utf8_version_1 => {
+                    let data = match self.inner.expect_pointer_size(&params[0]) {
+                        Ok(d) => d,
+                        Err(error) => {
+                            return ExternalsVm::NonConforming {
+                                error,
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    };
+
+                    let log_entry = match String::from_utf8(data) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            return ExternalsVm::NonConforming {
+                                error: NonConformingErr::WrongParamTy, // TODO: better error
+                                prototype: self.inner.into_prototype(),
+                            };
+                        }
+                    };
+
+                    return ExternalsVm::LogEmit(LogEmit {
+                        inner: self.inner,
+                        log_entry,
+                    });
+                }
+                Externality::ext_misc_print_hex_version_1 => {
+                    let data = match self.inner.expect_pointer_size(&params[0]) {
+                        Ok(d) => d,
+                        Err(error) => {
+                            return ExternalsVm::NonConforming {
+                                error,
+                                prototype: self.inner.into_prototype(),
+                            }
+                        }
+                    };
+
+                    let log_entry = hex::encode(&data);
+                    return ExternalsVm::LogEmit(LogEmit {
+                        inner: self.inner,
+                        log_entry,
+                    });
+                }
                 Externality::ext_misc_runtime_version_version_1 => todo!(),
                 Externality::ext_allocator_malloc_version_1 => {
                     let size = match params[0] {
@@ -1121,71 +1254,23 @@ impl ExternalStorageGet {
     ) -> ExternalsVm {
         match self.inner.registered_functions[self.calling] {
             Externality::ext_storage_get_version_1 => {
-                let (dest_ptr, len) = if let Some(value) = value {
-                    // TODO: don't allocate a Vec here
+                if let Some(value) = value {
+                    // Writing `Some(value)`.
                     let value_len = value.clone().fold(0, |a, b| a + b.as_ref().len());
                     let value_len_enc = parity_scale_codec::Encode::encode(
                         &parity_scale_codec::Compact(u64::try_from(value_len).unwrap()),
                     );
-                    let value_len_enc_len = u32::try_from(value_len_enc.len()).unwrap();
-
-                    let value_total_len = u32::try_from(value_len)
-                        .unwrap()
-                        .checked_add(value_len_enc_len)
-                        .unwrap()
-                        .checked_add(1)
-                        .unwrap();
-                    let dest_ptr = match self
-                        .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), value_total_len)
-                    {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-
-                    // Writing `Some(value)`.
-                    let mut offset = dest_ptr;
-                    self.inner.vm.write_memory(offset, &[1]).unwrap();
-                    offset += 1;
-                    self.inner.vm.write_memory(offset, &value_len_enc).unwrap();
-                    offset += value_len_enc_len;
-                    for value in value {
-                        let value = value.as_ref();
-                        self.inner.vm.write_memory(offset, value).unwrap();
-                        offset += u32::try_from(value.len()).unwrap();
-                    }
-                    (dest_ptr, value_total_len)
+                    self.inner.alloc_write_and_return_pointer_size(
+                        iter::once(&[1][..])
+                            .chain(iter::once(&value_len_enc[..]))
+                            .map(either::Left)
+                            .chain(value.map(either::Right)),
+                    )
                 } else {
                     // Write a SCALE-encoded `None`.
-                    let dest_ptr = match self
-                        .inner
-                        .allocator
-                        .allocate(&mut MemAccess(&mut self.inner.vm), 1)
-                    {
-                        Ok(p) => p,
-                        // TODO: better error reporting
-                        Err(_) => {
-                            return ExternalsVm::Trapped {
-                                prototype: self.inner.into_prototype(),
-                            }
-                        }
-                    };
-                    self.inner.vm.write_memory(dest_ptr, &[0]).unwrap();
-                    (dest_ptr, 1)
-                };
-
-                return ExternalsVm::ReadyToRun(ReadyToRun {
-                    inner: self.inner,
-                    resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64({
-                        build_pointer_size(dest_ptr, len)
-                    }))),
-                });
+                    self.inner
+                        .alloc_write_and_return_pointer_size(iter::once(&[0]))
+                }
             }
             Externality::ext_storage_read_version_1 => {
                 let outcome = if let Some(value) = value {
@@ -1208,32 +1293,9 @@ impl ExternalStorageGet {
                 };
 
                 let outcome_encoded = parity_scale_codec::Encode::encode(&outcome);
-                let outcome_encoded_len = u32::try_from(outcome_encoded.len()).unwrap();
-
-                let dest_ptr = match self
+                return self
                     .inner
-                    .allocator
-                    .allocate(&mut MemAccess(&mut self.inner.vm), outcome_encoded_len)
-                {
-                    Ok(p) => p,
-                    // TODO: better error reporting
-                    Err(_) => {
-                        return ExternalsVm::Trapped {
-                            prototype: self.inner.into_prototype(),
-                        }
-                    }
-                };
-
-                self.inner
-                    .vm
-                    .write_memory(dest_ptr, &outcome_encoded)
-                    .unwrap();
-                return ExternalsVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64(
-                        build_pointer_size(dest_ptr, outcome_encoded_len),
-                    ))),
-                    inner: self.inner,
-                });
+                    .alloc_write_and_return_pointer_size(iter::once(&outcome_encoded));
             }
             Externality::ext_storage_exists_version_1 => {
                 return ExternalsVm::ReadyToRun(ReadyToRun {
@@ -1401,29 +1463,9 @@ pub struct ExternalStorageRoot {
 
 impl ExternalStorageRoot {
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
-    pub fn resume(mut self, hash: &[u8; 32]) -> ExternalsVm {
-        let dest_ptr = match self
-            .inner
-            .allocator
-            .allocate(&mut MemAccess(&mut self.inner.vm), 32)
-        {
-            Ok(p) => p,
-            // TODO: better error reporting
-            Err(_) => {
-                return ExternalsVm::Trapped {
-                    prototype: self.inner.into_prototype(),
-                }
-            }
-        };
-
-        self.inner.vm.write_memory(dest_ptr, &hash[..]).unwrap();
-
-        ExternalsVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64({
-                build_pointer_size(dest_ptr, 32)
-            }))),
-        })
+    pub fn resume(self, hash: &[u8; 32]) -> ExternalsVm {
+        self.inner
+            .alloc_write_and_return_pointer_size(iter::once(hash))
     }
 }
 
@@ -1441,38 +1483,17 @@ pub struct ExternalStorageChangesRoot {
 impl ExternalStorageChangesRoot {
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
     // TODO: document why it can be `None`
-    pub fn resume(mut self, hash: Option<&[u8; 32]>) -> ExternalsVm {
-        let len = if hash.is_some() { 33 } else { 1 };
-        let dest_ptr = match self
-            .inner
-            .allocator
-            .allocate(&mut MemAccess(&mut self.inner.vm), len)
-        {
-            Ok(p) => p,
-            // TODO: better error reporting
-            Err(_) => {
-                return ExternalsVm::Trapped {
-                    prototype: self.inner.into_prototype(),
-                }
-            }
-        };
-
+    pub fn resume(self, hash: Option<&[u8; 32]>) -> ExternalsVm {
         if let Some(hash) = hash {
             // Writing the `Some` of the SCALE-encoded `Option`.
-            self.inner.vm.write_memory(dest_ptr, &[1]).unwrap();
-            // Writing the hash itself.
-            self.inner.vm.write_memory(dest_ptr + 1, &hash[..]).unwrap();
+            self.inner.alloc_write_and_return_pointer_size(
+                iter::once(&[1][..]).chain(iter::once(&hash[..])),
+            )
         } else {
             // Writing a SCALE-encoded `None`.
-            self.inner.vm.write_memory(dest_ptr, &[0]).unwrap();
+            self.inner
+                .alloc_write_and_return_pointer_size(iter::once(&[0][..]))
         }
-
-        ExternalsVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64({
-                build_pointer_size(dest_ptr, len)
-            }))),
-        })
     }
 }
 
@@ -1502,70 +1523,22 @@ impl ExternalStorageNextKey {
     /// Writes the follow-up key in the Wasm VM memory and prepares it for execution.
     ///
     /// Must be passed `None` if the key is the last one in the storage.
-    pub fn resume(mut self, follow_up: Option<&[u8]>) -> ExternalsVm {
-        let (dest_ptr, len) = if let Some(follow_up) = follow_up {
+    pub fn resume(self, follow_up: Option<&[u8]>) -> ExternalsVm {
+        if let Some(follow_up) = follow_up {
             // TODO: don't allocate a Vec here
             let value_len_enc = parity_scale_codec::Encode::encode(&parity_scale_codec::Compact(
                 u64::try_from(follow_up.len()).unwrap(),
             ));
-            let value_len_enc_len = u32::try_from(value_len_enc.len()).unwrap();
-
-            let value_len = u32::try_from(follow_up.len())
-                .unwrap()
-                .checked_add(value_len_enc_len)
-                .unwrap()
-                .checked_add(1)
-                .unwrap();
-            let dest_ptr = match self
-                .inner
-                .allocator
-                .allocate(&mut MemAccess(&mut self.inner.vm), value_len)
-            {
-                Ok(p) => p,
-                // TODO: better error reporting
-                Err(_) => {
-                    return ExternalsVm::Trapped {
-                        prototype: self.inner.into_prototype(),
-                    }
-                }
-            };
-
-            // Writing `Some(follow-up)`.
-            self.inner.vm.write_memory(dest_ptr, &[1]).unwrap();
-            self.inner
-                .vm
-                .write_memory(dest_ptr + 1, &value_len_enc)
-                .unwrap();
-            self.inner
-                .vm
-                .write_memory(dest_ptr + 1 + value_len_enc_len, follow_up)
-                .unwrap();
-            (dest_ptr, value_len)
+            self.inner.alloc_write_and_return_pointer_size(
+                iter::once(&[1][..])
+                    .chain(iter::once(&value_len_enc[..]))
+                    .chain(iter::once(follow_up)),
+            )
         } else {
             // Write a SCALE-encoded `None`.
-            let dest_ptr = match self
-                .inner
-                .allocator
-                .allocate(&mut MemAccess(&mut self.inner.vm), 1)
-            {
-                Ok(p) => p,
-                // TODO: better error reporting
-                Err(_) => {
-                    return ExternalsVm::Trapped {
-                        prototype: self.inner.into_prototype(),
-                    }
-                }
-            };
-            self.inner.vm.write_memory(dest_ptr, &[0]).unwrap();
-            (dest_ptr, 1)
-        };
-
-        ExternalsVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64({
-                build_pointer_size(dest_ptr, len)
-            }))),
-        })
+            self.inner
+                .alloc_write_and_return_pointer_size(iter::once(&[0]))
+        }
     }
 }
 
@@ -1597,56 +1570,12 @@ impl CallRuntimeVersion {
     ///
     /// If an error happened during the execution (such as an invalid Wasm binary code), pass
     /// an `Err`.
-    pub fn resume(mut self, scale_encoded_runtime_version: Result<&[u8], ()>) -> ExternalsVm {
+    pub fn resume(self, scale_encoded_runtime_version: Result<&[u8], ()>) -> ExternalsVm {
         // TODO: don't allocate a Vec here
         let scale_encoded_runtime_version =
             parity_scale_codec::Encode::encode(&scale_encoded_runtime_version.ok());
-        // TODO: don't allocate a Vec here
-        let value_len_enc = parity_scale_codec::Encode::encode(&parity_scale_codec::Compact(
-            u64::try_from(scale_encoded_runtime_version.len()).unwrap(),
-        ));
-        let value_len_enc_len = u32::try_from(value_len_enc.len()).unwrap();
-
-        let value_len = u32::try_from(scale_encoded_runtime_version.len())
-            .unwrap()
-            .checked_add(value_len_enc_len)
-            .unwrap()
-            .checked_add(1)
-            .unwrap();
-        let dest_ptr = match self
-            .inner
-            .allocator
-            .allocate(&mut MemAccess(&mut self.inner.vm), value_len)
-        {
-            Ok(p) => p,
-            // TODO: better error reporting
-            Err(_) => {
-                return ExternalsVm::Trapped {
-                    prototype: self.inner.into_prototype(),
-                }
-            }
-        };
-
-        // Writing `Some(follow-up)`.
-        self.inner.vm.write_memory(dest_ptr, &[1]).unwrap();
         self.inner
-            .vm
-            .write_memory(dest_ptr + 1, &value_len_enc)
-            .unwrap();
-        self.inner
-            .vm
-            .write_memory(
-                dest_ptr + 1 + value_len_enc_len,
-                &scale_encoded_runtime_version,
-            )
-            .unwrap();
-
-        ExternalsVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64({
-                build_pointer_size(dest_ptr, value_len)
-            }))),
-        })
+            .alloc_write_and_return_pointer_size(iter::once(scale_encoded_runtime_version))
     }
 }
 
@@ -1751,6 +1680,75 @@ struct Inner {
 }
 
 impl Inner {
+    /// Uses the memory allocator to allocate some memory for the given data, writes the data in
+    /// memory, and returns an [`ExternalsVm`] ready for the Wasm externality return.
+    ///
+    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    ///
+    /// # Panic
+    ///
+    /// Must only be called while the Wasm is handling an externality.
+    ///
+    fn alloc_write_and_return_pointer_size(
+        mut self,
+        data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+    ) -> ExternalsVm {
+        let mut data_len = 0u32;
+        for chunk in data.clone() {
+            data_len = data_len
+                .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
+        }
+
+        let dest_ptr = match self
+            .allocator
+            .allocate(&mut MemAccess(&mut self.vm), data_len)
+        {
+            Ok(p) => p,
+            // TODO: better error reporting
+            Err(_) => {
+                return ExternalsVm::Trapped {
+                    prototype: self.into_prototype(),
+                }
+            }
+        };
+
+        let mut ptr_iter = dest_ptr;
+        for chunk in data {
+            let chunk = chunk.as_ref();
+            self.vm.write_memory(ptr_iter, chunk).unwrap();
+            ptr_iter += u32::try_from(chunk.len()).unwrap_or(u32::max_value());
+        }
+
+        ReadyToRun {
+            inner: self,
+            resume_value: Some(vm::WasmValue::I64(reinterpret_u64_i64({
+                (u64::from(data_len) << 32) | u64::from(dest_ptr)
+            }))),
+        }
+        .into()
+    }
+
+    /// Utility function that turns a pointer parameter into the memory content, or returns an error
+    /// if it is impossible.
+    // TODO: shouldn't return a Vec<u8> but a impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
+    fn expect_constant_size_pointer(
+        &self,
+        param: &vm::WasmValue,
+        memory_size: u32,
+    ) -> Result<Vec<u8>, NonConformingErr> {
+        let ptr = match param {
+            vm::WasmValue::I32(v) => u32::from_ne_bytes(v.to_ne_bytes()),
+            _ => return Err(NonConformingErr::WrongParamTy),
+        };
+        // TODO: better error
+        Ok(self
+            .vm
+            .read_memory(ptr, memory_size)
+            .map_err(|_| NonConformingErr::WrongParamTy)?
+            .as_ref()
+            .to_vec())
+    }
+
     /// Utility function that turns a parameter into a "pointer-size" parameter, or returns an
     /// error if it is impossible.
     fn expect_pointer_size_raw(
@@ -1769,7 +1767,7 @@ impl Inner {
 
     /// Utility function that turns a "pointer-size" parameter into the memory content, or
     /// returns an error if it is impossible.
-    // TODO: shouldn't return a Vec<u8> but &[u8]
+    // TODO: shouldn't return a Vec<u8> but a impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
     fn expect_pointer_size(&self, param: &vm::WasmValue) -> Result<Vec<u8>, NonConformingErr> {
         let (ptr, len) = self.expect_pointer_size_raw(param)?;
         // TODO: better error
@@ -1925,11 +1923,6 @@ externalities! {
     ext_allocator_malloc_version_1,
     ext_allocator_free_version_1,
     ext_logging_log_version_1,
-}
-
-/// Builds a "pointer-size" value.
-fn build_pointer_size(pointer: u32, size: u32) -> u64 {
-    (u64::from(size) << 32) | u64::from(pointer)
 }
 
 /// Utility function that "reinterprets" a u32 into a i32. That is, the underlying bits stay the
