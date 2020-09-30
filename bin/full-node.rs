@@ -36,7 +36,9 @@ use std::{
 use structopt::StructOpt as _;
 use substrate_lite::{
     chain::{self, sync::full_optimistic},
-    chain_spec, header, network,
+    chain_spec,
+    database::full_sled,
+    header, network,
 };
 
 fn main() {
@@ -95,9 +97,50 @@ async fn async_main() {
         .create()
         .unwrap();
 
+    // Open the database from the filesystem, or create a new database if none is found.
+    let database = Arc::new({
+        // Directory supposed to contain the database.
+        let db_path = {
+            const APP_INFO: app_dirs::AppInfo = app_dirs::AppInfo {
+                name: "substrate-lite",
+                author: "paritytech",
+            };
+            let base_path =
+                app_dirs::app_dir(app_dirs::AppDataType::UserData, &APP_INFO, "database").unwrap();
+            base_path.join(chain_spec.id())
+        };
+
+        // The `unwrap()` here can panic for example in case of access denied.
+        match open_database(db_path.clone()).await.unwrap() {
+            full_sled::DatabaseOpen::Open(database) => {
+                // TODO: verify that the database matches the chain spec
+                // TODO: print the hash in a nicer way
+                eprintln!(
+                    "Loading existing database with finalized hash {:?}",
+                    database.finalized_block_hash().unwrap()
+                );
+                database
+            }
+            full_sled::DatabaseOpen::Empty(empty) => {
+                // TODO: make nicer
+                let genesis_block_header =
+                    substrate_lite::calculate_genesis_block_header(chain_spec.genesis_storage())
+                        .scale_encoding()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
+                eprintln!("Initializing new database at {}", db_path.display());
+                empty
+                    .insert_genesis_block(&genesis_block_header, chain_spec.genesis_storage())
+                    .unwrap()
+            }
+        }
+    });
+
     // Load the information about the chain from the database, or build the information of the
     // genesis block.
-    // TODO:
+    // TODO: load from database
     let chain_information = /*match local_storage.chain_information() {
         Ok(Some(i)) => i,
         Err(database::local_storage_light::AccessError::StorageAccess(err)) => return Err(err),
@@ -127,7 +170,6 @@ async fn async_main() {
 
     let (to_sync_tx, to_sync_rx) = mpsc::channel(64);
     let (to_network_tx, to_network_rx) = mpsc::channel(64);
-    let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
 
     let network_state = Arc::new(NetworkState {
         best_network_block_height: Atomic::new(0),
@@ -164,16 +206,10 @@ async fn async_main() {
             sync_state.clone(),
             to_sync_rx,
             to_network_tx,
-            to_db_save_tx,
+            database.clone(),
         )
         .await,
     );
-
-    threads_pool.spawn_ok(async move {
-        while let Some(info) = to_db_save_rx.next().await {
-            // TODO:
-        }
-    });
 
     let mut telemetry = {
         let endpoints = chain_spec
@@ -270,7 +306,7 @@ async fn start_sync(
     sync_state: Arc<Mutex<SyncState>>,
     mut to_sync: mpsc::Receiver<ToSync>,
     mut to_network: mpsc::Sender<ToNetwork>,
-    mut to_db_save_tx: mpsc::Sender<chain::chain_information::ChainInformation>,
+    database: Arc<full_sled::SledFullDatabase>,
 ) -> impl Future<Output = ()> {
     let mut sync =
         full_optimistic::OptimisticFullSync::<_, network::PeerId>::new(full_optimistic::Config {
@@ -308,13 +344,34 @@ async fn start_sync(
                         sync: s,
                         finalized_blocks,
                     } => {
-                        if let Some(last_finalized) = finalized_blocks.last() {
-                            let mut lock = sync_state.lock().await;
-                            lock.finalized_block_hash = last_finalized.header.hash();
-                            lock.finalized_block_number = last_finalized.header.number;
-                        }
+                        sync = s;
+
+                        let finalized_block_hash =
+                            if let Some(last_finalized) = finalized_blocks.last() {
+                                let mut lock = sync_state.lock().await;
+                                lock.finalized_block_hash = last_finalized.header.hash();
+                                lock.finalized_block_number = last_finalized.header.number;
+                                lock.finalized_block_hash
+                            } else {
+                                break;
+                            };
 
                         for block in finalized_blocks {
+                            database
+                                .insert(
+                                    &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
+                                        a.extend_from_slice(b.as_ref());
+                                        a
+                                    }),
+                                    false,
+                                    block.body.iter(),
+                                    block
+                                        .storage_top_trie_changes
+                                        .iter()
+                                        .map(|(k, v)| (k, v.as_ref())),
+                                )
+                                .unwrap();
+
                             for (key, value) in block.storage_top_trie_changes {
                                 if let Some(value) = value {
                                     finalized_block_storage.insert(key, value);
@@ -325,7 +382,7 @@ async fn start_sync(
                             }
                         }
 
-                        sync = s;
+                        database.set_finalized(&finalized_block_hash).unwrap();
                         break;
                     }
 
@@ -587,4 +644,40 @@ enum ToNetwork {
             Result<Vec<full_optimistic::RequestSuccessBlock>, full_optimistic::RequestFail>,
         >,
     },
+}
+
+/// Since opening the database can take a long time, this utility function performs this operation
+/// in the background while showing a small progress bar to the user.
+async fn open_database(path: PathBuf) -> Result<full_sled::DatabaseOpen, full_sled::SledError> {
+    let (tx, rx) = oneshot::channel();
+    let mut rx = rx.fuse();
+
+    let thread_spawn_result = thread::Builder::new().name("database-open".into()).spawn({
+        let path = path.clone();
+        move || {
+            let result = full_sled::open(full_sled::Config { path: &path });
+            let _ = tx.send(result);
+        }
+    });
+
+    // Fall back to opening the database on the same thread if the thread spawn failed.
+    if thread_spawn_result.is_err() {
+        return full_sled::open(full_sled::Config { path: &path });
+    }
+
+    let mut progress_timer = stream::unfold((), move |_| {
+        futures_timer::Delay::new(Duration::from_millis(200)).map(|_| Some(((), ())))
+    })
+    .map(|_| ());
+
+    let mut next_progress_icon = ['-', '\\', '|', '/'].iter().cloned().cycle();
+
+    loop {
+        futures::select! {
+            res = rx => return res.unwrap(),
+            _ = progress_timer.next() => {
+                eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
+            }
+        }
+    }
 }
