@@ -361,18 +361,6 @@ dependencies = [
 
 [[package]]
 name = "blake2"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94cb07b0da6a73955f8fb85d24c466778e70cda767a568229b104f0264089330"
-dependencies = [
- "byte-tools",
- "crypto-mac 0.7.0",
- "digest 0.8.1",
- "opaque-debug 0.2.3",
-]
-
-[[package]]
-name = "blake2"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84ce5b6108f8e154604bd4eb76a2f726066c3464d5a552a4229262a18c9bb471"
@@ -956,9 +944,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.5.3"
+version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1f6b1ce1c140482ea30ddd3335fc0024ac7ee112895426e0a629a6c20adfe3"
+checksum = "e78d4f1cc4ae33bbfc157ed5d5a5ef3bc29227303d595861deb238fcec4e9457"
 
 [[package]]
 name = "env_logger"
@@ -2993,7 +2981,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32bf8474159a95551661246cda4976e89356999e3cbfef36f493dacc3fae1e8e"
 dependencies = [
  "aes-gcm",
- "blake2 0.9.0",
+ "blake2",
  "chacha20poly1305",
  "rand",
  "rand_core",
@@ -3123,11 +3111,9 @@ dependencies = [
  "async-trait",
  "atomic",
  "bitflags",
- "blake2 0.8.1",
  "blake2-rfc",
  "bytes",
  "chrono",
- "console_error_panic_hook",
  "derive_more",
  "ed25519-dalek",
  "either",
@@ -3143,7 +3129,6 @@ dependencies = [
  "js-sys",
  "lazy_static",
  "libp2p",
- "libp2p-wasm-ext",
  "libsecp256k1",
  "lru",
  "merlin",
@@ -3164,6 +3149,7 @@ dependencies = [
  "send_wrapper 0.4.0",
  "serde",
  "serde_json",
+ "sha2 0.9.1",
  "slab",
  "smallvec 0.6.13",
  "snow",
@@ -3176,12 +3162,27 @@ dependencies = [
  "url",
  "void",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "wasm-timer",
  "wasmi",
  "wasmtime",
  "web-sys",
  "webpki",
+]
+
+[[package]]
+name = "substrate-lite-browser-node"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "futures",
+ "js-sys",
+ "libp2p",
+ "libp2p-wasm-ext",
+ "rand",
+ "substrate-lite",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wee_alloc",
 ]
 
