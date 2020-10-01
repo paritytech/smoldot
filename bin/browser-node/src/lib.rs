@@ -18,20 +18,18 @@
 //! When this library is compiled for `wasm`, this library contains the types and functions that
 //! can be accessed from the user through the `wasm-bindgen` library.
 
-#![cfg(feature = "wasm-bindings")]
-#![cfg_attr(docsrs, doc(cfg(feature = "wasm-bindings")))]
+#![recursion_limit = "512"]
 
-use crate::{
-    chain, chain::sync::headers_optimistic, chain_spec, database, header, json_rpc, network,
-    verify::babe,
-};
-
-use core::num::{NonZeroU32, NonZeroU64};
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
 use libp2p::wasm_ext::{ffi, ExtTransport};
+use std::{collections::HashMap, num::{NonZeroU32, NonZeroU64}};
+use substrate_lite::{
+    chain, chain::sync::headers_optimistic, chain_spec, database, header, json_rpc, network,
+    verify::babe,
+};
 use wasm_bindgen::prelude::*;
 
 // TODO: should that be here?
@@ -215,7 +213,7 @@ async fn start_sync(
     );
 
     async move {
-        let mut peers_source_id_map = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
+        let mut peers_source_id_map = HashMap::new();
         let mut block_requests_finished = stream::FuturesUnordered::new();
 
         loop {
@@ -282,7 +280,7 @@ async fn start_sync(
                 // take a long time. In order to avoid blocking the rest of the program in the
                 // meanwhile, the `yield_once` function interrupts the current task and gives a
                 // chance for other tasks to progress.
-                crate::util::yield_once().await;
+                yield_once().await;
             }
 
             // TODO: save less often
@@ -351,7 +349,7 @@ async fn start_network(
             known_addresses,
             chain_spec_protocol_id: chain_spec.protocol_id().as_bytes().to_vec(),
             tasks_executor: Box::new(|fut| wasm_bindgen_futures::spawn_local(fut)),
-            local_genesis_hash: crate::calculate_genesis_block_header(chain_spec.genesis_storage())
+            local_genesis_hash: substrate_lite::calculate_genesis_block_header(chain_spec.genesis_storage())
                 .hash(),
             wasm_external_transport: Some(ExtTransport::new(ffi::websocket_transport())),
         })
@@ -360,7 +358,7 @@ async fn start_network(
 
     async move {
         // TODO: store send back channel in a network user data rather than having this hashmap
-        let mut block_requests = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
+        let mut block_requests = HashMap::new();
 
         loop {
             futures::select! {
@@ -444,4 +442,22 @@ enum ToNetwork {
             Result<Vec<headers_optimistic::RequestSuccessBlock>, headers_optimistic::RequestFail>,
         >,
     },
+}
+
+/// Use in an asynchronous context to interrupt the current task execution and schedule it back.
+///
+/// This function is useful in order to guarantee a fine granularity of tasks execution time in
+/// situations where a CPU-heavy task is being performed.
+async fn yield_once() {
+    let mut pending = true;
+    futures::future::poll_fn(move |cx| {
+        if pending {
+            pending = false;
+            cx.waker().wake_by_ref();
+            core::task::Poll::Pending
+        } else {
+            core::task::Poll::Ready(())
+        }
+    })
+    .await
 }
