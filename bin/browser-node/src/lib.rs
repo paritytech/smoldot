@@ -13,10 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Contains `wasm-bindgen` bindings.
-//!
-//! When this library is compiled for `wasm`, this library contains the types and functions that
-//! can be accessed from the user through the `wasm-bindgen` library.
+//! Contains a light client implementation usable from a browser environment, using the
+//! `wasm-bindgen` library.
 
 #![recursion_limit = "512"]
 
@@ -32,7 +30,7 @@ use substrate_lite::{
 };
 use wasm_bindgen::prelude::*;
 
-// TODO: should that be here?
+// This custom allocator is used in order to reduce the size of the Wasm binary.
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
@@ -50,10 +48,8 @@ pub struct BrowserLightClient {
 /// >           is thrown.
 #[wasm_bindgen]
 pub async fn start_client(chain_spec: String) -> Result<BrowserLightClient, JsValue> {
-    // TODO: don't put that here, it's a global setting that doesn't have its place in a library
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
 
-    // TODO: this entire function is just some temporary code before we figure out where to put it
     let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&chain_spec) {
         Ok(cs) => cs,
         Err(err) => {
