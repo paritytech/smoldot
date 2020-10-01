@@ -40,6 +40,17 @@ pub struct SledFullDatabase {
     ///
     /// - `best`: Hash of the best block.
     /// - `finalized`: Height of the finalized block, as a 64bits big endian number.
+    /// - `grandpa_authorities_set_id`: A 64bits big endian number representing the authorities
+    /// set id that must finalize the block right after the finalized block.
+    /// - `grandpa_triggered_authorities_scheduled_height`: A 64bits big endian number
+    /// containing the height of the finalized block that scheduled the authorities that must
+    /// finalize the block right after the latest finalized block. The list of authorities can be
+    /// found in that block's header. Missing if `grandpa_authorities_set_id` is 0, in which case
+    /// the authorities are the one in the genesis block.
+    /// - `grandpa_scheduled_non_triggered_authorities_height`: A 64bits big endian number
+    /// containing the height of the finalized block that scheduled authorities that haven't been
+    /// triggered yet. The list of authorities can be found in that block's header. Missing
+    /// there's no scheduled-but-non-finalized authorities change.
     ///
     meta_tree: sled::Tree,
 
@@ -391,7 +402,8 @@ impl SledFullDatabase {
     /// an error is returned.
     ///
     /// The block must be a descendant of the current finalized block. Reverting finalization is
-    /// forbidden, as the way the format database.
+    /// forbidden, as the database intentionally discards some information when finality is
+    /// applied.
     pub fn set_finalized(
         &self,
         new_finalized_block_hash: &[u8; 32],
@@ -562,6 +574,8 @@ impl SledFullDatabase {
                             )?
                         };
 
+                        // TODO: update the grandpa stuff in meta
+
                         todo!()
                     }
 
@@ -589,10 +603,14 @@ impl SledFullDatabase {
     /// [`FinalizedStorageError::Obsolete`] error is returned.
     pub fn finalized_block_storage_top_trie_keys(
         &self,
-        finalized_block_hash: [u8; 32],
+        finalized_block_hash: &[u8; 32],
     ) -> Result<Vec<VarLenBytes>, FinalizedStorageError> {
-        // TODO: block isn't checked
-        Ok(self
+        // TODO: use a transaction rather than checking once before and once after?
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedStorageError::Obsolete);
+        }
+
+        let ret = self
             .finalized_storage_top_trie_tree
             .iter()
             .keys()
@@ -600,7 +618,13 @@ impl SledFullDatabase {
             .collect::<Result<Vec<_>, _>>()
             .map_err(SledError)
             .map_err(AccessError::Database)
-            .map_err(FinalizedStorageError::Access)?)
+            .map_err(FinalizedStorageError::Access)?;
+
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedStorageError::Obsolete);
+        }
+
+        Ok(ret)
     }
 
     /// Returns the value associated to a key in the storage of the finalized block.
@@ -611,17 +635,27 @@ impl SledFullDatabase {
     /// [`FinalizedStorageError::Obsolete`] error is returned.
     pub fn finalized_block_storage_top_trie_get(
         &self,
-        finalized_block_hash: [u8; 32],
+        finalized_block_hash: &[u8; 32],
         key: &[u8],
     ) -> Result<Option<VarLenBytes>, FinalizedStorageError> {
-        // TODO: block isn't checked
-        Ok(self
+        // TODO: use a transaction rather than checking once before and once after?
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedStorageError::Obsolete);
+        }
+
+        let ret = self
             .finalized_storage_top_trie_tree
             .get(key)
             .map_err(SledError)
             .map_err(AccessError::Database)
             .map_err(FinalizedStorageError::Access)?
-            .map(VarLenBytes))
+            .map(VarLenBytes);
+
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedStorageError::Obsolete);
+        }
+
+        Ok(ret)
     }
 }
 

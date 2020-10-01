@@ -138,9 +138,7 @@ async fn async_main() {
         }
     });
 
-    // Load the information about the chain from the database, or build the information of the
-    // genesis block.
-    // TODO: load from database
+    // Load the information about the chain from the database.
     let chain_information = /*match local_storage.chain_information() {
         Ok(Some(i)) => i,
         Err(database::local_storage_light::AccessError::StorageAccess(err)) => return Err(err),

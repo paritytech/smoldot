@@ -159,6 +159,7 @@ impl DatabaseEmpty {
                     )?;
                     meta.insert(b"best", &genesis_block_hash[..])?;
                     meta.insert(b"finalized", &0u64.to_be_bytes()[..])?;
+                    meta.insert(b"grandpa_authorities_set_id", &0u64.to_be_bytes()[..])?;
                     Ok(())
                 },
             );
