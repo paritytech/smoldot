@@ -33,12 +33,12 @@ wasm-bindings = [
 
 [[bin]]
 name = "full-node"
-path = "bin/full-node.rs"
+path = "bin/full-node/main.rs"
 required-features = ["os-networking"]
 
 [[bin]]
 name = "json-rpc-test"
-path = "bin/json-rpc-test.rs"
+path = "bin/json-rpc-test/main.rs"
 required-features = ["os-networking"]
 
 [lib]
