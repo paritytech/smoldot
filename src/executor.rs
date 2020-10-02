@@ -82,7 +82,6 @@
 //!
 //!         // Errors can happen if the WebAssembly code panics or does something wrong.
 //!         // In a real-life situation, the host should obviously not panic in these situations.
-//!         substrate_lite::executor::WasmVm::NonConforming { .. } |
 //!         substrate_lite::executor::WasmVm::Error { .. } => {
 //!             panic!("Error while executing code")
 //!         },
