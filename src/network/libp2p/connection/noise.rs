@@ -846,7 +846,7 @@ mod tests {
             let mut buf_2_to_1 = Vec::new();
 
             while !matches!(
-                (&handshake1, &handshake1),
+                (&handshake1, &handshake2),
                 (NoiseHandshake::Success { .. }, NoiseHandshake::Success { .. })
             ) {
                 match handshake1 {
