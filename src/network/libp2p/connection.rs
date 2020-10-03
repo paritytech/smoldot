@@ -34,10 +34,14 @@ mod yamux;
 
 // TODO: needs a timeout for the handshake
 
-pub struct Connection<TNow> {
+pub struct Connection<TNow, TRqUd, TProtoList, TProto> {
     encryption: noise::Noise,
     yamux: yamux::Connection<Substream>,
-    marker: core::marker::PhantomData<TNow>, // TODO: remove
+
+    /// List of request-response protocols.
+    in_request_protocols: TProtoList,
+
+    marker: core::marker::PhantomData<(TNow, TRqUd, TProtoList, TProto)>, // TODO: remove
 }
 
 struct Substream {
@@ -54,7 +58,7 @@ enum SubstreamTy {
     RequestIn,
 }
 
-impl<TNow> Connection<TNow>
+impl<TNow, TRqUd, TProtoList, TProto> Connection<TNow, TRqUd, TProtoList, TProto>
 where
     TNow: Clone + Add<Duration> + Sub<TNow, Output = Duration> + Ord,
 {
@@ -79,8 +83,9 @@ where
         now: TNow,
         mut incoming_data: Option<&[u8]>,
         mut outgoing_buffer: &mut [u8],
-    ) -> Result<ReadWrite<TNow>, Error> {
+    ) -> Result<ReadWrite<TNow, TRqUd, TProtoList, TProto>, Error> {
         let mut total_read = 0;
+        let mut total_written = 0;
 
         if let Some(incoming_data) = incoming_data.as_mut() {
             let num_read = self
@@ -89,6 +94,27 @@ where
                 .map_err(Error::Noise)?;
             total_read += incoming_data.len();
             *incoming_data = &incoming_data[num_read..];
+        }
+
+        // The yamux state machine contains data that needs to be written out.
+        loop {
+            let bytes_out = self
+                .encryption
+                .encrypt_in_size_for_out(outgoing_buffer.len());
+            if bytes_out == 0 {
+                break;
+            }
+
+            let buffers = self.yamux.extract_out(bytes_out);
+            let mut buffers = buffers.peekable();
+            if buffers.peek().is_none() {
+                break;
+            }
+
+            let (_read, written) = self.encryption.encrypt(buffers, &mut outgoing_buffer);
+            debug_assert!(_read <= bytes_out);
+            total_written += written;
+            outgoing_buffer = &mut outgoing_buffer[written..];
         }
 
         /*loop {
@@ -123,24 +149,34 @@ where
             }
         }*/
 
-        todo!()
+        Ok(ReadWrite {
+            connection: self,
+            read_bytes: total_read,
+            written_bytes: total_written,
+            wake_up_after: None,
+            event: None, // TODO:
+        })
     }
 
-    /// Send a request to the remote.
+    /// Sends a request to the remote.
+    ///
+    /// This method only inserts the request into the connection object. Use
+    /// [`Connection::read_write`] in order to actually send out the request.
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
-    /// be generated on their side.
+    /// be generated on its side.
     ///
-    /// After the remote has sent back a response, a [`Event::Response`] event will be generated
-    /// locally.
-    // TODO: pass protocol
-    // TODO: finish docs
-    pub fn start_request(&mut self, request: Vec<u8>) {
+    /// After the remote has sent back a response, an [`Event::Response`] event will be generated
+    /// locally. The `user_data` parameter will be passed back.
+    pub fn add_request(&mut self, protocol: &TProto, request: Vec<u8>, user_data: TRqUd) {
+        /*self.yamux.open_substream(Substream {
+            user_data
+        });*/
         todo!()
     }
 }
 
-impl<TNow> fmt::Debug for Connection<TNow> {
+impl<TNow, TRqUd, TProtoList, TProto> fmt::Debug for Connection<TNow, TRqUd, TProtoList, TProto> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // TODO: better debug
         f.debug_struct("Connection").finish()
@@ -150,9 +186,9 @@ impl<TNow> fmt::Debug for Connection<TNow> {
 /// Outcome of [`Connection::read_write`].
 #[must_use]
 #[derive(Debug)]
-pub struct ReadWrite<TNow> {
+pub struct ReadWrite<TNow, TRqUd, TProtoList, TProto> {
     /// Connection object yielded back.
-    pub connection: Connection<TNow>,
+    pub connection: Connection<TNow, TRqUd, TProtoList, TProto>,
 
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
     /// should no longer be present the next time [`Connection::read_write`] is called.
@@ -167,29 +203,58 @@ pub struct ReadWrite<TNow> {
     pub wake_up_after: Option<TNow>,
 
     /// Event that happened on the connection.
-    pub event: Option<Event>,
+    pub event: Option<Event<TRqUd, TProto>>,
 }
 
 /// Event that happened on the connection. See [`ReadWrite::event`].
 #[must_use]
 #[derive(Debug)]
-pub enum Event {
+pub enum Event<TRqUd, TProto> {
     /// No more outgoing data will be emitted. The local writing side of the connection should be
     /// closed.
     // TODO: remove?
     EndOfData,
     /// Received a request in the context of a request-response protocol.
     RequestIn {
-        // TODO: protocol: ...
+        /// Protocol the request was sent on.
+        protocol: TProto,
         /// Bytes of the request. Its interpretation is out of scope of this module.
         request: Vec<u8>,
     },
     /// Received a response to a previously emitted request on a request-response protocol.
     Response {
-        // TODO: user_data: ...
         /// Bytes of the response. Its interpretation is out of scope of this module.
-        response: Vec<u8>,
+        // TODO: error type
+        response: Result<Vec<u8>, ()>,
+        /// Value that was passed to [`Connection::start_request`].
+        user_data: TRqUd,
     },
+}
+
+/// Successfully negotiated connection. Ready to be turned into a [`Connection`].
+pub struct ConnectionPrototype {
+    encryption: noise::Noise,
+    is_initiator: bool,
+}
+
+impl ConnectionPrototype {
+    /// Turns this prototype into an actual connection.
+    pub fn into_connection<TNow, TRqUd, TProtoList, TProto>(
+        self,
+    ) -> Connection<TNow, TRqUd, TProtoList, TProto> {
+        Connection {
+            encryption: self.encryption,
+            yamux: yamux::Connection::new(self.is_initiator),
+            in_request_protocols: todo!(),
+            marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl fmt::Debug for ConnectionPrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("ConnectionPrototype").finish()
+    }
 }
 
 #[derive(derive_more::From)]
@@ -200,7 +265,7 @@ pub enum Handshake {
     NoiseKeyRequired(NoiseKeyRequired),
     Success {
         remote_peer_id: PeerId,
-        connection: Connection<std::time::Instant>, // TODO: no for generic
+        connection: ConnectionPrototype,
     },
 }
 
@@ -380,10 +445,9 @@ impl HealthyHandshake {
                         multistream_select::Negotiation::Success(_) => {
                             return Ok((
                                 Handshake::Success {
-                                    connection: Connection {
+                                    connection: ConnectionPrototype {
                                         encryption,
-                                        yamux: yamux::Connection::new(),
-                                        marker: core::marker::PhantomData,
+                                        is_initiator: self.is_initiator,
                                     },
                                     remote_peer_id: peer_id,
                                 },

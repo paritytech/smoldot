@@ -25,34 +25,43 @@
 //!
 //! # Usage
 //!
-//! The user of this module is responsible for managing the list of substreams in the form of a
-//! collection of [`SubstreamState`]s. Each substream is identified by a [`SubstreamId`].
 
 // TODO: finish usage
 
-use core::{
-    cmp,
-    convert::TryFrom as _,
-    fmt, iter,
-    num::{NonZeroU32, NonZeroUsize},
-};
+use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU32};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
 
 pub struct Connection<T> {
+    /// List of substreams currently open in the yamux state machine.
     // TODO: there's an actual chance of collision attack here if we don't use a siphasher
-    substreams: hashbrown::HashMap<u32, Substream<T>, fnv::FnvBuildHasher>,
+    substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, fnv::FnvBuildHasher>,
+    /// Id of the next outgoing substream to open.
+    /// This implementation allocates identifiers linearly. Every time a substream is open, its
+    /// value is incremented by two.
+    next_outbound_substream: NonZeroU32,
     /// Buffer for a partially read header.
     incoming_header: arrayvec::ArrayVec<[u8; 12]>,
-    /// Header to be written out in priority.
+    /// Header currently being written out. Finishing to write this header is the first and
+    /// foremost priority of [`Connection::read_write`].
     pending_out_header: arrayvec::ArrayVec<[u8; 12]>,
+    /// If `Some`, contains a substream ID and a number of bytes. A data frame header has been
+    /// written to the socket, and the number of bytes stored in there is the number of bytes
+    /// remaining in this frame.
+    ///
+    /// Writing out the data of this substream is the second most highest priority after writing
+    /// out [`Connection::pending_out_header`].
+    writing_out_substream: Option<(SubstreamId, usize)>,
     pending_incoming_substream: Option<SubstreamId>,
 }
 
 struct Substream<T> {
     /// Identifier of the substream.
     id: SubstreamId,
+    /// True if a message on this substream has already been sent since it has been opened. The
+    /// first message on a substream must contain either a SYN or ACK flag.
+    first_message_queued: bool,
     /// Amount of data the remote is allowed to transmit to the local node.
     remote_allowed_window: u64,
     /// Amount of data the local node is allowed to transmit to the remote.
@@ -61,25 +70,120 @@ struct Substream<T> {
     local_write_closed: bool,
     /// True if the writing side of the remote node is closed for this substream.
     remote_write_closed: bool,
+    /// Buffer of buffers to be written out to the socket.
+    // TODO call shrink_to_fit from time to time?
+    write_buffers: Vec<Vec<u8>>,
+    /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
+    /// socket.
+    first_write_buffer_offset: usize,
     /// Data chosen by the user.
     user_data: T,
 }
 
 impl<T> Connection<T> {
     /// Initializes a new yamux state machine.
-    pub fn new() -> Connection<T> {
-        Self::with_capacity(0)
+    ///
+    /// Must be passed `true` if the local machine has initiated the connection.
+    /// Otherwise, `false`.
+    pub fn new(is_initiator: bool) -> Connection<T> {
+        Self::with_capacity(is_initiator, 0)
     }
 
     /// Initializes a new yamux state machine with enough capacity for the given number of
     /// substreams.
-    pub fn with_capacity(capacity: usize) -> Connection<T> {
+    ///
+    /// Must be passed `true` if the local machine has initiated the connection.
+    /// Otherwise, `false`.
+    pub fn with_capacity(is_initiator: bool, capacity: usize) -> Connection<T> {
         Connection {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(capacity, Default::default()),
+            next_outbound_substream: if is_initiator {
+                NonZeroU32::new(1).unwrap()
+            } else {
+                NonZeroU32::new(2).unwrap()
+            },
             incoming_header: arrayvec::ArrayVec::new(),
             pending_out_header: arrayvec::ArrayVec::new(),
+            writing_out_substream: None,
             pending_incoming_substream: None,
         }
+    }
+
+    /// Opens a new substream.
+    ///
+    /// This method only modifies the state of `self` and reserves an identifier. No message needs
+    /// to be sent to the remote before data is actually being sent on the substream.
+    ///
+    /// > **Note**: Importantly, the remote will not be notified of the substream being open
+    /// >           before the local side sends data on this substream. As such, protocols where
+    /// >           the remote is expected to send data in response to a substream being open,
+    /// >           without the local side first sending some data on that substream, will not
+    /// >           work. In practice, while this is technically out of concern of the yamux
+    /// >           protocol, all substreams in the context of libp2p start with a
+    /// >           multistream-select negotiation, and this scenario can therefore never happen.
+    ///
+    /// # Panic
+    ///
+    /// Panics if all possible substream IDs are already taken. This happen if there exists more
+    /// than approximately 2^31 substreams, which is very unlikely to happen unless there exists a
+    /// bug in the code.
+    ///
+    pub fn open_substream(&mut self, user_data: T) -> SubstreamId {
+        // Make sure that the `loop` below can finish.
+        assert!(usize::try_from(u32::max_value() / 2 - 1)
+            .map_or(true, |full_len| self.substreams.len() < full_len));
+
+        // Grab a `VacantEntry` in `self.substreams`.
+        let entry = loop {
+            // Allocating a substream ID is surprisingly difficult because overflows in the
+            // identifier are possible if the software runs for a very long time.
+            // Rather than naively incrementing the id by two and assuming that no substream with
+            // this ID exists, the code below properly handles wrapping around and ignores IDs
+            // already in use .
+            let id_attempt = self.next_outbound_substream;
+            self.next_outbound_substream = {
+                let mut id = self.next_outbound_substream.get();
+                loop {
+                    // Odd ids are reserved for the initiator and even ids are reserved for the
+                    // listener. Assuming that the current id is valid, incrementing by 2 will
+                    // lead to a valid id as well.
+                    id = id.wrapping_add(2);
+                    // However, the substream ID `0` is always invalid.
+                    match NonZeroU32::new(id) {
+                        Some(v) => break v,
+                        None => continue,
+                    }
+                }
+            };
+            if let hashbrown::hash_map::Entry::Vacant(e) = self.substreams.entry(id_attempt) {
+                break e;
+            }
+        };
+
+        // ID that was just allocated.
+        let substream_id = SubstreamId(*entry.key());
+
+        entry.insert(Substream {
+            id: substream_id,
+            first_message_queued: false,
+            remote_allowed_window: DEFAULT_FRAME_SIZE,
+            allowed_window: DEFAULT_FRAME_SIZE,
+            local_write_closed: false,
+            remote_write_closed: false,
+            write_buffers: Vec::with_capacity(16),
+            first_write_buffer_offset: 0,
+            user_data,
+        });
+
+        substream_id
+    }
+
+    pub fn write_substream(&mut self, substream_id: SubstreamId, data: Vec<u8>) {
+        let mut substream = self.substreams.get_mut(&substream_id.0).unwrap();
+        debug_assert!(
+            !substream.write_buffers.is_empty() || substream.first_write_buffer_offset == 0
+        );
+        substream.write_buffers.push(data);
     }
 
     /// Process some incoming data.
@@ -95,7 +199,7 @@ impl<T> Connection<T> {
     pub fn incoming_data(
         &mut self,
         mut data: &[u8],
-        mut out: &mut [u8],
+        mut out: &mut [u8], // TODO: remove `out`
     ) -> Result<IncomingDataOutcome, Error> {
         assert!(self.pending_incoming_substream.is_none());
 
@@ -197,6 +301,129 @@ impl<T> Connection<T> {
         todo!()
     }
 
+    /// Returns an iterator to a list of buffers whose content must be sent out on the socket.
+    ///
+    /// The buffers produced by the iterator will never yield more than `size_bytes` bytes of
+    /// data. The user is expected to pass an exact amount of bytes that the next layer is ready
+    /// to accept.
+    ///
+    /// After the iterator has been destroyed, the yamux state machine will automatically consider
+    /// that these `size_bytes` have been sent out, even if the iterator has been destroyed
+    /// before finishing.
+    ///
+    /// > **Note**: Most other objects in the networking code have a "`read_write`" method that
+    /// >           writes the outgoing data to a buffer. This is an idiomatic way to do things in
+    /// >           situations where the data is generated on the fly. In the context of yamux,
+    /// >           however, this would be rather suboptimal considering that buffers to send out
+    /// >           are already stored in their final form in the state machine.
+    pub fn extract_out<'a>(
+        &'a mut self,
+        size_bytes: usize,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+        // TODO: this function has a zero-cost API, but its body isn't really zero-cost due to laziness
+
+        struct VecWithOffset(Vec<u8>, usize);
+        impl AsRef<[u8]> for VecWithOffset {
+            fn as_ref(&self) -> &[u8] {
+                &self.0[self.1..]
+            }
+        }
+
+        // The implementation consists in filling a buffer of buffers, then calling `into_iter`.
+        let mut buffers = Vec::with_capacity(32);
+
+        // Copy of `size_bytes`, decremented over the iterations.
+        let mut size_bytes_iter = size_bytes;
+
+        while size_bytes_iter != 0 {
+            // Finish writing `self.pending_out_header` if possible.
+            if !self.pending_out_header.is_empty() {
+                if size_bytes_iter >= self.pending_out_header.len() {
+                    size_bytes_iter -= self.pending_out_header.len();
+                    buffers.push(either::Left(mem::replace(
+                        &mut self.pending_out_header,
+                        Default::default(),
+                    )));
+                } else {
+                    let to_copy = cmp::min(size_bytes_iter, self.pending_out_header.len());
+                    let to_add = self.pending_out_header[..to_copy].to_vec();
+                    size_bytes_iter -= to_copy;
+                    for _ in 0..to_copy {
+                        self.pending_out_header.remove(0);
+                    }
+                    buffers.push(either::Right(VecWithOffset(to_add, 0)));
+                }
+            }
+
+            // Now update `writing_out_substream`.
+            if let Some((substream, ref mut remain)) = self.writing_out_substream {
+                let mut substream = self.substreams.get_mut(&substream.0).unwrap();
+
+                let first_buf_avail =
+                    substream.write_buffers[0].len() - substream.first_write_buffer_offset;
+                if first_buf_avail <= *remain {
+                    buffers.push(either::Right(VecWithOffset(
+                        substream.write_buffers.remove(0),
+                        substream.first_write_buffer_offset,
+                    )));
+                    size_bytes_iter -= first_buf_avail;
+                    substream.first_write_buffer_offset = 0;
+                    *remain -= first_buf_avail;
+                    if *remain == 0 {
+                        self.writing_out_substream = None;
+                    }
+                } else {
+                    size_bytes_iter -= *remain;
+                    buffers.push(either::Right(VecWithOffset(
+                        substream.write_buffers[0][substream.first_write_buffer_offset..]
+                            [..*remain]
+                            .to_vec(),
+                        0,
+                    )));
+                    substream.first_write_buffer_offset += *remain;
+                    self.writing_out_substream = None;
+                }
+
+                continue;
+            }
+
+            // All frames in the process of being written have been written.
+            debug_assert!(self.pending_out_header.is_empty());
+            debug_assert!(self.writing_out_substream.is_none());
+
+            // Start writing more data from another substream.
+            // TODO: choose substreams in some sort of round-robin way
+            if let Some((id, sub)) = self
+                .substreams
+                .iter_mut()
+                .find(|(_, s)| !s.write_buffers.is_empty())
+                .map(|(id, sub)| (*id, sub))
+            {
+                let pending_len = sub.write_buffers.iter().fold(0, |l, b| l + b.len());
+                let len_out = cmp::min(
+                    u32::try_from(pending_len).unwrap_or(u32::max_value()),
+                    u32::try_from(sub.allowed_window).unwrap_or(u32::max_value()),
+                );
+                sub.allowed_window -= u64::from(len_out);
+                let syn_ack_flag = !sub.first_message_queued;
+                sub.first_message_queued = true;
+                self.writing_out_substream =
+                    Some((SubstreamId(id), usize::try_from(len_out).unwrap()));
+                self.queue_data_frame_header(syn_ack_flag, id, len_out);
+            } else {
+                break;
+            }
+        }
+
+        debug_assert!(
+            buffers
+                .iter()
+                .fold(0, |n, b| n + AsRef::<[u8]>::as_ref(b).len())
+                < size_bytes
+        );
+        buffers.into_iter()
+    }
+
     pub fn accept_pending_substream(&mut self, user_data: T, mut out: &mut [u8]) -> usize {
         let pending_incoming_substream = self.pending_incoming_substream.take().unwrap();
         debug_assert!(self.pending_out_header.is_empty());
@@ -230,55 +457,45 @@ impl<T> Connection<T> {
         to_write
     }
 
-    /*pub fn emit_data_frame_header(
+    /// Writes a data frame header in `self.pending_out_header`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `!self.pending_out_header.is_empty()`.
+    ///
+    fn queue_data_frame_header(
         &mut self,
-        mut payload: &[u8],
-        destination: &mut [u8],
-    ) -> (usize, usize) {
-        // A header occupies 12 bytes. If the destination isn't capable of holding at least a header
-        // and one byte of data, return immediately.
-        if destination.len() <= 12 {
-            return (0, 0);
+        syn_ack_flag: bool,
+        substream_id: NonZeroU32,
+        data_length: u32,
+    ) {
+        assert!(self.pending_out_header.is_empty());
+
+        let mut flags: u16 = 0;
+        if syn_ack_flag {
+            if (substream_id.get() % 2) == (self.next_outbound_substream.get() % 2) {
+                // SYN
+                flags |= 0x1;
+            } else {
+                // ACK
+                flags |= 0x2;
+            }
         }
 
-        // There's no point in writing empty frames.
-        if payload.is_empty() {
-            return (0, 0);
-        }
+        self.pending_out_header.push(0);
+        self.pending_out_header.push(0);
+        self.pending_out_header
+            .try_extend_from_slice(&flags.to_be_bytes())
+            .unwrap();
+        self.pending_out_header
+            .try_extend_from_slice(&substream_id.get().to_be_bytes())
+            .unwrap();
+        self.pending_out_header
+            .try_extend_from_slice(&data_length.to_be_bytes())
+            .unwrap();
 
-        // If the local node isn't allowed to write any more data, return immediately as well.
-        if substream.local_write_closed || substream.allowed_window == 0 {
-            // TODO: error if local_write_closed instead?
-            return (0, 0);
-        }
-
-        // Clamp `payload` to the length that is actually going to be emitted.
-        payload = {
-            let len = cmp::min(
-                cmp::min(destination.len() - 12, payload.len()),
-                usize::try_from(substream.allowed_window).unwrap_or(usize::max_value()),
-            );
-            debug_assert_ne!(len, 0);
-            &payload[..len]
-        };
-
-        // Write the header.
-        destination[0] = 0;
-        destination[1] = 0;
-        destination[2..4].copy_from_slice(&0u16.to_be_bytes());
-        // Since the payload is clamped to the allowed window size, which is a u32, it is also
-        // guaranteed that `payload.len()` fits in a u32.
-        destination[4..8].copy_from_slice(&substream.id.0.get().to_be_bytes());
-        destination[8..12].copy_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
-
-        // Copy the data.
-        destination[12..][..payload.len()].copy_from_slice(&payload);
-
-        // Success!
-        substream.allowed_window -= u64::try_from(payload.len()).unwrap();
-        debug_assert!(payload.len() + 12 <= destination.len());
-        (payload.len(), payload.len() + 12)
-    }*/
+        debug_assert_eq!(self.pending_out_header.len(), 12);
+    }
 }
 
 impl<T> fmt::Debug for Connection<T>
@@ -306,7 +523,7 @@ where
 
 /// Identifier of a substream in the context of a connection.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, derive_more::From)]
-pub struct SubstreamId(pub NonZeroU32);
+pub struct SubstreamId(NonZeroU32);
 
 pub struct IncomingDataOutcome {
     pub bytes_read: usize,
@@ -334,4 +551,4 @@ pub enum Error {
 }
 
 /// By default, all new substreams have this implicit window size.
-const DEFAULT_FRAME_SIZE: u32 = 256 * 1024;
+const DEFAULT_FRAME_SIZE: u64 = 256 * 1024;
