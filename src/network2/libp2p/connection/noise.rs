@@ -366,20 +366,23 @@ impl Noise {
     }
 
     // TODO: doc
+    pub fn encrypt_in_size_for_out(&self, out_size: usize) -> usize {
+        let mut total = 0;
+        let mut dest_len = out_size;
+        while dest_len >= 19 {
+            let in_len = cmp::min(65536, dest_len - 18);
+            total += in_len;
+            dest_len -= in_len + 18;
+        }
+        total
+    }
+
+    // TODO: doc
     pub fn prepare_buffer_encryption<'a>(
         &'a mut self,
         destination: &'a mut [u8],
     ) -> BufferEncryption<'a> {
-        let available_in = {
-            let mut total = 0;
-            let mut dest_len = destination.len();
-            while dest_len >= 19 {
-                let in_len = cmp::min(65536, dest_len - 18);
-                total += in_len;
-                dest_len -= in_len + 18;
-            }
-            total
-        };
+        let available_in = self.encrypt_in_size_for_out(destination.len());
 
         let buffer = vec![0; available_in];
 

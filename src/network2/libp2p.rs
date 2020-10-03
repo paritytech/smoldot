@@ -204,7 +204,7 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
     /// This method is `async` but will only block if synchronization with other tasks is
     /// necessary.
     pub async fn add_incoming_connection(&self, remote_send_back: Multiaddr) -> ConnectionId {
-        let handshake = connection::HealthyHandshake::new(connection::Endpoint::Listener);
+        let handshake = connection::HealthyHandshake::new(false);
 
         self.num_incoming_connections
             .fetch_add(1, Ordering::Relaxed);

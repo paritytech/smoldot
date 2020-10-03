@@ -206,13 +206,13 @@ pub enum Handshake {
 
 impl Handshake {
     /// Shortcut for [`HealthyHandshake::new`] wrapped in a [`Connection`].
-    pub fn new(endpoint: Endpoint) -> Self {
-        HealthyHandshake::new(endpoint).into()
+    pub fn new(is_initiator: bool) -> Self {
+        HealthyHandshake::new(is_initiator).into()
     }
 }
 
 pub struct HealthyHandshake {
-    endpoint: Endpoint,
+    is_initiator: bool,
     state: HandshakeState,
 }
 
@@ -235,190 +235,84 @@ impl HealthyHandshake {
     ///
     /// Must pass [`Endpoint::Dialer`] if the connection has been opened by the local machine,
     /// and [`Endpoint::Listener`] if it has been opened by the remote.
-    pub fn new(endpoint: Endpoint) -> Self {
-        let negotiation = multistream_select::InProgress::new(match endpoint {
-            Endpoint::Dialer => multistream_select::Config::Dialer {
+    pub fn new(is_initiator: bool) -> Self {
+        let negotiation = multistream_select::InProgress::new(if is_initiator {
+            multistream_select::Config::Dialer {
                 requested_protocol: noise::PROTOCOL_NAME,
-            },
-            Endpoint::Listener => multistream_select::Config::Listener {
+            }
+        } else {
+            multistream_select::Config::Listener {
                 supported_protocols: iter::once(noise::PROTOCOL_NAME),
-            },
+            }
         });
 
         HealthyHandshake {
-            endpoint,
+            is_initiator,
             state: HandshakeState::NegotiatingEncryptionProtocol { negotiation },
         }
     }
 
-    /// Parse the content of `data`. Returns the new state of the connection and the number of
-    /// bytes read from `data`.
+    /// Feeds data coming from a socket through `incoming_data`, updates the internal state
+    /// machine, and writes data destined to the socket to `outgoing_buffer`.
     ///
-    /// Returns an error in case of protocol error, in which case the connection should be
-    /// entirely shut down.
+    /// On success, returns the new state of the negotiation, plus the number of bytes that have
+    /// been read from `incoming_data` and the number of bytes that have been written to
+    /// `outgoing_buffer`.
     ///
-    /// If the number of bytes read is different from 0, you should immediately call this method
-    /// again with the remaining data.
-    pub fn inject_data<'c, 'd>(
+    /// An error is returned if the protocol is being violated by the remote. When that happens,
+    /// the connection should be closed altogether.
+    ///
+    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
+    pub fn read_write(
         mut self,
-        mut data: &[u8],
-    ) -> Result<(Handshake, usize), HandshakeError> {
-        /*let mut total_read = 0;
-
-        match self.state {
-            HandshakeState::NegotiatingEncryptionProtocol { negotiation } => {
-                let (updated, num_read) = negotiation
-                    .inject_data(data)
-                    .map_err(HandshakeError::MultistreamSelect)?;
-                total_read += num_read;
-                data = &data[num_read..];
-
-                match updated {
-                    multistream_select::Negotiation::InProgress(updated) => {
-                        self.state = HandshakeState::NegotiatingEncryptionProtocol {
-                            negotiation: updated,
-                        };
-                    }
-                    multistream_select::Negotiation::Success(_) => {
-                        return Ok((
-                            Handshake::NoiseKeyRequired(NoiseKeyRequired {
-                                endpoint: self.endpoint,
-                            }),
-                            total_read,
-                        ));
-                    }
-                    multistream_select::Negotiation::NotAvailable => {
-                        return Err(HandshakeError::NoEncryptionProtocol)
-                    }
-                }
-
-                Ok((Handshake::Healthy(self), total_read))
-            }
-
-            HandshakeState::NegotiatingEncryption { handshake } => {
-                let (updated, num_read) = handshake
-                    .inject_data(data)
-                    .map_err(HandshakeError::NoiseHandshake)?;
-                total_read += num_read;
-                data = &data[num_read..];
-
-                match updated {
-                    noise::NoiseHandshake::Success {
-                        cipher,
-                        remote_peer_id,
-                    } => {
-                        let negotiation =
-                            multistream_select::InProgress::new(match self.endpoint {
-                                Endpoint::Dialer => multistream_select::Config::Dialer {
-                                    requested_protocol: yamux::PROTOCOL_NAME,
-                                },
-                                Endpoint::Listener => multistream_select::Config::Listener {
-                                    supported_protocols: iter::once(yamux::PROTOCOL_NAME),
-                                },
-                            });
-
-                        self.state = HandshakeState::NegotiatingMultiplexing {
-                            peer_id: remote_peer_id,
-                            encryption: cipher,
-                            negotiation,
-                        };
-                    }
-                    noise::NoiseHandshake::InProgress(updated) => {
-                        self.state = HandshakeState::NegotiatingEncryption { handshake: updated }
-                    }
-                };
-
-                Ok((Handshake::Healthy(self), total_read))
-            }
-
-            HandshakeState::NegotiatingMultiplexing {
-                negotiation,
-                mut encryption,
-                peer_id,
-            } => {
-                let num_read = encryption
-                    .inject_inbound_data(data)
-                    .map_err(HandshakeError::Noise)?;
-                total_read += data.len();
-                data = &data[num_read..];
-
-                let (updated, read_num) = negotiation
-                    .inject_data(encryption.decoded_inbound_data())
-                    .map_err(HandshakeError::MultistreamSelect)?;
-                encryption.consume_inbound_data(read_num);
-
-                match updated {
-                    multistream_select::Negotiation::InProgress(updated) => {
-                        self.state = HandshakeState::NegotiatingMultiplexing {
-                            negotiation: updated,
-                            encryption,
-                            peer_id,
-                        };
-                    }
-                    multistream_select::Negotiation::Success(_) => {
-                        return Ok((
-                            Handshake::Success {
-                                connection: Connection {
-                                    encryption,
-                                    yamux: yamux::Connection::new(),
-                                    marker: core::marker::PhantomData,
-                                },
-                                remote_peer_id: peer_id,
-                            },
-                            total_read,
-                        ));
-                    }
-                    multistream_select::Negotiation::NotAvailable => {
-                        return Err(HandshakeError::NoMultiplexingProtocol)
-                    }
-                }
-
-                Ok((Handshake::Healthy(self), total_read))
-            }
-        }*/
-        todo!()
-    }
-
-    /// Write to the given buffer the bytes that are ready to be sent out. Returns the number of
-    /// bytes written to `destination`.
-    pub fn write_out(mut self, mut destination: &mut [u8]) -> (Handshake, usize) {
-        /*let mut total_written = 0;
+        mut incoming_buffer: &[u8],
+        mut outgoing_buffer: &mut [u8],
+    ) -> Result<(Handshake, usize, usize), HandshakeError> {
+        let mut total_read = 0;
+        let mut total_written = 0;
 
         loop {
             match self.state {
                 HandshakeState::NegotiatingEncryptionProtocol { negotiation } => {
-                    let (updated, written) = negotiation.write_out(destination);
-                    total_written += written;
-                    destination = &mut destination[written..];
+                    let (updated, num_read, num_written) = negotiation
+                        .read_write(incoming_buffer, outgoing_buffer)
+                        .map_err(HandshakeError::MultistreamSelect)?;
+                    total_read += num_read;
+                    total_written += num_written;
+                    // TODO: what to do with these warnings here? the warnings are legit, but removing these lines below would be error-prone for the future
+                    incoming_buffer = &incoming_buffer[num_read..];
+                    outgoing_buffer = &mut outgoing_buffer[num_written..];
 
                     match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
                             self.state = HandshakeState::NegotiatingEncryptionProtocol {
                                 negotiation: updated,
                             };
-                            if written == 0 {
-                                break;
-                            }
+                            break;
                         }
                         multistream_select::Negotiation::Success(_) => {
-                            return (
+                            return Ok((
                                 Handshake::NoiseKeyRequired(NoiseKeyRequired {
-                                    endpoint: self.endpoint,
+                                    is_initiator: self.is_initiator,
                                 }),
+                                total_read,
                                 total_written,
-                            );
+                            ));
                         }
-                        multistream_select::Negotiation::NotAvailable => todo!(), // TODO:
-                    };
-
-                    if written == 0 {
-                        break;
+                        multistream_select::Negotiation::NotAvailable => {
+                            return Err(HandshakeError::NoEncryptionProtocol);
+                        }
                     }
                 }
-                HandshakeState::NegotiatingEncryption { mut handshake } => {
-                    let (updated, written) = handshake.write_out(destination);
-                    total_written += written;
-                    destination = &mut destination[written..];
+
+                HandshakeState::NegotiatingEncryption { handshake } => {
+                    let (updated, num_read, num_written) = handshake
+                        .read_write(incoming_buffer, &mut outgoing_buffer)
+                        .map_err(HandshakeError::NoiseHandshake)?;
+                    total_read += num_read;
+                    total_written += num_written;
+                    incoming_buffer = &incoming_buffer[num_read..];
+                    outgoing_buffer = &mut outgoing_buffer[num_written..];
 
                     match updated {
                         noise::NoiseHandshake::Success {
@@ -426,13 +320,14 @@ impl HealthyHandshake {
                             remote_peer_id,
                         } => {
                             let negotiation =
-                                multistream_select::InProgress::new(match self.endpoint {
-                                    Endpoint::Dialer => multistream_select::Config::Dialer {
+                                multistream_select::InProgress::new(if self.is_initiator {
+                                    multistream_select::Config::Dialer {
                                         requested_protocol: yamux::PROTOCOL_NAME,
-                                    },
-                                    Endpoint::Listener => multistream_select::Config::Listener {
+                                    }
+                                } else {
+                                    multistream_select::Config::Listener {
                                         supported_protocols: iter::once(yamux::PROTOCOL_NAME),
-                                    },
+                                    }
                                 });
 
                             self.state = HandshakeState::NegotiatingMultiplexing {
@@ -443,35 +338,45 @@ impl HealthyHandshake {
                         }
                         noise::NoiseHandshake::InProgress(updated) => {
                             self.state =
-                                HandshakeState::NegotiatingEncryption { handshake: updated }
+                                HandshakeState::NegotiatingEncryption { handshake: updated };
+                            break;
                         }
                     };
-
-                    if written == 0 {
-                        break;
-                    }
                 }
+
                 HandshakeState::NegotiatingMultiplexing {
-                    mut encryption,
                     negotiation,
+                    mut encryption,
                     peer_id,
                 } => {
-                    let mut buffer = encryption.prepare_buffer_encryption(destination);
-                    let (updated, written_interm) = negotiation.write_out(&mut *buffer);
-                    let written = buffer.finish(written_interm);
-                    destination = &mut destination[written..];
+                    let num_read = encryption
+                        .inject_inbound_data(incoming_buffer)
+                        .map_err(HandshakeError::Noise)?;
+                    total_read += incoming_buffer.len();
+                    incoming_buffer = &incoming_buffer[num_read..];
+
+                    let mut buffer =
+                        vec![0; encryption.encrypt_in_size_for_out(outgoing_buffer.len())];
+
+                    let (updated, read_num, written_interm) = negotiation
+                        .read_write(encryption.decoded_inbound_data(), &mut *buffer)
+                        .map_err(HandshakeError::MultistreamSelect)?;
+                    encryption.consume_inbound_data(read_num);
+                    let (_read, written) =
+                        encryption.encrypt(iter::once(&buffer[..written_interm]), outgoing_buffer);
+                    outgoing_buffer = &mut outgoing_buffer[written..];
                     total_written += written;
 
-                    self.state = match updated {
+                    match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
-                            HandshakeState::NegotiatingMultiplexing {
-                                encryption,
+                            self.state = HandshakeState::NegotiatingMultiplexing {
                                 negotiation: updated,
+                                encryption,
                                 peer_id,
-                            }
+                            };
                         }
                         multistream_select::Negotiation::Success(_) => {
-                            return (
+                            return Ok((
                                 Handshake::Success {
                                     connection: Connection {
                                         encryption,
@@ -480,47 +385,36 @@ impl HealthyHandshake {
                                     },
                                     remote_peer_id: peer_id,
                                 },
+                                total_read,
                                 total_written,
-                            );
+                            ));
                         }
-                        multistream_select::Negotiation::NotAvailable => todo!(), // TODO: ?!
-                    };
-
-                    if written == 0 {
-                        break;
+                        multistream_select::Negotiation::NotAvailable => {
+                            return Err(HandshakeError::NoMultiplexingProtocol)
+                        }
                     }
                 }
             }
         }
 
-        (Handshake::Healthy(self), total_written)*/
-        todo!()
+        Ok((Handshake::Healthy(self), total_read, total_written))
     }
 }
 
 pub struct NoiseKeyRequired {
-    endpoint: Endpoint,
+    is_initiator: bool,
 }
 
 impl NoiseKeyRequired {
     /// Turn this [`NoiseKeyRequired`] back into a [`Healthy`] by indicating the noise key.
     pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
         HealthyHandshake {
-            endpoint: self.endpoint,
+            is_initiator: self.is_initiator,
             state: HandshakeState::NegotiatingEncryption {
-                handshake: noise::HandshakeInProgress::new(
-                    noise_key,
-                    matches!(self.endpoint, Endpoint::Dialer),
-                ),
+                handshake: noise::HandshakeInProgress::new(noise_key, self.is_initiator),
             },
         }
     }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Endpoint {
-    Dialer,
-    Listener,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -560,4 +454,71 @@ pub enum HandshakeError {
     NoMultiplexingProtocol,
     /// Error in the noise cipher. Data has most likely been corrupted.
     Noise(noise::CipherError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Handshake, NoiseKey};
+
+    #[test]
+    fn handshake_basic_works() {
+        fn test_with_buffer_sizes(size1: usize, size2: usize) {
+            let key1 = NoiseKey::new(&rand::random());
+            let key2 = NoiseKey::new(&rand::random());
+
+            let mut handshake1 = Handshake::new(true);
+            let mut handshake2 = Handshake::new(false);
+
+            let mut buf_1_to_2 = Vec::new();
+            let mut buf_2_to_1 = Vec::new();
+
+            while !matches!(
+                (&handshake1, &handshake1),
+                (Handshake::Success { .. }, Handshake::Success { .. })
+            ) {
+                match handshake1 {
+                    Handshake::Success { .. } => {}
+                    Handshake::NoiseKeyRequired(req) => handshake1 = req.resume(&key1).into(),
+                    Handshake::Healthy(nego) => {
+                        if buf_1_to_2.is_empty() {
+                            buf_1_to_2.resize(size1, 0);
+                            let (updated, num_read, written) =
+                                nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
+                            handshake1 = updated;
+                            for _ in 0..num_read {
+                                buf_2_to_1.remove(0);
+                            }
+                            buf_1_to_2.truncate(written);
+                        } else {
+                            handshake1 = Handshake::Healthy(nego);
+                        }
+                    }
+                }
+
+                match handshake2 {
+                    Handshake::Success { .. } => {}
+                    Handshake::NoiseKeyRequired(req) => handshake2 = req.resume(&key2).into(),
+                    Handshake::Healthy(nego) => {
+                        if buf_2_to_1.is_empty() {
+                            buf_2_to_1.resize(size2, 0);
+                            let (updated, num_read, written) =
+                                nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
+                            handshake2 = updated;
+                            for _ in 0..num_read {
+                                buf_1_to_2.remove(0);
+                            }
+                            buf_2_to_1.truncate(written);
+                        } else {
+                            handshake2 = Handshake::Healthy(nego);
+                        }
+                    }
+                }
+            }
+        }
+
+        test_with_buffer_sizes(256, 256);
+        test_with_buffer_sizes(1, 1);
+        test_with_buffer_sizes(1, 2048);
+        test_with_buffer_sizes(2048, 1);
+    }
 }
