@@ -263,7 +263,7 @@ impl HealthyHandshake {
         mut self,
         mut data: &[u8],
     ) -> Result<(Handshake, usize), HandshakeError> {
-        let mut total_read = 0;
+        /*let mut total_read = 0;
 
         match self.state {
             HandshakeState::NegotiatingEncryptionProtocol { negotiation } => {
@@ -375,13 +375,14 @@ impl HealthyHandshake {
 
                 Ok((Handshake::Healthy(self), total_read))
             }
-        }
+        }*/
+        todo!()
     }
 
     /// Write to the given buffer the bytes that are ready to be sent out. Returns the number of
     /// bytes written to `destination`.
     pub fn write_out(mut self, mut destination: &mut [u8]) -> (Handshake, usize) {
-        let mut total_written = 0;
+        /*let mut total_written = 0;
 
         loop {
             match self.state {
@@ -492,7 +493,8 @@ impl HealthyHandshake {
             }
         }
 
-        (Handshake::Healthy(self), total_written)
+        (Handshake::Healthy(self), total_written)*/
+        todo!()
     }
 }
 

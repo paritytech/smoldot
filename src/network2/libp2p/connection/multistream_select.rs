@@ -47,7 +47,6 @@
 
 use crate::network2::leb128;
 
-use alloc::borrow::Cow;
 use core::{cmp, fmt, iter, mem, slice, str};
 
 /// Handshake message sent by both parties at the beginning of each multistream-select negotiation.
@@ -166,45 +165,135 @@ where
         }
     }
 
-    /// Feeds more data to the negotiation.
+    /// Feeds data coming from a socket through `incoming_data`, updates the internal state
+    /// machine, and writes data destined to the socket to `outgoing_buffer`.
     ///
-    /// Returns either an error in case of protocol error, or the new state of the negotiation
-    /// and the number of bytes that have been processed in `data`.
+    /// On success, returns the new state of the negotiation, plus the number of bytes that have
+    /// been read from `incoming_data` and the number of bytes that have been written to
+    /// `outgoing_buffer`.
     ///
-    /// If the number of bytes read is different from 0, you should immediately call this method
-    /// again with the remaining data.
-    pub fn inject_data(mut self, mut data: &[u8]) -> Result<(Negotiation<I, P>, usize), Error> {
+    /// An error is returned if the protocol is being violated by the remote. When that happens,
+    /// the connection should be closed altogether.
+    ///
+    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
+    pub fn read_write(
+        mut self,
+        mut incoming_data: &[u8],
+        mut outgoing_buffer: &mut [u8],
+    ) -> Result<(Negotiation<I, P>, usize, usize), Error> {
         let mut total_read = 0;
+        let mut total_written = 0;
 
         loop {
-            // If the current state involves sending out data, any additional incoming data is
-            // refused in order to apply back-pressure on the remote.
-            match &self.state {
-                InProgressState::SendHandshake { .. }
-                | InProgressState::SendProtocolRequest { .. }
-                | InProgressState::SendProtocolNa { .. }
-                | InProgressState::SendProtocolOk { .. } => break,
-                _ => {}
-            }
-
-            // `recv_buffer` serves as a helper to delimit `data` into frames. The first step is
-            // to inject the received data into `recv_buffer`.
+            // `self.recv_buffer` serves as a helper to delimit `data` into frames. The first step
+            // is to inject the received data into `recv_buffer`.
             // `recv_buffer` doesn't necessarily consume all of `data`.
-            let num_read = self.recv_buffer.inject_data(data).map_err(Error::Frame)?;
+            let num_read = self
+                .recv_buffer
+                .inject_data(incoming_data)
+                .map_err(Error::Frame)?;
             total_read += num_read;
-            data = &data[num_read..];
+            incoming_data = &incoming_data[num_read..];
 
-            let frame = match self.recv_buffer.take_frame() {
-                Some(f) => f,
-                None => {
-                    // No frame is available.
-                    debug_assert!(data.is_empty());
-                    break;
+            match (self.state, &mut self.config) {
+                (
+                    InProgressState::SendHandshake {
+                        mut num_bytes_written,
+                    },
+                    _,
+                ) => {
+                    let message = MessageOut::Handshake::<&'static str>;
+                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
+                    outgoing_buffer = &mut outgoing_buffer[written..];
+                    total_written += written;
+                    num_bytes_written += written;
+
+                    self.state = match (done, self.config.as_ref().unwrap()) {
+                        (false, _) => InProgressState::SendHandshake { num_bytes_written },
+                        (true, Config::Dialer { .. }) => InProgressState::SendProtocolRequest {
+                            num_bytes_written: 0,
+                        },
+                        (true, Config::Listener { .. }) => InProgressState::HandshakeExpected,
+                    };
                 }
-            };
 
-            match (&mut self.state, &mut self.config) {
+                (
+                    InProgressState::SendProtocolRequest {
+                        mut num_bytes_written,
+                    },
+                    _,
+                ) => {
+                    let message = match self.config.as_ref().unwrap() {
+                        Config::Dialer { requested_protocol } => {
+                            MessageOut::ProtocolRequest(requested_protocol.as_ref())
+                        }
+                        _ => unreachable!(),
+                    };
+                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
+                    outgoing_buffer = &mut outgoing_buffer[written..];
+                    total_written += written;
+                    num_bytes_written += written;
+
+                    if done {
+                        self.state = InProgressState::HandshakeExpected;
+                    } else {
+                        self.state = InProgressState::SendProtocolRequest { num_bytes_written };
+                    }
+                }
+
+                (
+                    InProgressState::SendProtocolNa {
+                        mut num_bytes_written,
+                    },
+                    _,
+                ) => {
+                    let message = MessageOut::ProtocolNa::<&'static str>;
+                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
+                    outgoing_buffer = &mut outgoing_buffer[written..];
+                    total_written += written;
+                    num_bytes_written += written;
+
+                    if done {
+                        self.state = InProgressState::CommandExpected;
+                    } else {
+                        self.state = InProgressState::SendProtocolNa { num_bytes_written };
+                    }
+                }
+
+                (
+                    InProgressState::SendProtocolOk {
+                        mut num_bytes_written,
+                        protocol,
+                    },
+                    _,
+                ) => {
+                    let message = MessageOut::ProtocolOk(protocol.as_ref());
+                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
+                    outgoing_buffer = &mut outgoing_buffer[written..];
+                    total_written += written;
+                    num_bytes_written += written;
+
+                    if done {
+                        return Ok((Negotiation::Success(protocol), total_read, total_written));
+                    } else {
+                        self.state = InProgressState::SendProtocolOk {
+                            num_bytes_written,
+                            protocol,
+                        };
+                    }
+                }
+
                 (InProgressState::HandshakeExpected, Some(Config::Dialer { .. })) => {
+                    let frame = match self.recv_buffer.take_frame() {
+                        Some(f) => f,
+                        None => {
+                            // No frame is available.
+                            debug_assert!(incoming_data.is_empty());
+                            self.state = InProgressState::HandshakeExpected;
+                            break;
+                        }
+                    };
+
                     if &*frame != HANDSHAKE {
                         return Err(Error::BadHandshake);
                     }
@@ -215,6 +304,16 @@ where
                 }
 
                 (InProgressState::HandshakeExpected, Some(Config::Listener { .. })) => {
+                    let frame = match self.recv_buffer.take_frame() {
+                        Some(f) => f,
+                        None => {
+                            // No frame is available.
+                            debug_assert!(incoming_data.is_empty());
+                            self.state = InProgressState::HandshakeExpected;
+                            break;
+                        }
+                    };
+
                     if &*frame != HANDSHAKE {
                         return Err(Error::BadHandshake);
                     }
@@ -229,6 +328,16 @@ where
                         supported_protocols,
                     }),
                 ) => {
+                    let frame = match self.recv_buffer.take_frame() {
+                        Some(f) => f,
+                        None => {
+                            // No frame is available.
+                            debug_assert!(incoming_data.is_empty());
+                            self.state = InProgressState::CommandExpected;
+                            break;
+                        }
+                    };
+
                     if frame.is_empty() {
                         return Err(Error::InvalidCommand);
                     } else if &*frame == b"ls\n" {
@@ -250,8 +359,18 @@ where
 
                 (
                     InProgressState::ProtocolRequestAnswerExpected,
-                    mut cfg @ Some(Config::Dialer { .. }),
+                    cfg @ Some(Config::Dialer { .. }),
                 ) => {
+                    let frame = match self.recv_buffer.take_frame() {
+                        Some(f) => f,
+                        None => {
+                            // No frame is available.
+                            debug_assert!(incoming_data.is_empty());
+                            self.state = InProgressState::ProtocolRequestAnswerExpected;
+                            break;
+                        }
+                    };
+
                     // Extract `config` to get the protocol name. All the paths below return,
                     // thereby `config` doesn't need to be put back in `self`.
                     let requested_protocol = match cfg.take() {
@@ -263,19 +382,17 @@ where
                         return Err(Error::UnexpectedProtocolRequestAnswer);
                     }
                     if &*frame == b"na\n" {
-                        return Ok((Negotiation::NotAvailable, total_read));
+                        return Ok((Negotiation::NotAvailable, total_read, total_written));
                     }
                     if &frame[..frame.len() - 1] != requested_protocol.as_ref().as_bytes() {
                         return Err(Error::UnexpectedProtocolRequestAnswer);
                     }
-                    return Ok((Negotiation::Success(requested_protocol), total_read));
+                    return Ok((
+                        Negotiation::Success(requested_protocol),
+                        total_read,
+                        total_written,
+                    ));
                 }
-
-                // Handled above.
-                (InProgressState::SendHandshake { .. }, _)
-                | (InProgressState::SendProtocolRequest { .. }, _)
-                | (InProgressState::SendProtocolNa { .. }, _)
-                | (InProgressState::SendProtocolOk { .. }, _) => unreachable!(),
 
                 // Invalid states.
                 (InProgressState::CommandExpected, Some(Config::Dialer { .. })) => unreachable!(),
@@ -287,106 +404,7 @@ where
         }
 
         // This point should be reached only if data is lacking in order to proceed.
-        Ok((Negotiation::InProgress(self), total_read))
-    }
-
-    /// Write to the given buffer the bytes that are ready to be sent out. Returns the new state
-    /// of the negotiation and the number of bytes that have been written to `destination`.
-    ///
-    /// If `0` is returned and `destination` wasn't empty, no more data can be written out before
-    /// [`InProgress::inject_data`] is called.
-    pub fn write_out(mut self, destination: &mut [u8]) -> (Negotiation<I, P>, usize) {
-        let mut total_written = 0;
-
-        loop {
-            let destination = &mut destination[total_written..];
-
-            match self.state {
-                InProgressState::SendHandshake {
-                    mut num_bytes_written,
-                } => {
-                    let message = MessageOut::Handshake::<&'static str>;
-                    let (written, done) = message.write_out(num_bytes_written, destination);
-                    total_written += written;
-                    num_bytes_written += written;
-
-                    match (done, self.config.as_ref().unwrap()) {
-                        (false, _) => {
-                            self.state = InProgressState::SendHandshake { num_bytes_written }
-                        }
-                        (true, Config::Dialer { .. }) => {
-                            self.state = InProgressState::SendProtocolRequest {
-                                num_bytes_written: 0,
-                            }
-                        }
-                        (true, Config::Listener { .. }) => {
-                            self.state = InProgressState::HandshakeExpected;
-                        }
-                    };
-                }
-
-                InProgressState::SendProtocolRequest {
-                    mut num_bytes_written,
-                } => {
-                    let message = match self.config.as_ref().unwrap() {
-                        Config::Dialer { requested_protocol } => {
-                            MessageOut::ProtocolRequest(requested_protocol.as_ref())
-                        }
-                        _ => unreachable!(),
-                    };
-                    let (written, done) = message.write_out(num_bytes_written, destination);
-                    total_written += written;
-                    num_bytes_written += written;
-
-                    if done {
-                        self.state = InProgressState::HandshakeExpected;
-                    } else {
-                        self.state = InProgressState::SendProtocolRequest { num_bytes_written };
-                    }
-                }
-
-                InProgressState::SendProtocolNa {
-                    mut num_bytes_written,
-                } => {
-                    let message = MessageOut::ProtocolNa::<&'static str>;
-                    let (written, done) = message.write_out(num_bytes_written, destination);
-                    total_written += written;
-                    num_bytes_written += written;
-
-                    if done {
-                        self.state = InProgressState::CommandExpected;
-                    } else {
-                        self.state = InProgressState::SendProtocolNa { num_bytes_written };
-                    }
-                }
-
-                InProgressState::SendProtocolOk {
-                    mut num_bytes_written,
-                    protocol,
-                } => {
-                    let message = MessageOut::ProtocolOk(protocol.as_ref());
-                    let (written, done) = message.write_out(num_bytes_written, destination);
-                    total_written += written;
-                    num_bytes_written += written;
-
-                    if done {
-                        return (Negotiation::Success(protocol), total_written);
-                    } else {
-                        self.state = InProgressState::SendProtocolOk {
-                            num_bytes_written,
-                            protocol,
-                        };
-                    }
-                }
-
-                // Nothing to write out when the state machine is waiting for a message to arrive.
-                InProgressState::HandshakeExpected { .. }
-                | InProgressState::CommandExpected { .. }
-                | InProgressState::ProtocolRequestAnswerExpected => break,
-            }
-        }
-
-        (Negotiation::InProgress(self), total_written)
+        Ok((Negotiation::InProgress(self), total_read, total_written))
     }
 }
 
@@ -584,11 +602,15 @@ mod tests {
             (Negotiation::Success(_), Negotiation::Success(_))
         ) {
             match negotiation1 {
-                Negotiation::InProgress(mut nego) => {
+                Negotiation::InProgress(nego) => {
                     if buf_1_to_2.is_empty() {
                         buf_1_to_2.resize(256, 0);
-                        let (updated, written) = nego.write_out(&mut buf_1_to_2);
+                        let (updated, num_read, written) =
+                            nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
                         negotiation1 = updated;
+                        for _ in 0..num_read {
+                            buf_2_to_1.remove(0);
+                        }
                         buf_1_to_2.truncate(written);
                     } else {
                         negotiation1 = Negotiation::InProgress(nego);
@@ -598,39 +620,19 @@ mod tests {
                 Negotiation::NotAvailable => panic!(),
             }
 
-            match negotiation1 {
-                Negotiation::InProgress(mut nego) => {
-                    let (updated, num_read) = nego.inject_data(&buf_2_to_1).unwrap();
-                    negotiation1 = updated;
-                    for _ in 0..num_read {
-                        buf_2_to_1.remove(0);
-                    }
-                }
-                Negotiation::Success(_) => {}
-                Negotiation::NotAvailable => panic!(),
-            }
-
             match negotiation2 {
-                Negotiation::InProgress(mut nego) => {
+                Negotiation::InProgress(nego) => {
                     if buf_2_to_1.is_empty() {
                         buf_2_to_1.resize(256, 0);
-                        let (updated, written) = nego.write_out(&mut buf_2_to_1);
+                        let (updated, num_read, written) =
+                            nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
                         negotiation2 = updated;
+                        for _ in 0..num_read {
+                            buf_1_to_2.remove(0);
+                        }
                         buf_2_to_1.truncate(written);
                     } else {
                         negotiation2 = Negotiation::InProgress(nego);
-                    }
-                }
-                Negotiation::Success(_) => {}
-                Negotiation::NotAvailable => panic!(),
-            }
-
-            match negotiation2 {
-                Negotiation::InProgress(mut nego) => {
-                    let (updated, num_read) = nego.inject_data(&buf_1_to_2).unwrap();
-                    negotiation2 = updated;
-                    for _ in 0..num_read {
-                        buf_1_to_2.remove(0);
                     }
                 }
                 Negotiation::Success(_) => {}

@@ -29,12 +29,12 @@
 //! >           multiple tasks (themselves distributed between multiple CPU cores), and share the
 //! >           [`Network`] object between all these tasks.
 
+use ::libp2p::{Multiaddr, PeerId};
 use alloc::{collections::BTreeSet, sync::Arc};
 use connection::NoiseKey;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use futures::lock::Mutex;
 use hashbrown::HashMap;
-use ::libp2p::{Multiaddr, PeerId};
 
 pub mod connection;
 
@@ -149,7 +149,7 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
                     //connection.inject_data(incoming_data);
                     todo!()
                 }
-            },
+            }
             Connection::Active { .. } => todo!(),
         }
 
@@ -206,7 +206,8 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
     pub async fn add_incoming_connection(&self, remote_send_back: Multiaddr) -> ConnectionId {
         let handshake = connection::HealthyHandshake::new(connection::Endpoint::Listener);
 
-        self.num_incoming_connections.fetch_add(1, Ordering::Relaxed);
+        self.num_incoming_connections
+            .fetch_add(1, Ordering::Relaxed);
 
         todo!()
     }

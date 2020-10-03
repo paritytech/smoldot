@@ -636,9 +636,7 @@ async fn start_network2(
         .boot_nodes()
         .iter()
         .map(|a| {
-            let mut a = a
-                .parse::<substrate_lite::network2::Multiaddr>()
-                .unwrap();
+            let mut a = a.parse::<substrate_lite::network2::Multiaddr>().unwrap();
             let peer_id = match a.pop().unwrap() {
                 substrate_lite::network2::multiaddr::Protocol::P2p(h) => {
                     substrate_lite::network2::PeerId::from_multihash(h).unwrap()

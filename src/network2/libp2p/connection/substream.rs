@@ -56,7 +56,7 @@ enum SubstreamTy<TNow, TProtoList, TProto> {
     RequestOutReceive(leb128::Framed),
     /// Receiving an incoming request from the remote.
     RequestInReceive(leb128::Framed),
-    /// Request has been reported on the API layer. Waiting for 
+    /// Request has been reported on the API layer. Waiting for
     // TODO: wait for which method to be called?
     RequestInWaitLocal,
     RequestInSend,
