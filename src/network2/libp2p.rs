@@ -75,6 +75,9 @@ pub struct Network<TProto, TRqUd, TNow> {
     /// the `HashMap` for too long, accessing the connections must be done by first cloning the
     /// `Arc`.
     connections: Mutex<HashMap<u64, Arc<Mutex<Connection>>, fnv::FnvBuildHasher>>,
+
+    // TODO: remove
+    tmp: core::marker::PhantomData<(TProto, TRqUd, TNow)>,
 }
 
 enum Connection {
@@ -96,11 +99,13 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
             next_connection_id: atomic::Atomic::new(0),
             next_request_id: atomic::Atomic::new(0),
             num_incoming_connections: AtomicUsize::new(0),
-            peers: BTreeSet::with_capacity(config.connections_capacity),
-            connections: HashMap::with_capacity_and_hasher(
+            // Note: `BTreeSet` doesn't have any `with_capacity` method.
+            peers: Mutex::new(BTreeSet::new()),
+            connections: Mutex::new(HashMap::with_capacity_and_hasher(
                 config.connections_capacity,
                 Default::default(),
-            ),
+            )),
+            tmp: core::marker::PhantomData,
         }
     }
 
@@ -134,14 +139,14 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
             connecs.get(&connection.0).unwrap().clone() // TODO: don't unwrap
         };
 
-        let connection = connection.lock().await;
+        let mut connection = connection.lock().await;
 
-        match *connection {
+        match &mut *connection {
             Connection::Pending { .. } => todo!(), // TODO: invalid id
             Connection::Handshaking { connection } => {
                 // TODO: this seems incorrect w.r.t handling closure
                 if let Some(incoming_data) = incoming_data {
-                    connection.inject_data(incoming_data);
+                    //connection.inject_data(incoming_data);
                     todo!()
                 }
             },
@@ -230,7 +235,7 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
     pub async fn resolve_pending_connection_failure(
         &self,
         id: PendingConnectionId,
-    ) -> Option<Event<TNow>> {
+    ) -> Option<Event<TProto, TRqUd, TNow>> {
         todo!()
     }
 
@@ -316,7 +321,7 @@ pub struct InRequestId(u64);
 
 /// Outcome of [`Network::read_write`].
 #[must_use]
-#[derive(Debug)]
+// TODO: Debug
 pub struct ReadWrite<TProto, TRqUd, TNow> {
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
     /// should no longer be present the next time [`Network::read_write`] is called.
@@ -351,6 +356,9 @@ pub enum Event<TProto, TRqUd, TNow> {
         id: PendingConnectionId,
         /// Target of the dialing attempt.
         target: Multiaddr,
+
+        // TODO: remove
+        _tmp: core::marker::PhantomData<TNow>,
     },
 
     /// No longer connected to the node with the given identity.

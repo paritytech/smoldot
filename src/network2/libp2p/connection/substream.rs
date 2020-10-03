@@ -33,7 +33,7 @@ use core::{
     ops::{Add, Sub},
     time::Duration,
 };
-
+/*
 /// State of a single substream.
 pub struct Substream<TNow, TProtoList, TProto> {
     /// Specialization for the substream.
@@ -145,3 +145,4 @@ where
         todo!()
     }
 }
+*/
