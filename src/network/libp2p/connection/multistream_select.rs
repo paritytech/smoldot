@@ -208,12 +208,19 @@ where
                     total_written += written;
                     num_bytes_written += written;
 
-                    self.state = match (done, self.config.as_ref().unwrap()) {
-                        (false, _) => InProgressState::SendHandshake { num_bytes_written },
-                        (true, Config::Dialer { .. }) => InProgressState::SendProtocolRequest {
-                            num_bytes_written: 0,
-                        },
-                        (true, Config::Listener { .. }) => InProgressState::HandshakeExpected,
+                    match (done, self.config.as_ref().unwrap()) {
+                        (false, _) => {
+                            self.state = InProgressState::SendHandshake { num_bytes_written };
+                            break;
+                        }
+                        (true, Config::Dialer { .. }) => {
+                            self.state = InProgressState::SendProtocolRequest {
+                                num_bytes_written: 0,
+                            }
+                        }
+                        (true, Config::Listener { .. }) => {
+                            self.state = InProgressState::HandshakeExpected
+                        }
                     };
                 }
 
@@ -238,6 +245,7 @@ where
                         self.state = InProgressState::HandshakeExpected;
                     } else {
                         self.state = InProgressState::SendProtocolRequest { num_bytes_written };
+                        break;
                     }
                 }
 
@@ -257,6 +265,7 @@ where
                         self.state = InProgressState::CommandExpected;
                     } else {
                         self.state = InProgressState::SendProtocolNa { num_bytes_written };
+                        break;
                     }
                 }
 
@@ -280,6 +289,7 @@ where
                             num_bytes_written,
                             protocol,
                         };
+                        break;
                     }
                 }
 
@@ -506,7 +516,7 @@ where
     /// Write to the given buffer the bytes of the message, starting at `message_offset`. Returns
     /// the number of bytes written to `destination`, and a flag indicating whether the
     /// destination buffer was large enough to hold the entire message.
-    pub fn write_out(self, mut message_offset: usize, destination: &mut [u8]) -> (usize, bool) {
+    pub fn write_out(self, mut message_offset: usize, mut destination: &mut [u8]) -> (usize, bool) {
         let mut total_written = 0;
 
         for buf in self.to_bytes() {
@@ -517,10 +527,10 @@ where
             }
 
             let buf = &buf[message_offset..];
-            let destination = &mut destination[total_written..];
 
             let to_write = cmp::min(buf.len(), destination.len());
             destination[..to_write].copy_from_slice(&buf[..to_write]);
+            destination = &mut destination[to_write..];
             total_written += to_write;
             message_offset = 0;
 
@@ -585,59 +595,74 @@ mod tests {
 
     #[test]
     fn negotiation_basic_works() {
-        // TODO: test doesn't work with smaller buffer length
+        fn test_with_buffer_sizes(size1: usize, size2: usize) {
+            let mut negotiation1 = Negotiation::new(Config::<iter::Once<_>, _>::Dialer {
+                requested_protocol: "/foo",
+            });
+            let mut negotiation2 = Negotiation::new(Config::Listener {
+                supported_protocols: iter::once("/foo"),
+            });
 
-        let mut negotiation1 = Negotiation::new(Config::<iter::Once<_>, _>::Dialer {
-            requested_protocol: "/foo",
-        });
-        let mut negotiation2 = Negotiation::new(Config::Listener {
-            supported_protocols: iter::once("/foo"),
-        });
+            let mut buf_1_to_2 = Vec::new();
+            let mut buf_2_to_1 = Vec::new();
 
-        let mut buf_1_to_2 = Vec::new();
-        let mut buf_2_to_1 = Vec::new();
-
-        while !matches!(
-            (&negotiation1, &negotiation2),
-            (Negotiation::Success(_), Negotiation::Success(_))
-        ) {
-            match negotiation1 {
-                Negotiation::InProgress(nego) => {
-                    if buf_1_to_2.is_empty() {
-                        buf_1_to_2.resize(256, 0);
-                        let (updated, num_read, written) =
-                            nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
-                        negotiation1 = updated;
-                        for _ in 0..num_read {
-                            buf_2_to_1.remove(0);
+            while !matches!(
+                (&negotiation1, &negotiation2),
+                (Negotiation::Success(_), Negotiation::Success(_))
+            ) {
+                match negotiation1 {
+                    Negotiation::InProgress(nego) => {
+                        if buf_1_to_2.is_empty() {
+                            buf_1_to_2.resize(size1, 0);
+                            let (updated, num_read, written) =
+                                nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
+                            negotiation1 = updated;
+                            for _ in 0..num_read {
+                                buf_2_to_1.remove(0);
+                            }
+                            buf_1_to_2.truncate(written);
+                        } else {
+                            let (updated, num_read, _) =
+                                nego.read_write(&buf_2_to_1, &mut []).unwrap();
+                            negotiation1 = updated;
+                            for _ in 0..num_read {
+                                buf_2_to_1.remove(0);
+                            }
                         }
-                        buf_1_to_2.truncate(written);
-                    } else {
-                        negotiation1 = Negotiation::InProgress(nego);
                     }
+                    Negotiation::Success(_) => {}
+                    Negotiation::NotAvailable => panic!(),
                 }
-                Negotiation::Success(_) => {}
-                Negotiation::NotAvailable => panic!(),
-            }
 
-            match negotiation2 {
-                Negotiation::InProgress(nego) => {
-                    if buf_2_to_1.is_empty() {
-                        buf_2_to_1.resize(256, 0);
-                        let (updated, num_read, written) =
-                            nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
-                        negotiation2 = updated;
-                        for _ in 0..num_read {
-                            buf_1_to_2.remove(0);
+                match negotiation2 {
+                    Negotiation::InProgress(nego) => {
+                        if buf_2_to_1.is_empty() {
+                            buf_2_to_1.resize(size2, 0);
+                            let (updated, num_read, written) =
+                                nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
+                            negotiation2 = updated;
+                            for _ in 0..num_read {
+                                buf_1_to_2.remove(0);
+                            }
+                            buf_2_to_1.truncate(written);
+                        } else {
+                            let (updated, num_read, _) =
+                                nego.read_write(&buf_1_to_2, &mut []).unwrap();
+                            negotiation2 = updated;
+                            for _ in 0..num_read {
+                                buf_1_to_2.remove(0);
+                            }
                         }
-                        buf_2_to_1.truncate(written);
-                    } else {
-                        negotiation2 = Negotiation::InProgress(nego);
                     }
+                    Negotiation::Success(_) => {}
+                    Negotiation::NotAvailable => panic!(),
                 }
-                Negotiation::Success(_) => {}
-                Negotiation::NotAvailable => panic!(),
             }
         }
+
+        test_with_buffer_sizes(256, 256);
+        test_with_buffer_sizes(1, 1);
+        test_with_buffer_sizes(1, 2048);
+        test_with_buffer_sizes(2048, 1);
     }
 }

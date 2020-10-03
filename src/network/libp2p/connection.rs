@@ -492,7 +492,12 @@ mod tests {
                             }
                             buf_1_to_2.truncate(written);
                         } else {
-                            handshake1 = Handshake::Healthy(nego);
+                            let (updated, num_read, _) =
+                                nego.read_write(&buf_2_to_1, &mut []).unwrap();
+                            handshake1 = updated;
+                            for _ in 0..num_read {
+                                buf_2_to_1.remove(0);
+                            }
                         }
                     }
                 }
@@ -511,7 +516,12 @@ mod tests {
                             }
                             buf_2_to_1.truncate(written);
                         } else {
-                            handshake2 = Handshake::Healthy(nego);
+                            let (updated, num_read, _) =
+                                nego.read_write(&buf_1_to_2, &mut []).unwrap();
+                            handshake2 = updated;
+                            for _ in 0..num_read {
+                                buf_1_to_2.remove(0);
+                            }
                         }
                     }
                 }
@@ -519,7 +529,7 @@ mod tests {
         }
 
         test_with_buffer_sizes(256, 256);
-        // TODO: restore after the multistream-select bug is fixed
+        // TODO: not passing
         //test_with_buffer_sizes(1, 1);
         //test_with_buffer_sizes(1, 2048);
         //test_with_buffer_sizes(2048, 1);
