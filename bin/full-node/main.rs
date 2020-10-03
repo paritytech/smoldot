@@ -623,9 +623,9 @@ async fn start_network2(
         .ok();
 
     let mut network =
-        substrate_lite::network2::libp2p::Network::<_, _, _, (), _, std::time::Instant>::new(
-            substrate_lite::network2::libp2p::Config {
-                noise_key: substrate_lite::network2::libp2p::NoiseKey::new(&[0; 32]), // TODO:
+        substrate_lite::network::libp2p::Network::<_, _, _, (), _, std::time::Instant>::new(
+            substrate_lite::network::libp2p::Config {
+                noise_key: substrate_lite::network::libp2p::NoiseKey::new(&[0; 32]), // TODO:
                 notification_protocols: core::iter::empty::<()>(),
                 request_protocols: Vec::new(),
                 tasks_executor,
@@ -636,10 +636,10 @@ async fn start_network2(
         .boot_nodes()
         .iter()
         .map(|a| {
-            let mut a = a.parse::<substrate_lite::network2::Multiaddr>().unwrap();
+            let mut a = a.parse::<substrate_lite::network::Multiaddr>().unwrap();
             let peer_id = match a.pop().unwrap() {
-                substrate_lite::network2::multiaddr::Protocol::P2p(h) => {
-                    substrate_lite::network2::PeerId::from_multihash(h).unwrap()
+                substrate_lite::network::multiaddr::Protocol::P2p(h) => {
+                    substrate_lite::network::PeerId::from_multihash(h).unwrap()
                 }
                 _ => panic!(),
             };
@@ -667,8 +667,8 @@ async fn start_network2(
             futures::select! {
                 event = network.next_event().fuse() => {
                     match event {
-                        substrate_lite::network2::libp2p::Event::Notification { .. } => todo!(),
-                        substrate_lite::network2::libp2p::Event::RequestFinished { .. } => todo!(),
+                        substrate_lite::network::libp2p::Event::Notification { .. } => todo!(),
+                        substrate_lite::network::libp2p::Event::RequestFinished { .. } => todo!(),
                     }
                 },
                 incoming = async { if let Some(l) = tcp_listener.as_ref() { l.accept().await } else { loop { futures::pending!() } } }.fuse() => {
@@ -681,7 +681,7 @@ async fn start_network2(
 }
 
 fn multiaddr_to_socketaddr(
-    addr: &substrate_lite::network2::libp2p::Multiaddr,
+    addr: &substrate_lite::network::libp2p::Multiaddr,
 ) -> Result<SocketAddr, ()> {
     let mut iter = addr.iter();
     let proto1 = iter.next().ok_or(())?;
@@ -693,24 +693,24 @@ fn multiaddr_to_socketaddr(
 
     match (proto1, proto2) {
         (
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Dns(addr),
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Tcp(port),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Dns(addr),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
         )
         | (
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Dns4(addr),
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Tcp(port),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Dns4(addr),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
         )
         | (
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Dns6(addr),
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Tcp(port),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Dns6(addr),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
         ) => Ok((&*addr, port).to_socket_addrs().unwrap().next().unwrap()),
         (
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Ip4(ip),
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Tcp(port),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Ip4(ip),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
         ) => Ok(SocketAddr::new(ip.into(), port)),
         (
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Ip6(ip),
-            substrate_lite::network2::libp2p::multiaddr::Protocol::Tcp(port),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Ip6(ip),
+            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
         ) => Ok(SocketAddr::new(ip.into(), port)),
         _ => Err(()),
     }

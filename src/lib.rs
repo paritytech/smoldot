@@ -201,9 +201,7 @@ pub mod header;
 pub mod informant;
 pub mod json_rpc;
 pub mod metadata;
-#[allow(warnings)] // TODO: temporary because code has been copy-pasted from Substrate
 pub mod network;
-pub mod network2;
 pub mod telemetry;
 pub mod trie;
 pub mod verify;

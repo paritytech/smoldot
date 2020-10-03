@@ -45,7 +45,7 @@
 
 // TODO: write usage once it's fully fledged out
 
-use crate::network2::leb128;
+use crate::network::leb128;
 
 use core::{cmp, fmt, iter, mem, slice, str};
 

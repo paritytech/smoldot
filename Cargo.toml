@@ -115,7 +115,7 @@ primitive-types = { version = "0.6.2", default-features = false, features = ["co
 sc-peerset = { git = "https://github.com/paritytech/substrate", rev = "16fdfc4a80a14a26221d17b8a1b9a95421a1576c" }
 void = "1.0"    # TODO: remove
 
-[dependencies.libp2p]
+[dependencies.libp2p] # TODO: remove
 version = "0.22.0"
 default-features = false
 features = ["identify", "kad", "mdns", "mplex", "noise", "ping", "request-response", "wasm-ext", "yamux"]
@@ -130,8 +130,6 @@ prost-build = "0.6.1"
 
 [dev-dependencies]
 async-std = "1.6.2"
-# TODO: remove
-libp2p = { version = "0.22.0", default-features = false, features = ["secio"] }
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
