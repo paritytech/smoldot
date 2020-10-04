@@ -299,6 +299,10 @@ impl Noise {
     /// This function returns only after the input bytes are fully consumed or the output buffer
     /// is full.
     ///
+    /// The number of bytes read and written is only a function of the size of the input and of
+    /// the available output. Use [`Noise::encrypt_size_conv`] to determine the maximum payload
+    /// size that fits a certain output buffers.
+    ///
     /// > **Note**: Because each message has a prefix and a suffix, you are encouraged to batch
     /// >           as much data as possible into `payload` before calling this function.
     pub fn encrypt(
@@ -310,8 +314,8 @@ impl Noise {
         //       contiguous buffer. The reason is that, theoretically speaking, the underlying
         //       implementation should be able to read bytes from an iterator. Rather than
         //       providing an API whose usage might force an overhead, the overhead is instead
-        //       moved to the implementation while keeping in mind that this overhead can be
-        //       fixed later.
+        //       moved to the body of this method, while keeping in mind that this overhead can
+        //       be fixed later.
 
         // The three possible paths below are: the iterator is empty, the iterator contains
         // exactly one buffer, the iterator contains two or more buffers.
@@ -365,8 +369,9 @@ impl Noise {
         (total_read, total_written)
     }
 
+    /// Returns the size of unencrypted data that fits a buffer of encrypted data.
     // TODO: doc
-    pub fn encrypt_in_size_for_out(&self, out_size: usize) -> usize {
+    pub fn encrypt_size_conv(&self, out_size: usize) -> usize {
         let mut total = 0;
         let mut dest_len = out_size;
         while dest_len >= 19 {
@@ -376,67 +381,11 @@ impl Noise {
         }
         total
     }
-
-    // TODO: doc
-    pub fn prepare_buffer_encryption<'a>(
-        &'a mut self,
-        destination: &'a mut [u8],
-    ) -> BufferEncryption<'a> {
-        let available_in = self.encrypt_in_size_for_out(destination.len());
-
-        let buffer = vec![0; available_in];
-
-        BufferEncryption {
-            noise: self,
-            destination,
-            buffer,
-        }
-    }
 }
 
 impl fmt::Debug for Noise {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Noise").finish()
-    }
-}
-
-// TODO: doc
-// TODO: Debug
-pub struct BufferEncryption<'a> {
-    noise: &'a mut Noise,
-    destination: &'a mut [u8],
-    buffer: Vec<u8>,
-}
-
-impl<'a> BufferEncryption<'a> {
-    /// Send the `len` first bytes to the noise state machine for encryption and puts them in the
-    /// buffer originally passed to [`Noise::prepare_buffer_encryption`]. Returns the number of
-    /// bytes written.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `len` is larger than the slice this derefs to.
-    ///
-    pub fn finish(self, len: usize) -> usize {
-        let (_read, written) = self
-            .noise
-            .encrypt(iter::once(&self.buffer[..len]), self.destination);
-        debug_assert_eq!(_read, len);
-        written
-    }
-}
-
-impl<'a> ops::Deref for BufferEncryption<'a> {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        &self.buffer
-    }
-}
-
-impl<'a> ops::DerefMut for BufferEncryption<'a> {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        &mut self.buffer
     }
 }
 

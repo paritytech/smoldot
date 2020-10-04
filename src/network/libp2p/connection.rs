@@ -34,33 +34,41 @@ mod yamux;
 
 // TODO: needs a timeout for the handshake
 
-pub struct Connection<TNow, TRqUd, TProtoList, TProto> {
+pub struct Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     encryption: noise::Noise,
-    yamux: yamux::Connection<Substream>,
+    yamux: yamux::Connection<Substream<TNow, TRqUd, TProtoList, TProto>>,
 
     /// List of request-response protocols.
     in_request_protocols: TProtoList,
+    /// List of notifications protocols.
+    in_notifications_protocols: TProtoList,
 
-    marker: core::marker::PhantomData<(TNow, TRqUd, TProtoList, TProto)>, // TODO: remove
+    marker: core::marker::PhantomData<(TNow, TRqUd, TNotifUd, TProtoList, TProto)>, // TODO: remove
 }
 
-struct Substream {
-    /// Specialization for that substream.
-    ty: SubstreamTy,
-}
-
-enum SubstreamTy {
+enum Substream<TNow, TRqUd, TProtoList, TProto> {
     /// Protocol negotiation is still in progress on this substream.
-    Negotiating(multistream_select::InProgress<iter::Once<&'static str>, &'static str>),
+    Negotiating(multistream_select::InProgress<TProtoList, TProto>),
     NotificationsOut,
     NotificationsIn,
+    /// Negotiating a protocol for an outgoing request.
+    RequestOutNegotiating {
+        /// When the request has timed out.
+        timeout: TNow,
+        negotiation: multistream_select::InProgress<TProtoList, TProto>,
+        request: Vec<u8>,
+        user_data: TRqUd,
+    },
     RequestOut,
     RequestIn,
 }
 
-impl<TNow, TRqUd, TProtoList, TProto> Connection<TNow, TRqUd, TProtoList, TProto>
+impl<TNow, TRqUd, TNotifUd, TProtoList, TProto>
+    Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto>
 where
-    TNow: Clone + Add<Duration> + Sub<TNow, Output = Duration> + Ord,
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+    TProtoList: Iterator<Item = TProto> + Clone,
+    TProto: AsRef<str>,
 {
     /// Reads data coming from the socket from `incoming_data`, updates the internal state machine,
     /// and writes data destined to the socket to `outgoing_buffer`.
@@ -68,8 +76,10 @@ where
     /// `incoming_data` should be `None` if the remote has closed their writing side.
     ///
     /// The returned structure contains the number of bytes read and written from/to the two
-    /// buffers. Call this method in a loop until these two values are both 0 and
-    /// [`ReadWrite::event`] is `None`.
+    /// buffers. In order to avoid unnecessary memory allocations, only one [`Event`] is returned
+    /// at a time. Consequently, this method returns as soon as an event is available, even if the
+    /// buffers haven't finished being read. Call this method in a loop until these two values are
+    /// both 0 and [`ReadWrite::event`] is `None`.
     ///
     /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
     ///
@@ -83,7 +93,7 @@ where
         now: TNow,
         mut incoming_data: Option<&[u8]>,
         mut outgoing_buffer: &mut [u8],
-    ) -> Result<ReadWrite<TNow, TRqUd, TProtoList, TProto>, Error> {
+    ) -> Result<ReadWrite<TNow, TRqUd, TNotifUd, TProtoList, TProto>, Error> {
         let mut total_read = 0;
         let mut total_written = 0;
 
@@ -96,17 +106,18 @@ where
             *incoming_data = &incoming_data[num_read..];
         }
 
-        // The yamux state machine contains data that needs to be written out.
+        // TODO: handle incoming_data being None
+
+        // The yamux state machine contains the data that needs to be written out.
+        // Try to flush it.
         loop {
-            let bytes_out = self
-                .encryption
-                .encrypt_in_size_for_out(outgoing_buffer.len());
+            let bytes_out = self.encryption.encrypt_size_conv(outgoing_buffer.len());
             if bytes_out == 0 {
                 break;
             }
 
-            let buffers = self.yamux.extract_out(bytes_out);
-            let mut buffers = buffers.peekable();
+            let mut buffers = self.yamux.extract_out(bytes_out);
+            let mut buffers = buffers.buffers().peekable();
             if buffers.peek().is_none() {
                 break;
             }
@@ -168,27 +179,69 @@ where
     ///
     /// After the remote has sent back a response, an [`Event::Response`] event will be generated
     /// locally. The `user_data` parameter will be passed back.
-    pub fn add_request(&mut self, protocol: &TProto, request: Vec<u8>, user_data: TRqUd) {
-        /*self.yamux.open_substream(Substream {
-            user_data
-        });*/
+    pub fn add_request(
+        &mut self,
+        now: TNow,
+        protocol: TProto,
+        request: Vec<u8>,
+        user_data: TRqUd,
+    ) -> SubstreamId {
+        let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
+            requested_protocol: protocol,
+        });
+        let id = self
+            .yamux
+            .open_substream(Substream::RequestOutNegotiating {
+                timeout: now + Duration::from_secs(20), // TODO:
+                negotiation,
+                request,
+                user_data,
+            })
+            .id();
+        SubstreamId(id)
+    }
+
+    /// Opens a outgoing substream with the given protocol, destined for a stream of
+    /// notifications.
+    ///
+    /// The remote must first accept (or reject) the substream before notifications can be sent
+    /// on it.
+    ///
+    /// This method only inserts the opening handshake into the connection object. Use
+    /// [`Connection::read_write`] in order to actually send out the request.
+    ///
+    /// Assuming that the remote is using the same implementation, an
+    /// [`Event::NotificationsInOpen`] will be generated on its side.
+    ///
+    pub fn open_notifications_substream(
+        &mut self,
+        now: TNow,
+        protocol: TProto,
+        handshake: Vec<u8>,
+    ) -> SubstreamId {
         todo!()
     }
 }
 
-impl<TNow, TRqUd, TProtoList, TProto> fmt::Debug for Connection<TNow, TRqUd, TProtoList, TProto> {
+impl<TNow, TRqUd, TNotifUd, TProtoList, TProto> fmt::Debug
+    for Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto>
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // TODO: better debug
+        // TODO: show substreams list
         f.debug_struct("Connection").finish()
     }
 }
 
+/// Identifier of a request or a notifications substream.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubstreamId(yamux::SubstreamId);
+
 /// Outcome of [`Connection::read_write`].
 #[must_use]
 #[derive(Debug)]
-pub struct ReadWrite<TNow, TRqUd, TProtoList, TProto> {
+pub struct ReadWrite<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// Connection object yielded back.
-    pub connection: Connection<TNow, TRqUd, TProtoList, TProto>,
+    pub connection: Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto>,
 
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
     /// should no longer be present the next time [`Connection::read_write`] is called.
@@ -203,19 +256,21 @@ pub struct ReadWrite<TNow, TRqUd, TProtoList, TProto> {
     pub wake_up_after: Option<TNow>,
 
     /// Event that happened on the connection.
-    pub event: Option<Event<TRqUd, TProto>>,
+    pub event: Option<Event<TRqUd, TNotifUd, TProto>>,
 }
 
 /// Event that happened on the connection. See [`ReadWrite::event`].
 #[must_use]
 #[derive(Debug)]
-pub enum Event<TRqUd, TProto> {
+pub enum Event<TRqUd, TNotifUd, TProto> {
     /// No more outgoing data will be emitted. The local writing side of the connection should be
     /// closed.
     // TODO: remove?
     EndOfData,
     /// Received a request in the context of a request-response protocol.
     RequestIn {
+        /// Identifier of the request. Needs to be provided back when answering the request.
+        id: SubstreamId,
         /// Protocol the request was sent on.
         protocol: TProto,
         /// Bytes of the request. Its interpretation is out of scope of this module.
@@ -226,9 +281,47 @@ pub enum Event<TRqUd, TProto> {
         /// Bytes of the response. Its interpretation is out of scope of this module.
         // TODO: error type
         response: Result<Vec<u8>, ()>,
-        /// Value that was passed to [`Connection::start_request`].
+        /// Identifier of the request. Value that was returned by [`Connection::add_request`].
+        id: SubstreamId,
+        /// Value that was passed to [`Connection::add_request`].
         user_data: TRqUd,
     },
+    NotificationsInOpen {
+        /// Identifier of the substream. Needs to be provided back when accept or rejecting the
+        /// substream.
+        id: SubstreamId,
+        /// Protocol concerned by the substream.
+        protocol: TProto,
+        /// Handshake sent by the remote. Its interpretation is out of scope of this module.
+        handshake: Vec<u8>,
+    },
+    /// Remote has accepted a substream opened with [`Connection::open_notifications_substream`].
+    ///
+    /// It is now possible to send notifications on this substream.
+    NotificationsOutAccept {
+        /// Identifier of the substream. Value that was returned by
+        /// [`Connection::open_notifications_substream`].
+        id: SubstreamId,
+        /// Value that was passed to [`Connection::open_notifications_substream`].
+        user_data: TNotifUd,
+        /// Handshake sent back by the remote. Its interpretation is out of scope of this module.
+        remote_handshake: Vec<u8>,
+    },
+    /// Remote has rejected a substream opened with [`Connection::open_notifications_substream`].
+    NotificationsOutReject {
+        /// Identifier of the substream. Value that was returned by
+        /// [`Connection::open_notifications_substream`].
+        id: SubstreamId,
+        /// Value that was passed to [`Connection::open_notifications_substream`].
+        user_data: TNotifUd,
+    },
+}
+
+/// Error during a connection. The connection should be shut down.
+#[derive(Debug, derive_more::Display)]
+pub enum Error {
+    /// Error in the noise cipher. Data has most likely been corrupted.
+    Noise(noise::CipherError),
 }
 
 /// Successfully negotiated connection. Ready to be turned into a [`Connection`].
@@ -239,13 +332,15 @@ pub struct ConnectionPrototype {
 
 impl ConnectionPrototype {
     /// Turns this prototype into an actual connection.
-    pub fn into_connection<TNow, TRqUd, TProtoList, TProto>(
+    pub fn into_connection<TNow, TRqUd, TNotifUd, TProtoList, TProto>(
         self,
-    ) -> Connection<TNow, TRqUd, TProtoList, TProto> {
+        config: Config<TProtoList>,
+    ) -> Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
         Connection {
             encryption: self.encryption,
             yamux: yamux::Connection::new(self.is_initiator),
-            in_request_protocols: todo!(),
+            in_request_protocols: config.in_request_protocols,
+            in_notifications_protocols: config.in_notifications_protocols,
             marker: core::marker::PhantomData,
         }
     }
@@ -257,14 +352,27 @@ impl fmt::Debug for ConnectionPrototype {
     }
 }
 
-#[derive(derive_more::From)]
+/// Configuration to turn a [`ConnectionPrototype`] into a [`Connection`].
+pub struct Config<TProtoList> {
+    /// List of request-response protocols supported for incoming substreams.
+    pub in_request_protocols: TProtoList,
+    /// List of notifications protocols supported for incoming substreams.
+    pub in_notifications_protocols: TProtoList,
+}
+
+/// Current state of a connection handshake.
+#[derive(Debug, derive_more::From)]
 pub enum Handshake {
+    /// Connection handshake in progress.
     Healthy(HealthyHandshake),
     /// Connection handshake has reached the noise handshake, and it is necessary to know the
     /// noise key in order to proceed.
     NoiseKeyRequired(NoiseKeyRequired),
+    /// Handshake has succeeded. Connection is now open.
     Success {
+        /// Network identity of the remote.
         remote_peer_id: PeerId,
+        /// Prototype for the connection.
         connection: ConnectionPrototype,
     },
 }
@@ -276,6 +384,7 @@ impl Handshake {
     }
 }
 
+/// Connection handshake in progress.
 pub struct HealthyHandshake {
     is_initiator: bool,
     state: HandshakeState,
@@ -420,8 +529,7 @@ impl HealthyHandshake {
                     total_read += incoming_buffer.len();
                     incoming_buffer = &incoming_buffer[num_read..];
 
-                    let mut buffer =
-                        vec![0; encryption.encrypt_in_size_for_out(outgoing_buffer.len())];
+                    let mut buffer = vec![0; encryption.encrypt_size_conv(outgoing_buffer.len())];
 
                     let (updated, read_num, written_interm) = negotiation
                         .read_write(encryption.decoded_inbound_data(), &mut buffer)
@@ -467,6 +575,14 @@ impl HealthyHandshake {
     }
 }
 
+impl fmt::Debug for HealthyHandshake {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("HealthyHandshake").finish()
+    }
+}
+
+/// Connection handshake has reached the noise handshake, and it is necessary to know the noise
+/// key in order to proceed.
 pub struct NoiseKeyRequired {
     is_initiator: bool,
 }
@@ -483,24 +599,10 @@ impl NoiseKeyRequired {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum InjectDataOutcome<'c, 'd> {
-    ReceivedIdentity(PeerId),
-    /// Received a ping request from the remote and answered it.
-    Ping,
-    /// Received a pong from the remote.
-    Pong,
-    RequestIn {
-        protocol_name: &'c str,
-        request: &'d [u8],
-    },
-}
-
-/// Error during a connection. The connection should be shut down.
-#[derive(Debug, derive_more::Display)]
-pub enum Error {
-    /// Error in the noise cipher. Data has most likely been corrupted.
-    Noise(noise::CipherError),
+impl fmt::Debug for NoiseKeyRequired {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("NoiseKeyRequired").finish()
+    }
 }
 
 /// Error during a connection handshake. The connection should be shut down.

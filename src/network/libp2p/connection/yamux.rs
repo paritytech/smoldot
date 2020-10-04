@@ -29,6 +29,7 @@
 // TODO: finish usage
 
 use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU32};
+use hashbrown::hash_map::OccupiedEntry;
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
@@ -71,7 +72,8 @@ struct Substream<T> {
     /// True if the writing side of the remote node is closed for this substream.
     remote_write_closed: bool,
     /// Buffer of buffers to be written out to the socket.
-    // TODO call shrink_to_fit from time to time?
+    // TODO: is it a good idea to have an unbounded Vec?
+    // TODO: call shrink_to_fit from time to time?
     write_buffers: Vec<Vec<u8>>,
     /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
     /// socket.
@@ -128,7 +130,7 @@ impl<T> Connection<T> {
     /// than approximately 2^31 substreams, which is very unlikely to happen unless there exists a
     /// bug in the code.
     ///
-    pub fn open_substream(&mut self, user_data: T) -> SubstreamId {
+    pub fn open_substream(&mut self, user_data: T) -> SubstreamMut<T> {
         // Make sure that the `loop` below can finish.
         assert!(usize::try_from(u32::max_value() / 2 - 1)
             .map_or(true, |full_len| self.substreams.len() < full_len));
@@ -175,15 +177,10 @@ impl<T> Connection<T> {
             user_data,
         });
 
-        substream_id
-    }
-
-    pub fn write_substream(&mut self, substream_id: SubstreamId, data: Vec<u8>) {
-        let mut substream = self.substreams.get_mut(&substream_id.0).unwrap();
-        debug_assert!(
-            !substream.write_buffers.is_empty() || substream.first_write_buffer_offset == 0
-        );
-        substream.write_buffers.push(data);
+        match self.substreams.entry(substream_id.0) {
+            hashbrown::hash_map::Entry::Occupied(e) => SubstreamMut { substream: e },
+            _ => unreachable!(),
+        }
     }
 
     /// Process some incoming data.
@@ -301,33 +298,24 @@ impl<T> Connection<T> {
         todo!()
     }
 
-    /// Returns an iterator to a list of buffers whose content must be sent out on the socket.
+    /// Returns an object that provides an iterator to a list of buffers whose content must be
+    /// sent out on the socket.
     ///
     /// The buffers produced by the iterator will never yield more than `size_bytes` bytes of
     /// data. The user is expected to pass an exact amount of bytes that the next layer is ready
     /// to accept.
     ///
-    /// After the iterator has been destroyed, the yamux state machine will automatically consider
-    /// that these `size_bytes` have been sent out, even if the iterator has been destroyed
-    /// before finishing.
+    /// After the [`ExtractOut`] has been destroyed, the yamux state machine will automatically
+    /// consider that these `size_bytes` have been sent out, even if the iterator has been
+    /// destroyed before finishing. It is a logic error to `mem::forget` the [`ExtractOut`].
     ///
     /// > **Note**: Most other objects in the networking code have a "`read_write`" method that
     /// >           writes the outgoing data to a buffer. This is an idiomatic way to do things in
     /// >           situations where the data is generated on the fly. In the context of yamux,
     /// >           however, this would be rather suboptimal considering that buffers to send out
     /// >           are already stored in their final form in the state machine.
-    pub fn extract_out<'a>(
-        &'a mut self,
-        size_bytes: usize,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    pub fn extract_out(&mut self, size_bytes: usize) -> ExtractOut<T> {
         // TODO: this function has a zero-cost API, but its body isn't really zero-cost due to laziness
-
-        struct VecWithOffset(Vec<u8>, usize);
-        impl AsRef<[u8]> for VecWithOffset {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[self.1..]
-            }
-        }
 
         // The implementation consists in filling a buffer of buffers, then calling `into_iter`.
         let mut buffers = Vec::with_capacity(32);
@@ -421,7 +409,11 @@ impl<T> Connection<T> {
                 .fold(0, |n, b| n + AsRef::<[u8]>::as_ref(b).len())
                 < size_bytes
         );
-        buffers.into_iter()
+
+        ExtractOut {
+            connection: self,
+            buffers: Some(buffers),
+        }
     }
 
     pub fn accept_pending_substream(&mut self, user_data: T, mut out: &mut [u8]) -> usize {
@@ -518,6 +510,65 @@ where
         f.debug_struct("Connection")
             .field("substreams", &List(self))
             .finish()
+    }
+}
+
+/// Reference to a substream within the [`Connection`].
+// TODO: Debug
+pub struct SubstreamMut<'a, T> {
+    substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, fnv::FnvBuildHasher>,
+}
+
+impl<'a, T> SubstreamMut<'a, T> {
+    /// Identifier of the substream.
+    pub fn id(&self) -> SubstreamId {
+        SubstreamId(*self.substream.key())
+    }
+
+    /// Returns the user data associated to this substream.
+    pub fn user_data(&mut self) -> &mut T {
+        &mut self.substream.get_mut().user_data
+    }
+
+    /// Returns the user data associated to this substream.
+    pub fn into_user_data(self) -> &'a mut T {
+        &mut self.substream.into_mut().user_data
+    }
+
+    /// Appends data to the buffer of data to send out on this substream.
+    pub fn write(&mut self, data: Vec<u8>) {
+        let substream = self.substream.get_mut();
+        debug_assert!(
+            !substream.write_buffers.is_empty() || substream.first_write_buffer_offset == 0
+        );
+        substream.write_buffers.push(data);
+    }
+}
+
+pub struct ExtractOut<'a, T> {
+    connection: &'a mut Connection<T>,
+    buffers: Option<Vec<either::Either<arrayvec::ArrayVec<[u8; 12]>, VecWithOffset>>>,
+}
+
+impl<'a, T> ExtractOut<'a, T> {
+    /// Returns the list of buffers to write.
+    ///
+    /// Can only be called once.
+    ///
+    /// # Panic
+    ///
+    /// Panics if called multiple times.
+    ///
+    pub fn buffers(&mut self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+        self.buffers.take().unwrap().into_iter()
+    }
+}
+
+#[derive(Clone)]
+struct VecWithOffset(Vec<u8>, usize);
+impl AsRef<[u8]> for VecWithOffset {
+    fn as_ref(&self) -> &[u8] {
+        &self.0[self.1..]
     }
 }
 
