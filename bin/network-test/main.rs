@@ -127,11 +127,11 @@ async fn async_main() {
     println!("Connected!");
 
     let mut connection = connection.into_connection::<_, (), (), _, _>(connection::Config {
-        in_request_protocols: iter::empty(),
-        in_notifications_protocols: iter::empty::<&'static str>(),
+        in_request_protocols: iter::once("/ipfs/ping/1.0.0"),
+        in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO:
     });
 
-    connection.add_request(Instant::now(), "/sup/sync/2", vec![0x1, 0x2, 0x3, 0x4], ());
+    connection.add_request(Instant::now(), "/dot/sync/2", vec![0x1, 0x2, 0x3, 0x4], ());
 
     loop {
         let read_write = connection

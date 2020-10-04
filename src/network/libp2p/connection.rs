@@ -19,7 +19,7 @@
 //! connection.
 
 use core::{
-    fmt, iter,
+    fmt, iter, mem,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -30,6 +30,7 @@ pub use noise::{NoiseKey, UnsignedNoiseKey};
 mod multistream_select;
 mod noise;
 mod substream;
+mod tests;
 mod yamux;
 
 // TODO: needs a timeout for the handshake
@@ -158,20 +159,82 @@ where
                     start_offset,
                     substream_id,
                 }) => {
-                    let data = &self.encryption.decoded_inbound_data()[..yamux_decode.bytes_read]
-                        [..start_offset];
+                    // Data belonging to a substream has been decoded.
+                    let mut data = &self.encryption.decoded_inbound_data()
+                        [start_offset..yamux_decode.bytes_read];
+                    dbg!(data);
 
                     let mut substream = self.yamux.substream_by_id(substream_id).unwrap();
-                    match substream.user_data() {
-                        Substream::Poisoned => unreachable!(),
-                        Substream::RequestOutNegotiating { negotiation, .. } => {
-                            //negotiation.read_write(&data, &mut []);
-                            //todo!("negotiation")
+                    while !data.is_empty() {
+                        match mem::replace(substream.user_data(), Substream::Poisoned) {
+                            Substream::Poisoned => unreachable!(),
+                            Substream::RequestOutNegotiating {
+                                negotiation,
+                                timeout,
+                                request,
+                                user_data,
+                            } => {
+                                match negotiation.read_write_vec(data) {
+                                    Ok((
+                                        multistream_select::Negotiation::InProgress(nego),
+                                        _read,
+                                        out_buffer,
+                                    )) => {
+                                        debug_assert_eq!(_read, data.len());
+                                        data = &data[_read..];
+                                        substream.write(out_buffer);
+                                        *substream.user_data() = Substream::RequestOutNegotiating {
+                                            negotiation: nego,
+                                            timeout,
+                                            request,
+                                            user_data,
+                                        };
+                                    }
+                                    Ok((
+                                        multistream_select::Negotiation::Success(protocol),
+                                        num_read,
+                                        out_buffer,
+                                    )) => {
+                                        println!("writing out {:?}", out_buffer);
+                                        substream.write(out_buffer);
+                                        data = &data[num_read..];
+                                        println!("negotiated {:?}", protocol.as_ref());
+                                        //*substream.user_data() = Substream::
+                                        // TODO: transition
+                                    }
+                                    _ => todo!("other state"),
+                                }
+                            }
+                            Substream::Negotiating(nego) => {
+                                match nego.read_write_vec(data) {
+                                    Ok((
+                                        multistream_select::Negotiation::InProgress(nego),
+                                        _read,
+                                        out_buffer,
+                                    )) => {
+                                        debug_assert_eq!(_read, data.len());
+                                        data = &data[_read..];
+                                        println!("writing out {:?}", out_buffer);
+                                        substream.write(out_buffer);
+                                        *substream.user_data() = Substream::Negotiating(nego);
+                                    }
+                                    Ok((
+                                        multistream_select::Negotiation::Success(protocol),
+                                        num_read,
+                                        out_buffer,
+                                    )) => {
+                                        println!("writing out {:?}", out_buffer);
+                                        substream.write(out_buffer);
+                                        data = &data[num_read..];
+                                        println!("negotiated {:?}", protocol.as_ref());
+                                        //*substream.user_data() = Substream::
+                                        // TODO: transition
+                                    }
+                                    _ => todo!("other state"),
+                                }
+                            }
+                            _ => todo!("other substream kind"),
                         }
-                        Substream::Negotiating(nego) => {
-                            // todo!("negotiating in");
-                        }
-                        _ => todo!("other substream kind"),
                     }
                 }
             }
@@ -205,38 +268,6 @@ where
             outgoing_buffer = &mut outgoing_buffer[written..];
         }
 
-        /*loop {
-            let mut buffer = encryption.prepare_buffer_encryption(destination);
-            let (updated, written_interm) = negotiation.write_out(&mut *buffer);
-            let written = buffer.finish(written_interm);
-            destination = &mut destination[written..];
-            total_written += written;
-
-            self.state = match updated {
-                multistream_select::Negotiation::InProgress(updated) => {
-                    HandshakeState::NegotiatingMultiplexing {
-                        encryption,
-                        negotiation: updated,
-                        peer_id,
-                    }
-                }
-                multistream_select::Negotiation::Success(_) => {
-                    return (
-                        Handshake::Success {
-                            connection: Connection { encryption },
-                            remote_peer_id: peer_id,
-                        },
-                        total_written,
-                    );
-                }
-                multistream_select::Negotiation::NotAvailable => todo!(), // TODO: ?!
-            };
-
-            if written == 0 {
-                break;
-            }
-        }*/
-
         Ok(ReadWrite {
             connection: self,
             read_bytes: total_read,
@@ -268,21 +299,11 @@ where
                 requested_protocol: protocol,
             });
 
-        let mut out_buffer = vec![0; 512];
-        let mut total_written = 0;
-        loop {
-            let (new_state, _, written) = negotiation.read_write(&[], &mut out_buffer).unwrap();
-            total_written += written;
-            assert!(total_written < out_buffer.len()); // TODO: how to choose appropriate buffer length?
-            match new_state {
-                multistream_select::Negotiation::InProgress(n) => negotiation = n,
-                _ => unreachable!(),
-            }
-            if written == 0 {
-                break;
-            }
+        let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
+        match new_state {
+            multistream_select::Negotiation::InProgress(n) => negotiation = n,
+            _ => unreachable!(),
         }
-        out_buffer.truncate(total_written);
 
         let mut substream = self.yamux.open_substream(Substream::RequestOutNegotiating {
             timeout: now + Duration::from_secs(20), // TODO:
@@ -424,7 +445,6 @@ pub enum Error {
 /// Successfully negotiated connection. Ready to be turned into a [`Connection`].
 pub struct ConnectionPrototype {
     encryption: noise::Noise,
-    is_initiator: bool,
 }
 
 impl ConnectionPrototype {
@@ -433,9 +453,10 @@ impl ConnectionPrototype {
         self,
         config: Config<TProtoList>,
     ) -> Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
+        let yamux = yamux::Connection::new(self.encryption.is_initiator());
         Connection {
             encryption: self.encryption,
-            yamux: yamux::Connection::new(self.is_initiator),
+            yamux,
             in_request_protocols: config.in_request_protocols,
             in_notifications_protocols: config.in_notifications_protocols,
             marker: core::marker::PhantomData,
@@ -483,13 +504,13 @@ impl Handshake {
 
 /// Connection handshake in progress.
 pub struct HealthyHandshake {
-    is_initiator: bool,
     state: HandshakeState,
 }
 
 enum HandshakeState {
     NegotiatingEncryptionProtocol {
         negotiation: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
+        is_initiator: bool,
     },
     NegotiatingEncryption {
         handshake: noise::HandshakeInProgress,
@@ -518,8 +539,10 @@ impl HealthyHandshake {
         });
 
         HealthyHandshake {
-            is_initiator,
-            state: HandshakeState::NegotiatingEncryptionProtocol { negotiation },
+            state: HandshakeState::NegotiatingEncryptionProtocol {
+                negotiation,
+                is_initiator,
+            },
         }
     }
 
@@ -544,7 +567,10 @@ impl HealthyHandshake {
 
         loop {
             match self.state {
-                HandshakeState::NegotiatingEncryptionProtocol { negotiation } => {
+                HandshakeState::NegotiatingEncryptionProtocol {
+                    negotiation,
+                    is_initiator,
+                } => {
                     let (updated, num_read, num_written) = negotiation
                         .read_write(incoming_buffer, outgoing_buffer)
                         .map_err(HandshakeError::MultistreamSelect)?;
@@ -558,14 +584,13 @@ impl HealthyHandshake {
                         multistream_select::Negotiation::InProgress(updated) => {
                             self.state = HandshakeState::NegotiatingEncryptionProtocol {
                                 negotiation: updated,
+                                is_initiator,
                             };
                             break;
                         }
                         multistream_select::Negotiation::Success(_) => {
                             return Ok((
-                                Handshake::NoiseKeyRequired(NoiseKeyRequired {
-                                    is_initiator: self.is_initiator,
-                                }),
+                                Handshake::NoiseKeyRequired(NoiseKeyRequired { is_initiator }),
                                 total_read,
                                 total_written,
                             ));
@@ -591,7 +616,7 @@ impl HealthyHandshake {
                             remote_peer_id,
                         } => {
                             let negotiation =
-                                multistream_select::InProgress::new(if self.is_initiator {
+                                multistream_select::InProgress::new(if cipher.is_initiator() {
                                     multistream_select::Config::Dialer {
                                         requested_protocol: yamux::PROTOCOL_NAME,
                                     }
@@ -650,10 +675,7 @@ impl HealthyHandshake {
                         multistream_select::Negotiation::Success(_) => {
                             return Ok((
                                 Handshake::Success {
-                                    connection: ConnectionPrototype {
-                                        encryption,
-                                        is_initiator: self.is_initiator,
-                                    },
+                                    connection: ConnectionPrototype { encryption },
                                     remote_peer_id: peer_id,
                                 },
                                 total_read,
@@ -688,7 +710,6 @@ impl NoiseKeyRequired {
     /// Turn this [`NoiseKeyRequired`] back into a [`Healthy`] by indicating the noise key.
     pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
         HealthyHandshake {
-            is_initiator: self.is_initiator,
             state: HandshakeState::NegotiatingEncryption {
                 handshake: noise::HandshakeInProgress::new(noise_key, self.is_initiator),
             },
@@ -719,82 +740,4 @@ pub enum HandshakeError {
     NoMultiplexingProtocol,
     /// Error in the noise cipher. Data has most likely been corrupted.
     Noise(noise::CipherError),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Handshake, NoiseKey};
-
-    #[test]
-    fn handshake_basic_works() {
-        fn test_with_buffer_sizes(size1: usize, size2: usize) {
-            let key1 = NoiseKey::new(&rand::random());
-            let key2 = NoiseKey::new(&rand::random());
-
-            let mut handshake1 = Handshake::new(true);
-            let mut handshake2 = Handshake::new(false);
-
-            let mut buf_1_to_2 = Vec::new();
-            let mut buf_2_to_1 = Vec::new();
-
-            while !matches!(
-                (&handshake1, &handshake2),
-                (Handshake::Success { .. }, Handshake::Success { .. })
-            ) {
-                match handshake1 {
-                    Handshake::Success { .. } => {}
-                    Handshake::NoiseKeyRequired(req) => handshake1 = req.resume(&key1).into(),
-                    Handshake::Healthy(nego) => {
-                        if buf_1_to_2.is_empty() {
-                            buf_1_to_2.resize(size1, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
-                            handshake1 = updated;
-                            for _ in 0..num_read {
-                                buf_2_to_1.remove(0);
-                            }
-                            buf_1_to_2.truncate(written);
-                        } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_2_to_1, &mut []).unwrap();
-                            handshake1 = updated;
-                            for _ in 0..num_read {
-                                buf_2_to_1.remove(0);
-                            }
-                        }
-                    }
-                }
-
-                match handshake2 {
-                    Handshake::Success { .. } => {}
-                    Handshake::NoiseKeyRequired(req) => handshake2 = req.resume(&key2).into(),
-                    Handshake::Healthy(nego) => {
-                        if buf_2_to_1.is_empty() {
-                            buf_2_to_1.resize(size2, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
-                            handshake2 = updated;
-                            for _ in 0..num_read {
-                                buf_1_to_2.remove(0);
-                            }
-                            buf_2_to_1.truncate(written);
-                        } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_1_to_2, &mut []).unwrap();
-                            handshake2 = updated;
-                            for _ in 0..num_read {
-                                buf_1_to_2.remove(0);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        test_with_buffer_sizes(256, 256);
-        // TODO: not passing
-        //test_with_buffer_sizes(1, 1);
-        //test_with_buffer_sizes(1, 2048);
-        //test_with_buffer_sizes(2048, 1);
-    }
 }

@@ -416,6 +416,45 @@ where
         // This point should be reached only if data is lacking in order to proceed.
         Ok((Negotiation::InProgress(self), total_read, total_written))
     }
+
+    /// Similar to [`InProgress::read_write`], but write the outgoing data to a `Vec` rather than
+    /// a borrowed buffer.
+    ///
+    /// Considering that the outgoing buffer is "unlimited" in size, it is guaranteed that either
+    /// the negotiation ends (by a success or a failure) or the entire incoming buffer is
+    /// consumed. In other words, it is not possible for [`Negotiation::InProgress`] to be
+    /// returned alongside with a number or bytes that isn't equal to `incoming_data.len()`.
+    pub fn read_write_vec(
+        mut self,
+        mut incoming_data: &[u8],
+    ) -> Result<(Negotiation<I, P>, usize, Vec<u8>), Error> {
+        // TODO: how to choose appropriate buffer length?
+        let mut out_buffer = vec![0; 512];
+
+        let mut total_read = 0;
+        let mut total_written = 0;
+
+        loop {
+            let (new_state, read, written) = self.read_write(incoming_data, &mut out_buffer)?;
+            total_read += read;
+            incoming_data = &incoming_data[read..];
+            total_written += written;
+            assert!(total_written < out_buffer.len()); // TODO: how to choose appropriate buffer length?
+            match new_state {
+                Negotiation::InProgress(n) => self = n,
+                other => {
+                    out_buffer.truncate(total_written);
+                    return Ok((other, total_read, out_buffer));
+                }
+            }
+            if written == 0 {
+                break;
+            }
+        }
+
+        out_buffer.truncate(total_written);
+        return Ok((Negotiation::InProgress(self), total_read, out_buffer));
+    }
 }
 
 impl<I, P> fmt::Debug for InProgress<I, P> {

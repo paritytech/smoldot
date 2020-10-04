@@ -279,6 +279,11 @@ impl Noise {
         Ok(total_read)
     }
 
+    /// Returns true if the local side has opened the connection.
+    pub fn is_initiator(&self) -> bool {
+        self.inner.is_initiator()
+    }
+
     // TODO: if rx_buffer_decrypted becomes a VecDeque, this leads to a potentially weird API
     //       where calling consume_inbound_data can lead to decoded_inbound_data to provide more
     //       data
