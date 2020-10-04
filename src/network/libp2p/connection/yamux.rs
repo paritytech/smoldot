@@ -83,6 +83,8 @@ struct Substream<T> {
     /// Amount of data the local node is allowed to transmit to the remote.
     allowed_window: u64,
     /// True if the writing side of the local node is closed for this substream.
+    /// Note that the data queued in [`Substream::write_buffers`] must still be sent out,
+    /// alongside with a frame with a FIN flag.
     local_write_closed: bool,
     /// True if the writing side of the remote node is closed for this substream.
     remote_write_closed: bool,
@@ -485,12 +487,13 @@ impl<T> Connection<T> {
                     u32::try_from(pending_len).unwrap_or(u32::max_value()),
                     u32::try_from(sub.allowed_window).unwrap_or(u32::max_value()),
                 );
+                let len_out_usize = usize::try_from(len_out).unwrap();
                 sub.allowed_window -= u64::from(len_out);
                 let syn_ack_flag = !sub.first_message_queued;
                 sub.first_message_queued = true;
-                self.writing_out_substream =
-                    Some((SubstreamId(id), usize::try_from(len_out).unwrap()));
-                self.queue_data_frame_header(syn_ack_flag, id, len_out);
+                let fin_flag = sub.local_write_closed && len_out_usize == pending_len;
+                self.writing_out_substream = Some((SubstreamId(id), len_out_usize));
+                self.queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
             } else {
                 break;
             }
@@ -569,6 +572,7 @@ impl<T> Connection<T> {
     fn queue_data_frame_header(
         &mut self,
         syn_ack_flag: bool,
+        fin_flag: bool,
         substream_id: NonZeroU32,
         data_length: u32,
     ) {
@@ -583,6 +587,9 @@ impl<T> Connection<T> {
                 // ACK
                 flags |= 0x2;
             }
+        }
+        if fin_flag {
+            flags |= 0x4;
         }
 
         self.pending_out_header.push(0);
@@ -660,12 +667,31 @@ impl<'a, T> SubstreamMut<'a, T> {
     }
 
     /// Appends data to the buffer of data to send out on this substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`SubstreamMut::close`] has already been called on this substream.
+    ///
     pub fn write(&mut self, data: Vec<u8>) {
         let substream = self.substream.get_mut();
         debug_assert!(
             !substream.write_buffers.is_empty() || substream.first_write_buffer_offset == 0
         );
         substream.write_buffers.push(data);
+    }
+
+    /// Marks the substream as closed. It is no longer possible to write data on it. The remote
+    /// can still send data.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`SubstreamMut::close`] has already been called on this substream.
+    ///
+    pub fn close(&mut self) {
+        let substream = self.substream.get_mut();
+        assert!(!substream.local_write_closed);
+        substream.local_write_closed = true;
+        // TODO: what is write_buffers is empty? need to send the close frame
     }
 
     /// Abruptly shuts down the substream. Its identifier is now invalid. Sends a frame with the

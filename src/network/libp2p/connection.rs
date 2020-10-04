@@ -85,7 +85,7 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
         user_data: TRqUd,
     },
     /// Outgoing request has been sent out or is queued for send out, and a response from the
-    /// remote is now expected.
+    /// remote is now expected. Substream has been closed.
     RequestOut {
         /// When the request will time out in the absence of response.
         timeout: TNow,
@@ -282,13 +282,10 @@ where
                                 substream.write(out_buffer);
                                 data = &data[num_read..];
                                 println!("negotiated {:?}", protocol.as_ref());
-                                // TODO: better code for the length
-                                substream.write(parity_scale_codec::Encode::encode(
-                                    &parity_scale_codec::Compact(
-                                        u64::try_from(request.len()).unwrap(),
-                                    ),
-                                ));
+                                substream.write(leb128::encode_usize(request.len()).collect());
                                 substream.write(request);
+                                substream.close();
+                                println!("wrote request");
                                 *substream.user_data() = Substream::RequestOut {
                                     timeout,
                                     user_data,
@@ -335,7 +332,11 @@ where
                                 }),
                             });
                         }
-                        todo!()
+                        *substream.user_data() = Substream::RequestOut {
+                            timeout,
+                            user_data,
+                            response,
+                        };
                     }
                     Substream::RequestInRecv {
                         mut request,
