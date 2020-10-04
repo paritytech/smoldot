@@ -61,6 +61,8 @@ pub struct Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
 enum Substream<TNow, TRqUd, TProtoList, TProto> {
     /// Temporary transition state.
     Poisoned,
+    /// Substream is waiting for a close from the remote.
+    Dead,
     /// Protocol negotiation is still in progress on this substream.
     Negotiating(multistream_select::InProgress<iter::Chain<TProtoList, TProtoList>, TProto>),
     NotificationsOut,
@@ -245,12 +247,26 @@ where
                                     };
                                 }
                             }
+                            Ok((
+                                multistream_select::Negotiation::NotAvailable,
+                                num_read,
+                                out_buffer,
+                            )) => {
+                                data = &data[num_read..];
+                                substream.write(out_buffer);
+                                substream.close();
+                                *substream.user_data() = Substream::Dead;
+                            }
                             Err(_) => {
                                 substream.reset();
                                 break;
                             }
-                            _ => todo!("other state"),
                         }
+                    }
+                    Substream::Dead => {
+                        data = &data[data.len()..];
+                        *substream.user_data() = Substream::Dead;
+                        // TODO: ?!
                     }
                     Substream::RequestOutNegotiating {
                         negotiation,
