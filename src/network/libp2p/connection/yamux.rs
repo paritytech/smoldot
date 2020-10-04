@@ -99,27 +99,14 @@ struct Substream<T> {
 
 impl<T> Connection<T> {
     /// Initializes a new yamux state machine.
-    ///
-    /// Must be passed `true` if the local machine has initiated the connection.
-    /// Otherwise, `false`.
-    pub fn new(is_initiator: bool) -> Connection<T> {
-        Self::with_capacity(is_initiator, 0)
-    }
-
-    /// Initializes a new yamux state machine with enough capacity for the given number of
-    /// substreams.
-    ///
-    /// Must be passed `true` if the local machine has initiated the connection.
-    /// Otherwise, `false`.
-    pub fn with_capacity(is_initiator: bool, capacity: usize) -> Connection<T> {
-        // TODO: provide randomness seeds through API, otherwise it's not very random
+    pub fn new(config: Config) -> Connection<T> {
         Connection {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                capacity,
-                ahash::RandomState::with_seeds(0, 0),
+                config.capacity,
+                ahash::RandomState::with_seeds(config.randomness_seed.0, config.randomness_seed.1),
             ),
             incoming_data_frame: None,
-            next_outbound_substream: if is_initiator {
+            next_outbound_substream: if config.is_initiator {
                 NonZeroU32::new(1).unwrap()
             } else {
                 NonZeroU32::new(2).unwrap()
@@ -635,6 +622,19 @@ where
             .field("substreams", &List(self))
             .finish()
     }
+}
+
+/// Configuration for a new [`Connection`].
+#[derive(Debug)]
+pub struct Config {
+    /// `true` if the local machine has initiated the connection. Otherwise, `false`.
+    pub is_initiator: bool,
+    /// Expected number of substreams simultaneously open, both inbound and outbound substreams
+    /// combined.
+    pub capacity: usize,
+    /// Seed used for the randomness. Used to avoid HashDos attack and determines the order in
+    /// which the data on substreams is sent out.
+    pub randomness_seed: (u64, u64),
 }
 
 /// Reference to a substream within the [`Connection`].
