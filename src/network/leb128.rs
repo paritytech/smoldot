@@ -149,6 +149,12 @@ pub enum FramedError {
 
 pub struct FrameDrain<'a>(&'a mut Framed);
 
+impl<'a> FrameDrain<'a> {
+    pub fn into_vec(self) -> Vec<u8> {
+        mem::replace(&mut self.0.buffer, Vec::new())
+    }
+}
+
 impl<'a> Deref for FrameDrain<'a> {
     type Target = [u8];
 
@@ -160,6 +166,12 @@ impl<'a> Deref for FrameDrain<'a> {
 impl<'a> AsRef<[u8]> for FrameDrain<'a> {
     fn as_ref(&self) -> &[u8] {
         &self.0.buffer
+    }
+}
+
+impl<'a> From<FrameDrain<'a>> for Vec<u8> {
+    fn from(drain: FrameDrain<'a>) -> Vec<u8> {
+        drain.into_vec()
     }
 }
 

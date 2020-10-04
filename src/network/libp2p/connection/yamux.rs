@@ -667,6 +667,15 @@ impl<'a, T> SubstreamMut<'a, T> {
         );
         substream.write_buffers.push(data);
     }
+
+    /// Abruptly shuts down the substream. Its identifier is now invalid. Sends a frame with the
+    /// `RST` flag to the remote.
+    ///
+    /// Use this method when a protocol error happens on a substream.
+    pub fn reset(self) {
+        self.substream.remove();
+        // TODO: finish
+    }
 }
 
 pub struct ExtractOut<'a, T> {

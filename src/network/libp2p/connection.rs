@@ -18,6 +18,8 @@
 //! This state machine tries to negotiate and apply the noise and yamux protocols on top of the
 //! connection.
 
+use crate::network::leb128;
+
 use core::{
     fmt, iter, mem,
     ops::{Add, Sub},
@@ -27,11 +29,11 @@ use libp2p::PeerId;
 
 pub use noise::{NoiseKey, UnsignedNoiseKey};
 
-mod multistream_select;
-mod noise;
-mod substream;
+pub mod multistream_select;
+pub mod noise;
+pub mod yamux;
+
 mod tests;
-mod yamux;
 
 // TODO: needs a timeout for the handshake
 
@@ -64,13 +66,23 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
     NotificationsIn,
     /// Negotiating a protocol for an outgoing request.
     RequestOutNegotiating {
-        /// When the request has timed out.
+        /// When the request will time out in the absence of response.
         timeout: TNow,
         negotiation: multistream_select::InProgress<TProtoList, TProto>,
         request: Vec<u8>,
+        /// Data passed by the user to [`Connection::add_request`].
         user_data: TRqUd,
     },
-    RequestOut,
+    /// Outgoing request has been sent out or is queued for send out, and a response from the
+    /// remote is now expected.
+    RequestOut {
+        /// When the request will time out in the absence of response.
+        timeout: TNow,
+        /// Data passed by the user to [`Connection::add_request`].
+        user_data: TRqUd,
+        /// Buffer for the incoming response.
+        response: leb128::Framed,
+    },
     RequestIn,
 }
 
@@ -124,9 +136,7 @@ where
 
             // TODO: handle incoming_data being None
 
-            println!("in data: {:?}", self.encryption.decoded_inbound_data());
-
-            // Ask the Yamux state machine to decode the buffer in `self.encryption`.
+            // Ask the Yamux state machine to decode the buffer present in `self.encryption`.
             let yamux_decode = self
                 .yamux
                 .incoming_data(self.encryption.decoded_inbound_data())
@@ -162,12 +172,41 @@ where
                     // Data belonging to a substream has been decoded.
                     let mut data = &self.encryption.decoded_inbound_data()
                         [start_offset..yamux_decode.bytes_read];
-                    dbg!(data);
 
                     let mut substream = self.yamux.substream_by_id(substream_id).unwrap();
                     while !data.is_empty() {
                         match mem::replace(substream.user_data(), Substream::Poisoned) {
                             Substream::Poisoned => unreachable!(),
+                            Substream::Negotiating(nego) => {
+                                match nego.read_write_vec(data) {
+                                    Ok((
+                                        multistream_select::Negotiation::InProgress(nego),
+                                        _read,
+                                        out_buffer,
+                                    )) => {
+                                        debug_assert_eq!(_read, data.len());
+                                        data = &data[_read..];
+                                        substream.write(out_buffer);
+                                        *substream.user_data() = Substream::Negotiating(nego);
+                                    }
+                                    Ok((
+                                        multistream_select::Negotiation::Success(protocol),
+                                        num_read,
+                                        out_buffer,
+                                    )) => {
+                                        substream.write(out_buffer);
+                                        data = &data[num_read..];
+                                        println!("negotiated {:?}", protocol.as_ref());
+                                        //*substream.user_data() = Substream::
+                                        // TODO: transition
+                                    }
+                                    Err(_) => {
+                                        substream.reset();
+                                        break;
+                                    }
+                                    _ => todo!("other state"),
+                                }
+                            }
                             Substream::RequestOutNegotiating {
                                 negotiation,
                                 timeout,
@@ -195,43 +234,49 @@ where
                                         num_read,
                                         out_buffer,
                                     )) => {
-                                        println!("writing out {:?}", out_buffer);
                                         substream.write(out_buffer);
                                         data = &data[num_read..];
                                         println!("negotiated {:?}", protocol.as_ref());
                                         //*substream.user_data() = Substream::
                                         // TODO: transition
+                                    }
+                                    Err(_) => {
+                                        substream.reset();
+                                        return Ok(ReadWrite {
+                                            connection: self,
+                                            read_bytes: total_read,
+                                            written_bytes: total_written,
+                                            wake_up_after: None, // TODO:
+                                            event: Some(Event::Response {
+                                                id: SubstreamId(substream_id),
+                                                user_data,
+                                                response: Err(()),
+                                            }),
+                                        });
                                     }
                                     _ => todo!("other state"),
                                 }
                             }
-                            Substream::Negotiating(nego) => {
-                                match nego.read_write_vec(data) {
-                                    Ok((
-                                        multistream_select::Negotiation::InProgress(nego),
-                                        _read,
-                                        out_buffer,
-                                    )) => {
-                                        debug_assert_eq!(_read, data.len());
-                                        data = &data[_read..];
-                                        println!("writing out {:?}", out_buffer);
-                                        substream.write(out_buffer);
-                                        *substream.user_data() = Substream::Negotiating(nego);
-                                    }
-                                    Ok((
-                                        multistream_select::Negotiation::Success(protocol),
-                                        num_read,
-                                        out_buffer,
-                                    )) => {
-                                        println!("writing out {:?}", out_buffer);
-                                        substream.write(out_buffer);
-                                        data = &data[num_read..];
-                                        println!("negotiated {:?}", protocol.as_ref());
-                                        //*substream.user_data() = Substream::
-                                        // TODO: transition
-                                    }
-                                    _ => todo!("other state"),
+                            Substream::RequestOut {
+                                timeout,
+                                user_data,
+                                mut response,
+                            } => {
+                                let num_read = response.inject_data(&data).unwrap(); // TODO: don't unwrap
+                                if let Some(response) = response.take_frame() {
+                                    return Ok(ReadWrite {
+                                        connection: self,
+                                        read_bytes: total_read,
+                                        written_bytes: total_written,
+                                        wake_up_after: None, // TODO:
+                                        event: Some(Event::Response {
+                                            id: SubstreamId(substream_id),
+                                            user_data,
+                                            response: Ok(response.into()),
+                                        }),
+                                    });
                                 }
+                                todo!()
                             }
                             _ => todo!("other substream kind"),
                         }
