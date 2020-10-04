@@ -79,6 +79,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahash"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0adac150c2dd5a9c864d054e07bda5e6bc010cd10036ea5f17e82a2f5867f735"
+
+[[package]]
 name = "aho-corasick"
 version = "0.7.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,7 +1261,7 @@ version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e6073d0ca812575946eb5f35ff68dbe519907b25c42530389ff946dc84c6ead"
 dependencies = [
- "ahash",
+ "ahash 0.2.18",
  "autocfg 0.1.7",
 ]
 
@@ -3009,6 +3015,7 @@ dependencies = [
 name = "substrate-lite"
 version = "0.1.0"
 dependencies = [
+ "ahash 0.4.5",
  "ansi_term 0.12.1",
  "anyhow",
  "app_dirs",

@@ -35,7 +35,15 @@ mod yamux;
 // TODO: needs a timeout for the handshake
 
 pub struct Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
+    /// Encryption layer applied directly on top of the incoming data and outgoing data.
+    /// In addition to the cipher state, also contains a buffer of data received from the socket,
+    /// decoded but yet to be parsed.
+    // TODO: move this decoded-data buffer here
     encryption: noise::Noise,
+    /// State of the various substreams of the connection.
+    /// Consists in a collection of substreams, each of which holding a [`Substream`] object.
+    /// Also includes, for each substream, a collection of buffers whose data is to be written
+    /// out.
     yamux: yamux::Connection<Substream<TNow, TRqUd, TProtoList, TProto>>,
 
     /// List of request-response protocols.
@@ -43,12 +51,14 @@ pub struct Connection<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// List of notifications protocols.
     in_notifications_protocols: TProtoList,
 
-    marker: core::marker::PhantomData<(TNow, TRqUd, TNotifUd, TProtoList, TProto)>, // TODO: remove
+    marker: core::marker::PhantomData<TNotifUd>, // TODO: remove
 }
 
 enum Substream<TNow, TRqUd, TProtoList, TProto> {
+    /// Temporary transition state.
+    Poisoned,
     /// Protocol negotiation is still in progress on this substream.
-    Negotiating(multistream_select::InProgress<TProtoList, TProto>),
+    Negotiating(multistream_select::InProgress<iter::Chain<TProtoList, TProtoList>, TProto>),
     NotificationsOut,
     NotificationsIn,
     /// Negotiating a protocol for an outgoing request.
@@ -128,15 +138,22 @@ where
             // This still contains references to the data in `self.encryption`.
             match yamux_decode.detail {
                 None => {}
+
                 Some(yamux::IncomingDataDetail::IncomingSubstream) => {
-                    // TODO: not all protocols
+                    // Receive a request from the remote for a new incoming substream.
+                    // These requests are automatically accepted.
+                    // TODO: add a limit to the number of substreams
                     let nego =
                         multistream_select::InProgress::new(multistream_select::Config::Listener {
-                            supported_protocols: self.in_request_protocols.clone(),
+                            supported_protocols: self
+                                .in_request_protocols
+                                .clone()
+                                .chain(self.in_notifications_protocols.clone()),
                         });
                     self.yamux
                         .accept_pending_substream(Substream::Negotiating(nego));
                 }
+
                 Some(yamux::IncomingDataDetail::DataFrame {
                     start_offset,
                     substream_id,
@@ -146,12 +163,13 @@ where
 
                     let mut substream = self.yamux.substream_by_id(substream_id).unwrap();
                     match substream.user_data() {
+                        Substream::Poisoned => unreachable!(),
                         Substream::RequestOutNegotiating { negotiation, .. } => {
                             //negotiation.read_write(&data, &mut []);
-                            todo!("negotiation")
+                            //todo!("negotiation")
                         }
                         Substream::Negotiating(nego) => {
-                            todo!("negotiating in");
+                            // todo!("negotiating in");
                         }
                         _ => todo!("other substream kind"),
                     }

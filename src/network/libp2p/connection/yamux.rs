@@ -28,6 +28,8 @@
 
 // TODO: finish usage
 
+// TODO: the code of this module is rather complicated; either simplify it or write a lot of tests, including fuzzing tests
+
 use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU32};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
 
@@ -36,8 +38,9 @@ pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
 
 pub struct Connection<T> {
     /// List of substreams currently open in the yamux state machine.
-    // TODO: there's an actual chance of collision attack here if we don't use a siphasher
-    substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, fnv::FnvBuildHasher>,
+    ///
+    /// A SipHasher is used in order to avoid hash collision attacks on substream IDs.
+    substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, ahash::RandomState>,
 
     /// If `Some`, the next incoming data belongs to a previously-received data frame concerning
     /// the given substream. Also contains the number of bytes remaining in this data frame.
@@ -72,8 +75,6 @@ pub struct Connection<T> {
 }
 
 struct Substream<T> {
-    /// Identifier of the substream.
-    id: SubstreamId,
     /// True if a message on this substream has already been sent since it has been opened. The
     /// first message on a substream must contain either a SYN or ACK flag.
     first_message_queued: bool,
@@ -111,8 +112,12 @@ impl<T> Connection<T> {
     /// Must be passed `true` if the local machine has initiated the connection.
     /// Otherwise, `false`.
     pub fn with_capacity(is_initiator: bool, capacity: usize) -> Connection<T> {
+        // TODO: provide randomness seeds through API, otherwise it's not very random
         Connection {
-            substreams: hashbrown::HashMap::with_capacity_and_hasher(capacity, Default::default()),
+            substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                capacity,
+                ahash::RandomState::with_seeds(0, 0),
+            ),
             incoming_data_frame: None,
             next_outbound_substream: if is_initiator {
                 NonZeroU32::new(1).unwrap()
@@ -181,7 +186,6 @@ impl<T> Connection<T> {
         let substream_id = SubstreamId(*entry.key());
 
         entry.insert(Substream {
-            id: substream_id,
             first_message_queued: false,
             remote_allowed_window: DEFAULT_FRAME_SIZE,
             allowed_window: DEFAULT_FRAME_SIZE,
@@ -523,7 +527,6 @@ impl<T> Connection<T> {
         let _was_before = self.substreams.insert(
             pending_incoming_substream.0,
             Substream {
-                id: pending_incoming_substream,
                 first_message_queued: false,
                 remote_allowed_window: DEFAULT_FRAME_SIZE + u64::from(credits),
                 allowed_window: DEFAULT_FRAME_SIZE + u64::from(credits),
@@ -637,7 +640,7 @@ where
 /// Reference to a substream within the [`Connection`].
 // TODO: Debug
 pub struct SubstreamMut<'a, T> {
-    substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, fnv::FnvBuildHasher>,
+    substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, ahash::RandomState>,
 }
 
 impl<'a, T> SubstreamMut<'a, T> {
@@ -697,17 +700,28 @@ impl AsRef<[u8]> for VecWithOffset {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, derive_more::From)]
 pub struct SubstreamId(NonZeroU32);
 
+#[must_use]
+#[derive(Debug)]
 pub struct IncomingDataOutcome<T> {
     /// Connection object on which [`Connection::incoming_data`] has been called.
     pub yamux: Connection<T>,
     /// Number of bytes read from the incoming buffer. These bytes should no longer be present the
     /// next time [`Connection::incoming_data`] is called.
     pub bytes_read: usize,
-    /// Detail about the data in the incoming data. `None` if nothing of interest has happened.
+    /// Detail about the incoming data. `None` if nothing of interest has happened.
     pub detail: Option<IncomingDataDetail>,
 }
 
+/// Details about the incoming data.
+#[must_use]
+#[derive(Debug)]
 pub enum IncomingDataDetail {
+    /// Remote has requested to open a new substream.
+    ///
+    /// After this has been received, either [`Connection::accept_pending_substream`] or
+    /// [`Connection::reject_pending_substream`] needs to be called in order to accept or reject
+    /// this substream. Calling [`Connection::incoming_data`] before this is done will lead to a
+    /// panic.
     IncomingSubstream,
     /// Received data corresponding to a substream.
     DataFrame {

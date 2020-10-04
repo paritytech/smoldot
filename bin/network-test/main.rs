@@ -17,12 +17,9 @@
 
 // TODO: temporary binary to try the networking alone
 
-use core::{convert::TryFrom as _, iter};
+use core::iter;
 use futures::prelude::*;
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Instant,
-};
+use std::time::Instant;
 use substrate_lite::network::libp2p::connection;
 
 fn main() {

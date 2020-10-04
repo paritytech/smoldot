@@ -50,6 +50,7 @@ path = "bin/network-test/main.rs"
 required-features = ["os-networking"]
 
 [dependencies]
+ahash = { version = "0.4.5", default-features = false }
 ansi_term = "0.12.1"
 app_dirs = "1.2.1"
 arrayvec = "0.5.1"
