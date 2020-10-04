@@ -29,7 +29,7 @@
 // TODO: finish usage
 
 use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU32};
-use hashbrown::hash_map::OccupiedEntry;
+use hashbrown::hash_map::{Entry, OccupiedEntry};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
@@ -38,15 +38,26 @@ pub struct Connection<T> {
     /// List of substreams currently open in the yamux state machine.
     // TODO: there's an actual chance of collision attack here if we don't use a siphasher
     substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, fnv::FnvBuildHasher>,
+
+    /// If `Some`, the next incoming data belongs to a previously-received data frame concerning
+    /// the given substream. Also contains the number of bytes remaining in this data frame.
+    ///
+    /// Can contain an invalid substream ID, and can contain the substream ID contained in
+    /// [`Connection::pending_incoming_substream`].
+    incoming_data_frame: Option<(SubstreamId, u32)>,
+
     /// Id of the next outgoing substream to open.
     /// This implementation allocates identifiers linearly. Every time a substream is open, its
     /// value is incremented by two.
     next_outbound_substream: NonZeroU32,
-    /// Buffer for a partially read header.
+
+    /// Buffer for a partially read yamux header.
     incoming_header: arrayvec::ArrayVec<[u8; 12]>,
+
     /// Header currently being written out. Finishing to write this header is the first and
     /// foremost priority of [`Connection::read_write`].
     pending_out_header: arrayvec::ArrayVec<[u8; 12]>,
+
     /// If `Some`, contains a substream ID and a number of bytes. A data frame header has been
     /// written to the socket, and the number of bytes stored in there is the number of bytes
     /// remaining in this frame.
@@ -54,7 +65,10 @@ pub struct Connection<T> {
     /// Writing out the data of this substream is the second most highest priority after writing
     /// out [`Connection::pending_out_header`].
     writing_out_substream: Option<(SubstreamId, usize)>,
-    pending_incoming_substream: Option<SubstreamId>,
+
+    /// If `Some`, the remote has requested to open the substream with the given ID. Contains
+    /// additional credits that the remote allocates to us.
+    pending_incoming_substream: Option<(SubstreamId, u32)>,
 }
 
 struct Substream<T> {
@@ -99,6 +113,7 @@ impl<T> Connection<T> {
     pub fn with_capacity(is_initiator: bool, capacity: usize) -> Connection<T> {
         Connection {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(capacity, Default::default()),
+            incoming_data_frame: None,
             next_outbound_substream: if is_initiator {
                 NonZeroU32::new(1).unwrap()
             } else {
@@ -157,7 +172,7 @@ impl<T> Connection<T> {
                     }
                 }
             };
-            if let hashbrown::hash_map::Entry::Vacant(e) = self.substreams.entry(id_attempt) {
+            if let Entry::Vacant(e) = self.substreams.entry(id_attempt) {
                 break e;
             }
         };
@@ -178,43 +193,67 @@ impl<T> Connection<T> {
         });
 
         match self.substreams.entry(substream_id.0) {
-            hashbrown::hash_map::Entry::Occupied(e) => SubstreamMut { substream: e },
+            Entry::Occupied(e) => SubstreamMut { substream: e },
             _ => unreachable!(),
+        }
+    }
+
+    /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
+    /// is open.
+    pub fn substream_by_id(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
+        if let Entry::Occupied(e) = self.substreams.entry(id.0) {
+            Some(SubstreamMut { substream: e })
+        } else {
+            None
         }
     }
 
     /// Process some incoming data.
     ///
-    /// The received payload may require some data to be written back on the socket. As such,
-    /// `out` is a buffer destined to hold data to be sent to the remote.
-    ///
     /// # Panic
     ///
     /// Panics if pending incoming substream.
     ///
+    // TODO: explain that reading might be blocked on writing
     // TODO: reword panic reason
-    pub fn incoming_data(
-        &mut self,
-        mut data: &[u8],
-        mut out: &mut [u8], // TODO: remove `out`
-    ) -> Result<IncomingDataOutcome, Error> {
+    pub fn incoming_data(mut self, mut data: &[u8]) -> Result<IncomingDataOutcome<T>, Error> {
         assert!(self.pending_incoming_substream.is_none());
 
-        let mut total_read = 0;
-        let mut total_written = 0;
+        let mut total_read: usize = 0;
 
         loop {
-            // Start by emptying `pending_out_header`. The code below might require writing
-            // to it, and as such we can't proceed with any reading if it isn't empty.
-            if !self.pending_out_header.is_empty() && !out.is_empty() {
-                let to_write = cmp::min(self.pending_out_header.len(), out.len());
-                out[..to_write].copy_from_slice(&self.pending_out_header[..to_write]);
-                for _ in 0..to_write {
-                    self.pending_out_header.remove(0);
+            if let Some((substream_id, ref mut remaining_bytes)) = self.incoming_data_frame {
+                debug_assert!(self.incoming_header.is_empty());
+                let pulled_data = cmp::min(
+                    *remaining_bytes,
+                    u32::try_from(data.len()).unwrap_or(u32::max_value()),
+                );
+                let pulled_data_usize = usize::try_from(pulled_data).unwrap();
+                *remaining_bytes -= pulled_data;
+                if *remaining_bytes == 0 {
+                    self.incoming_data_frame = None;
                 }
-                out = &mut out[to_write..];
-                total_written += to_write;
+
+                let start_offset = total_read;
+                total_read += pulled_data_usize;
+                data = &data[pulled_data_usize..];
+
+                if self.substreams.contains_key(&substream_id.0) {
+                    return Ok(IncomingDataOutcome {
+                        yamux: self,
+                        bytes_read: total_read,
+                        detail: Some(IncomingDataDetail::DataFrame {
+                            substream_id,
+                            start_offset,
+                        }),
+                    });
+                } else {
+                    continue;
+                }
             }
+
+            // The code below might require writing to it, and as such we can't proceed with any
+            // reading if it isn't empty.
             if !self.pending_out_header.is_empty() {
                 break;
             }
@@ -232,7 +271,7 @@ impl<T> Connection<T> {
                 break;
             }
 
-            // Full header to decode available.
+            // Full header available to decode in `incoming_header`.
 
             // Byte 0 of the header is the yamux version number. Return an error if it isn't 0.
             if self.incoming_header[0] != 0 {
@@ -285,17 +324,80 @@ impl<T> Connection<T> {
                 _ => return Err(Error::BadFrameType(self.incoming_header[1])),
             }
 
-            // In case of data (`0`) or window size (`1`) frame, check whether the remote has the
-            // the rights to send this data.
+            // The frame is now either a data (`0`) or window size (`1`) frame.
             let substream_id = match NonZeroU32::new(substream_id_field) {
                 Some(i) => SubstreamId(i),
                 None => return Err(Error::ZeroSubstreamId),
             };
 
-            todo!()
+            // Find the element in `self.substreams` corresponding to the substream requested by
+            // the remote.
+            // It is possible that the remote is referring to a substream for which a RST has been
+            // sent out. Since the local state machine doesn't keep track of RST'ted substreams,
+            // any frame concerning a substream with an unknown id is discarded and doesn't
+            // an error, under the presumption that we are in this situation. When that is the
+            // case, the `substream` variable below is `None`.
+            let substream: Option<_> = if (flags_field & 0x1) != 0 {
+                if self.substreams.contains_key(&substream_id.0) {
+                    return Err(Error::UnexpectedSyn(substream_id.0));
+                } else {
+                    debug_assert!(self.pending_incoming_substream.is_none());
+                    self.pending_incoming_substream = Some((
+                        substream_id,
+                        if self.incoming_header[0] == 0 {
+                            0
+                        } else {
+                            length_field
+                        },
+                    ));
+                    if self.incoming_header[0] == 0 {
+                        debug_assert!(self.incoming_data_frame.is_none());
+                        self.incoming_data_frame = Some((substream_id, length_field));
+                    }
+                    self.incoming_header.clear();
+                    return Ok(IncomingDataOutcome {
+                        yamux: self,
+                        bytes_read: total_read,
+                        detail: Some(IncomingDataDetail::IncomingSubstream),
+                    });
+                }
+            } else {
+                self.substreams.get_mut(&substream_id.0)
+            };
+
+            if self.incoming_header[0] == 0 {
+                // Data frame.
+                // Check whether the remote has the right to send that much data.
+                // Note that the credits aren't checked in the case of an unknown substream.
+                if let Some(substream) = substream {
+                    // TODO: allocate more size?
+                    substream.remote_allowed_window = substream
+                        .remote_allowed_window
+                        .checked_sub(u64::from(length_field))
+                        .ok_or(Error::CreditsExceeded)?;
+                }
+                debug_assert!(self.incoming_data_frame.is_none());
+                self.incoming_data_frame = Some((substream_id, length_field));
+                self.incoming_header.clear();
+            } else if self.incoming_header[0] == 1 {
+                // Window size frame.
+                if let Some(substream) = substream {
+                    substream.allowed_window = substream
+                        .allowed_window
+                        .checked_add(u64::from(length_field))
+                        .ok_or(Error::LocalCreditsOverflow)?;
+                }
+                self.incoming_header.clear();
+            } else {
+                unreachable!()
+            }
         }
 
-        todo!()
+        Ok(IncomingDataOutcome {
+            yamux: self,
+            bytes_read: total_read,
+            detail: None,
+        })
     }
 
     /// Returns an object that provides an iterator to a list of buffers whose content must be
@@ -416,20 +518,37 @@ impl<T> Connection<T> {
         }
     }
 
-    pub fn accept_pending_substream(&mut self, user_data: T, mut out: &mut [u8]) -> usize {
-        let pending_incoming_substream = self.pending_incoming_substream.take().unwrap();
-        debug_assert!(self.pending_out_header.is_empty());
+    pub fn accept_pending_substream(&mut self, user_data: T) -> SubstreamMut<T> {
+        let (pending_incoming_substream, credits) = self.pending_incoming_substream.take().unwrap();
+        let _was_before = self.substreams.insert(
+            pending_incoming_substream.0,
+            Substream {
+                id: pending_incoming_substream,
+                first_message_queued: false,
+                remote_allowed_window: DEFAULT_FRAME_SIZE + u64::from(credits),
+                allowed_window: DEFAULT_FRAME_SIZE + u64::from(credits),
+                local_write_closed: false,
+                remote_write_closed: false,
+                write_buffers: Vec::new(),
+                first_write_buffer_offset: 0,
+                user_data,
+            },
+        );
+        debug_assert!(_was_before.is_none());
 
-        // TODO: finish
-
-        todo!()
+        SubstreamMut {
+            substream: match self.substreams.entry(pending_incoming_substream.0) {
+                Entry::Occupied(e) => e,
+                _ => unreachable!(),
+            },
+        }
     }
 
-    pub fn reject_pending_substream(&mut self, mut out: &mut [u8]) -> usize {
+    pub fn reject_pending_substream(&mut self) {
         let pending_incoming_substream = self.pending_incoming_substream.take().unwrap();
         debug_assert!(self.pending_out_header.is_empty());
 
-        self.pending_out_header.push(0);
+        /*self.pending_out_header.push(0);
         self.pending_out_header.push(1);
         self.pending_out_header
             .try_extend_from_slice(&0x8u16.to_be_bytes()[..])
@@ -446,7 +565,9 @@ impl<T> Connection<T> {
         for _ in 0..to_write {
             self.pending_out_header.remove(0);
         }
-        to_write
+        to_write*/
+        // TODO:
+        todo!()
     }
 
     /// Writes a data frame header in `self.pending_out_header`.
@@ -576,14 +697,26 @@ impl AsRef<[u8]> for VecWithOffset {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, derive_more::From)]
 pub struct SubstreamId(NonZeroU32);
 
-pub struct IncomingDataOutcome {
+pub struct IncomingDataOutcome<T> {
+    /// Connection object on which [`Connection::incoming_data`] has been called.
+    pub yamux: Connection<T>,
+    /// Number of bytes read from the incoming buffer. These bytes should no longer be present the
+    /// next time [`Connection::incoming_data`] is called.
     pub bytes_read: usize,
-    pub bytes_written: usize,
-    pub ty: IncomingDataTy,
+    /// Detail about the data in the incoming data. `None` if nothing of interest has happened.
+    pub detail: Option<IncomingDataDetail>,
 }
 
-pub enum IncomingDataTy {
-    IncomingSubstream(SubstreamId),
+pub enum IncomingDataDetail {
+    IncomingSubstream,
+    /// Received data corresponding to a substream.
+    DataFrame {
+        /// Offset in the buffer passed to [`Connection::incoming_data`] where the data frame
+        /// starts. The data frame ends at the offset of [`IncomingDataOutcome::bytes_read`].
+        start_offset: usize,
+        /// Substream the data belongs to. Guaranteed to be valid.
+        substream_id: SubstreamId,
+    },
 }
 
 /// Error while decoding the yamux stream.
@@ -595,10 +728,12 @@ pub enum Error {
     BadFrameType(u8),
     /// Substream ID was zero in a data of window update frame.
     ZeroSubstreamId,
-    /// Received unknown substream ID without a SYN flag.
-    InvalidSubstreamId(u32),
+    /// Received a SYN flag with a known substream ID.
+    UnexpectedSyn(NonZeroU32),
     /// Remote tried to send more data than it was allowed to.
     CreditsExceeded,
+    /// Number of credits allocated to the local node has overflowed.
+    LocalCreditsOverflow,
 }
 
 /// By default, all new substreams have this implicit window size.

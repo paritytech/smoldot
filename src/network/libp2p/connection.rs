@@ -97,16 +97,75 @@ where
         let mut total_read = 0;
         let mut total_written = 0;
 
-        if let Some(incoming_data) = incoming_data.as_mut() {
-            let num_read = self
-                .encryption
-                .inject_inbound_data(*incoming_data)
-                .map_err(Error::Noise)?;
-            total_read += incoming_data.len();
-            *incoming_data = &incoming_data[num_read..];
-        }
+        // TODO: need to check timeouts
 
-        // TODO: handle incoming_data being None
+        // Decoding the incoming data.
+        loop {
+            // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
+            if let Some(incoming_data) = incoming_data.as_mut() {
+                let num_read = self
+                    .encryption
+                    .inject_inbound_data(*incoming_data)
+                    .map_err(Error::Noise)?;
+                total_read += num_read;
+                *incoming_data = &incoming_data[num_read..];
+            }
+
+            // TODO: handle incoming_data being None
+
+            println!("in data: {:?}", self.encryption.decoded_inbound_data());
+
+            // Ask the Yamux state machine to decode the buffer in `self.encryption`.
+            let yamux_decode = self
+                .yamux
+                .incoming_data(self.encryption.decoded_inbound_data())
+                .map_err(|err| Error::Yamux(err))?;
+            self.yamux = yamux_decode.yamux;
+
+            // TODO: it is possible that the yamux reading is blocked on writing
+
+            // Analyze how Yamux has parsed the data.
+            // This still contains references to the data in `self.encryption`.
+            match yamux_decode.detail {
+                None => {}
+                Some(yamux::IncomingDataDetail::IncomingSubstream) => {
+                    // TODO: not all protocols
+                    let nego =
+                        multistream_select::InProgress::new(multistream_select::Config::Listener {
+                            supported_protocols: self.in_request_protocols.clone(),
+                        });
+                    self.yamux
+                        .accept_pending_substream(Substream::Negotiating(nego));
+                }
+                Some(yamux::IncomingDataDetail::DataFrame {
+                    start_offset,
+                    substream_id,
+                }) => {
+                    let data = &self.encryption.decoded_inbound_data()[..yamux_decode.bytes_read]
+                        [..start_offset];
+
+                    let mut substream = self.yamux.substream_by_id(substream_id).unwrap();
+                    match substream.user_data() {
+                        Substream::RequestOutNegotiating { negotiation, .. } => {
+                            //negotiation.read_write(&data, &mut []);
+                            todo!("negotiation")
+                        }
+                        Substream::Negotiating(nego) => {
+                            todo!("negotiating in");
+                        }
+                        _ => todo!("other substream kind"),
+                    }
+                }
+            }
+
+            // Now that the Yamux parsing has been processed, discard this data in
+            // `self.encryption` and loop again, or stop looping if no more data is decodable.
+            if yamux_decode.bytes_read == 0 {
+                break;
+            }
+            self.encryption
+                .consume_inbound_data(yamux_decode.bytes_read);
+        }
 
         // The yamux state machine contains the data that needs to be written out.
         // Try to flush it.
@@ -186,19 +245,37 @@ where
         request: Vec<u8>,
         user_data: TRqUd,
     ) -> SubstreamId {
-        let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
-            requested_protocol: protocol,
+        let mut negotiation =
+            multistream_select::InProgress::new(multistream_select::Config::Dialer {
+                requested_protocol: protocol,
+            });
+
+        let mut out_buffer = vec![0; 512];
+        let mut total_written = 0;
+        loop {
+            let (new_state, _, written) = negotiation.read_write(&[], &mut out_buffer).unwrap();
+            total_written += written;
+            assert!(total_written < out_buffer.len()); // TODO: how to choose appropriate buffer length?
+            match new_state {
+                multistream_select::Negotiation::InProgress(n) => negotiation = n,
+                _ => unreachable!(),
+            }
+            if written == 0 {
+                break;
+            }
+        }
+        out_buffer.truncate(total_written);
+
+        let mut substream = self.yamux.open_substream(Substream::RequestOutNegotiating {
+            timeout: now + Duration::from_secs(20), // TODO:
+            negotiation,
+            request,
+            user_data,
         });
-        let id = self
-            .yamux
-            .open_substream(Substream::RequestOutNegotiating {
-                timeout: now + Duration::from_secs(20), // TODO:
-                negotiation,
-                request,
-                user_data,
-            })
-            .id();
-        SubstreamId(id)
+
+        substream.write(out_buffer);
+
+        SubstreamId(substream.id())
     }
 
     /// Opens a outgoing substream with the given protocol, destined for a stream of
@@ -219,7 +296,7 @@ where
         protocol: TProto,
         handshake: Vec<u8>,
     ) -> SubstreamId {
-        todo!()
+        todo!("open_notifications_substream")
     }
 }
 
@@ -322,6 +399,8 @@ pub enum Event<TRqUd, TNotifUd, TProto> {
 pub enum Error {
     /// Error in the noise cipher. Data has most likely been corrupted.
     Noise(noise::CipherError),
+    /// Error in the yamux multiplexing protocol.
+    Yamux(yamux::Error),
 }
 
 /// Successfully negotiated connection. Ready to be turned into a [`Connection`].

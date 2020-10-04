@@ -44,6 +44,11 @@ name = "json-rpc-test"
 path = "bin/json-rpc-test/main.rs"
 required-features = ["os-networking"]
 
+[[bin]]
+name = "network-test"
+path = "bin/network-test/main.rs"
+required-features = ["os-networking"]
+
 [dependencies]
 ansi_term = "0.12.1"
 app_dirs = "1.2.1"

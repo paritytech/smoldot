@@ -197,6 +197,7 @@ pub struct Noise {
 // TODO: switch a single `read_write` method, as for `Connection`
 impl Noise {
     /// Feeds data received from the wire.
+    // TODO: document or redesign the return value; at the moment is can different from payload.len() only if the decrypted buffer is full
     pub fn inject_inbound_data(&mut self, mut payload: &[u8]) -> Result<usize, CipherError> {
         // As a reminder, noise frames consist of two bytes of length (big endian) followed with
         // the message of that length destined to the `snow` library.
@@ -206,6 +207,7 @@ impl Noise {
         loop {
             // Buffering up too much data in the output buffer should be avoided. As such, past
             // a certain threshold, return early and refuse to read more.
+            // TODO: is this a good idea?
             if self.rx_buffer_decrypted.len() >= 65536 * 4 {
                 // TODO: should be configurable value ^
                 break;
