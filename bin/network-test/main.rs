@@ -149,6 +149,10 @@ async fn async_main() {
             )
             .unwrap();
 
+        if let Some(event) = read_write.event {
+            println!("event: {:?}", event);
+        }
+
         if write_buffer_ready == 0 {
             write_buffer_ready = read_write.written_bytes;
             debug_assert_eq!(write_buffer_offset, 0);

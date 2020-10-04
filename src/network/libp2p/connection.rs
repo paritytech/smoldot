@@ -64,7 +64,17 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
     /// Protocol negotiation is still in progress on this substream.
     Negotiating(multistream_select::InProgress<iter::Chain<TProtoList, TProtoList>, TProto>),
     NotificationsOut,
-    NotificationsIn,
+    /// A notifications protocol has been negotiated on an incoming substream. A handshake from
+    /// the remote is expected.
+    NotificationsInHandshake {
+        /// Buffer for the incoming handshake.
+        handshake: leb128::Framed,
+        /// Protocol that was negotiated.
+        protocol: TProto,
+    },
+    /// A handshake on a notifications protocol has been received. Now waiting for an action from
+    /// the API user.
+    NotificationsInWait,
     /// Negotiating a protocol for an outgoing request.
     RequestOutNegotiating {
         /// When the request will time out in the absence of response.
@@ -84,7 +94,15 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
         /// Buffer for the incoming response.
         response: leb128::Framed,
     },
-    RequestIn,
+    /// A request-response protocol has been negotiated on an inbound substream. A request is now
+    /// expected.
+    RequestInRecv {
+        /// Buffer for the incoming request.
+        request: leb128::Framed,
+        /// Protocol that was negotiated.
+        protocol: TProto,
+    },
+    RequestInSend,
 }
 
 impl<TNow, TRqUd, TNotifUd, TProtoList, TProto>
@@ -211,8 +229,21 @@ where
                                 substream.write(out_buffer);
                                 data = &data[num_read..];
                                 println!("negotiated {:?}", protocol.as_ref());
-                                //*substream.user_data() = Substream::
-                                // TODO: transition
+                                let is_request_response = self
+                                    .in_request_protocols
+                                    .clone()
+                                    .any(|p| AsRef::as_ref(&p) == AsRef::as_ref(&protocol));
+                                if is_request_response {
+                                    *substream.user_data() = Substream::RequestInRecv {
+                                        protocol,
+                                        request: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper size
+                                    };
+                                } else {
+                                    *substream.user_data() = Substream::NotificationsInHandshake {
+                                        protocol,
+                                        handshake: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper size
+                                    };
+                                }
                             }
                             Err(_) => {
                                 substream.reset();
@@ -288,6 +319,7 @@ where
                         mut response,
                     } => {
                         let num_read = response.inject_data(&data).unwrap(); // TODO: don't unwrap
+                        data = &data[num_read..];
                         if let Some(response) = response.take_frame() {
                             let substream_id = substream.id();
                             // TODO: state transition
@@ -304,6 +336,62 @@ where
                             });
                         }
                         todo!()
+                    }
+                    Substream::RequestInRecv {
+                        mut request,
+                        protocol,
+                    } => {
+                        data = &data[data.len()..];
+                        *substream.user_data() = Substream::RequestInRecv { request, protocol };
+                        // TODO:
+                        /*let num_read = request.inject_data(&data).unwrap(); // TODO: don't unwrap
+                        if let Some(request) = request.take_frame() {
+                            let substream_id = substream.id();
+                            // TODO: state transition
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                wake_up_after: None, // TODO:
+                                event: Some(Event::RequestIn {
+                                    id: SubstreamId(substream_id),
+                                    protocol,
+                                    request: request.into(),
+                                }),
+                            });
+                        }
+                        todo!()*/
+                    }
+                    Substream::NotificationsInHandshake {
+                        mut handshake,
+                        protocol,
+                    } => {
+                        let num_read = handshake.inject_data(&data).unwrap(); // TODO: don't unwrap
+                        data = &data[num_read..];
+                        if let Some(handshake) = handshake.take_frame() {
+                            let substream_id = substream.id();
+                            *substream.user_data() = Substream::NotificationsInWait;
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                wake_up_after: None, // TODO:
+                                event: Some(Event::NotificationsInOpen {
+                                    id: SubstreamId(substream_id),
+                                    protocol,
+                                    handshake: handshake.into(),
+                                }),
+                            });
+                        }
+                        *substream.user_data() = Substream::NotificationsInHandshake {
+                            handshake,
+                            protocol,
+                        };
+                    }
+                    Substream::NotificationsInWait => {
+                        // TODO: what to do with data?
+                        data = &data[data.len()..];
+                        *substream.user_data() = Substream::NotificationsInWait;
                     }
                     _ => todo!("other substream kind"),
                 }
