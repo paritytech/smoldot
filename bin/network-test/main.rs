@@ -28,7 +28,7 @@ fn main() {
 }
 
 async fn async_main() {
-    let tcp_socket = async_std::net::TcpStream::connect("127.0.0.1:30333")
+    let tcp_socket = async_std::net::TcpStream::connect("p2p.cc1-4.polkadot.network:30100")
         .await
         .unwrap();
 

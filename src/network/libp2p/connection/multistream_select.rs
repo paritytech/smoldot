@@ -351,7 +351,7 @@ where
                     if frame.is_empty() {
                         return Err(Error::InvalidCommand);
                     } else if &*frame == b"ls\n" {
-                        todo!() // TODO:
+                        todo!("requested ls") // TODO:
                     } else if let Some(protocol) = supported_protocols
                         .clone()
                         .find(|p| p.as_ref().as_bytes() == &frame[..frame.len() - 1])
