@@ -196,6 +196,39 @@ where
                     continue;
                 }
 
+                Some(yamux::IncomingDataDetail::StreamReset {
+                    substream_id,
+                    user_data,
+                }) => {
+                    match user_data {
+                        Substream::Poisoned => unreachable!(),
+                        Substream::Negotiating(_) => {}
+                        Substream::Dead => {}
+                        Substream::RequestOutNegotiating { user_data, .. }
+                        | Substream::RequestOut { user_data, .. } => {
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                wake_up_after: None, // TODO:
+                                event: Some(Event::Response {
+                                    id: SubstreamId(substream_id),
+                                    user_data,
+                                    response: Err(()),
+                                }),
+                            });
+                        }
+                        Substream::RequestInRecv { .. } => {}
+                        Substream::NotificationsInHandshake { .. } => {}
+                        Substream::NotificationsInWait => {
+                            // TODO: report to user
+                            todo!()
+                        }
+                        _ => todo!("other substream kind"),
+                    }
+                    continue;
+                }
+
                 Some(yamux::IncomingDataDetail::DataFrame {
                     start_offset,
                     substream_id,

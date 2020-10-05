@@ -25,8 +25,25 @@
 //!
 //! # Usage
 //!
+//! The [`Connection`] object holds the state of all yamux-specific information, and the list of
+//! all currently-open substreams.
+//!
+//! Call [`Connection::incoming_data`] when data is available on the socket. This function parses
+//! the received data, updates the internal state machine, and possibly returns an [`Event`].
+//! Call [`Connection::extract_out`] when the remote is ready to accept more data.
+//!
+//! The generic parameter of [`Connection`] is an opaque "user data" associated to each substream.
+//!
+//! When [`Substream::write`] is called, the buffer of data to send out is stored within the
+//! [`Connection`] object. This data will then be progressively returned by
+//! [`Connection::extract_out`].
+//!
+//! It is the responsibility of the user to enforce a bound to the amount of enqueued data, as
+//! the [`Connection`] itself doesn't enforce any limit. Enforcing such a bound must be done based
+//! on the logic of the higher-level protocols. Failing to do so might lead to potential DoS
+//! attack vectors.
 
-// TODO: finish usage
+// TODO: write example
 
 // TODO: the code of this module is rather complicated; either simplify it or write a lot of tests, including fuzzing tests
 
@@ -70,8 +87,9 @@ pub struct Connection<T> {
     writing_out_substream: Option<(SubstreamId, usize)>,
 
     /// If `Some`, the remote has requested to open the substream with the given ID. Contains
-    /// additional credits that the remote allocates to us.
-    pending_incoming_substream: Option<(SubstreamId, u32)>,
+    /// additional credits that the remote allocates to us, and a boolean indicating whether the
+    /// FIN flag has been sent.
+    pending_incoming_substream: Option<(SubstreamId, u32, bool)>,
 }
 
 struct Substream<T> {
@@ -279,6 +297,10 @@ impl<T> Connection<T> {
             let length_field =
                 u32::from_be_bytes(<[u8; 4]>::try_from(&self.incoming_header[8..12]).unwrap());
 
+            if (flags_field & !0b1111) != 0 {
+                return Err(Error::UnknownFlags(flags_field))
+            }
+
             // Byte 1 of the header indicates the type of message.
             match self.incoming_header[1] {
                 2 => {
@@ -323,6 +345,30 @@ impl<T> Connection<T> {
                 None => return Err(Error::ZeroSubstreamId),
             };
 
+            // Handle `RST` flag separately.
+            if (flags_field & 0x8) != 0 {
+                if self.incoming_header[1] == 0 && length_field != 0 {
+                    return Err(Error::DataWithRst);
+                }
+                self.incoming_header.clear();
+
+                if let Some(removed) = self.substreams.remove(&substream_id.0) {
+                    return Ok(IncomingDataOutcome {
+                        yamux: self,
+                        bytes_read: total_read,
+                        detail: Some(IncomingDataDetail::StreamReset {
+                            substream_id,
+                            user_data: removed.user_data,
+                        }),
+                    });
+                } else {
+                    // The remote might have sent a RST frame concerning a substream for which we
+                    // have sent a RST frame earlier. Considering that we don't keep traces of old
+                    // substreams, we have no way to know whether this is the case or not.
+                    continue;
+                }
+            }
+
             // Find the element in `self.substreams` corresponding to the substream requested by
             // the remote.
             // It is possible that the remote is referring to a substream for which a RST has been
@@ -337,13 +383,14 @@ impl<T> Connection<T> {
                     debug_assert!(self.pending_incoming_substream.is_none());
                     self.pending_incoming_substream = Some((
                         substream_id,
-                        if self.incoming_header[0] == 0 {
+                        if self.incoming_header[1] == 0 {
                             0
                         } else {
                             length_field
                         },
+                        (flags_field & 0x4) != 0,
                     ));
-                    if self.incoming_header[0] == 0 {
+                    if self.incoming_header[1] == 0 {
                         debug_assert!(self.incoming_data_frame.is_none());
                         self.incoming_data_frame = Some((substream_id, length_field));
                     }
@@ -358,11 +405,17 @@ impl<T> Connection<T> {
                 self.substreams.get_mut(&substream_id.0)
             };
 
-            if self.incoming_header[0] == 0 {
+            if self.incoming_header[1] == 0 {
                 // Data frame.
                 // Check whether the remote has the right to send that much data.
                 // Note that the credits aren't checked in the case of an unknown substream.
                 if let Some(substream) = substream {
+                    if substream.remote_write_closed {
+                        return Err(Error::WriteAfterFin);
+                    }
+                    if (flags_field & 0x4) != 0 {
+                        substream.remote_write_closed = true;
+                    }
                     // TODO: allocate more size?
                     substream.remote_allowed_window = substream
                         .remote_allowed_window
@@ -372,9 +425,12 @@ impl<T> Connection<T> {
                 debug_assert!(self.incoming_data_frame.is_none());
                 self.incoming_data_frame = Some((substream_id, length_field));
                 self.incoming_header.clear();
-            } else if self.incoming_header[0] == 1 {
+            } else if self.incoming_header[1] == 1 {
                 // Window size frame.
                 if let Some(substream) = substream {
+                    if (flags_field & 0x4) != 0 {
+                        substream.remote_write_closed = true;
+                    }
                     substream.allowed_window = substream
                         .allowed_window
                         .checked_add(u64::from(length_field))
@@ -513,7 +569,8 @@ impl<T> Connection<T> {
     }
 
     pub fn accept_pending_substream(&mut self, user_data: T) -> SubstreamMut<T> {
-        let (pending_incoming_substream, credits) = self.pending_incoming_substream.take().unwrap();
+        let (pending_incoming_substream, credits, fin_flag) =
+            self.pending_incoming_substream.take().unwrap();
         let _was_before = self.substreams.insert(
             pending_incoming_substream.0,
             Substream {
@@ -521,7 +578,7 @@ impl<T> Connection<T> {
                 remote_allowed_window: DEFAULT_FRAME_SIZE + u64::from(credits),
                 allowed_window: DEFAULT_FRAME_SIZE + u64::from(credits),
                 local_write_closed: false,
-                remote_write_closed: false,
+                remote_write_closed: fin_flag,
                 write_buffers: Vec::new(),
                 first_write_buffer_offset: 0,
                 user_data,
@@ -744,13 +801,13 @@ pub struct IncomingDataOutcome<T> {
     /// next time [`Connection::incoming_data`] is called.
     pub bytes_read: usize,
     /// Detail about the incoming data. `None` if nothing of interest has happened.
-    pub detail: Option<IncomingDataDetail>,
+    pub detail: Option<IncomingDataDetail<T>>,
 }
 
 /// Details about the incoming data.
 #[must_use]
 #[derive(Debug)]
-pub enum IncomingDataDetail {
+pub enum IncomingDataDetail<T> {
     /// Remote has requested to open a new substream.
     ///
     /// After this has been received, either [`Connection::accept_pending_substream`] or
@@ -766,6 +823,15 @@ pub enum IncomingDataDetail {
         /// Substream the data belongs to. Guaranteed to be valid.
         substream_id: SubstreamId,
     },
+    /// Remote has asked to reset a substream.
+    ///
+    /// The substream is now considered destroyed.
+    StreamReset {
+        /// Substream that has been destroyed. No longer valid.
+        substream_id: SubstreamId,
+        /// User data that was associated to this substream.
+        user_data: T,
+    },
 }
 
 /// Error while decoding the yamux stream.
@@ -775,6 +841,8 @@ pub enum Error {
     UnknownVersion(u8),
     /// Unrecognized value for the type of frame as indicated in the header.
     BadFrameType(u8),
+    /// Received flags whose meaning is unknown.
+    UnknownFlags(u16),
     /// Substream ID was zero in a data of window update frame.
     ZeroSubstreamId,
     /// Received a SYN flag with a known substream ID.
@@ -783,6 +851,10 @@ pub enum Error {
     CreditsExceeded,
     /// Number of credits allocated to the local node has overflowed.
     LocalCreditsOverflow,
+    /// Remote sent additional data on a substream after having sent the FIN flag.
+    WriteAfterFin,
+    /// Remote has sent a data frame containing data at the same time as a RST flag.
+    DataWithRst,
 }
 
 /// By default, all new substreams have this implicit window size.
