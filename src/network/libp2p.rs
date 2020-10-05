@@ -85,7 +85,7 @@ enum Connection {
         target: Multiaddr,
     },
     Handshaking {
-        connection: connection::HealthyHandshake,
+        connection: connection::handshake::HealthyHandshake,
     },
     Active {
         // TODO: connection: connection::Connection<>,
@@ -204,7 +204,7 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
     /// This method is `async` but will only block if synchronization with other tasks is
     /// necessary.
     pub async fn add_incoming_connection(&self, remote_send_back: Multiaddr) -> ConnectionId {
-        let handshake = connection::HealthyHandshake::new(false);
+        let handshake = connection::handshake::HealthyHandshake::new(false);
 
         self.num_incoming_connections
             .fetch_add(1, Ordering::Relaxed);

@@ -60,7 +60,7 @@
 // TODO: review this last sentence, as this API might change after some experience with it
 
 use alloc::collections::VecDeque;
-use core::{cmp, convert::TryFrom as _, fmt, iter, ops};
+use core::{cmp, convert::TryFrom as _, fmt, iter};
 use libp2p::PeerId;
 use prost::Message as _;
 
@@ -133,7 +133,7 @@ impl UnsignedNoiseKey {
     /// Generates a new private and public key pair.
     pub fn new() -> Self {
         UnsignedNoiseKey {
-            // TODO: can panic if there's no RNG; do we care about that?
+            // TODO: can panic if there's no RNG
             key: snow::Builder::new(NOISE_PARAMS.clone())
                 .generate_keypair()
                 .unwrap(),
@@ -194,7 +194,6 @@ pub struct Noise {
     rx_buffer_decrypted: Vec<u8>,
 }
 
-// TODO: switch a single `read_write` method, as for `Connection`
 impl Noise {
     /// Feeds data received from the wire.
     // TODO: document or redesign the return value; at the moment is can different from payload.len() only if the decrypted buffer is full
@@ -208,9 +207,9 @@ impl Noise {
             // Buffering up too much data in the output buffer should be avoided. As such, past
             // a certain threshold, return early and refuse to read more.
             // TODO: is this a good idea?
+            // TODO: should be configurable value
             if self.rx_buffer_decrypted.len() >= 65536 * 4 {
-                // TODO: should be configurable value ^
-                break;
+                return Ok(total_read);
             }
 
             // Try to construct the length prefix in `rx_buffer_encrypted` by moving bytes from
@@ -235,8 +234,7 @@ impl Noise {
             if self.rx_buffer_encrypted.len() + payload.len() < expected_len + 2 {
                 self.rx_buffer_encrypted.extend_from_slice(payload);
                 total_read += payload.len();
-                payload = &[];
-                break;
+                return Ok(total_read);
             }
 
             // Construct the encrypted slice of data to decode.
@@ -275,8 +273,6 @@ impl Noise {
             // Clear the now-decoded frame.
             self.rx_buffer_encrypted.clear();
         }
-
-        Ok(total_read)
     }
 
     /// Returns true if the local side has opened the connection.
@@ -460,7 +456,6 @@ impl NoiseHandshake {
     }
 }
 
-// TODO: switch a single `read_write` method, as for `Connection`
 impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
     pub fn new(key: &NoiseKey, is_initiator: bool) -> Self {
@@ -698,7 +693,7 @@ impl HandshakeInProgress {
                 // Because rust-libp2p was erroneously putting a length prefix before the payload,
                 // we try, as a fallback, to skip the first two bytes.
                 // See https://github.com/libp2p/rust-libp2p/blob/9178459cc8abb8379c759c02185175af7cfcea78/protocols/noise/src/io/handshake.rs#L368-L384
-                // TODO: remove this hack in the future
+                // TODO: remove this hack after Polkadot 0.8.25 is widely deployed
                 let handshake_payload =
                     match payload_proto::NoiseHandshakePayload::decode(&decoded_payload[..]) {
                         Ok(p) => p,

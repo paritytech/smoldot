@@ -40,10 +40,10 @@ async fn async_main() {
     let mut write_buffer_offset = 0;
     let mut write_buffer_ready = 0;
 
-    let mut connection = connection::Handshake::new(true);
+    let mut connection = connection::handshake::Handshake::new(true);
     let connection = loop {
         match connection {
-            connection::Handshake::Healthy(handshake) => {
+            connection::handshake::Handshake::Healthy(handshake) => {
                 let (new_state, read, written) = handshake
                     .read_write(
                         &read_buffer[..read_buffer_ready],
@@ -111,10 +111,10 @@ async fn async_main() {
 
                 connection = new_state;
             }
-            connection::Handshake::NoiseKeyRequired(key) => {
+            connection::handshake::Handshake::NoiseKeyRequired(key) => {
                 connection = key.resume(&noise_key).into()
             }
-            connection::Handshake::Success {
+            connection::handshake::Handshake::Success {
                 remote_peer_id,
                 connection,
             } => {
