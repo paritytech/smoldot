@@ -15,8 +15,19 @@
 
 //! State machine handling the handshake with a TCP or WebSocket libp2p connection.
 //!
-//! This state machine tries to negotiate and apply the noise and yamux protocols on top of the
-//! connection.
+//! A connection handshake consists of three steps:
+//!
+//! - A multistream-select negotiation to negotiate the encryption protocol. Only the noise
+//! protocol is supported at the moment.
+//! - A noise protocol handshake, where public keys are exchanged and symmetric encryption is
+//! initialized.
+//! - A multistream-select negotiation to negotiate the yamux protocol. Only the yamux protocol is
+//! supported at the moment. This negotiation is performed on top of the noise cipher.
+//!
+//! This entire handshake requires in total either three or five TCP packets (not including the
+//! TCP handshake), depending on the strategy used for the multistream-select protocol.
+
+// TODO: finish commenting on the number of round trips
 
 use super::{
     multistream_select,
@@ -122,37 +133,42 @@ impl HealthyHandshake {
                     negotiation,
                     is_initiator,
                 } => {
+                    // Earliest point of the handshake. The encryption is being negotiated.
+                    // Delegating read/write to the negotiation.
                     let (updated, num_read, num_written) = negotiation
                         .read_write(incoming_buffer, outgoing_buffer)
                         .map_err(HandshakeError::MultistreamSelect)?;
                     total_read += num_read;
                     total_written += num_written;
-                    // TODO: what to do with these warnings here? the warnings are legit, but removing these lines below would be error-prone for the future
-                    incoming_buffer = &incoming_buffer[num_read..];
-                    outgoing_buffer = &mut outgoing_buffer[num_written..];
 
-                    match updated {
-                        multistream_select::Negotiation::InProgress(updated) => {
-                            self.state = HandshakeState::NegotiatingEncryptionProtocol {
-                                negotiation: updated,
-                                is_initiator,
-                            };
-                            break;
-                        }
+                    return match updated {
+                        multistream_select::Negotiation::InProgress(updated) => Ok((
+                            Handshake::Healthy(HealthyHandshake {
+                                state: HandshakeState::NegotiatingEncryptionProtocol {
+                                    negotiation: updated,
+                                    is_initiator,
+                                },
+                            }),
+                            total_read,
+                            total_written,
+                        )),
                         multistream_select::Negotiation::Success(_) => {
-                            return Ok((
+                            // Reached the point where the Noise key is required in order to
+                            // continue. This Noise key is requested from the user.
+                            Ok((
                                 Handshake::NoiseKeyRequired(NoiseKeyRequired { is_initiator }),
                                 total_read,
                                 total_written,
-                            ));
+                            ))
                         }
                         multistream_select::Negotiation::NotAvailable => {
-                            return Err(HandshakeError::NoEncryptionProtocol);
+                            Err(HandshakeError::NoEncryptionProtocol)
                         }
-                    }
+                    };
                 }
 
                 HandshakeState::NegotiatingEncryption { handshake } => {
+                    // Delegating read/write to the Noise handshake state machine.
                     let (updated, num_read, num_written) = handshake
                         .read_write(incoming_buffer, &mut outgoing_buffer)
                         .map_err(HandshakeError::NoiseHandshake)?;
@@ -166,6 +182,8 @@ impl HealthyHandshake {
                             cipher,
                             remote_peer_id,
                         } => {
+                            // Encryption layer has been successfully negotiated. Start the
+                            // handshake for the multiplexing protocol negotiation.
                             let negotiation =
                                 multistream_select::InProgress::new(if cipher.is_initiator() {
                                     multistream_select::Config::Dialer {
@@ -182,11 +200,19 @@ impl HealthyHandshake {
                                 encryption: cipher,
                                 negotiation,
                             };
+
+                            continue;
                         }
                         noise::NoiseHandshake::InProgress(updated) => {
-                            self.state =
-                                HandshakeState::NegotiatingEncryption { handshake: updated };
-                            break;
+                            return Ok((
+                                Handshake::Healthy(HealthyHandshake {
+                                    state: HandshakeState::NegotiatingEncryption {
+                                        handshake: updated,
+                                    },
+                                }),
+                                total_read,
+                                total_written,
+                            ));
                         }
                     };
                 }
@@ -196,52 +222,68 @@ impl HealthyHandshake {
                     mut encryption,
                     peer_id,
                 } => {
+                    // During the multiplexing protocol negotiation, all exchanges have to go
+                    // through the Noise cipher.
+
+                    // TODO: explain
                     let num_read = encryption
                         .inject_inbound_data(incoming_buffer)
                         .map_err(HandshakeError::Noise)?;
-                    total_read += incoming_buffer.len();
-                    incoming_buffer = &incoming_buffer[num_read..];
+                    assert_eq!(num_read, incoming_buffer.len()); // TODO: not necessarily true; situation is a bit complicated; see noise module
+                    total_read += num_read;
 
-                    let mut buffer = vec![0; encryption.encrypt_size_conv(outgoing_buffer.len())];
+                    // Allocate a temporary buffer where to put the unencrypted data that should
+                    // later be encrypted and written out.
+                    // The size of this buffer is equal to the maximum possible size of
+                    // unencrypted data that will lead to `outgoing_buffer.len()` encrypted bytes.
+                    let mut out_intermediary =
+                        vec![0; encryption.encrypt_size_conv(outgoing_buffer.len())];
 
-                    let (updated, read_num, written_interm) = negotiation
-                        .read_write(encryption.decoded_inbound_data(), &mut buffer)
+                    // Continue the multistream-select negotiation, writing to `out_intermediary`.
+                    let (updated, decrypted_read_num, written_interm) = negotiation
+                        .read_write(encryption.decoded_inbound_data(), &mut out_intermediary)
                         .map_err(HandshakeError::MultistreamSelect)?;
-                    encryption.consume_inbound_data(read_num);
-                    let (_read, written) =
-                        encryption.encrypt(iter::once(&buffer[..written_interm]), outgoing_buffer);
-                    debug_assert_eq!(_read, written_interm);
-                    outgoing_buffer = &mut outgoing_buffer[written..];
-                    total_written += written;
 
-                    match updated {
-                        multistream_select::Negotiation::InProgress(updated) => {
-                            self.state = HandshakeState::NegotiatingMultiplexing {
-                                negotiation: updated,
-                                encryption,
-                                peer_id,
-                            };
-                            break;
-                        }
-                        multistream_select::Negotiation::Success(_) => {
-                            return Ok((
-                                Handshake::Success {
-                                    connection: ConnectionPrototype::from_noise_yamux(encryption),
-                                    remote_peer_id: peer_id,
+                    // TODO: explain
+                    encryption.consume_inbound_data(decrypted_read_num);
+
+                    // Encrypt the content of `out_intermediary`, writing it to `outgoing_buffer`.
+                    // It is guaranteed that `out_intermediary` will be entirely consumed and can
+                    // thus be thrown away.
+                    let (_unencrypted_read, encrypted_written) = encryption.encrypt(
+                        iter::once(&out_intermediary[..written_interm]),
+                        outgoing_buffer,
+                    );
+                    debug_assert_eq!(_unencrypted_read, written_interm);
+                    total_written += encrypted_written;
+
+                    return match updated {
+                        multistream_select::Negotiation::InProgress(updated) => Ok((
+                            Handshake::Healthy(HealthyHandshake {
+                                state: HandshakeState::NegotiatingMultiplexing {
+                                    negotiation: updated,
+                                    encryption,
+                                    peer_id,
                                 },
-                                total_read,
-                                total_written,
-                            ));
-                        }
+                            }),
+                            total_read,
+                            total_written,
+                        )),
+                        multistream_select::Negotiation::Success(_) => Ok((
+                            Handshake::Success {
+                                connection: ConnectionPrototype::from_noise_yamux(encryption),
+                                remote_peer_id: peer_id,
+                            },
+                            total_read,
+                            total_written,
+                        )),
                         multistream_select::Negotiation::NotAvailable => {
-                            return Err(HandshakeError::NoMultiplexingProtocol)
+                            Err(HandshakeError::NoMultiplexingProtocol)
                         }
-                    }
+                    };
                 }
             }
         }
-
-        Ok((Handshake::Healthy(self), total_read, total_written))
     }
 }
 
