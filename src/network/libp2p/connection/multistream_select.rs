@@ -34,6 +34,16 @@
 //! the dialer and listener of the connection. In the context of a substream, the dialer is the
 //! side that initiated the opening of the substream.
 //!
+//! # About protocol names
+//!
+//! Due to flaws in the wire protocol design, a protocol named `ls` or `na` causes an ambiguity in
+//! the exchange. Because protocol names are normally decided ahead of time, this situation is
+//! expected to never arise, except in the presence of a malicious remote. The decision has been
+//! taken that such protocol will always fail to negotiate, but will also not produce any error
+//! or panic.
+//!
+//! Please don't intentionally name a protocol `ls` or `na`.
+//!
 //! # Usage
 //!
 //! To be written.
@@ -43,14 +53,11 @@
 //! - [Official repository](https://github.com/multiformats/multistream-select)
 //!
 
-// TODO: write usage once it's fully fledged out
+// TODO: write usage
 
 use crate::network::leb128;
 
 use core::{cmp, fmt, iter, mem, slice, str};
-
-/// Handshake message sent by both parties at the beginning of each multistream-select negotiation.
-const HANDSHAKE: &'static [u8] = b"/multistream/1.0.0\n";
 
 /// Configuration of a multistream-select protocol.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -97,23 +104,34 @@ where
 pub struct InProgress<I, P> {
     /// Configuration of the negotiation. Always `Some` except right before destruction.
     config: Option<Config<I, P>>,
+    /// Current state of the negotiation.
     state: InProgressState<P>,
     /// Incoming data is buffered in this `recv_buffer` before being decoded.
     recv_buffer: leb128::Framed,
 }
 
+/// Current state of the negotiation.
 enum InProgressState<P> {
     SendHandshake {
+        /// Number of bytes of the handshake already written out.
         num_bytes_written: usize,
     },
     SendProtocolRequest {
+        /// Number of bytes of the request already written out.
         num_bytes_written: usize,
     },
     SendProtocolOk {
+        /// Number of bytes of the response already written out.
         num_bytes_written: usize,
+        /// Which protocol to acknowledge.
         protocol: P,
     },
+    SendLsResponse {
+        /// Number of bytes of the response already written out.
+        num_bytes_written: usize,
+    },
     SendProtocolNa {
+        /// Number of bytes of the response already written out.
         num_bytes_written: usize,
     },
     HandshakeExpected,
@@ -200,7 +218,7 @@ where
                     InProgressState::SendHandshake {
                         mut num_bytes_written,
                     },
-                    _,
+                    Some(config),
                 ) => {
                     let message = MessageOut::Handshake::<&'static str>;
                     let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
@@ -208,7 +226,7 @@ where
                     total_written += written;
                     num_bytes_written += written;
 
-                    match (done, self.config.as_ref().unwrap()) {
+                    match (done, config) {
                         (false, _) => {
                             self.state = InProgressState::SendHandshake { num_bytes_written };
                             break;
@@ -228,14 +246,9 @@ where
                     InProgressState::SendProtocolRequest {
                         mut num_bytes_written,
                     },
-                    _,
+                    Some(Config::Dialer { requested_protocol }),
                 ) => {
-                    let message = match self.config.as_ref().unwrap() {
-                        Config::Dialer { requested_protocol } => {
-                            MessageOut::ProtocolRequest(requested_protocol.as_ref())
-                        }
-                        _ => unreachable!(),
-                    };
+                    let message = MessageOut::ProtocolRequest(requested_protocol.as_ref());
                     let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
                     outgoing_buffer = &mut outgoing_buffer[written..];
                     total_written += written;
@@ -278,7 +291,6 @@ where
                 ) => {
                     let message = MessageOut::ProtocolOk(protocol.as_ref());
                     let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
-                    outgoing_buffer = &mut outgoing_buffer[written..];
                     total_written += written;
                     num_bytes_written += written;
 
@@ -289,6 +301,27 @@ where
                             num_bytes_written,
                             protocol,
                         };
+                        break;
+                    }
+                }
+
+                (
+                    InProgressState::SendLsResponse {
+                        mut num_bytes_written,
+                    },
+                    Some(Config::Listener {
+                        supported_protocols: _,
+                    }),
+                ) => {
+                    let message = MessageOut::LsResponse::<&'static str>;
+                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
+                    total_written += written;
+                    num_bytes_written += written;
+
+                    if done {
+                        self.state = InProgressState::CommandExpected;
+                    } else {
+                        self.state = InProgressState::SendLsResponse { num_bytes_written };
                         break;
                     }
                 }
@@ -307,6 +340,7 @@ where
                     if &*frame != HANDSHAKE {
                         return Err(Error::BadHandshake);
                     }
+
                     // The dialer immediately sends the request after its handshake and before
                     // waiting for the handshake from the listener. As such, after receiving the
                     // handshake, the next step is to wait for the request answer.
@@ -327,6 +361,7 @@ where
                     if &*frame != HANDSHAKE {
                         return Err(Error::BadHandshake);
                     }
+
                     // The listener immediately sends the handshake at initialization. When this
                     // code is reached, it has therefore already been sent.
                     self.state = InProgressState::CommandExpected;
@@ -351,7 +386,12 @@ where
                     if frame.is_empty() {
                         return Err(Error::InvalidCommand);
                     } else if &*frame == b"ls\n" {
-                        todo!("requested ls") // TODO:
+                        // Because of the order of checks, a protocol named `ls` will never be
+                        // successfully negotiated. Debugging is expected to be less confusing if
+                        // the negotiation always fails.
+                        self.state = InProgressState::SendLsResponse {
+                            num_bytes_written: 0,
+                        };
                     } else if let Some(protocol) = supported_protocols
                         .clone()
                         .find(|p| p.as_ref().as_bytes() == &frame[..frame.len() - 1])
@@ -392,6 +432,9 @@ where
                         return Err(Error::UnexpectedProtocolRequestAnswer);
                     }
                     if &*frame == b"na\n" {
+                        // Because of the order of checks, a protocol named `na` will never be
+                        // successfully negotiated. Debugging is expected to be less confusing if
+                        // the negotiation always fails.
                         return Ok((Negotiation::NotAvailable, total_read, total_written));
                     }
                     if &frame[..frame.len() - 1] != requested_protocol.as_ref().as_bytes() {
@@ -405,6 +448,12 @@ where
                 }
 
                 // Invalid states.
+                (InProgressState::SendProtocolRequest { .. }, Some(Config::Listener { .. })) => {
+                    unreachable!()
+                }
+                (InProgressState::SendLsResponse { .. }, Some(Config::Dialer { .. })) => {
+                    unreachable!()
+                }
                 (InProgressState::CommandExpected, Some(Config::Dialer { .. })) => unreachable!(),
                 (InProgressState::ProtocolRequestAnswerExpected, Some(Config::Listener { .. })) => {
                     unreachable!()
@@ -476,6 +525,9 @@ pub enum Error {
     UnexpectedProtocolRequestAnswer,
 }
 
+/// Handshake message sent by both parties at the beginning of each multistream-select negotiation.
+const HANDSHAKE: &'static [u8] = b"/multistream/1.0.0\n";
+
 /// Message on the multistream-select protocol.
 #[derive(Debug, Copy, Clone)]
 pub enum MessageOut<P> {
@@ -497,7 +549,7 @@ where
         let len = match &self {
             MessageOut::Handshake => HANDSHAKE.len(),
             MessageOut::Ls => 3,
-            MessageOut::LsResponse => todo!(),
+            MessageOut::LsResponse => todo!("sending ls response unimplemented"), // TODO:
             MessageOut::ProtocolRequest(p) => p.as_ref().len() + 1,
             MessageOut::ProtocolOk(p) => p.as_ref().len() + 1,
             MessageOut::ProtocolNa => 3,
@@ -512,8 +564,6 @@ where
             }
             One(n)
         });
-
-        // TODO: check that protocol name isn't `ls` or `na`
 
         let mut n = 0;
         let body = iter::from_fn(move || {
@@ -555,6 +605,11 @@ where
     /// Write to the given buffer the bytes of the message, starting at `message_offset`. Returns
     /// the number of bytes written to `destination`, and a flag indicating whether the
     /// destination buffer was large enough to hold the entire message.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `message_offset` is larger than the size of the message.
+    ///
     pub fn write_out(self, mut message_offset: usize, mut destination: &mut [u8]) -> (usize, bool) {
         let mut total_written = 0;
 

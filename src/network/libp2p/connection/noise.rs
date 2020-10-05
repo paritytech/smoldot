@@ -543,7 +543,7 @@ impl HandshakeInProgress {
     }
 
     /// Try to turn this [`InProgress`] into a [`NoiseHandshake::Success`] if possible.
-    fn try_finish(mut self) -> NoiseHandshake {
+    fn try_finish(self) -> NoiseHandshake {
         if !self.tx_buffer_encrypted.is_empty() {
             return NoiseHandshake::InProgress(self);
         }

@@ -298,7 +298,7 @@ impl<T> Connection<T> {
                 u32::from_be_bytes(<[u8; 4]>::try_from(&self.incoming_header[8..12]).unwrap());
 
             if (flags_field & !0b1111) != 0 {
-                return Err(Error::UnknownFlags(flags_field))
+                return Err(Error::UnknownFlags(flags_field));
             }
 
             // Byte 1 of the header indicates the type of message.
