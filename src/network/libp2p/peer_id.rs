@@ -1,4 +1,4 @@
-// Copyright 2019 Parity Technologies (UK) Ltd.
+// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
 // copy of this software and associated documentation files (the "Software"),
@@ -25,19 +25,22 @@ mod keys_proto {
     include!(concat!(env!("OUT_DIR"), "/keys_proto.rs"));
 }
 
-/// The public key of a node's identity keypair.
+/// Public key of a node's identity.
+///
+/// > **Note**: This enum isn't fully compatible with the libp2p specifications, as support for
+/// >           RSA is mandatory.
+// TODO: add support for RSA ^
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicKey {
     /// An ed25519 public key.
     Ed25519([u8; 32]),
+    // TODO: Rsa(??)
 }
 
 impl PublicKey {
     /// Encode the public key into a protobuf structure for storage or
     /// exchange with other nodes.
     pub fn into_protobuf_encoding(self) -> Vec<u8> {
-        use prost::Message;
-
         let public_key = match self {
             PublicKey::Ed25519(key) => keys_proto::PublicKey {
                 r#type: keys_proto::KeyType::Ed25519 as i32,
@@ -67,9 +70,9 @@ impl PublicKey {
                     .map_err(|_| FromProtobufEncodingError::BadEd25519Key)?;
                 Ok(PublicKey::Ed25519(*pubkey))
             }
-            keys_proto::KeyType::Rsa | keys_proto::KeyType::Secp256k1 => {
-                Err(FromProtobufEncodingError::UnsupportedAlgorithm)
-            }
+            keys_proto::KeyType::Rsa
+            | keys_proto::KeyType::Secp256k1
+            | keys_proto::KeyType::Ecdsa => Err(FromProtobufEncodingError::UnsupportedAlgorithm),
         }
     }
 
@@ -91,6 +94,12 @@ impl PublicKey {
     }
 }
 
+impl From<PublicKey> for PeerId {
+    fn from(public_key: PublicKey) -> PeerId {
+        public_key.into_peer_id()
+    }
+}
+
 /// Error potentially returned by [`PublicKey::from_protobuf_encoding`].
 #[derive(Debug, derive_more::Display)]
 pub enum FromProtobufEncodingError {
@@ -108,7 +117,7 @@ pub enum FromProtobufEncodingError {
 /// automatically used as the peer id using an identity multihash.
 const MAX_INLINE_KEY_LENGTH: usize = 42;
 
-/// Identifier of a peer of the network.
+/// Identifier of a node of the network.
 ///
 /// The data is a multihash of the public key of the peer.
 #[derive(Clone, Eq)]
@@ -116,34 +125,8 @@ pub struct PeerId {
     multihash: multihash::Multihash,
 }
 
-impl fmt::Debug for PeerId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PeerId").field(&self.to_base58()).finish()
-    }
-}
-
-impl fmt::Display for PeerId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.to_base58().fmt(f)
-    }
-}
-
-impl cmp::PartialOrd for PeerId {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(Ord::cmp(self, other))
-    }
-}
-
-impl cmp::Ord for PeerId {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        let lhs: &[u8] = self.as_ref();
-        let rhs: &[u8] = other.as_ref();
-        lhs.cmp(rhs)
-    }
-}
-
 impl PeerId {
-    /// Builds a `PeerId` from a public key.
+    /// Builds the [`PeerId`] corresponding to a public key.
     pub fn from_public_key(key: PublicKey) -> PeerId {
         let key_enc = key.into_protobuf_encoding();
 
@@ -157,30 +140,36 @@ impl PeerId {
         PeerId { multihash }
     }
 
-    /// Checks whether `data` is a valid `PeerId`. If so, returns the `PeerId`. If not, returns
-    /// back the data as an error.
-    pub fn from_bytes(data: Vec<u8>) -> Result<PeerId, Vec<u8>> {
+    /// Checks whether `data` is a valid [`PeerId`].
+    ///
+    /// In case of error, returns the bytes passed as parameter in addition to the error.
+    pub fn from_bytes(data: Vec<u8>) -> Result<PeerId, (FromBytesError, Vec<u8>)> {
         match multihash::Multihash::from_bytes(data) {
             Ok(multihash) => match Self::from_multihash(multihash) {
                 Ok(p) => Ok(p),
-                Err(mh) => Err(mh.into_bytes()),
+                Err((err, mh)) => Err((FromBytesError::InvalidMultihash(err), mh.into_bytes())),
             },
-            Err(err) => Err(err.data),
+            Err(err) => Err((FromBytesError::DecodeError(err.error), err.data)),
         }
     }
 
     /// Turns a `Multihash` into a `PeerId`. If the multihash doesn't use the correct algorithm,
-    /// returns back the data as an error.
-    pub fn from_multihash(data: multihash::Multihash) -> Result<PeerId, multihash::Multihash> {
+    /// returns back the data in addition to the error.
+    pub fn from_multihash(
+        data: multihash::Multihash,
+    ) -> Result<PeerId, (FromMultihashError, multihash::Multihash)> {
         if data.algorithm() == multihash::Code::Sha2_256 {
             Ok(PeerId { multihash: data })
         } else if data.algorithm() == multihash::Code::Identity {
             if data.digest().len() > MAX_INLINE_KEY_LENGTH {
-                return Err(data);
+                return Err((FromMultihashError::BadAlgorithm, data));
+            }
+            if let Err(err) = PublicKey::from_protobuf_encoding(data.digest()) {
+                return Err((FromMultihashError::InvalidPublicKey(err), data));
             }
             Ok(PeerId { multihash: data })
         } else {
-            Err(data)
+            Err((FromMultihashError::BadAlgorithm, data))
         }
     }
 
@@ -210,6 +199,32 @@ impl PeerId {
     }
 }
 
+impl fmt::Debug for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PeerId").field(&self.to_base58()).finish()
+    }
+}
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.to_base58().fmt(f)
+    }
+}
+
+impl cmp::PartialOrd for PeerId {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(Ord::cmp(self, other))
+    }
+}
+
+impl cmp::Ord for PeerId {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        let lhs: &[u8] = self.as_ref();
+        let rhs: &[u8] = other.as_ref();
+        lhs.cmp(rhs)
+    }
+}
+
 impl hash::Hash for PeerId {
     fn hash<H>(&self, state: &mut H)
     where
@@ -220,25 +235,19 @@ impl hash::Hash for PeerId {
     }
 }
 
-impl From<PublicKey> for PeerId {
-    fn from(key: PublicKey) -> PeerId {
-        PeerId::from_public_key(key)
-    }
-}
-
 impl TryFrom<Vec<u8>> for PeerId {
-    type Error = Vec<u8>;
+    type Error = FromBytesError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        PeerId::from_bytes(value)
+        PeerId::from_bytes(value).map_err(|(err, _)| err)
     }
 }
 
 impl TryFrom<multihash::Multihash> for PeerId {
-    type Error = multihash::Multihash;
+    type Error = FromMultihashError;
 
     fn try_from(value: multihash::Multihash) -> Result<Self, Self::Error> {
-        PeerId::from_multihash(value)
+        PeerId::from_multihash(value).map_err(|(err, _)| err)
     }
 }
 
@@ -262,17 +271,45 @@ impl From<PeerId> for multihash::Multihash {
     }
 }
 
-#[derive(Debug, derive_more::Display, derive_more::From)]
-pub enum ParseError {
-    Bs58(bs58::decode::Error),
-    MultiHash,
-}
-
 impl FromStr for PeerId {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes = bs58::decode(s).into_vec()?;
-        PeerId::from_bytes(bytes).map_err(|_| ParseError::MultiHash)
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(Bs58DecodeError)
+            .map_err(ParseError::Bs58)?;
+        PeerId::from_bytes(bytes).map_err(|(err, _)| ParseError::Multihash(err))
     }
 }
+
+/// Error when turning bytes into a [`PeerId`].
+#[derive(Debug, derive_more::Display)]
+pub enum FromBytesError {
+    /// Failed to decode bytes into a multihash.
+    DecodeError(multihash::DecodeError),
+    /// Multihash isn't a valid [`PeerId`].
+    InvalidMultihash(FromMultihashError),
+}
+
+/// Error when turning a mulithash into a [`PeerId`].
+#[derive(Debug, derive_more::Display)]
+pub enum FromMultihashError {
+    /// Algorithm used into the multihash isn't correct.
+    BadAlgorithm,
+    /// Multihash uses the identity algorithm, but the data isn't a valid public key.
+    InvalidPublicKey(FromProtobufEncodingError),
+}
+
+/// Error when parsing a string to a [`PeerId`].
+#[derive(Debug, derive_more::Display)]
+pub enum ParseError {
+    /// Error decoding the base58 encoding.
+    Bs58(Bs58DecodeError),
+    /// Decoded bytes aren't a valid [`PeerId`].
+    Multihash(FromBytesError),
+}
+
+/// Error when decoding base58 encoding.
+#[derive(Debug, derive_more::Display, derive_more::From)]
+pub struct Bs58DecodeError(bs58::decode::Error);

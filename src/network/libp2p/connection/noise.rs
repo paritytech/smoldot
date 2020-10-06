@@ -160,10 +160,8 @@ impl UnsignedNoiseKey {
     /// Turns this [`UnsignedNoiseKey`] into a [`NoiseKey`] after signing it using the libp2p
     /// private key.
     pub fn sign(self, libp2p_public_ed25519_key: [u8; 32], signature: [u8; 64]) -> NoiseKey {
-        let libp2p_pubkey_protobuf = libp2p::identity::PublicKey::Ed25519(
-            libp2p::identity::ed25519::PublicKey::decode(&libp2p_public_ed25519_key).unwrap(),
-        )
-        .into_protobuf_encoding();
+        let libp2p_pubkey_protobuf =
+            PublicKey::Ed25519(libp2p_public_ed25519_key).into_protobuf_encoding();
 
         let handshake_message = {
             let mut protobuf = payload_proto::NoiseHandshakePayload::default();

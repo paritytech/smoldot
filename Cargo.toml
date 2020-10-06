@@ -18,9 +18,6 @@ default = ["os-networking"]
 os-networking = [
     "async-std",
     "async-tls",
-    "libp2p/dns",
-    "libp2p/tcp-async-std",
-    "libp2p/websocket",
     "soketto",
     "url",
     "webpki",
@@ -60,7 +57,7 @@ blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.3.1", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", features = ["serde"] }   # TODO: remove serde feature
 derive_more = "0.99.7"
-ed25519-dalek = { version = "1.0.0", default-features = false, features = ["alloc", "batch"] }
+ed25519-dalek = { version = "1.0.0", default-features = false, features = ["alloc", "batch", "u64_backend"] }
 either = "1.6.1"
 env_logger = "0.7.1"
 fnv = "1.0"
@@ -85,14 +82,14 @@ pin-project = "0.4.26"
 prost = "0.6.1"
 rand = "0.7.0"
 rand_chacha = "0.2.2"
-schnorrkel = { version = "0.9.1", default-features = false }
+schnorrkel = { git = "https://github.com/w3f/schnorrkel", rev = "cfdbe9ae865a4d3ffa2566d896d4dbedf5107028" } # TODO: waiting for a publication { version = "0.9.1", default-features = false }
 send_wrapper = "0.4.0"
 serde = { version = "1.0.101", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.57", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = "0.9.1"
 slab = "0.4.2"
 smallvec = "0.6.10"
-snow = { version = "0.7.1", default-features = false }  # TODO: we have to pick a resolver I think
+snow = { version = "0.7.1", default-features = false, features = ["default-resolver"] }
 structopt = { version = "0.3.17", default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = "0.1.12"
 tiny-keccak = { version = "2.0", features = ["keccak"] }
@@ -121,13 +118,6 @@ bytes = "0.5.0"  # TODO: I hate bytes
 impl-serde = "0.2.3"  # TODO: that looks like a hack
 parity-scale-codec = { version = "1.0.0", features = ["derive"] } # TODO: a lot of unnecessary overhead in terms of memory allocations
 primitive-types = { version = "0.6.2", default-features = false, features = ["codec", "serde", "std"] } # TODO: nothing wrong with this one, but ideally don't use parity crates
-sc-peerset = { git = "https://github.com/paritytech/substrate", rev = "16fdfc4a80a14a26221d17b8a1b9a95421a1576c" }
-void = "1.0"    # TODO: remove
-
-[dependencies.libp2p] # TODO: remove
-version = "0.22.0"
-default-features = false
-features = ["identify", "kad", "mdns", "mplex", "noise", "ping", "request-response", "wasm-ext", "yamux"]
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `wasmtime` feature

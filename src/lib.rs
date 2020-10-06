@@ -202,7 +202,6 @@ pub mod informant;
 pub mod json_rpc;
 pub mod metadata;
 pub mod network;
-pub mod telemetry;
 pub mod trie;
 pub mod verify;
 

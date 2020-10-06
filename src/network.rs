@@ -22,4 +22,5 @@ pub mod leb128;
 pub mod libp2p;
 pub mod with_buffers;
 
-pub use ::libp2p::{Multiaddr, PeerId}; // TODO: redefine locally?
+pub use libp2p::peer_id::PeerId;
+pub use parity_multiaddr::Multiaddr;
