@@ -30,6 +30,7 @@
 // TODO: finish commenting on the number of round trips
 
 use super::{
+    super::peer_id::PeerId,
     established::ConnectionPrototype,
     multistream_select,
     noise::{self, NoiseKey},
@@ -37,7 +38,6 @@ use super::{
 };
 
 use core::{fmt, iter};
-use libp2p::PeerId;
 
 mod tests;
 

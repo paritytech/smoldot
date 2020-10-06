@@ -29,18 +29,19 @@
 //! >           multiple tasks (themselves distributed between multiple CPU cores), and share the
 //! >           [`Network`] object between all these tasks.
 
-use ::libp2p::PeerId;
 use alloc::{collections::BTreeSet, sync::Arc};
 use connection::NoiseKey;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use futures::lock::Mutex;
 use hashbrown::HashMap;
 use multiaddr::Multiaddr;
+use peer_id::PeerId;
 
 #[doc(inline)]
 pub use parity_multiaddr as multiaddr;
 
 pub mod connection;
+pub mod peer_id;
 
 /// Configuration for creating a [`Network`].
 pub struct Config {

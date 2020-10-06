@@ -21,6 +21,7 @@
 
 fn main() {
     //prost_build::compile_protos(PROTOS, &["src/network/schema"]).unwrap();
+    prost_build::compile_protos(&["src/network/libp2p/peer_id/keys.proto"], &["src"]).unwrap();
     prost_build::compile_protos(
         &["src/network/libp2p/connection/noise/payload.proto"],
         &["src"],

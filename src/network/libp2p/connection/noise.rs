@@ -59,9 +59,10 @@
 //! remote, and [`Noise::inject_inbound_data`] when data is received.
 // TODO: review this last sentence, as this API might change after some experience with it
 
+use crate::network::libp2p::peer_id::{PeerId, PublicKey};
+
 use alloc::collections::VecDeque;
 use core::{cmp, convert::TryFrom as _, fmt, iter};
-use libp2p::PeerId;
 use prost::Message as _;
 
 mod payload_proto {
@@ -714,20 +715,22 @@ impl HandshakeInProgress {
                         }
                     };
 
-                let remote_public_key = libp2p::identity::PublicKey::from_protobuf_encoding(
-                    &handshake_payload.identity_key,
-                )
-                .map_err(|_| HandshakeError::InvalidKey)?;
+                let remote_public_key =
+                    PublicKey::from_protobuf_encoding(&handshake_payload.identity_key)
+                        .map_err(|_| HandshakeError::InvalidKey)?;
 
                 // Assuming that the libp2p+noise specifications are well-designed, the payload
                 // will only arrive after `get_remote_static` is `Some`. Since we have already
                 // checked that the payload arrives when it is supposed to, this can never panic.
                 let remote_noise_static = self.inner.get_remote_static().unwrap();
                 // TODO: don't use concat() in order to not allocate a Vec
-                if !remote_public_key.verify(
-                    &["noise-libp2p-static-key:".as_bytes(), remote_noise_static].concat(),
-                    &handshake_payload.identity_sig,
-                ) {
+                if remote_public_key
+                    .verify(
+                        &["noise-libp2p-static-key:".as_bytes(), remote_noise_static].concat(),
+                        &handshake_payload.identity_sig,
+                    )
+                    .is_err()
+                {
                     return Err(HandshakeError::SignatureVerificationFailed);
                 }
 
