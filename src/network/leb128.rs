@@ -21,28 +21,46 @@
 
 // TODO: better doc
 
-use core::{cmp, convert::TryFrom as _, fmt, iter, mem, ops::Deref};
+use core::{cmp, convert::TryFrom as _, fmt, mem, ops::Deref};
 
 /// Returns an LEB128-encoded integer as a list of bytes.
-// TODO: could be an ExactSizeIterator
-pub fn encode(value: impl Into<u64>) -> impl Iterator<Item = u8> {
-    let mut value = value.into();
-    let mut finished = false;
+pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clone {
+    #[derive(Clone)]
+    struct EncodeIter {
+        value: u64,
+        finished: bool,
+    }
 
-    iter::from_fn(move || {
-        if finished {
-            return None;
+    impl Iterator for EncodeIter {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.finished {
+                return None;
+            }
+
+            if self.value < (1 << 7) {
+                self.finished = true;
+                return Some(u8::try_from(self.value).unwrap());
+            }
+
+            let ret = (1 << 7) | u8::try_from(self.value & 0b1111111).unwrap();
+            self.value >>= 7;
+            Some(ret)
         }
 
-        if value < (1 << 7) {
-            finished = true;
-            return Some(u8::try_from(value).unwrap());
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let len = self.clone().count();
+            (len, Some(len))
         }
+    }
 
-        let ret = (1 << 7) | u8::try_from(value & 0b1111111).unwrap();
-        value >>= 7;
-        Some(ret)
-    })
+    impl ExactSizeIterator for EncodeIter {}
+
+    EncodeIter {
+        value: value.into(),
+        finished: false,
+    }
 }
 
 /// Returns an LEB128-encoded `usize` as a list of bytes.
@@ -189,4 +207,19 @@ impl<'a> Drop for FrameDrain<'a> {
     }
 }
 
-// TODO: tests
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn basic_encode() {
+        let obtained = super::encode(0x123456789abcdefu64).collect::<Vec<_>>();
+        assert_eq!(obtained, &[239, 155, 175, 205, 248, 172, 209, 145, 1]);
+    }
+
+    #[test]
+    fn encode_zero() {
+        let obtained = super::encode(0u64).collect::<Vec<_>>();
+        assert_eq!(obtained, &[0x0u8]);
+    }
+
+    // TODO: more tests
+}
