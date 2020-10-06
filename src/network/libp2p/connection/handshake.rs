@@ -30,9 +30,10 @@
 // TODO: finish commenting on the number of round trips
 
 use super::{
+    established::ConnectionPrototype,
     multistream_select,
     noise::{self, NoiseKey},
-    yamux, ConnectionPrototype,
+    yamux,
 };
 
 use core::{fmt, iter};

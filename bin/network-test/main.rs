@@ -126,11 +126,12 @@ async fn async_main() {
 
     println!("Connected!");
 
-    let mut connection = connection.into_connection::<_, (), (), _, _>(connection::Config {
-        in_request_protocols: iter::once("/ipfs/ping/1.0.0"),
-        in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO:
-        randomness_seed: rand::random(),
-    });
+    let mut connection =
+        connection.into_connection::<_, (), (), _, _>(connection::established::Config {
+            in_request_protocols: iter::once("/ipfs/ping/1.0.0"),
+            in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO:
+            randomness_seed: rand::random(),
+        });
 
     connection.add_request(Instant::now(), "/dot/sync/2", vec![0x1, 0x2, 0x3, 0x4], ());
 

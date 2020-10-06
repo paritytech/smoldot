@@ -209,6 +209,13 @@ impl<T> Connection<T> {
         }
     }
 
+    /// Returns an iterator to the list of all substream user datas.
+    pub fn user_datas(&self) -> impl ExactSizeIterator<Item = (SubstreamId, &T)> {
+        self.substreams
+            .iter()
+            .map(|(id, s)| (SubstreamId(*id), &s.user_data))
+    }
+
     /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
     /// is open.
     pub fn substream_by_id(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
