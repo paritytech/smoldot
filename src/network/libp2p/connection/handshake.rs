@@ -120,6 +120,7 @@ impl HealthyHandshake {
     /// the connection should be closed altogether.
     ///
     /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
+    // TODO: should take the in and out buffers as iterators, to allow for vectored reads/writes; tricky because an impl Iterator<Item = &mut [u8]> + Clone is impossible to build
     pub fn read_write(
         mut self,
         mut incoming_buffer: &[u8],

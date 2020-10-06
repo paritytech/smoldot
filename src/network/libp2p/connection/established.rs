@@ -125,6 +125,7 @@ where
     /// `TNow` representing the moment after which this method should be called again.
     ///
     /// If an error is returned, the socket should be entirely shut down.
+    // TODO: should take the in and out buffers as iterators, to allow for vectored reads/writes; tricky because an impl Iterator<Item = &mut [u8]> + Clone is impossible to build
     // TODO: in case of error, we're supposed to first send a yamux goaway frame
     pub fn read_write(
         mut self,
