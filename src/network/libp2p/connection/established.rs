@@ -41,7 +41,7 @@ pub struct Established<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// Consists in a collection of substreams, each of which holding a [`Substream`] object.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
-    yamux: yamux::Connection<Substream<TNow, TRqUd, TProtoList, TProto>>,
+    yamux: yamux::Yamux<Substream<TNow, TRqUd, TProtoList, TProto>>,
 
     /// List of request-response protocols.
     in_request_protocols: TProtoList,
@@ -695,7 +695,7 @@ impl ConnectionPrototype {
         self,
         config: Config<TProtoList>,
     ) -> Established<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
-        let yamux = yamux::Connection::new(yamux::Config {
+        let yamux = yamux::Yamux::new(yamux::Config {
             is_initiator: self.encryption.is_initiator(),
             capacity: 64, // TODO: ?
             randomness_seed: config.randomness_seed,

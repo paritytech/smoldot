@@ -25,21 +25,21 @@
 //!
 //! # Usage
 //!
-//! The [`Connection`] object holds the state of all yamux-specific information, and the list of
+//! The [`Yamux`] object holds the state of all yamux-specific information, and the list of
 //! all currently-open substreams.
 //!
-//! Call [`Connection::incoming_data`] when data is available on the socket. This function parses
+//! Call [`Yamux::incoming_data`] when data is available on the socket. This function parses
 //! the received data, updates the internal state machine, and possibly returns an [`Event`].
-//! Call [`Connection::extract_out`] when the remote is ready to accept more data.
+//! Call [`Yamux::extract_out`] when the remote is ready to accept more data.
 //!
-//! The generic parameter of [`Connection`] is an opaque "user data" associated to each substream.
+//! The generic parameter of [`Yamux`] is an opaque "user data" associated to each substream.
 //!
 //! When [`Substream::write`] is called, the buffer of data to send out is stored within the
-//! [`Connection`] object. This data will then be progressively returned by
-//! [`Connection::extract_out`].
+//! [`Yamux`] object. This data will then be progressively returned by
+//! [`Yamux::extract_out`].
 //!
 //! It is the responsibility of the user to enforce a bound to the amount of enqueued data, as
-//! the [`Connection`] itself doesn't enforce any limit. Enforcing such a bound must be done based
+//! the [`Yamux`] itself doesn't enforce any limit. Enforcing such a bound must be done based
 //! on the logic of the higher-level protocols. Failing to do so might lead to potential DoS
 //! attack vectors.
 
@@ -53,7 +53,7 @@ use hashbrown::hash_map::{Entry, OccupiedEntry};
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
 
-pub struct Connection<T> {
+pub struct Yamux<T> {
     /// List of substreams currently open in the yamux state machine.
     ///
     /// A SipHasher is used in order to avoid hash collision attacks on substream IDs.
@@ -63,7 +63,7 @@ pub struct Connection<T> {
     /// the given substream. Also contains the number of bytes remaining in this data frame.
     ///
     /// Can contain an invalid substream ID, and can contain the substream ID contained in
-    /// [`Connection::pending_incoming_substream`].
+    /// [`Yamux::pending_incoming_substream`].
     incoming_data_frame: Option<(SubstreamId, u32)>,
 
     /// Id of the next outgoing substream to open.
@@ -75,7 +75,7 @@ pub struct Connection<T> {
     incoming_header: arrayvec::ArrayVec<[u8; 12]>,
 
     /// Header currently being written out. Finishing to write this header is the first and
-    /// foremost priority of [`Connection::read_write`].
+    /// foremost priority of [`Yamux::read_write`].
     pending_out_header: arrayvec::ArrayVec<[u8; 12]>,
 
     /// If `Some`, contains a substream ID and a number of bytes. A data frame header has been
@@ -83,7 +83,7 @@ pub struct Connection<T> {
     /// remaining in this frame.
     ///
     /// Writing out the data of this substream is the second most highest priority after writing
-    /// out [`Connection::pending_out_header`].
+    /// out [`Yamux::pending_out_header`].
     writing_out_substream: Option<(SubstreamId, usize)>,
 
     /// If `Some`, the remote has requested to open the substream with the given ID. Contains
@@ -117,10 +117,10 @@ struct Substream<T> {
     user_data: T,
 }
 
-impl<T> Connection<T> {
+impl<T> Yamux<T> {
     /// Initializes a new yamux state machine.
-    pub fn new(config: Config) -> Connection<T> {
-        Connection {
+    pub fn new(config: Config) -> Yamux<T> {
+        Yamux {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.capacity,
                 ahash::RandomState::with_seeds(config.randomness_seed.0, config.randomness_seed.1),
@@ -672,12 +672,12 @@ impl<T> Connection<T> {
     }
 }
 
-impl<T> fmt::Debug for Connection<T>
+impl<T> fmt::Debug for Yamux<T>
 where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        struct List<'a, T>(&'a Connection<T>);
+        struct List<'a, T>(&'a Yamux<T>);
         impl<'a, T> fmt::Debug for List<'a, T>
         where
             T: fmt::Debug,
@@ -689,13 +689,13 @@ where
             }
         }
 
-        f.debug_struct("Connection")
+        f.debug_struct("Yamux")
             .field("substreams", &List(self))
             .finish()
     }
 }
 
-/// Configuration for a new [`Connection`].
+/// Configuration for a new [`Yamux`].
 #[derive(Debug)]
 pub struct Config {
     /// `true` if the local machine has initiated the connection. Otherwise, `false`.
@@ -708,7 +708,7 @@ pub struct Config {
     pub randomness_seed: (u64, u64),
 }
 
-/// Reference to a substream within the [`Connection`].
+/// Reference to a substream within the [`Yamux`].
 // TODO: Debug
 pub struct SubstreamMut<'a, T> {
     substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, ahash::RandomState>,
@@ -769,7 +769,7 @@ impl<'a, T> SubstreamMut<'a, T> {
 }
 
 pub struct ExtractOut<'a, T> {
-    connection: &'a mut Connection<T>,
+    connection: &'a mut Yamux<T>,
     buffers: Option<Vec<either::Either<arrayvec::ArrayVec<[u8; 12]>, VecWithOffset>>>,
 }
 
@@ -802,10 +802,10 @@ pub struct SubstreamId(NonZeroU32);
 #[must_use]
 #[derive(Debug)]
 pub struct IncomingDataOutcome<T> {
-    /// Connection object on which [`Connection::incoming_data`] has been called.
-    pub yamux: Connection<T>,
+    /// Yamux object on which [`Yamux::incoming_data`] has been called.
+    pub yamux: Yamux<T>,
     /// Number of bytes read from the incoming buffer. These bytes should no longer be present the
-    /// next time [`Connection::incoming_data`] is called.
+    /// next time [`Yamux::incoming_data`] is called.
     pub bytes_read: usize,
     /// Detail about the incoming data. `None` if nothing of interest has happened.
     pub detail: Option<IncomingDataDetail<T>>,
@@ -817,14 +817,14 @@ pub struct IncomingDataOutcome<T> {
 pub enum IncomingDataDetail<T> {
     /// Remote has requested to open a new substream.
     ///
-    /// After this has been received, either [`Connection::accept_pending_substream`] or
-    /// [`Connection::reject_pending_substream`] needs to be called in order to accept or reject
-    /// this substream. Calling [`Connection::incoming_data`] before this is done will lead to a
+    /// After this has been received, either [`Yamux::accept_pending_substream`] or
+    /// [`Yamux::reject_pending_substream`] needs to be called in order to accept or reject
+    /// this substream. Calling [`Yamux::incoming_data`] before this is done will lead to a
     /// panic.
     IncomingSubstream,
     /// Received data corresponding to a substream.
     DataFrame {
-        /// Offset in the buffer passed to [`Connection::incoming_data`] where the data frame
+        /// Offset in the buffer passed to [`Yamux::incoming_data`] where the data frame
         /// starts. The data frame ends at the offset of [`IncomingDataOutcome::bytes_read`].
         start_offset: usize,
         /// Substream the data belongs to. Guaranteed to be valid.

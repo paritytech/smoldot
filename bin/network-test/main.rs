@@ -20,7 +20,7 @@
 use core::iter;
 use futures::prelude::*;
 use std::time::Instant;
-use substrate_lite::network::libp2p::connection;
+use substrate_lite::network::{libp2p::connection, with_buffers};
 
 fn main() {
     env_logger::init();
@@ -28,87 +28,37 @@ fn main() {
 }
 
 async fn async_main() {
-    let tcp_socket = async_std::net::TcpStream::connect("p2p.cc1-4.polkadot.network:30100")
-        .await
-        .unwrap();
+    let tcp_socket = with_buffers::WithBuffers::new(
+        async_std::net::TcpStream::connect("p2p.cc1-4.polkadot.network:30100")
+            .await
+            .unwrap(),
+    );
+    futures::pin_mut!(tcp_socket);
 
     let noise_key = connection::NoiseKey::new(&rand::random());
-
-    let mut read_buffer = vec![0; 4096];
-    let mut read_buffer_ready = 0;
-    let mut write_buffer = vec![0; 4096];
-    let mut write_buffer_offset = 0;
-    let mut write_buffer_ready = 0;
 
     let mut connection = connection::handshake::Handshake::new(true);
     let connection = loop {
         match connection {
             connection::handshake::Handshake::Healthy(handshake) => {
-                let (new_state, read, written) = handshake
+                // TODO: shouldn't unwrap here
+                let (read_buffer, write_buffer) = tcp_socket.buffers().unwrap();
+
+                let (new_state, num_read, num_written) = handshake
                     .read_write(
-                        &read_buffer[..read_buffer_ready],
-                        if write_buffer_ready == 0 {
-                            debug_assert_eq!(write_buffer_offset, 0);
-                            debug_assert!(!write_buffer.is_empty());
-                            &mut write_buffer
-                        } else {
-                            &mut []
-                        },
+                        read_buffer.map(|b| b.0).unwrap_or(&[]),
+                        write_buffer.unwrap().0,
                     )
                     .unwrap();
 
-                if write_buffer_ready == 0 {
-                    write_buffer_ready = written;
-                    debug_assert_eq!(write_buffer_offset, 0);
-                }
+                tcp_socket.advance(num_read, num_written);
 
-                // TODO: ugly
-                for _ in 0..read {
-                    read_buffer.remove(0);
-                }
-                read_buffer.resize(4096, 0);
-                read_buffer_ready -= read;
-
-                if read != 0 {
+                if num_read != 0 || num_written != 0 {
                     connection = new_state;
                     continue;
                 }
 
-                let mut tcp_socket_ref1 = &tcp_socket;
-                let mut tcp_socket_ref2 = &tcp_socket;
-
-                futures::select! {
-                    read = async {
-                        if read_buffer_ready == 0 {
-                            tcp_socket_ref1.read(&mut read_buffer).await.expect("read error")
-                        } else {
-                            loop { futures::pending!() }
-                        }
-                    }.fuse() => {
-                        if read == 0 {
-                            panic!() // TODO:
-                        }
-                        read_buffer_ready = read;
-                    }
-                    written = async {
-                        if write_buffer_ready != 0 {
-                            debug_assert_ne!(write_buffer_ready, write_buffer_offset);
-                            tcp_socket_ref2
-                                .write(&write_buffer[..write_buffer_ready][write_buffer_offset..])
-                                .await
-                                .expect("write error")
-                        } else {
-                            loop { futures::pending!() }
-                        }
-                    }.fuse() => {
-                        write_buffer_offset += written;
-                        if write_buffer_offset == write_buffer_ready {
-                            write_buffer_offset = 0;
-                            write_buffer_ready = 0;
-                        }
-                    }
-                }
-
+                tcp_socket.as_mut().process().await;
                 connection = new_state;
             }
             connection::handshake::Handshake::NoiseKeyRequired(key) => {
@@ -136,76 +86,29 @@ async fn async_main() {
     connection.add_request(Instant::now(), "/dot/sync/2", vec![0x1, 0x2, 0x3, 0x4], ());
 
     loop {
+        // TODO: shouldn't unwrap here
+        let (read_buffer, write_buffer) = tcp_socket.buffers().unwrap();
+
         let read_write = connection
             .read_write(
                 Instant::now(),
-                Some(&read_buffer[..read_buffer_ready]),
-                if write_buffer_ready == 0 {
-                    debug_assert_eq!(write_buffer_offset, 0);
-                    debug_assert!(!write_buffer.is_empty());
-                    &mut write_buffer
-                } else {
-                    &mut []
-                },
+                read_buffer.map(|b| b.0),
+                write_buffer.unwrap().0,
             )
             .unwrap();
+
+        tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
         if let Some(event) = read_write.event {
             println!("event: {:?}", event);
         }
 
-        if write_buffer_ready == 0 {
-            write_buffer_ready = read_write.written_bytes;
-            debug_assert_eq!(write_buffer_offset, 0);
-        }
-
-        // TODO: ugly
-        for _ in 0..read_write.read_bytes {
-            read_buffer.remove(0);
-        }
-        read_buffer.resize(4096, 0);
-        read_buffer_ready -= read_write.read_bytes;
-
-        if read_write.read_bytes != 0 {
+        if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
             connection = read_write.connection;
             continue;
         }
 
-        let mut tcp_socket_ref1 = &tcp_socket;
-        let mut tcp_socket_ref2 = &tcp_socket;
-
-        futures::select! {
-            read = async {
-                if read_buffer_ready == 0 {
-                    tcp_socket_ref1.read(&mut read_buffer).await.expect("read error")
-                } else {
-                    loop { futures::pending!() }
-                }
-            }.fuse() => {
-                if read == 0 {
-                    panic!() // TODO:
-                }
-                read_buffer_ready = read;
-            }
-            written = async {
-                if write_buffer_ready != 0 {
-                    debug_assert_ne!(write_buffer_ready, write_buffer_offset);
-                    tcp_socket_ref2
-                        .write(&write_buffer[..write_buffer_ready][write_buffer_offset..])
-                        .await
-                        .expect("write error")
-                } else {
-                    loop { futures::pending!() }
-                }
-            }.fuse() => {
-                write_buffer_offset += written;
-                if write_buffer_offset == write_buffer_ready {
-                    write_buffer_offset = 0;
-                    write_buffer_ready = 0;
-                }
-            }
-        }
-
+        tcp_socket.as_mut().process().await;
         connection = read_write.connection;
     }
 }
