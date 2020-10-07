@@ -206,11 +206,10 @@ impl SledFullDatabase {
     }
 
     /// Returns the hashes of the blocks given a block number.
-    // TODO: should return an ExactSizeIterator
     pub fn block_hash_by_number(
         &self,
         block_number: u64,
-    ) -> Result<impl Iterator<Item = [u8; 32]>, AccessError> {
+    ) -> Result<impl ExactSizeIterator<Item = [u8; 32]>, AccessError> {
         let hash = self
             .block_hashes_by_number_tree
             .get(&u64::to_be_bytes(block_number)[..])
@@ -226,16 +225,35 @@ impl SledFullDatabase {
             ));
         }
 
-        let mut cursor = 0;
-        Ok(either::Right(iter::from_fn(move || {
-            if hash.len() <= cursor {
-                let h = <[u8; 32]>::try_from(&hash[cursor..(cursor + 32)]).unwrap();
-                cursor += 32;
-                Some(h)
-            } else {
-                None
+        struct Iter {
+            hash: sled::IVec,
+            cursor: usize,
+        }
+
+        impl Iterator for Iter {
+            type Item = [u8; 32];
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.hash.len() <= self.cursor {
+                    let h =
+                        <[u8; 32]>::try_from(&self.hash[self.cursor..(self.cursor + 32)]).unwrap();
+                    self.cursor += 32;
+                    Some(h)
+                } else {
+                    None
+                }
             }
-        })))
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                debug_assert_eq!(self.cursor % 32, 0);
+                let len = (self.hash.len() - self.cursor) / 32;
+                (len, Some(len))
+            }
+        }
+
+        impl ExactSizeIterator for Iter {}
+
+        Ok(either::Right(Iter { hash, cursor: 0 }))
     }
 
     /// Insert a new block in the database.
