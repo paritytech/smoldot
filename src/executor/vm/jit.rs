@@ -366,7 +366,7 @@ impl Jit {
 
     /// Starts or continues execution of this thread.
     ///
-    /// If this is the first call you call [`run`](Thread::run) for this thread, then you must pass
+    /// If this is the first call you call [`run`](Jit::run) for this thread, then you must pass
     /// a value of `None`.
     /// If, however, you call this function after a previous call to [`run`](Thread::run) that was
     /// interrupted by an external function call, then you must pass back the outcome of that call.
