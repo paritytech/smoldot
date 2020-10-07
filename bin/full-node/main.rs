@@ -39,6 +39,7 @@ use substrate_lite::{
     chain_spec,
     database::full_sled,
     header, network,
+    verify::babe,
 };
 
 fn main() {
@@ -139,17 +140,49 @@ async fn async_main() {
     });
 
     // Load the information about the chain from the database.
-    let chain_information = /*match local_storage.chain_information() {
-        Ok(Some(i)) => i,
-        Err(database::local_storage_light::AccessError::StorageAccess(err)) => return Err(err),
-        // TODO: log why storage access failed?
-        Err(database::local_storage_light::AccessError::Corrupted(_)) | Ok(None) => {*/
-            chain::chain_information::ChainInformationConfig::from_genesis_storage(
-                chain_spec.genesis_storage(),
-            )
-            .unwrap()
-        //}
-    ; //};
+    let chain_information = chain::chain_information::ChainInformationConfig {
+        chain_information: {
+            let finalized_block_hash = database.finalized_block_hash().unwrap();
+            let finalized_block_header: header::Header = {
+                let encoded = database
+                    .block_scale_encoded_header(&finalized_block_hash)
+                    .unwrap()
+                    .unwrap();
+                header::decode(&encoded).unwrap().into()
+            };
+            let finalized_block_number = finalized_block_header.number;
+
+            chain::chain_information::ChainInformation {
+                finalized_block_header: finalized_block_header,
+                babe_finalized_block1_slot_number: if finalized_block_number != 0 {
+                    let block1 = database.block_hash_by_number(1).unwrap().next().unwrap();
+                    let encoded = database
+                        .block_scale_encoded_header(&block1)
+                        .unwrap()
+                        .unwrap();
+                    let decoded = header::decode(&encoded).unwrap();
+                    Some(decoded.digest.babe_pre_runtime().unwrap().slot_number())
+                } else {
+                    None
+                },
+                babe_finalized_block_epoch_information: todo!(),
+                babe_finalized_next_epoch_transition: todo!(),
+                grandpa_after_finalized_block_authorities_set_id: database
+                    .finalized_block_next_block_grandpa_authorities_set_id(&finalized_block_hash)
+                    .unwrap(),
+                grandpa_finalized_triggered_authorities: todo!(),
+                grandpa_finalized_scheduled_change: todo!(),
+            }
+        },
+        babe_genesis_config: babe::BabeGenesisConfiguration::from_genesis_storage(|k| {
+            chain_spec
+                .genesis_storage()
+                .clone()
+                .find(|(k2, _)| *k2 == k)
+                .map(|(_, v)| v.to_owned())
+        })
+        .unwrap(), // TODO: no unwrap
+    };
 
     // TODO: remove; just for testing
     /*let metadata = substrate_lite::metadata::metadata_from_runtime_code(

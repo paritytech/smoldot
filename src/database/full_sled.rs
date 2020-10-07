@@ -618,14 +618,14 @@ impl SledFullDatabase {
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`FinalizedStorageError::Obsolete`] error is returned.
+    /// [`FinalizedAccessError::Obsolete`] error is returned.
     pub fn finalized_block_storage_top_trie_keys(
         &self,
         finalized_block_hash: &[u8; 32],
-    ) -> Result<Vec<VarLenBytes>, FinalizedStorageError> {
+    ) -> Result<Vec<VarLenBytes>, FinalizedAccessError> {
         // TODO: use a transaction rather than checking once before and once after?
         if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedStorageError::Obsolete);
+            return Err(FinalizedAccessError::Obsolete);
         }
 
         let ret = self
@@ -636,10 +636,10 @@ impl SledFullDatabase {
             .collect::<Result<Vec<_>, _>>()
             .map_err(SledError)
             .map_err(AccessError::Database)
-            .map_err(FinalizedStorageError::Access)?;
+            .map_err(FinalizedAccessError::Access)?;
 
         if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedStorageError::Obsolete);
+            return Err(FinalizedAccessError::Obsolete);
         }
 
         Ok(ret)
@@ -650,15 +650,15 @@ impl SledFullDatabase {
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`FinalizedStorageError::Obsolete`] error is returned.
+    /// [`FinalizedAccessError::Obsolete`] error is returned.
     pub fn finalized_block_storage_top_trie_get(
         &self,
         finalized_block_hash: &[u8; 32],
         key: &[u8],
-    ) -> Result<Option<VarLenBytes>, FinalizedStorageError> {
+    ) -> Result<Option<VarLenBytes>, FinalizedAccessError> {
         // TODO: use a transaction rather than checking once before and once after?
         if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedStorageError::Obsolete);
+            return Err(FinalizedAccessError::Obsolete);
         }
 
         let ret = self
@@ -666,14 +666,55 @@ impl SledFullDatabase {
             .get(key)
             .map_err(SledError)
             .map_err(AccessError::Database)
-            .map_err(FinalizedStorageError::Access)?
+            .map_err(FinalizedAccessError::Access)?
             .map(VarLenBytes);
 
         if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedStorageError::Obsolete);
+            return Err(FinalizedAccessError::Obsolete);
         }
 
         Ok(ret)
+    }
+
+    /// Returns the authorities set id of the GrandPa authorities that must finalize the block
+    /// right after the finalized one.
+    ///
+    /// In order to avoid race conditions, the known finalized block hash must be passed as
+    /// parameter. If the finalized block in the database doesn't match the hash passed as
+    /// parameter, most likely because it has been updated in a parallel thread, a
+    /// [`FinalizedAccessError::Obsolete`] error is returned.
+    pub fn finalized_block_next_block_grandpa_authorities_set_id(
+        &self,
+        finalized_block_hash: &[u8; 32],
+    ) -> Result<u64, FinalizedAccessError> {
+        // TODO: use a transaction rather than checking once before and once after?
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedAccessError::Obsolete);
+        }
+
+        let num = self
+            .meta_tree
+            .get(b"grandpa_authorities_set_id")
+            .map_err(SledError)
+            .map_err(AccessError::Database)
+            .map_err(FinalizedAccessError::Access)?
+            .ok_or(AccessError::Corrupted(
+                CorruptedError::FinalizedBlockNumberNotFound,
+            ))
+            .map_err(FinalizedAccessError::Access)?;
+
+        let authorities_set_id =
+            u64::from_be_bytes(*<&[u8; 8]>::try_from(&num[..]).map_err(|_| {
+                FinalizedAccessError::Access(AccessError::Corrupted(
+                    CorruptedError::InvalidGrandpaAuthoritiesSetId,
+                ))
+            })?);
+
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedAccessError::Obsolete);
+        }
+
+        Ok(authorities_set_id)
     }
 }
 
@@ -741,7 +782,7 @@ pub enum SetFinalizedError {
 
 /// Error while accessing the storage of the finalized block.
 #[derive(Debug, derive_more::Display, derive_more::From)]
-pub enum FinalizedStorageError {
+pub enum FinalizedAccessError {
     /// Error accessing the database.
     Access(AccessError),
     /// Block hash passed as parameter is no longer the finalized block.
@@ -749,6 +790,7 @@ pub enum FinalizedStorageError {
 }
 
 /// Error in the content of the database.
+// TODO: document
 #[derive(Debug, derive_more::Display)]
 pub enum CorruptedError {
     /// The parent of a block in the database couldn't be found in the database.
@@ -762,4 +804,5 @@ pub enum CorruptedError {
     BlockHashLenInHashNumberMapping,
     BlockBodyCorrupted(parity_scale_codec::Error),
     NonFinalizedChangesMissing,
+    InvalidGrandpaAuthoritiesSetId,
 }
