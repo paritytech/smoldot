@@ -1,5 +1,6 @@
 # How to run this demo
 
 ```sh
-npm run build
+cargo install wasm-bindgen-cli		# If necessary
+wasm-pack build
 ```
