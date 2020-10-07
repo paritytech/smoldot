@@ -31,7 +31,12 @@
 
 use alloc::{collections::BTreeSet, sync::Arc};
 use connection::NoiseKey;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    iter, mem,
+    ops::{Add, Sub},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 use futures::lock::Mutex;
 use hashbrown::HashMap;
 use multiaddr::Multiaddr;
@@ -52,6 +57,9 @@ pub struct Config {
     /// Capacity to pre-allocate for the containers containing the list of connections. Should
     /// contain an estimate of the total number of connections.
     pub connections_capacity: usize,
+
+    /// Time after which a connection handshake is considered unresponsive.
+    pub handshake_timeout: Duration,
 }
 
 pub struct Network<TProto, TRqUd, TNow> {
@@ -65,13 +73,22 @@ pub struct Network<TProto, TRqUd, TNow> {
     /// Increased/decreased when entries are added to/removed from the list of connections.
     num_incoming_connections: AtomicUsize,
 
+    /// Additional fields behind a mutex.
+    mutex: Mutex<Guard<TProto, TRqUd, TNow>>,
+
+    /// Identical to [`Config::handshake_timeout`].
+    handshake_timeout: Duration,
+}
+
+/// Fields of [`Network`] protected by a mutex.
+struct Guard<TProto, TRqUd, TNow> {
     /// List of connections by peer.
     /// This container is semantically similar to a `HashMap<PeerId, Vec<ConnectionId>>`, except
     /// that the memory fragmentation of having an inner `Vec` is avoided, and that there is no
     /// risk of HashDoS attacks.
     /// Considering that the elements in a `BTreeSet` are ordered, all the [`ConnectionId`]s
     /// belonging to the same [`PeerId`] follow each other in the container.
-    peers: Mutex<BTreeSet<(PeerId, u64)>>,
+    peers: BTreeSet<(PeerId, u64)>,
 
     /// List of connections. Includes active connections, handshaking connections, and pending
     /// connections.
@@ -79,38 +96,51 @@ pub struct Network<TProto, TRqUd, TNow> {
     /// The values are wrapped within an `Arc<Mutex<>>`. In order to avoid locking the `Mutex` on
     /// the `HashMap` for too long, accessing the connections must be done by first cloning the
     /// `Arc`.
-    connections: Mutex<HashMap<u64, Arc<Mutex<Connection>>, fnv::FnvBuildHasher>>,
-
-    // TODO: remove
-    tmp: core::marker::PhantomData<(TProto, TRqUd, TNow)>,
+    connections: HashMap<
+        u64,
+        Arc<Mutex<Connection<TNow, TRqUd, iter::Once<TProto>, TProto>>>,
+        fnv::FnvBuildHasher,
+    >,
 }
 
-enum Connection {
+enum Connection<TNow, TRqUd, TProtoList, TProto> {
+    /// Temporary transition state. Shouldn't be found in the state expect during the execution
+    /// of a method.
+    Poisoned,
     Pending {
         target: Multiaddr,
+        /// When this connection attempt will be considered unresponsive.
+        timeout: TNow,
     },
     Handshaking {
         connection: connection::handshake::HealthyHandshake,
+        /// When this handshake attempt will be considered unresponsive.
+        timeout: TNow,
     },
     Active {
-        // TODO: connection: connection::Connection<>,
+        connection: connection::established::Established<TNow, TRqUd, (), TProtoList, TProto>,
     },
 }
 
-impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
+impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
     /// Initializes a new networking state machine.
     pub fn new(config: Config) -> Self {
         Network {
             next_connection_id: atomic::Atomic::new(0),
             next_request_id: atomic::Atomic::new(0),
             num_incoming_connections: AtomicUsize::new(0),
-            // Note: `BTreeSet` doesn't have any `with_capacity` method.
-            peers: Mutex::new(BTreeSet::new()),
-            connections: Mutex::new(HashMap::with_capacity_and_hasher(
-                config.connections_capacity,
-                Default::default(),
-            )),
-            tmp: core::marker::PhantomData,
+            mutex: Mutex::new(Guard {
+                // Note: `BTreeSet` doesn't have any `with_capacity` method.
+                peers: BTreeSet::new(),
+                connections: HashMap::with_capacity_and_hasher(
+                    config.connections_capacity,
+                    Default::default(),
+                ),
+            }),
+            handshake_timeout: config.handshake_timeout,
         }
     }
 
@@ -136,29 +166,48 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
         &self,
         connection: ConnectionId,
         now: TNow,
-        incoming_data: Option<&[u8]>,
+        incoming_buffer: Option<&[u8]>,
         outgoing_buffer: &mut [u8],
     ) -> ReadWrite<TProto, TRqUd, TNow> {
         let connection = {
-            let connecs = self.connections.lock().await;
-            connecs.get(&connection.0).unwrap().clone() // TODO: don't unwrap
+            let guard = self.mutex.lock().await;
+            guard.connections.get(&connection.0).unwrap().clone() // TODO: don't unwrap?
         };
 
         let mut connection = connection.lock().await;
 
-        match &mut *connection {
-            Connection::Pending { .. } => todo!(), // TODO: invalid id
-            Connection::Handshaking { connection } => {
-                // TODO: this seems incorrect w.r.t handling closure
-                if let Some(incoming_data) = incoming_data {
-                    //connection.inject_data(incoming_data);
-                    todo!()
+        match mem::replace(&mut *connection, Connection::Poisoned) {
+            Connection::Poisoned => panic!(),
+            st @ Connection::Pending { .. } => {
+                *connection = st;
+                todo!() // TODO: invalid id
+            }
+            Connection::Handshaking {
+                connection,
+                timeout,
+            } => {
+                if timeout <= now {
+                    // TODO: timeout!
+                }
+
+                if let Some(incoming_buffer) = incoming_buffer {
+                    match connection.read_write(incoming_buffer, outgoing_buffer) {
+                        _ => todo!(),
+                    }
+                } else {
+                    ReadWrite {
+                        read_bytes: 0,
+                        written_bytes: 0,
+                        wake_up_after: None,
+                        event: todo!(),
+                    }
                 }
             }
-            Connection::Active { .. } => todo!(),
+            Connection::Active { connection } => {
+                //connection.read_write(now, incoming_buffer, outgoing_buffer);
+                todo!()
+            }
         }
-
-        todo!()
     }
 
     /// Destroys an existing connection.
@@ -208,13 +257,27 @@ impl<TProto, TRqUd, TNow> Network<TProto, TRqUd, TNow> {
     ///
     /// This method is `async` but will only block if synchronization with other tasks is
     /// necessary.
-    pub async fn add_incoming_connection(&self, remote_send_back: Multiaddr) -> ConnectionId {
+    pub async fn add_incoming_connection(
+        &self,
+        now: TNow,
+        remote_send_back: Multiaddr,
+    ) -> ConnectionId {
+        let connection_id = ConnectionId(self.next_connection_id.fetch_add(1, Ordering::Relaxed));
+
         let handshake = connection::handshake::HealthyHandshake::new(false);
+
+        let connection = Arc::new(Mutex::new(Connection::Handshaking {
+            connection: handshake,
+            timeout: now + self.handshake_timeout,
+        }));
+
+        let mut guard = self.mutex.lock().await;
+        guard.connections.insert(connection_id.0, connection);
 
         self.num_incoming_connections
             .fetch_add(1, Ordering::Relaxed);
 
-        todo!()
+        connection_id
     }
 
     /// Notifies the network of the outcome of an outgoing dialing attempt.

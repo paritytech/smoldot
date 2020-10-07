@@ -49,9 +49,7 @@ impl PublicKey {
         };
 
         let mut buf = Vec::with_capacity(public_key.encoded_len());
-        public_key
-            .encode(&mut buf)
-            .expect("Vec<u8> provides capacity as needed");
+        public_key.encode(&mut buf).unwrap();
         buf
     }
 

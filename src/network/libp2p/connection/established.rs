@@ -130,7 +130,7 @@ where
     pub fn read_write(
         mut self,
         now: TNow,
-        mut incoming_data: Option<&[u8]>,
+        mut incoming_buffer: Option<&[u8]>,
         mut outgoing_buffer: &mut [u8],
     ) -> Result<ReadWrite<TNow, TRqUd, TNotifUd, TProtoList, TProto>, Error> {
         let mut total_read = 0;
@@ -141,7 +141,7 @@ where
         // Decoding the incoming data.
         loop {
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
-            if let Some(incoming_data) = incoming_data.as_mut() {
+            if let Some(incoming_data) = incoming_buffer.as_mut() {
                 let num_read = self
                     .encryption
                     .inject_inbound_data(*incoming_data)
