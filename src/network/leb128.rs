@@ -118,7 +118,7 @@ impl Framed {
                         return Err(FramedError::LengthPrefixTooLarge);
                     }
 
-                    if let Some(expected_len) = decode(&self.buffer) {
+                    if let Some(expected_len) = decode_leb128(&self.buffer) {
                         let expected_len = expected_len?;
                         if expected_len > self.max_len {
                             return Err(FramedError::LengthPrefixTooLarge);
@@ -128,6 +128,7 @@ impl Framed {
                     }
                 }
                 FramedInner::Body { expected_len } => {
+                    debug_assert!(self.buffer.len() <= expected_len);
                     let missing = expected_len - self.buffer.len();
                     let available = cmp::min(missing, data.len());
                     self.buffer.extend_from_slice(&data[..available]);
@@ -140,7 +141,7 @@ impl Framed {
     }
 }
 
-fn decode(buffer: &[u8]) -> Option<Result<usize, FramedError>> {
+fn decode_leb128(buffer: &[u8]) -> Option<Result<usize, FramedError>> {
     let mut out = 0usize;
 
     for (n, byte) in buffer.iter().enumerate() {

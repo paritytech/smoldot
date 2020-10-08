@@ -100,7 +100,8 @@ async fn async_main() {
         a
     });
 
-    connection.add_request(Instant::now(), "/dot/sync/2", request, ());
+    let id = connection.add_request(Instant::now(), "/dot/sync/2", request, ());
+    println!("start request on {:?}", id);
 
     loop {
         // TODO: shouldn't unwrap here

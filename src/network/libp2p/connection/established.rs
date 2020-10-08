@@ -236,6 +236,8 @@ where
                 }
             };
 
+            println!("rx on {:?} => {:?}", substream.id(), data);
+
             while !data.is_empty() {
                 match mem::replace(substream.user_data(), Substream::Poisoned) {
                     Substream::Poisoned => unreachable!("poisoned"), // TODO: remove cause
