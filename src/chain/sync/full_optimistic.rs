@@ -755,6 +755,11 @@ impl<TRq, TBl> StorageNextKey<TRq, TBl> {
     }
 
     /// Injects the key.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> ProcessOne<TRq, TBl> {
         let key = key.as_ref().map(|k| k.as_ref());
 
@@ -768,6 +773,10 @@ impl<TRq, TBl> StorageNextKey<TRq, TBl> {
         } else {
             self.inner.key()
         };
+
+        if let Some(key) = key {
+            assert!(key > requested_key);
+        }
 
         let in_diff = self
             .shared

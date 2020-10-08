@@ -367,6 +367,11 @@ impl NextKey {
     }
 
     /// Injects the key.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    ///
     pub fn inject_key(mut self, key: Option<impl AsRef<[u8]>>) -> Verify {
         let key = key.as_ref().map(|k| k.as_ref());
 
@@ -377,6 +382,10 @@ impl NextKey {
                 } else {
                     req.key()
                 };
+
+                if let Some(key) = key {
+                    assert!(key > requested_key);
+                }
 
                 // The next key can be either the one passed by the user or one key in the current
                 // pending storage changes that has been inserted during the verification.
