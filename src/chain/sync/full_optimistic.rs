@@ -774,6 +774,7 @@ impl<TRq, TBl> StorageNextKey<TRq, TBl> {
             .best_to_finalized_storage_diff
             .range(requested_key.to_vec()..) // TODO: don't use to_vec()
             .map(|(k, v)| (k, v.is_some()))
+            .filter(|(k, _)| &***k > requested_key)
             .next();
 
         let outcome = match (key, in_diff) {
@@ -781,6 +782,7 @@ impl<TRq, TBl> StorageNextKey<TRq, TBl> {
             (Some(a), Some((b, false))) if a < &b[..] => Some(a),
             (Some(a), Some((b, false))) => {
                 debug_assert!(a >= &b[..]);
+                debug_assert_ne!(&b[..], requested_key);
 
                 // The next key according to the finalized block storage has been erased since
                 // then. It is necessary to ask the user again, this time for the key after the

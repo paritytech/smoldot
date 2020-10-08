@@ -395,6 +395,7 @@ impl NextKey {
                     (Some(a), Some((b, false))) if a < &b[..] => Some(a),
                     (Some(a), Some((b, false))) => {
                         debug_assert!(a >= &b[..]);
+                        debug_assert_ne!(&b[..], requested_key);
 
                         // The next key according to the parent storage has been erased earlier in
                         // the block execution. It is necessary to ask the user again, this time
