@@ -92,12 +92,6 @@ impl PublicKey {
     }
 }
 
-impl From<PublicKey> for PeerId {
-    fn from(public_key: PublicKey) -> PeerId {
-        public_key.into_peer_id()
-    }
-}
-
 /// Error potentially returned by [`PublicKey::from_protobuf_encoding`].
 #[derive(Debug, derive_more::Display)]
 pub enum FromProtobufEncodingError {
@@ -194,6 +188,12 @@ impl PeerId {
         let alg = self.multihash.algorithm();
         let enc = public_key.clone().into_protobuf_encoding();
         Some(alg.digest(&enc) == self.multihash)
+    }
+}
+
+impl From<PublicKey> for PeerId {
+    fn from(public_key: PublicKey) -> PeerId {
+        PeerId::from_public_key(public_key)
     }
 }
 

@@ -20,7 +20,7 @@
 use core::iter;
 use futures::prelude::*;
 use std::time::Instant;
-use substrate_lite::network::{libp2p::connection, with_buffers};
+use substrate_lite::network::{libp2p::connection, request_response, with_buffers};
 
 fn main() {
     env_logger::init();
@@ -83,7 +83,24 @@ async fn async_main() {
             randomness_seed: rand::random(),
         });
 
-    connection.add_request(Instant::now(), "/dot/sync/2", vec![0x1, 0x2, 0x3, 0x4], ());
+    let request = request_response::build_block_request(request_response::BlocksRequestConfig {
+        start: request_response::BlocksRequestConfigStart::Number(
+            core::num::NonZeroU64::new(1).unwrap(),
+        ),
+        desired_count: core::num::NonZeroU32::new(u32::max_value()).unwrap(),
+        direction: request_response::BlocksRequestDirection::Ascending,
+        fields: request_response::BlocksRequestFields {
+            header: true,
+            body: true,
+            justification: false,
+        },
+    })
+    .fold(Vec::new(), |mut a, b| {
+        a.extend_from_slice(b.as_ref());
+        a
+    });
+
+    connection.add_request(Instant::now(), "/dot/sync/2", request, ());
 
     loop {
         // TODO: shouldn't unwrap here

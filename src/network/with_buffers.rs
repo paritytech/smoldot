@@ -124,7 +124,7 @@ impl<T> WithBuffers<T> {
             ))
         } else {
             let (buf2, buf1) = self.read_buffer.split_at(self.read_buffer_processed_cursor);
-            let buf1 = &buf1[..self.socket_in_cursor_start];
+            let buf2 = &buf2[..self.socket_in_cursor_start];
             Some((buf1, buf2))
         };
 
