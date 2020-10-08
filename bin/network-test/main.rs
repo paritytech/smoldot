@@ -117,8 +117,18 @@ async fn async_main() {
 
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
-        if let Some(event) = read_write.event {
+        if let Some(event) = &read_write.event {
             println!("event: {:?}", event);
+        }
+
+        if let Some(connection::established::Event::Response {
+            response,
+            id,
+            user_data,
+        }) = read_write.event
+        {
+            let decoded = request_response::decode_block_response(&response.unwrap()).unwrap();
+            println!("decoded: {:?}", decoded);
         }
 
         if read_write.read_bytes != 0 || read_write.written_bytes != 0 {

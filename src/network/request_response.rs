@@ -18,6 +18,7 @@
 // TODO: expand docs
 
 use core::{
+    convert::TryFrom as _,
     iter,
     num::{NonZeroU32, NonZeroU64},
 };
@@ -112,3 +113,92 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
 
     iter::once(request_bytes)
 }
+
+/// Decodes a response to a block request.
+// TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
+pub fn decode_block_response(
+    response_bytes: &[u8],
+) -> Result<Vec<BlockData>, DecodeBlockResponseError> {
+    let response = schema::BlockResponse::decode(&response_bytes[..])
+        .map_err(ProtobufDecodeError)
+        .map_err(DecodeBlockResponseError::ProtobufDecode)?;
+
+    let mut blocks = Vec::with_capacity(response.blocks.len());
+    for block in response.blocks {
+        if block.hash.len() != 32 {
+            return Err(DecodeBlockResponseError::InvalidHashLength);
+        }
+
+        let mut body = Vec::with_capacity(block.body.len());
+        for extrinsic in block.body {
+            // TODO: this encoding really is a bit stupid
+            let ext = match <Vec<u8> as parity_scale_codec::DecodeAll>::decode_all(
+                &mut extrinsic.as_ref(),
+            ) {
+                Ok(e) => e,
+                Err(_) => {
+                    return Err(DecodeBlockResponseError::BodyDecodeError);
+                }
+            };
+
+            body.push(ext);
+        }
+
+        blocks.push(BlockData {
+            hash: <[u8; 32]>::try_from(&block.hash[..]).unwrap(),
+            header: if !block.header.is_empty() {
+                Some(block.header)
+            } else {
+                None
+            },
+            // TODO: no; we might not have asked for the body
+            body: Some(body),
+            justification: if !block.justification.is_empty() {
+                Some(block.justification)
+            } else if block.is_empty_justification {
+                Some(Vec::new())
+            } else {
+                None
+            },
+        });
+    }
+
+    Ok(blocks)
+}
+
+/// Block sent in a block response.
+///
+/// > **Note**: Assuming that this response comes from the network, the information in this struct
+/// >           can be erroneous and shouldn't be trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockData {
+    /// Block hash.
+    ///
+    /// > **Note**: This should contain the hash of the header, but, like the rest of this
+    /// >           structure, this cannot be trusted.
+    pub hash: [u8; 32],
+
+    /// SCALE-encoded block header, if requested.
+    pub header: Option<Vec<u8>>,
+
+    /// Block body, if requested.
+    pub body: Option<Vec<Vec<u8>>>,
+
+    /// Justification, if requested and available.
+    pub justification: Option<Vec<u8>>,
+}
+
+/// Error potentially returned by [`decode_block_response`].
+#[derive(Debug, derive_more::Display)]
+pub enum DecodeBlockResponseError {
+    /// Error while decoding the protobuf encoding.
+    ProtobufDecode(ProtobufDecodeError),
+    /// Hash length isn't of the correct length.
+    InvalidHashLength,
+    BodyDecodeError,
+}
+
+/// Error while decoding the protobuf encoding.
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "{}", _0)]
+pub struct ProtobufDecodeError(prost::DecodeError);
