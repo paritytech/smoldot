@@ -368,7 +368,7 @@ impl Jit {
     ///
     /// If this is the first call you call [`run`](Jit::run) for this thread, then you must pass
     /// a value of `None`.
-    /// If, however, you call this function after a previous call to [`run`](Thread::run) that was
+    /// If, however, you call this function after a previous call to [`run`](Jit::run) that was
     /// interrupted by an external function call, then you must pass back the outcome of that call.
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         if self.coroutine.is_finished() {
