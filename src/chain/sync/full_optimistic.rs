@@ -225,9 +225,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
             Ok(tp) => tp,
             Err(sync) => {
                 self.sync = Some(sync);
-                return ProcessOne::Idle {
-                    sync: self,
-                };
+                return ProcessOne::Idle { sync: self };
             }
         };
 
@@ -550,9 +548,11 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         break ProcessOne::Finished {
                             sync: OptimisticFullSync {
                                 chain,
-                                best_to_finalized_storage_diff: shared.best_to_finalized_storage_diff,
+                                best_to_finalized_storage_diff: shared
+                                    .best_to_finalized_storage_diff,
                                 runtime_code_cache: shared.runtime_code_cache,
-                                top_trie_root_calculation_cache: shared.top_trie_root_calculation_cache,
+                                top_trie_root_calculation_cache: shared
+                                    .top_trie_root_calculation_cache,
                                 sync: Some(sync),
                             },
                             finalized_blocks: shared.finalized_blocks,
