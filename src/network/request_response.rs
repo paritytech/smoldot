@@ -13,15 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/*********************************************************
-**   Prototype for a rewrite of the networking code     **
-**   Not ready yet                                      **
-*********************************************************/
+//! Builds requests and responses of high-level request-response-type protocols.
 
-pub mod leb128;
-pub mod libp2p;
-pub mod request_response;
-pub mod with_buffers;
+// TODO: expand docs
 
-pub use libp2p::peer_id::PeerId;
-pub use parity_multiaddr::Multiaddr;
+mod schema {
+    include!(concat!(env!("OUT_DIR"), "/api.v1.rs"));
+    include!(concat!(env!("OUT_DIR"), "/api.v1.finality.rs"));
+    include!(concat!(env!("OUT_DIR"), "/api.v1.light.rs"));
+}
