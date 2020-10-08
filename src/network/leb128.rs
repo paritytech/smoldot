@@ -145,12 +145,10 @@ fn decode_leb128(buffer: &[u8]) -> Option<Result<usize, FramedError>> {
     let mut out = 0usize;
 
     for (n, byte) in buffer.iter().enumerate() {
-        out = match out.checked_mul(1 << 7) {
-            Some(o) => o,
+        match usize::from(*byte & 0b1111111).checked_mul(1 << (7 * n)) {
+            Some(o) => out |= o,
             None => return Some(Err(FramedError::LengthPrefixTooLarge)),
         };
-
-        out |= usize::from(*byte & 0b1111111);
 
         if (*byte & 0x80) == 0 {
             assert_eq!(n, buffer.len() - 1);
