@@ -382,7 +382,7 @@ impl NextKey {
                 // pending storage changes that has been inserted during the verification.
                 // As such, find the "next key" in the list of overlay changes.
                 // TODO: not optimized in terms of searching time ; should really be a BTreeMap or something
-                let in_overlay_any = self
+                let in_overlay = self
                     .inner
                     .top_trie_changes
                     .iter()
@@ -390,7 +390,7 @@ impl NextKey {
                     .filter(|(k, _)| &***k > requested_key)
                     .min_by_key(|(k, _)| *k);
 
-                let outcome = match (key, in_overlay_any) {
+                let outcome = match (key, in_overlay) {
                     (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
                     (Some(a), Some((b, false))) if a < &b[..] => Some(a),
                     (Some(a), Some((b, false))) => {
