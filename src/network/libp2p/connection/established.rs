@@ -43,6 +43,13 @@ pub struct Established<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// out.
     yamux: yamux::Yamux<Substream<TNow, TRqUd, TProtoList, TProto>>,
 
+    /// Next substream timeout. When the current time is superior to this value, means that one of
+    /// the substreams in `yamux` might have timed out.
+    ///
+    /// This value is not updated when a timeout is no longer necessary. As such, the value in
+    /// this field might correspond to nothing (i.e. is now obsolete).
+    next_timeout: Option<TNow>,
+
     /// List of request-response protocols.
     in_request_protocols: TProtoList,
     /// List of notifications protocols.
@@ -136,7 +143,21 @@ where
         let mut total_read = 0;
         let mut total_written = 0;
 
-        // TODO: need to check timeouts
+        // First, check for timeouts.
+        // Note that this might trigger timeouts for requests whose response is available in
+        // `incoming_buffer`. This is intentional, as from the perspective of `read_write` the
+        // response arrived after the timeout. It is the responsibility of the user to call
+        // `read_write` in an appropriate way for this to not happen.
+        if let Some(event) = self.update_now(now) {
+            let wake_up_after = self.next_timeout.clone();
+            return Ok(ReadWrite {
+                connection: self,
+                read_bytes: total_read,
+                written_bytes: total_written,
+                wake_up_after,
+                event: Some(event),
+            });
+        }
 
         // Decoding the incoming data.
         loop {
@@ -201,11 +222,12 @@ where
                         Substream::Dead => {}
                         Substream::RequestOutNegotiating { user_data, .. }
                         | Substream::RequestOut { user_data, .. } => {
+                            let wake_up_after = self.next_timeout.clone();
                             return Ok(ReadWrite {
                                 connection: self,
                                 read_bytes: total_read,
                                 written_bytes: total_written,
-                                wake_up_after: None, // TODO:
+                                wake_up_after,
                                 event: Some(Event::Response {
                                     id: SubstreamId(substream_id),
                                     user_data,
@@ -338,11 +360,12 @@ where
                             Err(_) => {
                                 let substream_id = substream.id();
                                 substream.reset();
+                                let wake_up_after = self.next_timeout.clone();
                                 return Ok(ReadWrite {
                                     connection: self,
                                     read_bytes: total_read,
                                     written_bytes: total_written,
-                                    wake_up_after: None, // TODO:
+                                    wake_up_after,
                                     event: Some(Event::Response {
                                         id: SubstreamId(substream_id),
                                         user_data,
@@ -363,11 +386,13 @@ where
                         if let Some(response) = response.take_frame() {
                             let substream_id = substream.id();
                             // TODO: state transition
+                            *substream.user_data() = Substream::Dead;
+                            let wake_up_after = self.next_timeout.clone();
                             return Ok(ReadWrite {
                                 connection: self,
                                 read_bytes: total_read,
                                 written_bytes: total_written,
-                                wake_up_after: None, // TODO:
+                                wake_up_after,
                                 event: Some(Event::Response {
                                     id: SubstreamId(substream_id),
                                     user_data,
@@ -392,11 +417,12 @@ where
                         if let Some(request) = request.take_frame() {
                             let substream_id = substream.id();
                             // TODO: state transition
+                            let wake_up_after = self.next_timeout.clone();
                             return Ok(ReadWrite {
                                 connection: self,
                                 read_bytes: total_read,
                                 written_bytes: total_written,
-                                wake_up_after: None, // TODO:
+                                wake_up_after,
                                 event: Some(Event::RequestIn {
                                     id: SubstreamId(substream_id),
                                     protocol,
@@ -415,11 +441,12 @@ where
                         if let Some(handshake) = handshake.take_frame() {
                             let substream_id = substream.id();
                             *substream.user_data() = Substream::NotificationsInWait;
+                            let wake_up_after = self.next_timeout.clone();
                             return Ok(ReadWrite {
                                 connection: self,
                                 read_bytes: total_read,
                                 written_bytes: total_written,
-                                wake_up_after: None, // TODO:
+                                wake_up_after,
                                 event: Some(Event::NotificationsInOpen {
                                     id: SubstreamId(substream_id),
                                     protocol,
@@ -470,13 +497,80 @@ where
             outgoing_buffer = &mut outgoing_buffer[written..];
         }
 
+        // Nothing more can be done.
+        let wake_up_after = self.next_timeout.clone();
         Ok(ReadWrite {
             connection: self,
             read_bytes: total_read,
             written_bytes: total_written,
-            wake_up_after: None,
-            event: None, // TODO:
+            wake_up_after,
+            event: None,
         })
+    }
+
+    /// Updates the internal state machine, most notably `self.next_timeout`, with the passage of
+    /// time.
+    ///
+    /// Optionally returns an event that happened as a result of the passage of time.
+    fn update_now(&mut self, now: TNow) -> Option<Event<TRqUd, TNotifUd, TProto>> {
+        if self.next_timeout.as_ref().map_or(true, |t| *t > now) {
+            return None;
+        }
+
+        // Find which substream has timed out. This can be `None`, as the value in
+        // `self.next_timeout` can be obsolete.
+        let timed_out_substream = self
+            .yamux
+            .user_datas()
+            .find(|(_, substream)| match &substream {
+                Substream::RequestOutNegotiating { timeout, .. }
+                | Substream::RequestOut { timeout, .. }
+                    if *timeout <= now =>
+                {
+                    true
+                }
+                _ => false,
+            })
+            .map(|(id, _)| id);
+
+        // Turn `timed_out_substream` into an `Event`.
+        // The timed out substream (if any) is being reset'ted.
+        let event = if let Some(timed_out_substream) = timed_out_substream {
+            let substream = self
+                .yamux
+                .substream_by_id(timed_out_substream)
+                .unwrap()
+                .reset();
+
+            Some(match substream {
+                Substream::RequestOutNegotiating { user_data, .. }
+                | Substream::RequestOut { user_data, .. } => Event::Response {
+                    id: SubstreamId(timed_out_substream),
+                    response: Err(()),
+                    user_data,
+                },
+                _ => unreachable!(),
+            })
+        } else {
+            None
+        };
+
+        // Update `next_timeout`. Note that some of the timeouts in `self.yamux` aren't
+        // necessarily strictly superior to `now`. This is normal. As only one event can be
+        // returned at a time, any further timeout will be handled the next time `update_now` is
+        // called.
+        self.next_timeout = self
+            .yamux
+            .user_datas()
+            .filter_map(|(_, substream)| match &substream {
+                Substream::RequestOutNegotiating { timeout, .. }
+                | Substream::RequestOut { timeout, .. } => Some(timeout),
+                _ => None,
+            })
+            .min()
+            .cloned();
+
+        event
     }
 
     /// Sends a request to the remote.
@@ -507,8 +601,14 @@ where
             _ => unreachable!(),
         }
 
+        let timeout = now + Duration::from_secs(20); // TODO:
+
+        if self.next_timeout.as_ref().map_or(true, |t| *t > timeout) {
+            self.next_timeout = Some(timeout.clone());
+        }
+
         let mut substream = self.yamux.open_substream(Substream::RequestOutNegotiating {
-            timeout: now + Duration::from_secs(20), // TODO:
+            timeout,
             negotiation,
             request,
             user_data,
@@ -705,6 +805,7 @@ impl ConnectionPrototype {
         Established {
             encryption: self.encryption,
             yamux,
+            next_timeout: None,
             in_request_protocols: config.in_request_protocols,
             in_notifications_protocols: config.in_notifications_protocols,
             marker: core::marker::PhantomData,

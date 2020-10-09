@@ -762,9 +762,10 @@ impl<'a, T> SubstreamMut<'a, T> {
     /// `RST` flag to the remote.
     ///
     /// Use this method when a protocol error happens on a substream.
-    pub fn reset(self) {
-        self.substream.remove();
+    pub fn reset(self) -> T {
+        let value = self.substream.remove();
         // TODO: finish
+        value.user_data
     }
 }
 
