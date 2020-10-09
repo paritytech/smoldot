@@ -18,8 +18,10 @@
 **   Not ready yet                                      **
 *********************************************************/
 
+pub mod discovery;
 pub mod leb128;
 pub mod libp2p;
+pub mod peerset;
 pub mod request_response;
 pub mod with_buffers;
 
