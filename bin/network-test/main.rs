@@ -28,6 +28,29 @@ fn main() {
 }
 
 async fn async_main() {
+    let mut peerset = substrate_lite::network::peerset::Peerset::new(substrate_lite::network::peerset::Config {
+        randomness_seed: [0; 32],
+    });
+
+    // peerset.insert("/dns/p2p.cc1-0.polkadot.network/tcp/30100/p2p/12D3KooWEdsXX9657ppNqqrRuaCHFvuNemasgU5msLDwSJ6WqsKc");
+    // peerset.insert("/dns/p2p.cc1-1.polkadot.network/tcp/30100/p2p/12D3KooWAtx477KzC8LwqLjWWUG6WF4Gqp2eNXmeqAG98ehAMWYH");
+    // peerset.insert("/dns/p2p.cc1-2.polkadot.network/tcp/30100/p2p/12D3KooWAGCCPZbr9UWGXPtBosTZo91Hb5M3hU8v6xbKgnC5LVao");
+    // peerset.insert("/dns/p2p.cc1-3.polkadot.network/tcp/30100/p2p/12D3KooWJ4eyPowiVcPU46pXuE2cDsiAmuBKXnFcFPapm4xKFdMJ");
+    // peerset.insert("/dns/p2p.cc1-4.polkadot.network/tcp/30100/p2p/12D3KooWNMUcqwSj38oEq1zHeGnWKmMvrCFnpMftw7JzjAtRj2rU");
+    // peerset.insert("/dns/p2p.cc1-5.polkadot.network/tcp/30100/p2p/12D3KooWDs6LnpmWDWgZyGtcLVr3E75CoBxzg1YZUPL5Bb1zz6fM");
+    // peerset.insert("/dns/cc1-0.parity.tech/tcp/30333/p2p/12D3KooWSz8r2WyCdsfWHgPyvD8GKQdJ1UAiRmrcrs8sQB3fe2KU");
+    // peerset.insert("/dns/cc1-1.parity.tech/tcp/30333/p2p/12D3KooWFN2mhgpkJsDBuNuE5427AcDrsib8EoqGMZmkxWwx3Md4");
+
+    /*while num_outgoing_connected_pending < 25 {
+        if let Some(node) = peerset.overlay(0).unwrap().random_disconnected() {
+            for address in node.addresses() {
+                
+            }
+
+            node.connect();
+        }
+    }*/
+
     let tcp_socket = with_buffers::WithBuffers::new(
         async_std::net::TcpStream::connect("p2p.cc1-4.polkadot.network:30100")
             .await

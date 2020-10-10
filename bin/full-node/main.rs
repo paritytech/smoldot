@@ -192,7 +192,7 @@ async fn async_main() {
         }
     });
 
-    let mut telemetry = {
+    /*let mut telemetry = {
         let endpoints = chain_spec
             .telemetry_endpoints()
             .map(|addr| (addr.as_ref().to_owned(), 0))
@@ -206,7 +206,7 @@ async fn async_main() {
                 Box::new(move |task| threads_pool.spawn_obj_ok(From::from(task))) as Box<_>
             },
         })
-    };
+    };*/
 
     let mut informant_timer = stream::unfold((), move |_| {
         futures_timer::Delay::new(Duration::from_secs(1)).map(|_| Some(((), ())))
@@ -252,7 +252,7 @@ async fn async_main() {
             },
 
             _ = telemetry_timer.next() => {
-                let sync_state = sync_state.lock().await.clone();
+                /*let sync_state = sync_state.lock().await.clone();
 
                 // Some of the fields below are set to `None` because there is no plan to
                 // implement reporting accurate metrics about the node.
@@ -275,7 +275,7 @@ async fn async_main() {
                     used_db_cache_size: None,
                     disk_read_per_sec: None,
                     disk_write_per_sec: None,
-                }));
+                }));*/
             },
         }
     }
