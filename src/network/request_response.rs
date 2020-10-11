@@ -31,7 +31,7 @@ mod schema {
 }
 
 /// Description of a block request that can be sent to a peer.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlocksRequestConfig {
     /// First block that the remote must return.
     pub start: BlocksRequestConfigStart,
@@ -46,7 +46,7 @@ pub struct BlocksRequestConfig {
 
 /// Whether the first block should be the one with the highest number, of the one with the lowest
 /// number.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlocksRequestDirection {
     /// Blocks should be returned in ascending number, starting from the requested one.
     Ascending,
@@ -55,7 +55,7 @@ pub enum BlocksRequestDirection {
 }
 
 /// Which fields should be present in the response.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlocksRequestFields {
     pub header: bool,
     pub body: bool,
@@ -63,7 +63,7 @@ pub struct BlocksRequestFields {
 }
 
 /// Which block the remote must return first.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlocksRequestConfigStart {
     /// Hash of the block.
     Hash([u8; 32]),

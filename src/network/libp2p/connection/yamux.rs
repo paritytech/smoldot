@@ -505,8 +505,10 @@ impl<T> Yamux<T> {
             if let Some((substream, ref mut remain)) = self.writing_out_substream {
                 let mut substream = self.substreams.get_mut(&substream.0).unwrap();
 
-                let first_buf_avail =
-                    substream.write_buffers[0].len() - substream.first_write_buffer_offset;
+                let first_buf_avail = cmp::min(
+                    size_bytes_iter,
+                    substream.write_buffers[0].len() - substream.first_write_buffer_offset,
+                );
                 if first_buf_avail <= *remain {
                     buffers.push(either::Right(VecWithOffset(
                         substream.write_buffers.remove(0),

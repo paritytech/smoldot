@@ -14,7 +14,11 @@
 // limitations under the License.
 
 use core::{iter, pin::Pin};
-use futures::prelude::*;
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+    prelude::*,
+};
 use std::{sync::Arc, time::Instant};
 use substrate_lite::network::{
     libp2p::{connection, peer_id::PeerId},
@@ -27,14 +31,27 @@ pub struct Config {
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>)>,
 }
 
-pub struct NetworkService {}
+pub enum Event {
+    Connected(PeerId),
+}
+
+pub struct NetworkService {
+    to_background: Mutex<mpsc::Sender<ToBackground>>,
+    from_background: Mutex<mpsc::Receiver<FromBackground>>,
+}
 
 impl NetworkService {
     pub fn new(mut config: Config) -> Arc<Self> {
-        // TODO: temporary for testing
-        (config.tasks_executor)(Box::pin(task()));
+        let (to_foreground, from_background) = mpsc::channel(16); // TODO: size
+        let (to_background, from_foreground) = mpsc::channel(16); // TODO: size
 
-        Arc::new(NetworkService {})
+        // TODO: temporary for testing
+        (config.tasks_executor)(Box::pin(task(to_foreground, from_foreground)));
+
+        Arc::new(NetworkService {
+            to_background: Mutex::new(to_background),
+            from_background: Mutex::new(from_background),
+        })
     }
 
     // TODO: proper error type
@@ -43,15 +60,48 @@ impl NetworkService {
         target: PeerId,
         config: request_response::BlocksRequestConfig,
     ) -> Result<Vec<request_response::BlockData>, ()> {
-        // TODO:
-        loop {
-            futures::pending!()
+        let mut to_background = self.to_background.lock().await;
+
+        let (send_back, receive_result) = oneshot::channel();
+
+        to_background
+            .send(ToBackground::BlocksRequest {
+                target,
+                config,
+                send_back,
+            })
+            .await
+            .unwrap();
+
+        receive_result.await.unwrap()
+    }
+
+    pub async fn next_event(&self) -> Event {
+        match self.from_background.lock().await.next().await.unwrap() {
+            FromBackground::Connected(peer_id) => Event::Connected(peer_id),
+            FromBackground::Disconnected(peer_id) => todo!(),
         }
     }
 }
 
+enum ToBackground {
+    BlocksRequest {
+        target: PeerId,
+        config: request_response::BlocksRequestConfig,
+        send_back: oneshot::Sender<Result<Vec<request_response::BlockData>, ()>>,
+    },
+}
+
+enum FromBackground {
+    Connected(PeerId),
+    Disconnected(PeerId),
+}
+
 // TODO: this function is temporary
-async fn task() {
+async fn task(
+    mut to_foreground: mpsc::Sender<FromBackground>,
+    mut from_foreground: mpsc::Receiver<ToBackground>,
+) {
     /*let mut peerset = substrate_lite::network::peerset::Peerset::new(substrate_lite::network::peerset::Config {
         randomness_seed: [0; 32],
     });*/
@@ -116,6 +166,10 @@ async fn task() {
                 connection,
             } => {
                 println!("Id = {}", remote_peer_id);
+                to_foreground
+                    .send(FromBackground::Connected(remote_peer_id))
+                    .await
+                    .unwrap();
                 break connection;
             }
         }
@@ -123,32 +177,13 @@ async fn task() {
 
     println!("Connected!");
 
-    let mut connection =
-        connection.into_connection::<_, (), (), _, _>(connection::established::Config {
+    let mut connection = connection.into_connection::<_, oneshot::Sender<_>, (), _, _>(
+        connection::established::Config {
             in_request_protocols: iter::once("/ipfs/ping/1.0.0"),
             in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO:
             randomness_seed: rand::random(),
-        });
-
-    let request = request_response::build_block_request(request_response::BlocksRequestConfig {
-        start: request_response::BlocksRequestConfigStart::Number(
-            core::num::NonZeroU64::new(1).unwrap(),
-        ),
-        desired_count: core::num::NonZeroU32::new(u32::max_value()).unwrap(),
-        direction: request_response::BlocksRequestDirection::Ascending,
-        fields: request_response::BlocksRequestFields {
-            header: true,
-            body: true,
-            justification: false,
         },
-    })
-    .fold(Vec::new(), |mut a, b| {
-        a.extend_from_slice(b.as_ref());
-        a
-    });
-
-    let id = connection.add_request(Instant::now(), "/dot/sync/2", request, ());
-    println!("start request on {:?}", id);
+    );
 
     loop {
         // TODO: shouldn't unwrap here
@@ -165,7 +200,7 @@ async fn task() {
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
         if let Some(event) = &read_write.event {
-            println!("event: {:?}", event);
+            //println!("event: {:?}", event);
         }
 
         if let Some(connection::established::Event::Response {
@@ -175,7 +210,7 @@ async fn task() {
         }) = read_write.event
         {
             let decoded = request_response::decode_block_response(&response.unwrap()).unwrap();
-            println!("decoded: {:?}", decoded);
+            let _ = user_data.send(Ok(decoded));
         }
 
         if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
@@ -183,7 +218,23 @@ async fn task() {
             continue;
         }
 
-        tcp_socket.as_mut().process().await;
         connection = read_write.connection;
+        futures::select! {
+            _ = tcp_socket.as_mut().process().fuse() => {},
+            message = from_foreground.select_next_some().fuse() => {
+                match message {
+                    ToBackground::BlocksRequest { target, config, send_back } => {
+                        let start = config.start.clone();
+                        let request = request_response::build_block_request(config)
+                            .fold(Vec::new(), |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            });
+                        let id = connection.add_request(Instant::now(), "/dot/sync/2", request, send_back);
+                        println!("start request on {:?} for blocks starting at {:?}", id, start);
+                    }
+                }
+            }
+        }
     }
 }

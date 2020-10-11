@@ -131,7 +131,7 @@ async fn async_main() {
         substrate_lite::metadata::decode(&metadata).unwrap()
     );*/
 
-    let (to_sync_tx, to_sync_rx) = mpsc::channel(64);
+    let (mut to_sync_tx, to_sync_rx) = mpsc::channel(64);
     let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
 
     let network_service = network_service::NetworkService::new(network_service::Config {
@@ -154,7 +154,7 @@ async fn async_main() {
             chain_information,
             sync_state.clone(),
             to_sync_rx,
-            network_service,
+            network_service.clone(),
             to_db_save_tx,
         )
         .await,
@@ -213,6 +213,14 @@ async fn async_main() {
                     }*/
                 });
             },
+
+            network_message = network_service.next_event().fuse() => {
+                match network_message {
+                    network_service::Event::Connected(peer_id) => {
+                        to_sync_tx.send(ToSync::NewPeer(peer_id)).await.unwrap();
+                    }
+                }
+            }
 
             /*telemetry_event = telemetry.next_event().fuse() => {
                 telemetry.send(substrate_lite::telemetry::message::TelemetryMessage::SystemConnected(substrate_lite::telemetry::message::SystemConnected {
