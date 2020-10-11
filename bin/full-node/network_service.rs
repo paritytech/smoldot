@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::{iter, pin::Pin};
+use core::{iter, pin::Pin, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -185,42 +185,57 @@ async fn task(
         },
     );
 
+    let mut poll_after = futures_timer::Delay::new(Duration::from_secs(3600));
+
     loop {
         // TODO: shouldn't unwrap here
         let (read_buffer, write_buffer) = tcp_socket.buffers().unwrap();
 
+        let now = Instant::now();
+
         let read_write = connection
-            .read_write(
-                Instant::now(),
-                read_buffer.map(|b| b.0),
-                write_buffer.unwrap().0,
-            )
+            .read_write(now, read_buffer.map(|b| b.0), write_buffer.unwrap().0)
             .unwrap();
+        connection = read_write.connection;
+
+        if let Some(wake_up) = read_write.wake_up_after {
+            if wake_up > now {
+                let dur = wake_up - now;
+                poll_after = futures_timer::Delay::new(dur);
+            } else {
+                poll_after = futures_timer::Delay::new(Duration::from_secs(0));
+            }
+        } else {
+            poll_after = futures_timer::Delay::new(Duration::from_secs(3600));
+        }
 
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
-        if let Some(event) = &read_write.event {
-            //println!("event: {:?}", event);
-        }
-
-        if let Some(connection::established::Event::Response {
-            response,
-            id,
-            user_data,
-        }) = read_write.event
-        {
-            let decoded = request_response::decode_block_response(&response.unwrap()).unwrap();
-            let _ = user_data.send(Ok(decoded));
+        match read_write.event {
+            Some(connection::established::Event::Response {
+                response,
+                user_data,
+                ..
+            }) => {
+                if let Ok(response) = response {
+                    let decoded = request_response::decode_block_response(&response).unwrap();
+                    let _ = user_data.send(Ok(decoded));
+                } else {
+                    let _ = user_data.send(Err(()));
+                }
+            }
+            _ => {}
         }
 
         if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
-            connection = read_write.connection;
             continue;
         }
 
-        connection = read_write.connection;
         futures::select! {
             _ = tcp_socket.as_mut().process().fuse() => {},
+            timeout = poll_after.fuse() => {
+                // Nothing to do, but guarantees that we loop again.
+            },
             message = from_foreground.select_next_some().fuse() => {
                 match message {
                     ToBackground::BlocksRequest { target, config, send_back } => {
