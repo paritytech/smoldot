@@ -13,24 +13,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![recursion_limit = "512"]
-
-// TODO: temporary binary to try the networking alone
-
-use core::iter;
+use core::{iter, pin::Pin};
 use futures::prelude::*;
-use std::time::Instant;
-use substrate_lite::network::{libp2p::connection, request_response, with_buffers};
+use std::{sync::Arc, time::Instant};
+use substrate_lite::network::{
+    libp2p::{connection, peer_id::PeerId},
+    request_response, with_buffers,
+};
 
-fn main() {
-    env_logger::init();
-    futures::executor::block_on(async_main())
+/// Configuration for a [`NetworkService`].
+pub struct Config {
+    /// Closure that spawns background tasks.
+    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>)>,
 }
 
-async fn async_main() {
-    let mut peerset = substrate_lite::network::peerset::Peerset::new(substrate_lite::network::peerset::Config {
+pub struct NetworkService {}
+
+impl NetworkService {
+    pub fn new(mut config: Config) -> Arc<Self> {
+        // TODO: temporary for testing
+        (config.tasks_executor)(Box::pin(task()));
+
+        Arc::new(NetworkService {})
+    }
+
+    // TODO: proper error type
+    pub async fn blocks_request(
+        self: &Arc<Self>,
+        target: PeerId,
+        config: request_response::BlocksRequestConfig,
+    ) -> Result<Vec<request_response::BlockData>, ()> {
+        // TODO:
+        loop {
+            futures::pending!()
+        }
+    }
+}
+
+// TODO: this function is temporary
+async fn task() {
+    /*let mut peerset = substrate_lite::network::peerset::Peerset::new(substrate_lite::network::peerset::Config {
         randomness_seed: [0; 32],
-    });
+    });*/
 
     // peerset.insert("/dns/p2p.cc1-0.polkadot.network/tcp/30100/p2p/12D3KooWEdsXX9657ppNqqrRuaCHFvuNemasgU5msLDwSJ6WqsKc");
     // peerset.insert("/dns/p2p.cc1-1.polkadot.network/tcp/30100/p2p/12D3KooWAtx477KzC8LwqLjWWUG6WF4Gqp2eNXmeqAG98ehAMWYH");
@@ -44,7 +68,7 @@ async fn async_main() {
     /*while num_outgoing_connected_pending < 25 {
         if let Some(node) = peerset.overlay(0).unwrap().random_disconnected() {
             for address in node.addresses() {
-                
+
             }
 
             node.connect();

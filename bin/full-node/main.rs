@@ -37,7 +37,13 @@ use structopt::StructOpt as _;
 use substrate_lite::{
     chain::{self, sync::full_optimistic},
     chain_spec, header, network,
+    network::{
+        libp2p::{connection, peer_id::PeerId},
+        request_response, with_buffers,
+    },
 };
+
+mod network_service;
 
 fn main() {
     env_logger::init();
@@ -126,45 +132,13 @@ async fn async_main() {
     );*/
 
     let (to_sync_tx, to_sync_rx) = mpsc::channel(64);
-    let (to_network_tx, to_network_rx) = mpsc::channel(64);
-    let (to_network_tx2, to_network_rx2) = mpsc::channel(64);
     let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
 
-    let network_state = Arc::new(NetworkState {
-        best_network_block_height: Atomic::new(0),
-        num_network_connections: Atomic::new(0),
-    });
-
-    threads_pool.spawn_ok({
-        let tasks_executor = Box::new({
+    let network_service = network_service::NetworkService::new(network_service::Config {
+        tasks_executor: {
             let threads_pool = threads_pool.clone();
-            move |f| threads_pool.spawn_ok(f)
-        });
-
-        start_network(
-            &chain_spec,
-            tasks_executor,
-            network_state.clone(),
-            to_network_rx,
-            to_sync_tx.clone(), // TODO: don't clone
-        )
-        .await
-    });
-
-    threads_pool.spawn_ok({
-        let tasks_executor = Box::new({
-            let threads_pool = threads_pool.clone();
-            move |f| threads_pool.spawn_ok(f)
-        });
-
-        start_network2(
-            &chain_spec,
-            tasks_executor,
-            network_state.clone(),
-            to_network_rx2,
-            to_sync_tx,
-        )
-        .await
+            Box::new(move |task| threads_pool.spawn_ok(task))
+        },
     });
 
     let sync_state = Arc::new(Mutex::new(SyncState {
@@ -180,7 +154,7 @@ async fn async_main() {
             chain_information,
             sync_state.clone(),
             to_sync_rx,
-            to_network_tx,
+            network_service,
             to_db_save_tx,
         )
         .await,
@@ -228,19 +202,19 @@ async fn async_main() {
                 eprint!("{}\r", substrate_lite::informant::InformantLine {
                     chain_name: chain_spec.name(),
                     max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(80),
-                    num_network_connections: network_state.num_network_connections.load(Ordering::Relaxed),
+                    num_network_connections: 0, // TODO: network_state.num_network_connections.load(Ordering::Relaxed),
                     best_number: sync_state.best_block_number,
                     finalized_number: sync_state.finalized_block_number,
                     best_hash: &sync_state.best_block_hash,
                     finalized_hash: &sync_state.finalized_block_hash,
-                    network_known_best: match network_state.best_network_block_height.load(Ordering::Relaxed) {
+                    network_known_best: None, /* TODO: match network_state.best_network_block_height.load(Ordering::Relaxed) {
                         0 => None,
                         n => Some(n)
-                    },
+                    }*/
                 });
             },
 
-            telemetry_event = telemetry.next_event().fuse() => {
+            /*telemetry_event = telemetry.next_event().fuse() => {
                 telemetry.send(substrate_lite::telemetry::message::TelemetryMessage::SystemConnected(substrate_lite::telemetry::message::SystemConnected {
                     chain: chain_spec.name().to_owned().into_boxed_str(),
                     name: String::from("Polkadot ✨ lite ✨").into_boxed_str(),  // TODO: node name
@@ -249,7 +223,7 @@ async fn async_main() {
                     validator: None,
                     network_id: None, // TODO: Some(service.local_peer_id().to_base58().into_boxed_str()),
                 }));
-            },
+            },*/
 
             _ = telemetry_timer.next() => {
                 /*let sync_state = sync_state.lock().await.clone();
@@ -286,7 +260,7 @@ async fn start_sync(
     chain_information_config: chain::chain_information::ChainInformationConfig,
     sync_state: Arc<Mutex<SyncState>>,
     mut to_sync: mpsc::Receiver<ToSync>,
-    mut to_network: mpsc::Sender<ToNetwork>,
+    network: Arc<network_service::NetworkService>,
     mut to_db_save_tx: mpsc::Sender<chain::chain_information::ChainInformation>,
 ) -> impl Future<Output = ()> {
     let mut sync =
@@ -415,19 +389,24 @@ async fn start_sync(
                         num_blocks,
                         ..
                     } => {
-                        let (tx, rx) = oneshot::channel();
-                        let _ = to_network
-                            .send(ToNetwork::StartBlockRequest {
-                                peer_id: source.clone(),
-                                block_height,
-                                num_blocks: num_blocks.get(),
-                                send_back: tx,
-                            })
-                            .await;
-
-                        let (rx, abort) = future::abortable(rx);
+                        let block_request = network.blocks_request(
+                            source.clone(),
+                            request_response::BlocksRequestConfig {
+                                start: request_response::BlocksRequestConfigStart::Number(
+                                    block_height,
+                                ),
+                                desired_count: num_blocks,
+                                direction: request_response::BlocksRequestDirection::Ascending,
+                                fields: request_response::BlocksRequestFields {
+                                    header: true,
+                                    body: true,
+                                    justification: true,
+                                },
+                            },
+                        );
+                        let (block_request, abort) = future::abortable(block_request);
                         let request_id = start.start(abort);
-                        block_requests_finished.push(rx.map(move |r| (request_id, r)));
+                        block_requests_finished.push(block_request.map(move |r| (request_id, r)));
                     }
                     full_optimistic::RequestAction::Cancel { user_data, .. } => {
                         user_data.abort();
@@ -461,7 +440,11 @@ async fn start_sync(
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
-                        let _ = sync.finish_request(request_id, result.unwrap().map(|v| v.into_iter()));
+                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
+                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                            scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
+                            scale_encoded_justification: block.justification,
+                        })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
             }
@@ -480,244 +463,4 @@ struct SyncState {
     best_block_hash: [u8; 32],
     finalized_block_number: u64,
     finalized_block_hash: [u8; 32],
-}
-
-async fn start_network(
-    chain_spec: &chain_spec::ChainSpec,
-    tasks_executor: Box<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
-    network_state: Arc<NetworkState>,
-    mut to_network: mpsc::Receiver<ToNetwork>,
-    mut to_sync: mpsc::Sender<ToSync>,
-) -> impl Future<Output = ()> {
-    let mut network = {
-        let mut known_addresses = chain_spec
-            .boot_nodes()
-            .iter()
-            .map(|bootnode_str| network::parse_str_addr(bootnode_str).unwrap())
-            .collect::<Vec<_>>();
-        // TODO: remove this; temporary because bootnode is apparently full
-        // TODO: to test, run a node with ./target/debug/polkadot --chain kusama --listen-addr /ip4/0.0.0.0/tcp/30333/ws --node-key 0000000000000000000000000000000000000000000000000000000000000000
-        known_addresses.push((
-            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
-                .parse()
-                .unwrap(),
-            "/ip4/127.0.0.1/tcp/30333/ws".parse().unwrap(),
-        ));
-
-        network::Network::start(network::Config {
-            known_addresses,
-            chain_spec_protocol_id: chain_spec.protocol_id().as_bytes().to_vec(),
-            tasks_executor,
-            local_genesis_hash: substrate_lite::calculate_genesis_block_header(
-                chain_spec.genesis_storage(),
-            )
-            .hash(),
-            wasm_external_transport: None,
-        })
-        .await
-    };
-
-    async move {
-        // TODO: store send back channel in a network user data rather than having this hashmap
-        let mut block_requests = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
-
-        loop {
-            futures::select! {
-                message = to_network.next() => {
-                    let message = match message {
-                        Some(m) => m,
-                        None => return,
-                    };
-
-                    match message {
-                        ToNetwork::StartBlockRequest { peer_id, block_height, num_blocks, send_back } => {
-                            let result = network.start_block_request(network::BlocksRequestConfig {
-                                start: network::BlocksRequestConfigStart::Number(block_height),
-                                peer_id,
-                                desired_count: num_blocks,
-                                direction: network::BlocksRequestDirection::Ascending,
-                                fields: network::BlocksRequestFields {
-                                    header: true,
-                                    body: true,
-                                    justification: true,
-                                },
-                            }).await;
-
-                            match result {
-                                Ok(id) => {
-                                    block_requests.insert(id, send_back);
-                                }
-                                Err(()) => {
-                                    // TODO: better error
-                                    let _ = send_back.send(Err(full_optimistic::RequestFail::BlocksUnavailable));
-                                }
-                            };
-                        },
-                    }
-                },
-
-                event = network.next_event().fuse() => {
-                    match event {
-                        network::Event::BlockAnnounce(header) => {
-                            if let Ok(header) = header::decode(&header.0) {
-                                network_state.best_network_block_height.store(header.number, Ordering::Relaxed);
-                            }
-                        }
-                        network::Event::CallRequestFinished { .. } => unreachable!(),
-                        network::Event::BlocksRequestFinished { id, result } => {
-                            let send_back = block_requests.remove(&id).unwrap();
-                            let _: Result<_, _> = send_back.send(result
-                                .map(|list| {
-                                    list.into_iter().map(|block| {
-                                        full_optimistic::RequestSuccessBlock {
-                                            scale_encoded_header: block.header.unwrap().0,
-                                            scale_encoded_extrinsics: block.body.unwrap().into_iter().map(|e| e.0).collect(), // TODO: overhead
-                                            scale_encoded_justification: block.justification,
-                                        }
-                                    }).collect()
-                                })
-                                .map_err(|()| full_optimistic::RequestFail::BlocksUnavailable) // TODO:
-                            );
-                        }
-                        network::Event::Connected(peer_id) => {
-                            network_state.num_network_connections.fetch_add(1, Ordering::Relaxed);
-                            let _ = to_sync.send(ToSync::NewPeer(peer_id)).await;
-                        }
-                        network::Event::Disconnected(peer_id) => {
-                            network_state.num_network_connections.fetch_sub(1, Ordering::Relaxed);
-                            let _ = to_sync.send(ToSync::PeerDisconnected(peer_id)).await;
-                        }
-                    }
-                },
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-struct NetworkState {
-    /// 0 means "unknown".
-    best_network_block_height: Atomic<u64>,
-    num_network_connections: Atomic<u64>,
-}
-
-enum ToNetwork {
-    StartBlockRequest {
-        peer_id: network::PeerId,
-        block_height: NonZeroU64,
-        num_blocks: u32,
-        send_back: oneshot::Sender<
-            Result<Vec<full_optimistic::RequestSuccessBlock>, full_optimistic::RequestFail>,
-        >,
-    },
-}
-
-/// Testing prototype of the new networking.
-// TODO: remove eventually
-async fn start_network2(
-    chain_spec: &chain_spec::ChainSpec,
-    tasks_executor: Box<dyn Fn(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
-    network_state: Arc<NetworkState>,
-    mut to_network: mpsc::Receiver<ToNetwork>,
-    mut to_sync: mpsc::Sender<ToSync>,
-) -> impl Future<Output = ()> {
-    // TODO: tokio instead?
-    // TODO: report listener opening error
-    // TODO: make address configurable
-    let tcp_listener = async_std::net::TcpListener::bind("0.0.0.0:30333")
-        .await
-        .ok();
-
-    let mut network =
-        substrate_lite::network::libp2p::Network::<_, _, _, (), _, std::time::Instant>::new(
-            substrate_lite::network::libp2p::Config {
-                noise_key: substrate_lite::network::libp2p::NoiseKey::new(&[0; 32]), // TODO:
-                notification_protocols: core::iter::empty::<()>(),
-                request_protocols: Vec::new(),
-                tasks_executor,
-            },
-        );
-
-    let bootnodes = chain_spec
-        .boot_nodes()
-        .iter()
-        .map(|a| {
-            let mut a = a.parse::<substrate_lite::network::Multiaddr>().unwrap();
-            let peer_id = match a.pop().unwrap() {
-                substrate_lite::network::multiaddr::Protocol::P2p(h) => {
-                    substrate_lite::network::PeerId::from_multihash(h).unwrap()
-                }
-                _ => panic!(),
-            };
-            (peer_id, a)
-        })
-        .collect::<Vec<_>>();
-
-    /*for (peer_id, target) in bootnodes {
-        if let Ok(addr) = multiaddr_to_socketaddr(&target) {
-            network.add_dial_future(async move {
-                async_std::net::TcpStream::connect(addr)
-                    .map_ok(|s| ((), s))
-                    .await
-            });
-        }
-    }*/
-    network.add_dial_future(async move {
-        async_std::net::TcpStream::connect("127.0.0.1:30333")
-            .map_ok(|s| ((), s))
-            .await
-    });
-
-    async move {
-        loop {
-            futures::select! {
-                event = network.next_event().fuse() => {
-                    match event {
-                        substrate_lite::network::libp2p::Event::Notification { .. } => todo!(),
-                        substrate_lite::network::libp2p::Event::RequestFinished { .. } => todo!(),
-                    }
-                },
-                incoming = async { if let Some(l) = tcp_listener.as_ref() { l.accept().await } else { loop { futures::pending!() } } }.fuse() => {
-                    // A new socket has been received from the TCP listener.
-                    todo!()
-                }
-            }
-        }
-    }
-}
-
-fn multiaddr_to_socketaddr(
-    addr: &substrate_lite::network::libp2p::Multiaddr,
-) -> Result<SocketAddr, ()> {
-    let mut iter = addr.iter();
-    let proto1 = iter.next().ok_or(())?;
-    let proto2 = iter.next().ok_or(())?;
-
-    if iter.next().is_some() {
-        return Err(());
-    }
-
-    match (proto1, proto2) {
-        (
-            substrate_lite::network::libp2p::multiaddr::Protocol::Dns(addr),
-            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
-        )
-        | (
-            substrate_lite::network::libp2p::multiaddr::Protocol::Dns4(addr),
-            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
-        )
-        | (
-            substrate_lite::network::libp2p::multiaddr::Protocol::Dns6(addr),
-            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
-        ) => Ok((&*addr, port).to_socket_addrs().unwrap().next().unwrap()),
-        (
-            substrate_lite::network::libp2p::multiaddr::Protocol::Ip4(ip),
-            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
-        ) => Ok(SocketAddr::new(ip.into(), port)),
-        (
-            substrate_lite::network::libp2p::multiaddr::Protocol::Ip6(ip),
-            substrate_lite::network::libp2p::multiaddr::Protocol::Tcp(port),
-        ) => Ok(SocketAddr::new(ip.into(), port)),
-        _ => Err(()),
-    }
 }

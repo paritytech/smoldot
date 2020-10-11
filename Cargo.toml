@@ -41,11 +41,6 @@ name = "json-rpc-test"
 path = "bin/json-rpc-test/main.rs"
 required-features = ["os-networking"]
 
-[[bin]]
-name = "network-test"
-path = "bin/network-test/main.rs"
-required-features = ["os-networking"]
-
 [dependencies]
 ahash = { version = "0.4.5", default-features = false }
 ansi_term = "0.12.1"
@@ -61,7 +56,7 @@ ed25519-dalek = { version = "1.0.0", default-features = false, features = ["allo
 either = "1.6.1"
 env_logger = "0.7.1"
 fnv = "1.0"
-futures = "0.3.1"   # TODO: should be default-features = false, but we use some std-only types at the moment
+futures = { version = "0.3.6", features = ["thread-pool"] }   # TODO: should be default-features = false, but we use some std-only types at the moment
 futures_codec = "0.3.3"
 futures-timer = "3.0"
 hashbrown = { version = "0.7.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
