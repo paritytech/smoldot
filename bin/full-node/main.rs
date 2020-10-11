@@ -140,48 +140,25 @@ async fn async_main() {
     });
 
     // Load the information about the chain from the database.
-    let chain_information = chain::chain_information::ChainInformationConfig {
-        chain_information: {
-            let finalized_block_hash = database.finalized_block_hash().unwrap();
-            let finalized_block_header: header::Header = {
-                let encoded = database
-                    .block_scale_encoded_header(&finalized_block_hash)
-                    .unwrap()
-                    .unwrap();
-                header::decode(&encoded).unwrap().into()
-            };
-            let finalized_block_number = finalized_block_header.number;
+    let chain_information = {
+        let genesis_chain_information =
+            chain::chain_information::ChainInformationConfig::from_genesis_storage(
+                chain_spec.genesis_storage(),
+            )
+            .unwrap(); // TODO: don't unwrap?
 
-            chain::chain_information::ChainInformation {
-                finalized_block_header: finalized_block_header,
-                babe_finalized_block1_slot_number: if finalized_block_number != 0 {
-                    let block1 = database.block_hash_by_number(1).unwrap().next().unwrap();
-                    let encoded = database
-                        .block_scale_encoded_header(&block1)
-                        .unwrap()
-                        .unwrap();
-                    let decoded = header::decode(&encoded).unwrap();
-                    Some(decoded.digest.babe_pre_runtime().unwrap().slot_number())
-                } else {
-                    None
-                },
-                babe_finalized_block_epoch_information: todo!(),
-                babe_finalized_next_epoch_transition: todo!(),
-                grandpa_after_finalized_block_authorities_set_id: database
-                    .finalized_block_next_block_grandpa_authorities_set_id(&finalized_block_hash)
-                    .unwrap(),
-                grandpa_finalized_triggered_authorities: todo!(),
-                grandpa_finalized_scheduled_change: todo!(),
-            }
-        },
-        babe_genesis_config: babe::BabeGenesisConfiguration::from_genesis_storage(|k| {
-            chain_spec
-                .genesis_storage()
-                .clone()
-                .find(|(k2, _)| *k2 == k)
-                .map(|(_, v)| v.to_owned())
-        })
-        .unwrap(), // TODO: no unwrap
+        chain::chain_information::ChainInformationConfig {
+            // TODO: don't unwrap? how to handle database access errors?
+            chain_information: database
+                .to_chain_information(
+                    &database.finalized_block_hash().unwrap(),
+                    genesis_chain_information
+                        .chain_information
+                        .grandpa_finalized_triggered_authorities,
+                )
+                .unwrap(),
+            babe_genesis_config: genesis_chain_information.babe_genesis_config,
+        }
     };
 
     // TODO: remove; just for testing
@@ -388,7 +365,7 @@ async fn start_sync(
                                 lock.finalized_block_number = last_finalized.header.number;
                                 lock.finalized_block_hash
                             } else {
-                                break;
+                                continue;
                             };
 
                         for block in finalized_blocks {

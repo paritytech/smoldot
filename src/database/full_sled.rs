@@ -22,7 +22,7 @@
 #![cfg(feature = "database-sled")]
 #![cfg_attr(docsrs, doc(cfg(feature = "database-sled")))]
 
-use crate::header;
+use crate::{chain::chain_information::ChainInformation, header};
 
 use core::{convert::TryFrom as _, fmt, iter, ops};
 use sled::Transactional as _;
@@ -51,6 +51,14 @@ pub struct SledFullDatabase {
     /// containing the height of the finalized block that scheduled authorities that haven't been
     /// triggered yet. The list of authorities can be found in that block's header. Missing
     /// there's no scheduled-but-non-finalized authorities change.
+    /// - `babe_current_epoch_info_height`: A 64bits big endian number indicating the height of
+    /// the finalized block that contains the information about the Babe epoch used for the latest
+    /// finalized block. Missing if and only if the finalized block is block #0 or belongs to
+    /// epoch #0.
+    /// - `babe_next_epoch_info_height`: A 64bits big endian number indicating the height of the
+    /// finalized block that contains the information about the Babe epoch that follows the one
+    /// designated by `babe_current_epoch_info_height`. Missing if the finalized block is block
+    /// #0.
     ///
     meta_tree: sled::Tree,
 
@@ -254,6 +262,251 @@ impl SledFullDatabase {
         impl ExactSizeIterator for Iter {}
 
         Ok(either::Right(Iter { hash, cursor: 0 }))
+    }
+
+    /// Returns a [`ChainInformation`] struct containing the information about the current
+    /// finalized state of the chain.
+    ///
+    /// In order to avoid race conditions, the known finalized block hash must be passed as
+    /// parameter. If the finalized block in the database doesn't match the hash passed as
+    /// parameter, most likely because it has been updated in a parallel thread, a
+    /// [`FinalizedAccessError::Obsolete`] error is returned.
+    // TODO: consider passing the genesis chain information as a whole, rather than just grandpa
+    pub fn to_chain_information(
+        &self,
+        finalized_block_hash: &[u8; 32],
+        genesis_grandpa_authorities: Vec<header::GrandpaAuthority>,
+    ) -> Result<ChainInformation, FinalizedAccessError> {
+        // Try to apply changes. This is done atomically through a transaction.
+        let result = (
+            &self.meta_tree,
+            &self.block_hashes_by_number_tree,
+            &self.block_headers_tree,
+        )
+            .transaction(move |(meta, block_hashes_by_number, block_headers)| {
+                // Short-cut for unwrapping an `Option`, returning a `CorruptedError` if it is `None`.
+                macro_rules! unwrap_or_corrupted {
+                    ($expr:expr, $err:expr) => {
+                        match $expr {
+                            Some(v) => v,
+                            None => {
+                                return Err(sled::transaction::ConflictableTransactionError::Abort(
+                                    FinalizedAccessError::Access(AccessError::Corrupted($err)),
+                                ))
+                            }
+                        }
+                    };
+                }
+
+                // Unwraps a `Result<_, CorruptedError>`.
+                macro_rules! try_corrupted {
+                    ($expr:expr) => {
+                        match $expr {
+                            Ok(v) => v,
+                            Err(err) => {
+                                return Err(sled::transaction::ConflictableTransactionError::Abort(
+                                    FinalizedAccessError::Access(AccessError::Corrupted(err)),
+                                ))
+                            }
+                        }
+                    };
+                }
+
+                // Hash of the finalized block.
+                let finalized_hash = {
+                    let finalized_height = unwrap_or_corrupted!(
+                        meta.get(b"finalized")?,
+                        CorruptedError::FinalizedBlockNumberNotFound
+                    );
+                    unwrap_or_corrupted!(
+                        block_hashes_by_number.get(finalized_height)?,
+                        CorruptedError::FinalizedBlockNumberOutOfRange
+                    )
+                };
+                if finalized_hash != finalized_block_hash {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        FinalizedAccessError::Obsolete,
+                    ));
+                }
+
+                // Header of the finalized block.
+                let finalized_block_header: header::Header = {
+                    let encoded = unwrap_or_corrupted!(
+                        block_headers.get(finalized_hash)?,
+                        CorruptedError::BlockHeaderNotInDatabase
+                    );
+                    try_corrupted!(
+                        header::decode(&encoded).map_err(CorruptedError::BlockHeaderCorrupted)
+                    )
+                    .into()
+                };
+
+                // Value to put in the field of the corresponding name in `ChainInformation`.
+                let babe_finalized_block1_slot_number = if finalized_block_header.number >= 1 {
+                    let block1_hash = unwrap_or_corrupted!(
+                        block_hashes_by_number.get(&u64::to_be_bytes(1)[..])?,
+                        CorruptedError::FinalizedBlockNumberOutOfRange
+                    );
+                    if block1_hash.len() != 32 {
+                        return Err(sled::transaction::ConflictableTransactionError::Abort(
+                            FinalizedAccessError::Access(AccessError::Corrupted(
+                                CorruptedError::BlockHashLenInHashNumberMapping,
+                            )),
+                        ));
+                    }
+                    let encoded = unwrap_or_corrupted!(
+                        block_headers.get(block1_hash)?,
+                        CorruptedError::BlockHeaderNotInDatabase
+                    );
+                    let decoded = try_corrupted!(
+                        header::decode(&encoded).map_err(CorruptedError::BlockHeaderCorrupted)
+                    );
+                    // TODO: don't unwrap
+                    Some(decoded.digest.babe_pre_runtime().unwrap().slot_number())
+                } else {
+                    None
+                };
+
+                // Value to put in the field of the corresponding name in `ChainInformation`.
+                let grandpa_after_finalized_block_authorities_set_id = {
+                    let num = unwrap_or_corrupted!(
+                        meta.get(b"grandpa_authorities_set_id")?,
+                        CorruptedError::MissingGrandpaAuthoritiesSetId
+                    );
+                    u64::from_be_bytes(*try_corrupted!(<&[u8; 8]>::try_from(&num[..])
+                        .map_err(|_| CorruptedError::InvalidGrandpaAuthoritiesSetId)))
+                };
+
+                // Value to put in the field of the corresponding name in `ChainInformation`.
+                let grandpa_finalized_triggered_authorities =
+                    if grandpa_after_finalized_block_authorities_set_id != 0 {
+                        let num = unwrap_or_corrupted!(
+                            meta.get(b"grandpa_triggered_authorities_scheduled_height")?,
+                            CorruptedError::MissingGrandpaTriggeredAuthoritiesScheduledHeight
+                        );
+                        let scheduled_height = u64::from_be_bytes(*try_corrupted!(
+                            <&[u8; 8]>::try_from(&num[..]).map_err(|_| {
+                                CorruptedError::InvalidGrandpaTriggeredAuthoritiesScheduledHeight
+                            })
+                        ));
+                        let scheduled_hash = unwrap_or_corrupted!(
+                            block_hashes_by_number.get(&scheduled_height.to_be_bytes()[..])?,
+                            CorruptedError::BlockHeaderNotInDatabase // TODO: bad error
+                        );
+                        let encoded = unwrap_or_corrupted!(
+                            block_headers.get(scheduled_hash)?,
+                            CorruptedError::BlockHeaderNotInDatabase
+                        );
+                        let decoded =
+                            try_corrupted!(header::decode(&encoded)
+                                .map_err(CorruptedError::BlockHeaderCorrupted));
+                        let list = decoded
+                            .digest
+                            .logs()
+                            .filter_map(|d| match d {
+                                header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
+                                _ => None,
+                            })
+                            .filter_map(|grandpa_digest_item| match grandpa_digest_item {
+                                header::GrandpaConsensusLogRef::ScheduledChange(change) => Some(
+                                    change
+                                        .next_authorities
+                                        .map(|a| header::GrandpaAuthority::from(a))
+                                        .collect::<Vec<_>>(),
+                                ),
+                                _ => None, // TODO: unimplemented
+                            })
+                            .next();
+                        unwrap_or_corrupted!(
+                            list,
+                            CorruptedError::InvalidGrandpaTriggeredAuthoritiesScheduledHeight
+                        )
+                    } else {
+                        genesis_grandpa_authorities.clone()
+                    };
+
+                // Value to put in the field of the corresponding name in `ChainInformation`.
+                let grandpa_finalized_scheduled_change = {
+                    let num = meta.get(b"grandpa_scheduled_non_triggered_authorities_height")?;
+                    if let Some(num) = num {
+                        let scheduled_height = u64::from_be_bytes(*try_corrupted!(
+                            <&[u8; 8]>::try_from(&num[..]).map_err(|_| {
+                                CorruptedError::InvalidGrandpaTriggeredAuthoritiesScheduledHeight
+                            })
+                        ));
+                        let scheduled_hash = unwrap_or_corrupted!(
+                            block_hashes_by_number.get(&scheduled_height.to_be_bytes()[..])?,
+                            CorruptedError::BlockHeaderNotInDatabase // TODO: bad error
+                        );
+                        let encoded = unwrap_or_corrupted!(
+                            block_headers.get(scheduled_hash)?,
+                            CorruptedError::BlockHeaderNotInDatabase
+                        );
+                        let decoded =
+                            try_corrupted!(header::decode(&encoded)
+                                .map_err(CorruptedError::BlockHeaderCorrupted));
+                        let list = decoded
+                            .digest
+                            .logs()
+                            .filter_map(|d| match d {
+                                header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
+                                _ => None,
+                            })
+                            .filter_map(|grandpa_digest_item| match grandpa_digest_item {
+                                header::GrandpaConsensusLogRef::ScheduledChange(change) => {
+                                    let triggered_height = decoded.number + u64::from(change.delay);
+                                    Some((
+                                        triggered_height,
+                                        change
+                                            .next_authorities
+                                            .map(|a| header::GrandpaAuthority::from(a))
+                                            .collect::<Vec<_>>(),
+                                    ))
+                                }
+                                _ => None, // TODO: unimplemented
+                            })
+                            .next();
+                        Some(unwrap_or_corrupted!(
+                            list,
+                            CorruptedError::InvalidGrandpaTriggeredAuthoritiesScheduledHeight
+                        ))
+                    } else {
+                        None
+                    }
+                };
+
+                // Value to put in the field of the corresponding name in `ChainInformation`.
+                let babe_finalized_block_epoch_information = if finalized_block_header.number != 0 {
+                    todo!()
+                } else {
+                    None
+                };
+
+                // Value to put in the field of the corresponding name in `ChainInformation`.
+                let babe_finalized_next_epoch_transition = if finalized_block_header.number != 0 {
+                    todo!()
+                } else {
+                    None
+                };
+
+                Ok(ChainInformation {
+                    finalized_block_header,
+                    babe_finalized_block1_slot_number,
+                    babe_finalized_block_epoch_information,
+                    babe_finalized_next_epoch_transition,
+                    grandpa_after_finalized_block_authorities_set_id,
+                    grandpa_finalized_triggered_authorities,
+                    grandpa_finalized_scheduled_change,
+                })
+            });
+
+        match result {
+            Ok(info) => Ok(info),
+            Err(sled::transaction::TransactionError::Abort(err)) => Err(err),
+            Err(sled::transaction::TransactionError::Storage(err)) => Err(
+                FinalizedAccessError::Access(AccessError::Database(SledError(err))),
+            ),
+        }
     }
 
     /// Insert a new block in the database.
@@ -675,47 +928,6 @@ impl SledFullDatabase {
 
         Ok(ret)
     }
-
-    /// Returns the authorities set id of the GrandPa authorities that must finalize the block
-    /// right after the finalized one.
-    ///
-    /// In order to avoid race conditions, the known finalized block hash must be passed as
-    /// parameter. If the finalized block in the database doesn't match the hash passed as
-    /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`FinalizedAccessError::Obsolete`] error is returned.
-    pub fn finalized_block_next_block_grandpa_authorities_set_id(
-        &self,
-        finalized_block_hash: &[u8; 32],
-    ) -> Result<u64, FinalizedAccessError> {
-        // TODO: use a transaction rather than checking once before and once after?
-        if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedAccessError::Obsolete);
-        }
-
-        let num = self
-            .meta_tree
-            .get(b"grandpa_authorities_set_id")
-            .map_err(SledError)
-            .map_err(AccessError::Database)
-            .map_err(FinalizedAccessError::Access)?
-            .ok_or(AccessError::Corrupted(
-                CorruptedError::FinalizedBlockNumberNotFound,
-            ))
-            .map_err(FinalizedAccessError::Access)?;
-
-        let authorities_set_id =
-            u64::from_be_bytes(*<&[u8; 8]>::try_from(&num[..]).map_err(|_| {
-                FinalizedAccessError::Access(AccessError::Corrupted(
-                    CorruptedError::InvalidGrandpaAuthoritiesSetId,
-                ))
-            })?);
-
-        if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedAccessError::Obsolete);
-        }
-
-        Ok(authorities_set_id)
-    }
 }
 
 impl fmt::Debug for SledFullDatabase {
@@ -799,10 +1011,14 @@ pub enum CorruptedError {
     FinalizedBlockNumberNotFound,
     FinalizedBlockNumberOutOfRange,
     BestBlockHashBadLength,
-    BestBlockHeaderNotInDatabase,
+    /// A block that is known to be in the database in missing from the list of block headers.
+    BlockHeaderNotInDatabase,
     BlockHeaderCorrupted(header::Error),
     BlockHashLenInHashNumberMapping,
     BlockBodyCorrupted(parity_scale_codec::Error),
     NonFinalizedChangesMissing,
+    MissingGrandpaAuthoritiesSetId,
     InvalidGrandpaAuthoritiesSetId,
+    MissingGrandpaTriggeredAuthoritiesScheduledHeight,
+    InvalidGrandpaTriggeredAuthoritiesScheduledHeight,
 }
