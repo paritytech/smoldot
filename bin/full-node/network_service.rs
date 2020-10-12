@@ -60,18 +60,33 @@ pub enum Event {
 }
 
 pub struct NetworkService {
-    /// Closure that spawns background tasks.
-    tasks_executor: Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
+    /// Fields behind a mutex.
+    guarded: Mutex<Guarded>,
 
     /// See [`Config::noise_key`].
     noise_key: Arc<connection::NoiseKey>,
 
-    connections: Mutex<slab::Slab<mpsc::Sender<ToConnection>>>,
-
-    peers: Mutex<HashMap<PeerId, Vec<usize>, RandomState>>,
-
+    /// Receiver of events sent by background tasks.
+    ///
+    /// > **Note**: This field is not in [`Guarded`] despite being inside of a mutex. The mutex
+    /// >           around this receiver is kept locked while an event is being waited for, and it
+    /// >           would be undesirable to block access to the other fields of [`Guarded`] during
+    /// >           that time.
     from_background: Mutex<mpsc::Receiver<FromBackground>>,
+
+    /// Sending side of [`NetworkService::from_background`]. Clones of this field are created when
+    /// a background task is spawned.
     to_foreground: mpsc::Sender<FromBackground>,
+}
+
+/// Fields of [`NetworkService`] behind a mutex.
+struct Guarded {
+    /// See [`Config::tasks_executor`].
+    tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+
+    connections: slab::Slab<mpsc::Sender<ToConnection>>,
+
+    peers: HashMap<PeerId, Vec<usize>, RandomState>,
 }
 
 impl NetworkService {
@@ -81,17 +96,20 @@ impl NetworkService {
 
         let (to_foreground, from_background) = mpsc::channel(64); // TODO: size
 
+        // For each listening address in the configuration, create a background task dedicated to
+        // listening on that address.
         for listen_address in config.listen_addresses {
             // TODO: proper address
             let tcp_listener = async_std::net::TcpListener::bind("0.0.0.0:30333").await?;
             let mut to_foreground = to_foreground.clone();
 
+            // TODO: don't spawn immediately, or have some sort of barrier, so that we liberate the TCP listeners in case of error.
             (config.tasks_executor)(Box::pin(async move {
                 loop {
                     let (socket, _addr) = match tcp_listener.accept().await {
                         Ok(v) => v,
                         Err(_) => {
-                            // Errors happen if the accept failed, for example if no file
+                            // Errors here can happen if the accept failed, for example if no file
                             // descriptor is available.
                             // A wait is added in order to avoid having a busy-loop failing to
                             // accept connections.
@@ -135,13 +153,13 @@ impl NetworkService {
         }*/
 
         // TODO: temporary, for testing
-        let connections = Mutex::new(slab::Slab::new());
+        let mut connections = slab::Slab::new();
         {
             let tcp_socket = async_std::net::TcpStream::connect("p2p.cc1-4.polkadot.network:30100")
                 .await
                 .unwrap();
             let (tx, rx) = mpsc::channel(8);
-            let connection_id = connections.lock().await.insert(tx);
+            let connection_id = connections.insert(tx);
             (config.tasks_executor)(Box::pin(connection_task(
                 tcp_socket,
                 true,
@@ -153,13 +171,15 @@ impl NetworkService {
         }
 
         Ok(Arc::new(NetworkService {
-            tasks_executor: Mutex::new(config.tasks_executor),
+            guarded: Mutex::new(Guarded {
+                tasks_executor: config.tasks_executor,
+                connections,
+                peers: HashMap::with_hasher(RandomState::with_seeds(
+                    rand::random(),
+                    rand::random(),
+                )),
+            }),
             noise_key,
-            connections,
-            peers: Mutex::new(HashMap::with_hasher(RandomState::with_seeds(
-                rand::random(),
-                rand::random(),
-            ))),
             from_background: Mutex::new(from_background),
             to_foreground,
         }))
@@ -173,29 +193,26 @@ impl NetworkService {
         target: PeerId,
         config: request_response::BlocksRequestConfig,
     ) -> Result<Vec<request_response::BlockData>, ()> {
+        let mut guarded = self.guarded.lock().await;
+
         // TODO: don't unwrap and all
-        let connection = self
-            .peers
-            .lock()
-            .await
-            .get(&target)
-            .unwrap()
-            .first()
-            .unwrap()
-            .clone();
+        let connection = *guarded.peers.get(&target).unwrap().first().unwrap();
 
         let (send_back, receive_result) = oneshot::channel();
 
-        {
-            let mut connections = self.connections.lock().await;
-            connections
-                .get_mut(connection)
-                .unwrap()
-                .send(ToConnection::BlocksRequest { config, send_back })
-                .await
-                .unwrap();
-        }
+        // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
+        guarded
+            .connections
+            .get_mut(connection)
+            .unwrap()
+            .send(ToConnection::BlocksRequest { config, send_back })
+            .await
+            .unwrap();
 
+        // Everything must be unlocked at this point.
+        drop(guarded);
+
+        // Wait for the result of the request. Can take a long time (i.e. several seconds).
         match receive_result.await {
             Ok(r) => r,
             Err(_) => Err(()),
@@ -213,8 +230,9 @@ impl NetworkService {
                     // A new socket has been accepted by a listener.
                     // Add the socket to the local state, and spawn the task of that connection.
                     let (tx, rx) = mpsc::channel(8);
-                    let connection_id = self.connections.lock().await.insert(tx);
-                    (self.tasks_executor.lock().await)(Box::pin(connection_task(
+                    let mut guarded = self.guarded.lock().await;
+                    let connection_id = guarded.connections.insert(tx);
+                    (guarded.tasks_executor)(Box::pin(connection_task(
                         tcp_socket,
                         false,
                         self.noise_key.clone(),
@@ -224,22 +242,24 @@ impl NetworkService {
                     )));
                 }
                 FromBackground::HandshakeError { connection_id, .. } => {
-                    self.connections.lock().await.remove(connection_id);
+                    let mut guarded = self.guarded.lock().await;
+                    guarded.connections.remove(connection_id);
                 }
                 FromBackground::HandshakeSuccess {
                     connection_id,
                     peer_id,
                 } => {
-                    self.peers
-                        .lock()
-                        .await
+                    let mut guarded = self.guarded.lock().await;
+                    guarded
+                        .peers
                         .entry(peer_id.clone())
                         .or_default()
                         .push(connection_id);
                     return Event::Connected(peer_id);
                 }
                 FromBackground::Disconnected { connection_id } => {
-                    self.connections.lock().await.remove(connection_id);
+                    let mut guarded = self.guarded.lock().await;
+                    guarded.connections.remove(connection_id);
                     // TODO: remove from peers as well
                 }
             }
@@ -256,8 +276,12 @@ enum ToConnection {
     },
 }
 
+/// Messsage sent from a background task and dedicated to the main [`NetworkService`]. Processed
+/// in [`NetworkService::next_event`].
 enum FromBackground {
+    /// A new socket has arrived on a listening endpoint.
     IncomingConnection(async_std::net::TcpStream),
+
     HandshakeError {
         connection_id: usize,
         error: HandshakeError,
@@ -327,7 +351,8 @@ async fn connection_task(
         return;
     }
 
-    let mut poll_after;
+    // Set to a timer after which the state machine of the connection needs an update.
+    let mut poll_after: futures_timer::Delay;
 
     loop {
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
