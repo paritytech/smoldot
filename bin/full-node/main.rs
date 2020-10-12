@@ -135,11 +135,15 @@ async fn async_main() {
     let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
 
     let network_service = network_service::NetworkService::new(network_service::Config {
+        listen_addresses: Vec::new(),
+        noise_key: connection::NoiseKey::new(&rand::random()), // TODO: not random
         tasks_executor: {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
-    });
+    })
+    .await
+    .unwrap();
 
     let sync_state = Arc::new(Mutex::new(SyncState {
         best_block_hash: [0; 32],      // TODO:
