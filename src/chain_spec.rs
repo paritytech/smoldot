@@ -32,8 +32,8 @@
 //! - Multiple other miscellaneous information.
 //!
 
-mod structs;
 mod light_sync_state;
+mod structs;
 
 /// A configuration of a chain. Can be used to build a genesis block.
 #[derive(Clone)]

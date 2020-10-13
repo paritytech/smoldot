@@ -1,8 +1,7 @@
-
-use parity_scale_codec::*;
 use super::structs::StorageData;
+use parity_scale_codec::*;
 use primitive_types::H256;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,7 +10,7 @@ pub(super) struct LightSyncState {
     babe_epoch_changes: StorageData,
     babe_finalized_block_weight: u32,
     finalized_block_header: StorageData,
-    grandpa_authority_set: StorageData,   
+    grandpa_authority_set: StorageData,
 }
 
 impl LightSyncState {
@@ -22,7 +21,8 @@ impl LightSyncState {
         let decoded = DecodedLightSyncState {
             babe_finalized_block_weight: self.babe_finalized_block_weight,
             finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
-                .unwrap().into(),
+                .unwrap()
+                .into(),
             grandpa_authority_set: AuthoritySet::decode(&mut grandpa_authority_set_slice).unwrap(),
             babe_epoch_changes: EpochChanges::decode(&mut babe_epoch_changes_slice).unwrap(),
         };
@@ -42,7 +42,6 @@ pub(super) struct DecodedLightSyncState {
     grandpa_authority_set: AuthoritySet,
 }
 
-
 #[derive(Debug, Decode, Encode)]
 pub(super) struct EpochChanges {
     inner: ForkTree<PersistedEpochHeader>,
@@ -52,7 +51,7 @@ pub(super) struct EpochChanges {
 #[derive(Debug, Decode, Encode)]
 pub(super) enum PersistedEpochHeader {
     Genesis(EpochHeader, EpochHeader),
-    Regular(EpochHeader)
+    Regular(EpochHeader),
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -64,7 +63,7 @@ pub(super) struct EpochHeader {
 #[derive(Debug, Decode, Encode)]
 pub(super) enum PersistedEpoch {
     Genesis(BabeEpoch, BabeEpoch),
-    Regular(BabeEpoch)
+    Regular(BabeEpoch),
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -85,9 +84,9 @@ pub(super) struct BabeEpochConfiguration {
 
 #[derive(Debug, Encode, Decode)]
 pub enum AllowedSlots {
-	PrimarySlots,
-	PrimaryAndSecondaryPlainSlots,
-	PrimaryAndSecondaryVRFSlots,
+    PrimarySlots,
+    PrimaryAndSecondaryPlainSlots,
+    PrimaryAndSecondaryVRFSlots,
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -110,9 +109,8 @@ pub(super) struct PendingChange {
 #[derive(Debug, Decode, Encode)]
 pub(super) enum DelayKind {
     Finalized,
-    Best { median_last_finalized: u32 }
+    Best { median_last_finalized: u32 },
 }
-
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct ForkTree<T> {
