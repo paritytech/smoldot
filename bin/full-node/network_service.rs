@@ -296,9 +296,7 @@ enum FromBackground {
     /// This only concerns connections onto which the handshake had succeeded. For connections on
     /// which the handshake hadn't succeeded, a [`FromBackground::HandshakeError`] is emitted
     /// instead.
-    Disconnected {
-        connection_id: usize,
-    },
+    Disconnected { connection_id: usize },
 }
 
 /// Asynchronous task managing a specific TCP connection.
