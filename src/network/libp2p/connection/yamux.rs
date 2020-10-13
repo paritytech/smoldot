@@ -552,11 +552,9 @@ impl<T> Yamux<T> {
             if let Some((substream, ref mut remain)) = self.writing_out_substream {
                 let mut substream = self.substreams.get_mut(&substream.0).unwrap();
 
-                let first_buf_avail = cmp::min(
-                    size_bytes_iter,
-                    substream.write_buffers[0].len() - substream.first_write_buffer_offset,
-                );
-                if first_buf_avail <= *remain {
+                let first_buf_avail =
+                    substream.write_buffers[0].len() - substream.first_write_buffer_offset;
+                if first_buf_avail <= *remain && first_buf_avail <= size_bytes_iter {
                     buffers.push(either::Right(VecWithOffset(
                         substream.write_buffers.remove(0),
                         substream.first_write_buffer_offset,
@@ -567,7 +565,7 @@ impl<T> Yamux<T> {
                     if *remain == 0 {
                         self.writing_out_substream = None;
                     }
-                } else {
+                } else if *remain <= size_bytes_iter {
                     size_bytes_iter -= *remain;
                     buffers.push(either::Right(VecWithOffset(
                         substream.write_buffers[0][substream.first_write_buffer_offset..]
@@ -577,6 +575,16 @@ impl<T> Yamux<T> {
                     )));
                     substream.first_write_buffer_offset += *remain;
                     self.writing_out_substream = None;
+                } else {
+                    buffers.push(either::Right(VecWithOffset(
+                        substream.write_buffers[0][substream.first_write_buffer_offset..]
+                            [..size_bytes_iter]
+                            .to_vec(),
+                        0,
+                    )));
+                    substream.first_write_buffer_offset += size_bytes_iter;
+                    *remain -= size_bytes_iter;
+                    size_bytes_iter = 0;
                 }
 
                 continue;
@@ -615,7 +623,7 @@ impl<T> Yamux<T> {
             buffers
                 .iter()
                 .fold(0, |n, b| n + AsRef::<[u8]>::as_ref(b).len())
-                < size_bytes
+                <= size_bytes
         );
 
         ExtractOut {
