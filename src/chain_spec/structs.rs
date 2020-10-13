@@ -23,6 +23,7 @@ use fnv::FnvBuildHasher;
 use hashbrown::{HashMap, HashSet};
 use primitive_types::H256;
 use serde::{Deserialize, Serialize};
+use super::light_sync_state::LightSyncState;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +45,8 @@ pub(super) struct ClientSpec {
     pub(super) consensus_engine: (),
     // TODO: looks deprecated?
     pub(super) genesis: Genesis,
+    pub(super) light_sync_state: Option<LightSyncState>,
+    
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
