@@ -1,8 +1,26 @@
-use super::structs::StorageData;
-use crate::header::{BabeAuthority, BabeNextConfig, GrandpaAuthority};
-use parity_scale_codec::*;
-use primitive_types::H256;
+// Copyright 2017-2020 Parity Technologies (UK) Ltd.
+// This file is part of Substrate.
+
+// Substrate is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// Substrate is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+
+use crate::header::BabeNextConfig;
+use alloc::collections::BTreeMap;
+use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct StorageData(#[serde(with = "impl_serde::serialize")] pub(super) Vec<u8>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,7 +64,7 @@ pub(super) struct DecodedLightSyncState {
 #[derive(Debug, Decode, Encode)]
 pub(super) struct EpochChanges {
     inner: ForkTree<PersistedEpochHeader>,
-    epochs: std::collections::BTreeMap<(H256, u32), PersistedEpoch>,
+    epochs: BTreeMap<([u8; 32], u32), PersistedEpoch>,
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -77,6 +95,17 @@ pub(super) struct BabeEpoch {
     config: BabeNextConfig,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct BabeAuthority {
+    /// Sr25519 public key.
+    pub public_key: [u8; 32],
+    /// Arbitrary number indicating the weight of the authority.
+    ///
+    /// This value can only be compared to other weight values.
+    // TODO: should be NonZeroU64; requires deep changes in decoding code though
+    pub weight: u64,
+}
+
 #[derive(Debug, Decode, Encode)]
 pub(super) struct AuthoritySet {
     current_authorities: Vec<GrandpaAuthority>,
@@ -90,7 +119,7 @@ pub(super) struct PendingChange {
     next_authorities: Vec<GrandpaAuthority>,
     delay: u32,
     canon_height: u32,
-    canon_hash: H256,
+    canon_hash: [u8; 32],
     delay_kind: DelayKind,
 }
 
@@ -98,6 +127,18 @@ pub(super) struct PendingChange {
 pub(super) enum DelayKind {
     Finalized,
     Best { median_last_finalized: u32 },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct GrandpaAuthority {
+    /// Ed25519 public key.
+    pub public_key: [u8; 32],
+
+    /// Arbitrary number indicating the weight of the authority.
+    ///
+    /// This value can only be compared to other weight values.
+    // TODO: should be NonZeroU64; requires deep changes in decoding code though
+    pub weight: u64,
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -108,7 +149,7 @@ pub(super) struct ForkTree<T> {
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct ForkTreeNode<T> {
-    hash: H256,
+    hash: [u8; 32],
     number: u32,
     data: T,
     children: Vec<Self>,

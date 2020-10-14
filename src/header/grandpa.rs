@@ -402,9 +402,7 @@ impl<'a> From<&'a GrandpaAuthority> for GrandpaAuthorityRef<'a> {
     }
 }
 
-#[derive(
-    Debug, Copy, Clone, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
-)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct GrandpaAuthority {
     /// Ed25519 public key.
     pub public_key: [u8; 32],
