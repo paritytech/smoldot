@@ -13,18 +13,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Helpers for managing connectivity to overlay networks.
+//! Data structure storing a networking state. Helper for managing connectivity to overlay
+//! networks.
 //!
 //! The [`Peerset`] is a data structure that holds a list of node identities ([`PeerId`]s) and a
 //! list of overlay networks. Each [`PeerId`] is associated with:
 //!
+//! - A list of active inbound connections.
 //! - A list of [`Multiaddr`]s onto which the node is believed to be reachable.
-//! - One or more overlay networks the node is believed to belong to.
-//! - For each overlay network the node belongs to, a boolean indicating whether there exists an
-//! active substream between this node and the local node. This boolean doesn't entail any *actual*
-//! connectivity, and exists only for the [`Peerset`] to provide convenient and optimized APIs
-//! that filter nodes based on this value.
-//! - An opaque user data of type `TPeer`. The actual type is at the discretion of the user.
+//!   - For each multiaddr, optionally an active connection or pending dialing attempt.
+//! - A list of overlay networks the node is believed to belong to.
+//!   - For each overlay network the node belongs to, TODO
+//!
+//! > **Note**: The [`Peerset`] does *do* anything by itself, such as opening new connections. It
+//! >           is purely a data structure that helps organize and maintain information about the
+//! >           network.
 //!
 //! # Usage
 //!
@@ -36,20 +39,12 @@
 //! When this discovery mechanism discovers a node that is part of an overlay network, insert it
 //! in the [`Peerset`] by calling [`Peerset::insert`].
 //!
-//! Whenever a TCP connection is established with a certain peer, query the [`Peerset`] for the
-//! list of overlay protocols it belongs to and try to open notification substreams with it.
-//!
-//! Additionally, whenever a notifications protocol substream is established or lost with a
-//! certain peer, set the appropriate connectivity flag in the [`Peerset`].
-//!
-//! In parallel, the [`Peerset`] can be asked for a list of node identities .
-//!
 
 // TODO: finish documentation
 
 use crate::network::libp2p::peer_id::PeerId;
 
-use ahash::AHasher;
+use ahash::RandomState;
 use alloc::collections::BTreeSet;
 use hashbrown::HashMap;
 use parity_multiaddr::Multiaddr;
@@ -60,17 +55,27 @@ pub struct Config {
     /// Capacity to reserve for containers having a number of peers.
     pub peers_capacity: usize,
 
+    /// Number of overlay networks managed by the [`Peerset`]. The overlay networks are numbered
+    /// from 0 to this value excluded.
+    pub num_overlay_networks: usize,
+
     /// Seed for the randomness used to decide how peers are chosen.
     pub randomness_seed: [u8; 32],
 }
 
 /// See the [module-level documentation](self).
-pub struct Peerset<TPeer, TNet> {
-    peer_ids: HashMap<PeerId, usize, AHasher>,
+pub struct Peerset<TPeer, TConn, TPending> {
+    peer_ids: HashMap<PeerId, usize, RandomState>,
 
     peers: slab::Slab<Peer<TPeer>>,
 
-    overlay_networks: slab::Slab<TNet>,
+    pending: slab::Slab<Connection<TPending>>,
+
+    connections: slab::Slab<Connection<TConn>>,
+
+    /// Container that holds tuples of `(peer_index, connection_index)`. Contains the combinations
+    /// of connections associated to a certain peer.
+    peer_connections: BTreeSet<(usize, usize)>,
 
     /// Container that holds tuples of `(overlay_index, peer_index)` where `overlay_index` is an
     /// index in [`Peerset::overlay_networks`] and `peer_index` is an index in [`Peerset::peers`].
@@ -92,42 +97,124 @@ struct Peer<TPeer> {
     connected: bool,
 }
 
-impl<TPeer, TNet> Peerset<TPeer, TNet> {
+struct Connection<TConn> {
+    peer_index: usize,
+    user_data: TConn,
+    inbound: bool,
+}
+
+impl<TPeer, TConn, TPending> Peerset<TPeer, TConn, TPending> {
+    /// Creates a [`Peerset`] with the given configuration.
     pub fn new(config: Config) -> Self {
         Peerset {
             // TODO: randomness seed
             peer_ids: HashMap::with_capacity_and_hasher(config.peers_capacity, Default::default()),
             peers: slab::Slab::with_capacity(config.peers_capacity),
-            overlay_networks: slab::Slab::new(), // TODO: with_capacity
+            pending: slab::Slab::with_capacity(config.peers_capacity * 2), // TODO: correct capacity?
+            connections: slab::Slab::with_capacity(config.peers_capacity * 2),
+            peer_connections: BTreeSet::new(),
             overlay_peers_connected: BTreeSet::new(),
             overlay_peers_disconnected: BTreeSet::new(),
         }
     }
 
-    pub fn node_mut(&mut self, peer_id: PeerId) -> NodeMut<TPeer, TNet> {
-        todo!()
+    /// Gives access to the state of the node with the given identity.
+    pub fn node_mut(&mut self, peer_id: PeerId) -> NodeMut<TPeer, TConn, TPending> {
+        if let Some(peer_index) = self.peer_ids.get(&peer_id).cloned() {
+            NodeMut::Known(NodeMutKnown {
+                peerset: self,
+                peer_index,
+            })
+        } else {
+            NodeMut::Unknown(NodeMutUnknown {
+                peerset: self,
+                peer_id,
+            })
+        }
     }
 }
 
+/// Identifier for a connection in a [`Peerset`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct ConnectionId(usize);
+
 /// Access to a node in the [`PeerSet`].
-pub enum NodeMut<'a, TPeer, TNet> {
-    Known(NodeMutKnown<'a, TPeer, TNet>),
-    Unknown(NodeMutUnknown<'a, TPeer, TNet>),
+pub enum NodeMut<'a, TPeer, TConn, TPending> {
+    /// Node is already known to the data structure.
+    Known(NodeMutKnown<'a, TPeer, TConn, TPending>),
+    /// Node isn't known by the data structure.
+    Unknown(NodeMutUnknown<'a, TPeer, TConn, TPending>),
 }
 
-pub struct NodeMutKnown<'a, TPeer, TNet> {
-    peerset: &'a mut Peerset<TPeer, TNet>,
+/// Access to a node is already known to the data structure.
+pub struct NodeMutKnown<'a, TPeer, TConn, TPending> {
+    peerset: &'a mut Peerset<TPeer, TConn, TPending>,
+    peer_index: usize,
 }
 
-pub struct NodeMutUnknown<'a, TPeer, TNet> {
-    peerset: &'a mut Peerset<TPeer, TNet>,
+impl<'a, TPeer, TConn, TPending> NodeMutKnown<'a, TPeer, TConn, TPending> {
+    /// Adds in the data structure an inbound connection with this node.
+    pub fn add_inbound_connection(&mut self, connection: TConn) -> ConnectionId {
+        let index = self.peerset.connections.insert(Connection {
+            peer_index: self.peer_index,
+            user_data: connection,
+            inbound: true,
+        });
+
+        let _newly_inserted = self
+            .peerset
+            .peer_connections
+            .insert((self.peer_index, index));
+        debug_assert!(_newly_inserted);
+
+        ConnectionId(index)
+    }
+
+    /// Adds an address to the list of addresses the node is reachable through.
+    ///
+    /// Has no effect if this address is already in the list.
+    pub fn add_known_address(&mut self, address: Multiaddr) {
+        let list = &mut self.peerset.peers[self.peer_index].addresses;
+        if list.iter().any(|a| *a == address) {
+            return;
+        }
+
+        list.push(address);
+    }
+
+    /// Gives access to the user data associated with the node.
+    pub fn user_data_mut(&mut self) -> &mut TPeer {
+        &mut self.peerset.peers[self.peer_index].user_data
+    }
+
+    /// Gives access to the user data associated with the node.
+    pub fn into_user_data(self) -> &'a mut TPeer {
+        &mut self.peerset.peers[self.peer_index].user_data
+    }
 }
 
-impl<'a, TPeer, TNet> NodeMutUnknown<'a, TPeer, TNet> {
-    pub fn add_to_overlay(self, overlay: usize) -> NodeMutKnown<'a, TPeer, TNet> {
-        // TODO:
+/// Access to a node that isn't known to the data structure.
+pub struct NodeMutUnknown<'a, TPeer, TConn, TPending> {
+    peerset: &'a mut Peerset<TPeer, TConn, TPending>,
+    peer_id: PeerId,
+}
+
+impl<'a, TPeer, TConn, TPending> NodeMutUnknown<'a, TPeer, TConn, TPending> {
+    /// Inserts the node into the data structure. Returns a [`NodeMutKnown`] for that node.
+    pub fn insert(self, user_data: TPeer) -> NodeMutKnown<'a, TPeer, TConn, TPending> {
+        let peer_index = self.peerset.peers.insert(Peer {
+            peer_id: self.peer_id.clone(),
+            user_data,
+            addresses: Vec::new(),
+            connected: true,
+        });
+
+        let _was_in = self.peerset.peer_ids.insert(self.peer_id, peer_index);
+        debug_assert!(_was_in.is_none());
+
         NodeMutKnown {
             peerset: self.peerset,
+            peer_index,
         }
     }
 }
