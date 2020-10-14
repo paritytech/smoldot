@@ -119,7 +119,10 @@ impl NetworkService {
                     };
 
                     if to_foreground
-                        .send(FromBackground::IncomingConnection(socket))
+                        .send(FromBackground::NewConnection {
+                            socket,
+                            is_initiator: false,
+                        })
                         .await
                         .is_err()
                     {
@@ -151,6 +154,17 @@ impl NetworkService {
                 node.connect();
             }
         }*/
+
+        /*
+
+        Peer state:
+
+        - Known addresses.
+            - For each address, the current or previous dialing attempt.
+        - Inbound connections.
+        - Overlay networks it belongs to.
+
+        */
 
         // TODO: temporary, for testing
         let mut connections = slab::Slab::new();
@@ -226,15 +240,18 @@ impl NetworkService {
     pub async fn next_event(&self) -> Event {
         loop {
             match self.from_background.lock().await.next().await.unwrap() {
-                FromBackground::IncomingConnection(tcp_socket) => {
+                FromBackground::NewConnection {
+                    socket,
+                    is_initiator,
+                } => {
                     // A new socket has been accepted by a listener.
                     // Add the socket to the local state, and spawn the task of that connection.
                     let (tx, rx) = mpsc::channel(8);
                     let mut guarded = self.guarded.lock().await;
                     let connection_id = guarded.connections.insert(tx);
                     (guarded.tasks_executor)(Box::pin(connection_task(
-                        tcp_socket,
-                        false,
+                        socket,
+                        is_initiator,
                         self.noise_key.clone(),
                         connection_id,
                         self.to_foreground.clone(),
@@ -279,8 +296,11 @@ enum ToConnection {
 /// Messsage sent from a background task and dedicated to the main [`NetworkService`]. Processed
 /// in [`NetworkService::next_event`].
 enum FromBackground {
-    /// A new socket has arrived on a listening endpoint.
-    IncomingConnection(async_std::net::TcpStream),
+    /// A new socket has arrived on a listening endpoint, or we have reached a remote.
+    NewConnection {
+        socket: async_std::net::TcpStream,
+        is_initiator: bool,
+    },
 
     HandshakeError {
         connection_id: usize,

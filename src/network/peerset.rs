@@ -19,11 +19,11 @@
 //! list of overlay networks. Each [`PeerId`] is associated with:
 //!
 //! - A list of [`Multiaddr`]s onto which the node is believed to be reachable.
-//! - One or more overlay networks the node is known to belong to.
-//! - For each overlay network the node belongs to, a flag indicating whether there exists an
-//! active substream between this node and the local node. This flag doesn't entail any *actual*
+//! - One or more overlay networks the node is believed to belong to.
+//! - For each overlay network the node belongs to, a boolean indicating whether there exists an
+//! active substream between this node and the local node. This boolean doesn't entail any *actual*
 //! connectivity, and exists only for the [`Peerset`] to provide convenient and optimized APIs
-//! that filter nodes based on this flag.
+//! that filter nodes based on this value.
 //! - An opaque user data of type `TPeer`. The actual type is at the discretion of the user.
 //!
 //! # Usage
@@ -50,23 +50,43 @@
 use crate::network::libp2p::peer_id::PeerId;
 
 use ahash::AHasher;
+use alloc::collections::BTreeSet;
 use hashbrown::HashMap;
 use parity_multiaddr::Multiaddr;
 
 /// Configuration for a [`Peerset`].
 #[derive(Debug)]
 pub struct Config {
+    /// Capacity to reserve for containers having a number of peers.
+    pub peers_capacity: usize,
+
     /// Seed for the randomness used to decide how peers are chosen.
     pub randomness_seed: [u8; 32],
 }
 
 /// See the [module-level documentation](self).
 pub struct Peerset<TPeer, TNet> {
-    peers: HashMap<PeerId, Peer<TPeer>, AHasher>,
+    peer_ids: HashMap<PeerId, usize, AHasher>,
+
+    peers: slab::Slab<Peer<TPeer>>,
+
     overlay_networks: slab::Slab<TNet>,
+
+    /// Container that holds tuples of `(overlay_index, peer_index)` where `overlay_index` is an
+    /// index in [`Peerset::overlay_networks`] and `peer_index` is an index in [`Peerset::peers`].
+    /// Only contains combinations where the peer belongs to the overlay network and is connected
+    /// to the local node through this overlay network.
+    overlay_peers_connected: BTreeSet<(usize, usize)>,
+
+    /// Container that holds tuples of `(overlay_index, peer_index)` where `overlay_index` is an
+    /// index in [`Peerset::overlay_networks`] and `peer_index` is an index in [`Peerset::peers`].
+    /// Only contains combinations where the peer belongs to the overlay network but is not
+    /// connected to the local node through this overlay network.
+    overlay_peers_disconnected: BTreeSet<(usize, usize)>,
 }
 
 struct Peer<TPeer> {
+    peer_id: PeerId,
     user_data: TPeer,
     addresses: Vec<Multiaddr>,
     connected: bool,
@@ -74,11 +94,40 @@ struct Peer<TPeer> {
 
 impl<TPeer, TNet> Peerset<TPeer, TNet> {
     pub fn new(config: Config) -> Self {
-        // TODO: with capacity
-        // TODO: randomness seed
         Peerset {
-            peers: HashMap::with_capacity_and_hasher(0, Default::default()),
-            overlay_networks: slab::Slab::new(),
+            // TODO: randomness seed
+            peer_ids: HashMap::with_capacity_and_hasher(config.peers_capacity, Default::default()),
+            peers: slab::Slab::with_capacity(config.peers_capacity),
+            overlay_networks: slab::Slab::new(), // TODO: with_capacity
+            overlay_peers_connected: BTreeSet::new(),
+            overlay_peers_disconnected: BTreeSet::new(),
+        }
+    }
+
+    pub fn node_mut(&mut self, peer_id: PeerId) -> NodeMut<TPeer, TNet> {
+        todo!()
+    }
+}
+
+/// Access to a node in the [`PeerSet`].
+pub enum NodeMut<'a, TPeer, TNet> {
+    Known(NodeMutKnown<'a, TPeer, TNet>),
+    Unknown(NodeMutUnknown<'a, TPeer, TNet>),
+}
+
+pub struct NodeMutKnown<'a, TPeer, TNet> {
+    peerset: &'a mut Peerset<TPeer, TNet>,
+}
+
+pub struct NodeMutUnknown<'a, TPeer, TNet> {
+    peerset: &'a mut Peerset<TPeer, TNet>,
+}
+
+impl<'a, TPeer, TNet> NodeMutUnknown<'a, TPeer, TNet> {
+    pub fn add_to_overlay(self, overlay: usize) -> NodeMutKnown<'a, TPeer, TNet> {
+        // TODO:
+        NodeMutKnown {
+            peerset: self.peerset,
         }
     }
 }
