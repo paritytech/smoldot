@@ -218,7 +218,6 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
     ///
     /// This method takes ownership of the [`OptimisticFullSync`] and starts a verification
     /// process. The [`OptimisticFullSync`] is yielded back at the end of this process.
-    // TODO: rename, since we process more than one
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc> {
         let sync = self.sync.take().unwrap();
 
@@ -226,10 +225,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
             Ok(tp) => tp,
             Err(sync) => {
                 self.sync = Some(sync);
-                return ProcessOne::Finished {
-                    sync: self,
-                    finalized_blocks: Vec::new(),
-                };
+                return ProcessOne::Idle { sync: self };
             }
         };
 
@@ -257,7 +253,18 @@ pub struct RequestSuccessBlock {
 
 /// State of the processing of blocks.
 pub enum ProcessOne<TRq, TSrc> {
+    /// No processing is necessary.
+    ///
+    /// Calling [`OptimisticFullSync::process_one`] again is unnecessary.
+    Idle {
+        /// The state machine.
+        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
+        /// [`OptimisticFullSync`]. This field yields it back.
+        sync: OptimisticFullSync<TRq, TSrc>,
+    },
     /// Processing is over.
+    ///
+    /// There might be more blocks remaining. Call [`OptimisticFullSync::process_one`] again.
     Finished {
         /// The state machine.
         /// The [`OptimisticFullSync::process_one`] method takes ownership of the
@@ -265,6 +272,7 @@ pub enum ProcessOne<TRq, TSrc> {
         sync: OptimisticFullSync<TRq, TSrc>,
         /// Blocks that have been finalized after the verification.
         /// Ordered by increasing block number.
+        // TODO: consider returning them one at a time?
         finalized_blocks: Vec<Block>,
     },
     /// A step in the processing has been completed.
@@ -529,6 +537,26 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         // diff.
                         debug_assert!(chain.is_empty());
                         shared.best_to_finalized_storage_diff.clear();
+
+                        // Since the verification process requires querying the finalized block
+                        // storage from the user, we need to report changes to the finalized
+                        // blocks to the user before we can continue.
+                        let sync = shared
+                            .to_process
+                            .report
+                            .update_block_height(chain.best_block_header().number);
+                        break ProcessOne::Finished {
+                            sync: OptimisticFullSync {
+                                chain,
+                                best_to_finalized_storage_diff: shared
+                                    .best_to_finalized_storage_diff,
+                                runtime_code_cache: shared.runtime_code_cache,
+                                top_trie_root_calculation_cache: shared
+                                    .top_trie_root_calculation_cache,
+                                sync: Some(sync),
+                            },
+                            finalized_blocks: shared.finalized_blocks,
+                        };
                     }
 
                     // Before looping again, report the progress to the user.
@@ -576,11 +604,10 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                 Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
                     // The underlying verification process is asking for the key that follows
                     // the requested one.
-
-                    // TODO: no; must look through hierarchy
                     break ProcessOne::FinalizedStorageNextKey(StorageNextKey {
                         inner: req,
                         shared,
+                        key_overwrite: None,
                     });
                 }
 
@@ -739,18 +766,84 @@ impl<TRq, TBl> StoragePrefixKeys<TRq, TBl> {
 pub struct StorageNextKey<TRq, TBl> {
     inner: blocks_tree::StorageNextKey<Block>,
     shared: ProcessOneShared<TRq, TBl>,
+
+    /// If `Some`, ask for the key inside of this field rather than the one of `inner`. Used in
+    /// corner-case situations where the key provided by the user has been erased from storage.
+    key_overwrite: Option<Vec<u8>>,
 }
 
 impl<TRq, TBl> StorageNextKey<TRq, TBl> {
     /// Returns the key whose next key must be passed back.
     pub fn key(&self) -> &[u8] {
-        self.inner.key()
+        if let Some(key_overwrite) = &self.key_overwrite {
+            key_overwrite
+        } else {
+            self.inner.key()
+        }
     }
 
     /// Injects the key.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> ProcessOne<TRq, TBl> {
-        // TODO: finish
-        let inner = self.inner.inject_key(key);
+        let key = key.as_ref().map(|k| k.as_ref());
+
+        // The key provided by the user as parameter is the next key in the storage of the
+        // finalized block.
+        // `best_to_finalized_storage_diff` needs to be taken into account in order to provide
+        // the next key in the best block instead.
+
+        let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
+            key_overwrite
+        } else {
+            self.inner.key()
+        };
+
+        if let Some(key) = key {
+            assert!(key > requested_key);
+        }
+
+        let in_diff = self
+            .shared
+            .best_to_finalized_storage_diff
+            .range(requested_key.to_vec()..) // TODO: don't use to_vec()
+            .map(|(k, v)| (k, v.is_some()))
+            .filter(|(k, _)| &***k > requested_key)
+            .next();
+
+        let outcome = match (key, in_diff) {
+            (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
+            (Some(a), Some((b, false))) if a < &b[..] => Some(a),
+            (Some(a), Some((b, false))) => {
+                debug_assert!(a >= &b[..]);
+                debug_assert_ne!(&b[..], requested_key);
+
+                // The next key according to the finalized block storage has been erased since
+                // then. It is necessary to ask the user again, this time for the key after the
+                // one that has been erased.
+                // This `clone()` is necessary, as `b` borrows from
+                // `self.shared.best_to_finalized_storage_diff`.
+                let key_overwrite = Some(b.clone());
+                return ProcessOne::FinalizedStorageNextKey(StorageNextKey {
+                    inner: self.inner,
+                    shared: self.shared,
+                    key_overwrite,
+                });
+            }
+            (Some(a), Some((b, true))) => {
+                debug_assert!(a >= &b[..]);
+                Some(&b[..])
+            }
+
+            (Some(a), None) => Some(a),
+            (None, Some((b, _))) => Some(&b[..]),
+            (None, None) => None,
+        };
+
+        let inner = self.inner.inject_key(outcome);
         ProcessOne::from(Inner::Step2(inner), self.shared)
     }
 }

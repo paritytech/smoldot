@@ -332,7 +332,6 @@ impl<'a> DigestRef<'a> {
     /// Returns a digest with empty logs.
     pub fn empty() -> DigestRef<'a> {
         DigestRef {
-            // TODO: Parsed instead
             inner: DigestRefInner::Parsed(&[]),
             babe_seal_index: None,
             babe_predigest_index: None,
@@ -342,8 +341,7 @@ impl<'a> DigestRef<'a> {
     }
 
     /// Returns the Babe seal digest item, if any.
-    // TODO: guaranteed to be 64 bytes long; type system stupidity again
-    pub fn babe_seal(&self) -> Option<&'a [u8]> {
+    pub fn babe_seal(&self) -> Option<&'a [u8; 64]> {
         if let Some(babe_seal_index) = self.babe_seal_index {
             if let DigestItemRef::BabeSeal(seal) = self.logs().nth(babe_seal_index).unwrap() {
                 Some(seal)
@@ -401,9 +399,8 @@ impl<'a> DigestRef<'a> {
     }
 
     /// If the last element of the list is a Babe seal, removes it from the [`DigestRef`].
-    // TODO: guaranteed 64 bytes
     // TODO: have a `Seal` enum or something, maybe?
-    pub fn pop_babe_seal(&mut self) -> Option<&'a [u8]> {
+    pub fn pop_babe_seal(&mut self) -> Option<&'a [u8; 64]> {
         let seal_pos = self.babe_seal_index?;
 
         match &mut self.inner {
@@ -415,7 +412,7 @@ impl<'a> DigestRef<'a> {
                 *list = &list[..seal_pos];
 
                 match item {
-                    DigestItem::BabeSeal(seal) => Some(&seal[..]),
+                    DigestItem::BabeSeal(seal) => Some(seal),
                     _ => unreachable!(),
                 }
             }
@@ -607,8 +604,7 @@ impl Digest {
     }
 
     /// Returns the Babe seal digest item, if any.
-    // TODO: [u8; 64]
-    pub fn babe_seal(&self) -> Option<&[u8]> {
+    pub fn babe_seal(&self) -> Option<&[u8; 64]> {
         DigestRef::from(self).babe_seal()
     }
 
@@ -705,10 +701,7 @@ pub enum DigestItemRef<'a> {
     BabePreDigest(BabePreDigestRef<'a>),
     BabeConsensus(BabeConsensusLogRef<'a>),
     /// Block signature made using the BABE consensus engine.
-    ///
-    /// Guaranteed to be 64 bytes long.
-    // TODO: we don't use a &[u8; 64] because traits aren't defined on this type; need to fix after Rust gets proper support or use a newtype
-    BabeSeal(&'a [u8]),
+    BabeSeal(&'a [u8; 64]),
 
     GrandpaConsensus(GrandpaConsensusLogRef<'a>),
 
@@ -778,7 +771,7 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(&parity_scale_codec::Encode::encode(
                     &parity_scale_codec::Compact(64u32),
                 ));
-                ret.extend_from_slice(&seal);
+                ret.extend_from_slice(seal);
                 iter::once(ret)
             }
             DigestItemRef::ChangesTrieSignal(ref changes) => {
@@ -809,8 +802,7 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
 }
 
 // TODO: document
-// TODO: Debug impl
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum DigestItem {
     BabePreDigest(BabePreDigest),
     BabeConsensus(BabeConsensusLog),
@@ -940,10 +932,7 @@ fn decode_item_from_parts<'a>(
         }
         (4, e) => return Err(Error::UnknownConsensusEngine(*e)),
         (5, b"BABE") => DigestItemRef::BabeSeal({
-            if content.len() != 64 {
-                return Err(Error::BadBabeSealLength);
-            }
-            content
+            TryFrom::try_from(content).map_err(|_| Error::BadBabeSealLength)?
         }),
         (5, e) => return Err(Error::UnknownConsensusEngine(*e)),
         (6, b"BABE") => DigestItemRef::BabePreDigest(BabePreDigestRef::from_slice(content)?),
