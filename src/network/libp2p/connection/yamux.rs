@@ -461,11 +461,21 @@ impl<T> Yamux<T> {
                             if substream.remote_write_closed {
                                 return Err(Error::WriteAfterFin);
                             }
-                            // TODO: allocate more size?
+
                             substream.remote_allowed_window = substream
                                 .remote_allowed_window
                                 .checked_sub(u64::from(length_field))
                                 .ok_or(Error::CreditsExceeded)?;
+
+                            // TODO: temporary hack
+                            let syn_ack_flag = !substream.first_message_queued;
+                            substream.first_message_queued = true;
+                            substream.remote_allowed_window += 256 * 1024;
+                            self.queue_window_size_frame_header(
+                                syn_ack_flag,
+                                substream_id.0,
+                                256 * 1024,
+                            );
                         }
 
                         self.incoming = Incoming::DataFrame {
@@ -738,6 +748,46 @@ impl<T> Yamux<T> {
             .unwrap();
         self.pending_out_header
             .try_extend_from_slice(&data_length.to_be_bytes())
+            .unwrap();
+
+        debug_assert_eq!(self.pending_out_header.len(), 12);
+    }
+
+    /// Writes a window size update frame header in `self.pending_out_header`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `!self.pending_out_header.is_empty()`.
+    ///
+    fn queue_window_size_frame_header(
+        &mut self,
+        syn_ack_flag: bool,
+        substream_id: NonZeroU32,
+        window_size: u32,
+    ) {
+        assert!(self.pending_out_header.is_empty());
+
+        let mut flags: u16 = 0;
+        if syn_ack_flag {
+            if (substream_id.get() % 2) == (self.next_outbound_substream.get() % 2) {
+                // SYN
+                flags |= 0x1;
+            } else {
+                // ACK
+                flags |= 0x2;
+            }
+        }
+
+        self.pending_out_header.push(0);
+        self.pending_out_header.push(1);
+        self.pending_out_header
+            .try_extend_from_slice(&flags.to_be_bytes())
+            .unwrap();
+        self.pending_out_header
+            .try_extend_from_slice(&substream_id.get().to_be_bytes())
+            .unwrap();
+        self.pending_out_header
+            .try_extend_from_slice(&window_size.to_be_bytes())
             .unwrap();
 
         debug_assert_eq!(self.pending_out_header.len(), 12);
