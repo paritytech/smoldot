@@ -298,7 +298,9 @@ impl<'a> From<&'a BabeAuthority> for BabeAuthorityRef<'a> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
+)]
 pub struct BabeAuthority {
     /// Sr25519 public key.
     pub public_key: [u8; 32],

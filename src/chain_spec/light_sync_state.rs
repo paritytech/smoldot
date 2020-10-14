@@ -1,4 +1,5 @@
 use super::structs::StorageData;
+use crate::header::{BabeAuthority, BabeNextConfig, GrandpaAuthority};
 use parity_scale_codec::*;
 use primitive_types::H256;
 use serde::{Deserialize, Serialize};
@@ -71,27 +72,14 @@ pub(super) struct BabeEpoch {
     epoch_index: u64,
     slot_number: u64,
     duration: u64,
-    authorities: Vec<([u8; 32], u64)>,
+    authorities: Vec<BabeAuthority>,
     randomness: [u8; 32],
-    config: BabeEpochConfiguration,
-}
-
-#[derive(Debug, Decode, Encode)]
-pub(super) struct BabeEpochConfiguration {
-    c: (u64, u64),
-    allowed_slots: AllowedSlots,
-}
-
-#[derive(Debug, Encode, Decode)]
-pub enum AllowedSlots {
-    PrimarySlots,
-    PrimaryAndSecondaryPlainSlots,
-    PrimaryAndSecondaryVRFSlots,
+    config: BabeNextConfig,
 }
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct AuthoritySet {
-    current_authorities: Vec<crate::header::GrandpaAuthority>,
+    current_authorities: Vec<GrandpaAuthority>,
     set_id: u64,
     pending_standard_changes: ForkTree<PendingChange>,
     pending_forced_changes: Vec<PendingChange>,
@@ -99,7 +87,7 @@ pub(super) struct AuthoritySet {
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct PendingChange {
-    next_authorities: Vec<crate::header::GrandpaAuthority>,
+    next_authorities: Vec<GrandpaAuthority>,
     delay: u32,
     canon_height: u32,
     canon_hash: H256,
