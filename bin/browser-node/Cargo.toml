@@ -11,7 +11,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-console_error_panic_hook = "0.1.5"
+console_error_panic_hook = "0.1.6"
 futures = "0.3.1"
 js-sys = "0.3.44"
 libp2p-wasm-ext = { version = "0.20.1", features = ["websocket"] }  # TODO: activating the "websocket" feature because the libp2p front doesn't provide a way; https://github.com/libp2p/rust-libp2p/pull/1718
