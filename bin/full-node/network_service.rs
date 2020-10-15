@@ -229,13 +229,15 @@ impl NetworkService {
         let (send_back, receive_result) = oneshot::channel();
 
         // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
+        // It is possible for the channel to be closed, if the background task has ended but the
+        // frontend hasn't processed this yet.
         guarded
             .connections
             .get_mut(connection)
             .unwrap()
             .send(ToConnection::BlocksRequest { config, send_back })
             .await
-            .unwrap();
+            .map_err(|_| ())?;
 
         // Everything must be unlocked at this point.
         drop(guarded);
