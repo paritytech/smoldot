@@ -398,7 +398,7 @@ async fn connection_task(
         let now = Instant::now();
 
         let read_write =
-            match connection.read_write(now, read_buffer.map(|b| b.0), write_buffer.unwrap().0) {
+            match connection.read_write(now, read_buffer.map(|b| b.0), write_buffer.unwrap()) {
                 Ok(rw) => rw,
                 Err(_) => {
                     let _ = to_foreground.send(FromBackground::Disconnected { connection_id });
@@ -420,6 +420,8 @@ async fn connection_task(
 
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
+        let has_event = read_write.event.is_some();
+
         match read_write.event {
             Some(connection::established::Event::Response {
                 response,
@@ -432,13 +434,16 @@ async fn connection_task(
                 } else {
                     let _ = user_data.send(Err(()));
                 }
+                continue;
             }
             _ => {}
         }
 
-        if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
+        if has_event || read_write.read_bytes != 0 || read_write.written_bytes != 0 {
             continue;
         }
+
+        // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {
             _ = tcp_socket.as_mut().process().fuse() => {},
@@ -502,7 +507,7 @@ async fn perform_handshake(
                     let read_buffer = read_buffer.ok_or(HandshakeError::UnexpectedEof)?.0;
                     // `write_buffer` can only be `None` if `close` has been manually called,
                     // which never happens.
-                    let write_buffer = write_buffer.unwrap().0;
+                    let write_buffer = write_buffer.unwrap();
                     healthy.read_write(read_buffer, write_buffer)?
                 };
                 handshake = new_state;

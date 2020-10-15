@@ -121,10 +121,10 @@ impl HealthyHandshake {
     ///
     /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
     // TODO: should take the in and out buffers as iterators, to allow for vectored reads/writes; tricky because an impl Iterator<Item = &mut [u8]> + Clone is impossible to build
-    pub fn read_write(
+    pub fn read_write<'a>(
         mut self,
         mut incoming_buffer: &[u8],
-        mut outgoing_buffer: &mut [u8],
+        mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
     ) -> Result<(Handshake, usize, usize), HandshakeError> {
         let mut total_read = 0;
         let mut total_written = 0;
@@ -138,22 +138,35 @@ impl HealthyHandshake {
                     // Earliest point of the handshake. The encryption is being negotiated.
                     // Delegating read/write to the negotiation.
                     let (updated, num_read, num_written) = negotiation
-                        .read_write(incoming_buffer, outgoing_buffer)
+                        .read_write(incoming_buffer, outgoing_buffer.0)
                         .map_err(HandshakeError::MultistreamSelect)?;
                     total_read += num_read;
                     total_written += num_written;
 
                     return match updated {
-                        multistream_select::Negotiation::InProgress(updated) => Ok((
-                            Handshake::Healthy(HealthyHandshake {
-                                state: HandshakeState::NegotiatingEncryptionProtocol {
+                        multistream_select::Negotiation::InProgress(updated) => {
+                            if num_written == outgoing_buffer.0.len()
+                                && !outgoing_buffer.1.is_empty()
+                            {
+                                outgoing_buffer = (outgoing_buffer.1, &mut []);
+                                self.state = HandshakeState::NegotiatingEncryptionProtocol {
                                     negotiation: updated,
                                     is_initiator,
-                                },
-                            }),
-                            total_read,
-                            total_written,
-                        )),
+                                };
+                                continue;
+                            }
+
+                            Ok((
+                                Handshake::Healthy(HealthyHandshake {
+                                    state: HandshakeState::NegotiatingEncryptionProtocol {
+                                        negotiation: updated,
+                                        is_initiator,
+                                    },
+                                }),
+                                total_read,
+                                total_written,
+                            ))
+                        }
                         multistream_select::Negotiation::Success(_) => {
                             // Reached the point where the Noise key is required in order to
                             // continue. This Noise key is requested from the user.
@@ -172,12 +185,16 @@ impl HealthyHandshake {
                 HandshakeState::NegotiatingEncryption { handshake } => {
                     // Delegating read/write to the Noise handshake state machine.
                     let (updated, num_read, num_written) = handshake
-                        .read_write(incoming_buffer, &mut outgoing_buffer)
+                        .read_write(incoming_buffer, outgoing_buffer.0)
                         .map_err(HandshakeError::NoiseHandshake)?;
                     total_read += num_read;
                     total_written += num_written;
                     incoming_buffer = &incoming_buffer[num_read..];
-                    outgoing_buffer = &mut outgoing_buffer[num_written..];
+                    outgoing_buffer.0 = &mut outgoing_buffer.0[num_written..];
+
+                    if outgoing_buffer.0.is_empty() && !outgoing_buffer.1.is_empty() {
+                        outgoing_buffer = (outgoing_buffer.1, &mut []);
+                    }
 
                     match updated {
                         noise::NoiseHandshake::Success {
@@ -238,8 +255,12 @@ impl HealthyHandshake {
                     // later be encrypted and written out.
                     // The size of this buffer is equal to the maximum possible size of
                     // unencrypted data that will lead to `outgoing_buffer.len()` encrypted bytes.
-                    let mut out_intermediary =
-                        vec![0; encryption.encrypt_size_conv(outgoing_buffer.len())];
+                    let mut out_intermediary = vec![
+                        0;
+                        encryption.encrypt_size_conv(
+                            outgoing_buffer.0.len() + outgoing_buffer.1.len()
+                        )
+                    ];
 
                     // Continue the multistream-select negotiation, writing to `out_intermediary`.
                     let (updated, decrypted_read_num, written_interm) = negotiation

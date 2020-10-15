@@ -23,7 +23,7 @@ use crate::network::leb128;
 use super::{multistream_select, noise, yamux};
 
 use core::{
-    fmt, iter, mem,
+    cmp, fmt, iter, mem,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -134,11 +134,11 @@ where
     /// If an error is returned, the socket should be entirely shut down.
     // TODO: should take the in and out buffers as iterators, to allow for vectored reads/writes; tricky because an impl Iterator<Item = &mut [u8]> + Clone is impossible to build
     // TODO: in case of error, we're supposed to first send a yamux goaway frame
-    pub fn read_write(
+    pub fn read_write<'a>(
         mut self,
         now: TNow,
         mut incoming_buffer: Option<&[u8]>,
-        mut outgoing_buffer: &mut [u8],
+        mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
     ) -> Result<ReadWrite<TNow, TRqUd, TNotifUd, TProtoList, TProto>, Error> {
         let mut total_read = 0;
         let mut total_written = 0;
@@ -480,7 +480,9 @@ where
         // The yamux state machine contains the data that needs to be written out.
         // Try to flush it.
         loop {
-            let bytes_out = self.encryption.encrypt_size_conv(outgoing_buffer.len());
+            let bytes_out = self
+                .encryption
+                .encrypt_size_conv(outgoing_buffer.0.len() + outgoing_buffer.1.len());
             if bytes_out == 0 {
                 break;
             }
@@ -491,10 +493,19 @@ where
                 break;
             }
 
-            let (_read, written) = self.encryption.encrypt(buffers, &mut outgoing_buffer);
+            let (_read, written) = self
+                .encryption
+                .encrypt(buffers, (&mut outgoing_buffer.0, &mut outgoing_buffer.1));
             debug_assert!(_read <= bytes_out);
             total_written += written;
-            outgoing_buffer = &mut outgoing_buffer[written..];
+            let out_buf_0_len = outgoing_buffer.0.len();
+            outgoing_buffer = (
+                &mut outgoing_buffer.0[cmp::min(written, out_buf_0_len)..],
+                &mut outgoing_buffer.1[written.saturating_sub(out_buf_0_len)..],
+            );
+            if outgoing_buffer.0.is_empty() {
+                outgoing_buffer = (outgoing_buffer.1, outgoing_buffer.0);
+            }
         }
 
         // Nothing more can be done.

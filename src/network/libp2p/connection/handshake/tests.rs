@@ -39,8 +39,9 @@ fn handshake_basic_works() {
                 Handshake::Healthy(nego) => {
                     if buf_1_to_2.is_empty() {
                         buf_1_to_2.resize(size1, 0);
-                        let (updated, num_read, written) =
-                            nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
+                        let (updated, num_read, written) = nego
+                            .read_write(&buf_2_to_1, (&mut buf_1_to_2, &mut []))
+                            .unwrap();
                         handshake1 = updated;
                         for _ in 0..num_read {
                             buf_2_to_1.remove(0);
@@ -62,8 +63,9 @@ fn handshake_basic_works() {
                 Handshake::Healthy(nego) => {
                     if buf_2_to_1.is_empty() {
                         buf_2_to_1.resize(size2, 0);
-                        let (updated, num_read, written) =
-                            nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
+                        let (updated, num_read, written) = nego
+                            .read_write(&buf_1_to_2, (&mut buf_2_to_1, &mut []))
+                            .unwrap();
                         handshake2 = updated;
                         for _ in 0..num_read {
                             buf_1_to_2.remove(0);
@@ -82,7 +84,7 @@ fn handshake_basic_works() {
     }
 
     test_with_buffer_sizes(256, 256);
-    // TODO: not passing
+    // TODO: not passing because Noise wants at least 19 bytes of buffer
     //test_with_buffer_sizes(1, 1);
     //test_with_buffer_sizes(1, 2048);
     //test_with_buffer_sizes(2048, 1);

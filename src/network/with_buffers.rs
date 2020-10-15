@@ -77,11 +77,11 @@ impl<T> WithBuffers<T> {
         WithBuffers {
             socket,
             error: None,
-            read_buffer: vec![0; 4096].into_boxed_slice(),
+            read_buffer: vec![0; 8192].into_boxed_slice(),
             read_buffer_processed_cursor: 0,
             socket_in_cursor_start: 0,
             read_closed: false,
-            write_buffer: vec![0; 4096].into_boxed_slice(),
+            write_buffer: vec![0; 8192].into_boxed_slice(),
             write_ready_start: 0,
             write_ready_end: 0,
             write_closed: false,

@@ -307,10 +307,10 @@ impl Noise {
     ///
     /// > **Note**: Because each message has a prefix and a suffix, you are encouraged to batch
     /// >           as much data as possible into `payload` before calling this function.
-    pub fn encrypt(
+    pub fn encrypt<'a>(
         &mut self,
         mut payload: impl Iterator<Item = impl AsRef<[u8]>>,
-        destination: &mut [u8],
+        destination: (&'a mut [u8], &'a mut [u8]),
     ) -> (usize, usize) {
         // TODO: The API exposes `payload` as an iterator of buffers rather than a single
         //       contiguous buffer. The reason is that, theoretically speaking, the underlying
@@ -340,32 +340,70 @@ impl Noise {
         }
     }
 
-    fn encrypt_inner(&mut self, mut payload: &[u8], mut destination: &mut [u8]) -> (usize, usize) {
+    fn encrypt_inner<'a>(
+        &mut self,
+        mut payload: &[u8],
+        mut destination: (&'a mut [u8], &'a mut [u8]),
+    ) -> (usize, usize) {
         let mut total_read = 0;
         let mut total_written = 0;
 
         // At least 18 bytes must be available in `destination` in order to fit an entire noise
         // frame. The check is for 19 because it doesn't make sense to send an empty frame.
-        while destination.len() >= 19 {
-            let in_len = cmp::min(payload.len(), cmp::min(65536, destination.len() - 18));
+        // TODO: this is error-prone ^ as a user might accidentally have a maximum buffer size that is < 19
+        while destination.0.len() + destination.1.len() >= 19 {
+            let in_len = cmp::min(
+                payload.len(),
+                cmp::min(65536, destination.0.len() + destination.1.len() - 18),
+            );
             if in_len == 0 {
                 debug_assert!(payload.is_empty());
                 break;
             }
 
-            let written = self
-                .inner
-                .write_message(&payload[..in_len], &mut destination[2..in_len + 2 + 16])
-                .unwrap();
-            debug_assert_eq!(written, in_len + 16);
+            let out_len = in_len + 2 + 16;
 
-            let len_bytes = u16::try_from(written).unwrap().to_be_bytes();
-            destination[..2].copy_from_slice(&len_bytes);
+            if out_len <= destination.0.len() {
+                let written = self
+                    .inner
+                    .write_message(&payload[..in_len], &mut destination.0[2..in_len + 2 + 16])
+                    .unwrap();
+                debug_assert_eq!(written, in_len + 16);
 
-            total_read += in_len;
-            payload = &payload[in_len..];
-            total_written += written + 2;
-            destination = &mut destination[written + 2..];
+                let len_bytes = u16::try_from(written).unwrap().to_be_bytes();
+                destination.0[..2].copy_from_slice(&len_bytes);
+
+                total_read += in_len;
+                payload = &payload[in_len..];
+                total_written += written + 2;
+                destination.0 = &mut destination.0[written + 2..];
+
+                if destination.0.is_empty() {
+                    destination = (destination.1, &mut []);
+                }
+            } else {
+                debug_assert!(out_len <= destination.0.len() + destination.1.len());
+                let mut intermediary_buffer = vec![0; out_len];
+                let _written = self
+                    .inner
+                    .write_message(&payload[..in_len], &mut intermediary_buffer[2..])
+                    .unwrap();
+                debug_assert_eq!(_written + 2, out_len);
+
+                let len_bytes = u16::try_from(out_len - 2).unwrap().to_be_bytes();
+                intermediary_buffer[..2].copy_from_slice(&len_bytes);
+
+                total_read += in_len;
+                payload = &payload[in_len..];
+                total_written += out_len;
+
+                destination
+                    .0
+                    .copy_from_slice(&intermediary_buffer[..destination.0.len()]);
+                destination.1[..out_len - destination.0.len()]
+                    .copy_from_slice(&intermediary_buffer[destination.0.len()..]);
+                destination = (&mut destination.1[out_len - destination.0.len()..], &mut []);
+            }
         }
 
         (total_read, total_written)

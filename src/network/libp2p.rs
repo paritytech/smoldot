@@ -162,12 +162,12 @@ where
     // TODO: comment about `now` monotonicity w.r.t. multiple threads
     // TODO: comment about async-ness of the function
     // TODO: comment about raciness?
-    pub async fn read_write(
+    pub async fn read_write<'a>(
         &self,
         connection: ConnectionId,
         now: TNow,
         incoming_buffer: Option<&[u8]>,
-        outgoing_buffer: &mut [u8],
+        outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
     ) -> ReadWrite<TProto, TRqUd, TNow> {
         let connection = {
             let guard = self.mutex.lock().await;

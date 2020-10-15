@@ -548,13 +548,13 @@ impl<T> Yamux<T> {
                         Default::default(),
                     )));
                 } else {
-                    let to_copy = cmp::min(size_bytes_iter, self.pending_out_header.len());
-                    let to_add = self.pending_out_header[..to_copy].to_vec();
-                    size_bytes_iter -= to_copy;
-                    for _ in 0..to_copy {
+                    let to_add = self.pending_out_header[..size_bytes_iter].to_vec();
+                    for _ in 0..size_bytes_iter {
                         self.pending_out_header.remove(0);
                     }
+                    size_bytes_iter = 0;
                     buffers.push(either::Right(VecWithOffset(to_add, 0)));
+                    break;
                 }
             }
 
