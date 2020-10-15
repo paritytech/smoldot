@@ -36,7 +36,7 @@ use hashbrown::HashMap;
 use std::{io, sync::Arc, time::Instant};
 use substrate_lite::network::{
     libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId},
-    request_response, with_buffers,
+    peerset, request_response, with_buffers,
 };
 
 /// Configuration for a [`NetworkService`].
@@ -87,6 +87,8 @@ struct Guarded {
     connections: slab::Slab<mpsc::Sender<ToConnection>>,
 
     peers: HashMap<PeerId, Vec<usize>, RandomState>,
+
+    peerset: peerset::Peerset<(), (), ()>,
 }
 
 impl NetworkService {
@@ -132,9 +134,20 @@ impl NetworkService {
             }))
         }
 
-        /*let mut peerset = substrate_lite::network::peerset::Peerset::new(substrate_lite::network::peerset::Config {
+        let mut peerset = peerset::Peerset::new(peerset::Config {
             randomness_seed: [0; 32],
-        });*/
+            peers_capacity: 50,
+            num_overlay_networks: 1,
+        });
+
+        peerset
+            .node_mut(
+                "12D3KooWEdsXX9657ppNqqrRuaCHFvuNemasgU5msLDwSJ6WqsKc"
+                    .parse()
+                    .unwrap(),
+            )
+            .or_default()
+            .add_known_address("/dns/p2p.cc1-0.polkadot.network/tcp/30100".parse().unwrap());
 
         // peerset.insert("/dns/p2p.cc1-0.polkadot.network/tcp/30100/p2p/12D3KooWEdsXX9657ppNqqrRuaCHFvuNemasgU5msLDwSJ6WqsKc");
         // peerset.insert("/dns/p2p.cc1-1.polkadot.network/tcp/30100/p2p/12D3KooWAtx477KzC8LwqLjWWUG6WF4Gqp2eNXmeqAG98ehAMWYH");
@@ -192,6 +205,7 @@ impl NetworkService {
                     rand::random(),
                     rand::random(),
                 )),
+                peerset,
             }),
             noise_key,
             from_background: Mutex::new(from_background),
