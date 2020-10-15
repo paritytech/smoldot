@@ -440,25 +440,22 @@ async fn connection_task(
             continue;
         }
 
-        loop {
-            futures::select! {
-                _ = tcp_socket.as_mut().process().fuse() => break,
-                timeout = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
-                    // Nothing to do, but guarantees that we loop again.
-                    break;
-                },
-                message = to_connection.select_next_some().fuse() => {
-                    match message {
-                        ToConnection::BlocksRequest { config, send_back } => {
-                            let start = config.start.clone();
-                            let request = request_response::build_block_request(config)
-                                .fold(Vec::new(), |mut a, b| {
-                                    a.extend_from_slice(b.as_ref());
-                                    a
-                                });
-                            let id = connection.add_request(Instant::now(), "/dot/sync/2", request, send_back);
-                            println!("start request on {:?} for blocks starting at {:?}", id, start);
-                        }
+        futures::select! {
+            _ = tcp_socket.as_mut().process().fuse() => {},
+            timeout = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
+                // Nothing to do, but guarantees that we loop again.
+            },
+            message = to_connection.select_next_some().fuse() => {
+                match message {
+                    ToConnection::BlocksRequest { config, send_back } => {
+                        let start = config.start.clone();
+                        let request = request_response::build_block_request(config)
+                            .fold(Vec::new(), |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            });
+                        let id = connection.add_request(Instant::now(), "/dot/sync/2", request, send_back);
+                        println!("start request on {:?} for blocks starting at {:?}", id, start);
                     }
                 }
             }
