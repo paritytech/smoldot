@@ -349,6 +349,9 @@ impl ReadyToRun {
                 Externality::ext_storage_child_clear_prefix_version_1 => todo!(),
                 Externality::ext_storage_child_root_version_1 => todo!(),
                 Externality::ext_storage_child_next_key_version_1 => todo!(),
+                Externality::ext_storage_start_transaction_version_1 => todo!(),
+                Externality::ext_storage_rollback_transaction_version_1 => todo!(),
+                Externality::ext_storage_commit_transaction_version_1 => todo!(),
                 Externality::ext_default_child_storage_get_version_1 => todo!(),
                 Externality::ext_default_child_storage_storage_kill_version_1 => todo!(),
                 Externality::ext_default_child_storage_set_version_1 => todo!(),
@@ -391,6 +394,14 @@ impl ReadyToRun {
                 Externality::ext_offchain_http_response_wait_version_1 => todo!(),
                 Externality::ext_offchain_http_response_headers_version_1 => todo!(),
                 Externality::ext_offchain_http_response_read_body_version_1 => todo!(),
+                Externality::ext_sandbox_instantiate_version_1 => todo!(),
+                Externality::ext_sandbox_invoke_version_1 => todo!(),
+                Externality::ext_sandbox_memory_new_version_1 => todo!(),
+                Externality::ext_sandbox_memory_get_version_1 => todo!(),
+                Externality::ext_sandbox_memory_set_version_1 => todo!(),
+                Externality::ext_sandbox_memory_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_instance_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_get_global_val_version_1 => todo!(),
                 Externality::ext_trie_blake2_256_root_version_1 => 1,
                 Externality::ext_trie_blake2_256_ordered_root_version_1 => 1,
                 Externality::ext_misc_chain_id_version_1 => 0,
@@ -625,6 +636,9 @@ impl ReadyToRun {
                 Externality::ext_storage_child_clear_prefix_version_1 => todo!(),
                 Externality::ext_storage_child_root_version_1 => todo!(),
                 Externality::ext_storage_child_next_key_version_1 => todo!(),
+                Externality::ext_storage_start_transaction_version_1 => todo!(),
+                Externality::ext_storage_rollback_transaction_version_1 => todo!(),
+                Externality::ext_storage_commit_transaction_version_1 => todo!(),
                 Externality::ext_default_child_storage_get_version_1 => todo!(),
                 Externality::ext_default_child_storage_storage_kill_version_1 => todo!(),
                 Externality::ext_default_child_storage_set_version_1 => todo!(),
@@ -664,8 +678,8 @@ impl ReadyToRun {
                     // TODO: clean up
                     #[derive(parity_scale_codec::Encode)]
                     enum EcdsaVerifyError {
-                        BadRS,
-                        BadV,
+                        RSError,
+                        VError,
                         BadSignature,
                     }
 
@@ -674,13 +688,13 @@ impl ReadyToRun {
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
                         let rs = secp256k1::Signature::parse_slice(&sig[0..64])
-                            .map_err(|_| EcdsaVerifyError::BadRS)?;
+                            .map_err(|_| EcdsaVerifyError::RSError)?;
                         let v = secp256k1::RecoveryId::parse(if sig[64] > 26 {
                             sig[64] - 27
                         } else {
                             sig[64]
                         } as u8)
-                        .map_err(|_| EcdsaVerifyError::BadV)?;
+                        .map_err(|_| EcdsaVerifyError::VError)?;
                         let pubkey = secp256k1::recover(
                             &secp256k1::Message::parse_slice(&msg).unwrap(),
                             &rs,
@@ -862,6 +876,14 @@ impl ReadyToRun {
                 Externality::ext_offchain_http_response_wait_version_1 => todo!(),
                 Externality::ext_offchain_http_response_headers_version_1 => todo!(),
                 Externality::ext_offchain_http_response_read_body_version_1 => todo!(),
+                Externality::ext_sandbox_instantiate_version_1 => todo!(),
+                Externality::ext_sandbox_invoke_version_1 => todo!(),
+                Externality::ext_sandbox_memory_new_version_1 => todo!(),
+                Externality::ext_sandbox_memory_get_version_1 => todo!(),
+                Externality::ext_sandbox_memory_set_version_1 => todo!(),
+                Externality::ext_sandbox_memory_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_instance_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_get_global_val_version_1 => todo!(),
                 Externality::ext_trie_blake2_256_root_version_1 => {
                     let encoded = expect_pointer_size!(0);
 
@@ -1930,6 +1952,9 @@ externalities! {
     ext_storage_child_clear_prefix_version_1,
     ext_storage_child_root_version_1,
     ext_storage_child_next_key_version_1,
+    ext_storage_start_transaction_version_1,
+    ext_storage_rollback_transaction_version_1,
+    ext_storage_commit_transaction_version_1,
     ext_default_child_storage_get_version_1,
     ext_default_child_storage_storage_kill_version_1,
     ext_default_child_storage_set_version_1,
@@ -1972,6 +1997,14 @@ externalities! {
     ext_offchain_http_response_wait_version_1,
     ext_offchain_http_response_headers_version_1,
     ext_offchain_http_response_read_body_version_1,
+    ext_sandbox_instantiate_version_1,
+    ext_sandbox_invoke_version_1,
+    ext_sandbox_memory_new_version_1,
+    ext_sandbox_memory_get_version_1,
+    ext_sandbox_memory_set_version_1,
+    ext_sandbox_memory_teardown_version_1,
+    ext_sandbox_instance_teardown_version_1,
+    ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
     ext_trie_blake2_256_ordered_root_version_1,
     ext_misc_chain_id_version_1,
