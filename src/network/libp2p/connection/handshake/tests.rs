@@ -48,7 +48,8 @@ fn handshake_basic_works() {
                         }
                         buf_1_to_2.truncate(written);
                     } else {
-                        let (updated, num_read, _) = nego.read_write(&buf_2_to_1, &mut []).unwrap();
+                        let (updated, num_read, _) =
+                            nego.read_write(&buf_2_to_1, (&mut [], &mut [])).unwrap();
                         handshake1 = updated;
                         for _ in 0..num_read {
                             buf_2_to_1.remove(0);
@@ -72,7 +73,8 @@ fn handshake_basic_works() {
                         }
                         buf_2_to_1.truncate(written);
                     } else {
-                        let (updated, num_read, _) = nego.read_write(&buf_1_to_2, &mut []).unwrap();
+                        let (updated, num_read, _) =
+                            nego.read_write(&buf_1_to_2, (&mut [], &mut [])).unwrap();
                         handshake2 = updated;
                         for _ in 0..num_read {
                             buf_1_to_2.remove(0);

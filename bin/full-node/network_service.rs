@@ -135,7 +135,7 @@ impl NetworkService {
         }
 
         let mut peerset = peerset::Peerset::new(peerset::Config {
-            randomness_seed: [0; 32],
+            randomness_seed: rand::random(),
             peers_capacity: 50,
             num_overlay_networks: 1,
         });
@@ -369,6 +369,7 @@ async fn connection_task(
         connection::established::Config {
             in_request_protocols: iter::once("/ipfs/ping/1.0.0"),
             in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO:
+            ping_protocol: "/ipfs/ping/1.0.0",
             randomness_seed: rand::random(),
         },
     );
@@ -461,8 +462,7 @@ async fn connection_task(
                                 a.extend_from_slice(b.as_ref());
                                 a
                             });
-                        let id = connection.add_request(Instant::now(), "/dot/sync/2", request, send_back);
-                        println!("start request on {:?} for blocks starting at {:?}", id, start);
+                        connection.add_request(Instant::now(), "/dot/sync/2", request, send_back);
                     }
                 }
             }
