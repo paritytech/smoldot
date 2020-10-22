@@ -93,8 +93,6 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
     NotificationsOutHandshakeRecv {
         /// Buffer for the incoming handshake.
         handshake: leb128::Framed,
-        /// Protocol that was negotiated.
-        protocol: TProto,
     },
 
     /// A notifications protocol has been negotiated, and the remote accepted it. Can now send
@@ -372,6 +370,52 @@ where
                         data = &data[data.len()..];
                         *substream.user_data() = Substream::NegotiationFailed;
                     }
+                    Substream::NotificationsOutNegotiating {
+                        negotiation,
+                        timeout,
+                        handshake,
+                    } => {
+                        match negotiation.read_write_vec(data) {
+                            Ok((
+                                multistream_select::Negotiation::InProgress(nego),
+                                _read,
+                                out_buffer,
+                            )) => {
+                                debug_assert_eq!(_read, data.len());
+                                data = &data[_read..];
+                                substream.write(out_buffer);
+                                *substream.user_data() = Substream::NotificationsOutNegotiating {
+                                    negotiation: nego,
+                                    timeout,
+                                    handshake,
+                                };
+                            }
+                            Ok((
+                                multistream_select::Negotiation::Success(_),
+                                num_read,
+                                out_buffer,
+                            )) => {
+                                substream.write(out_buffer);
+                                data = &data[num_read..];
+                                substream.write(leb128::encode_usize(handshake.len()).collect());
+                                substream.write(handshake);
+                                *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
+                                    handshake: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper max size
+                                };
+                            }
+                            _ => todo!(), // TODO:
+                        }
+                    }
+                    Substream::NotificationsOutHandshakeRecv { mut handshake } => {
+                        let num_read = handshake.inject_data(&data).unwrap(); // TODO: don't unwrap
+                        data = &data[num_read..];
+                        if let Some(handshake) = handshake.take_frame() {
+                            let substream_id = substream.id();
+                            todo!() // TODO:
+                        }
+                        *substream.user_data() =
+                            Substream::NotificationsOutHandshakeRecv { handshake };
+                    }
                     Substream::RequestOutNegotiating {
                         negotiation,
                         timeout,
@@ -449,7 +493,26 @@ where
                         user_data,
                         mut response,
                     } => {
-                        let num_read = response.inject_data(&data).unwrap(); // TODO: don't unwrap
+                        let num_read = match response.inject_data(&data) {
+                            Ok(n) => n,
+                            Err(err) => {
+                                let substream_id = substream.id();
+                                substream.reset();
+                                let wake_up_after = self.next_timeout.clone();
+                                return Ok(ReadWrite {
+                                    connection: self,
+                                    read_bytes: total_read,
+                                    written_bytes: total_written,
+                                    wake_up_after,
+                                    event: Some(Event::Response {
+                                        id: SubstreamId(substream_id),
+                                        user_data,
+                                        response: Err(RequestError::ResponseLebError(err)),
+                                    }),
+                                });
+                            }
+                        };
+
                         data = &data[num_read..];
                         if let Some(response) = response.take_frame() {
                             let substream_id = substream.id();
@@ -735,7 +798,34 @@ where
         protocol: TProto,
         handshake: Vec<u8>,
     ) -> SubstreamId {
-        todo!("open_notifications_substream")
+        let mut negotiation =
+            multistream_select::InProgress::new(multistream_select::Config::Dialer {
+                requested_protocol: protocol,
+            });
+
+        let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
+        match new_state {
+            multistream_select::Negotiation::InProgress(n) => negotiation = n,
+            _ => unreachable!(),
+        }
+
+        let timeout = now + Duration::from_secs(20); // TODO:
+
+        if self.next_timeout.as_ref().map_or(true, |t| *t > timeout) {
+            self.next_timeout = Some(timeout.clone());
+        }
+
+        let mut substream = self
+            .yamux
+            .open_substream(Substream::NotificationsOutNegotiating {
+                timeout,
+                negotiation,
+                handshake,
+            });
+
+        substream.write(out_buffer);
+
+        SubstreamId(substream.id())
     }
 }
 
@@ -894,6 +984,8 @@ pub enum RequestError {
     SubstreamReset,
     /// Error during protocol negotiation.
     NegotiationError(multistream_select::Error),
+    /// Error while receiving the response.
+    ResponseLebError(leb128::FramedError),
 }
 
 /// Successfully negotiated connection. Ready to be turned into a [`Established`].
