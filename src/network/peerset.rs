@@ -45,9 +45,11 @@
 use crate::network::libp2p::peer_id::PeerId;
 
 use ahash::RandomState;
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::mem;
 use hashbrown::HashMap;
 use parity_multiaddr::Multiaddr;
+use rand::{seq::IteratorRandom as _, RngCore as _, SeedableRng as _};
 
 /// Configuration for a [`Peerset`].
 #[derive(Debug)]
@@ -72,9 +74,11 @@ pub struct Peerset<TPeer, TConn, TPending> {
 
     peers: slab::Slab<Peer<TPeer>>,
 
-    pending: slab::Slab<Connection<TPending>>,
+    /// Active and pending connections.
+    connections: slab::Slab<Connection<TConn, TPending>>,
 
-    connections: slab::Slab<Connection<TConn>>,
+    /// PRNG used to randomly select nodes.
+    rng: rand_chacha::ChaCha20Rng,
 
     /// Container that holds tuples of `(peer_index, connection_index)`. Contains the combinations
     /// of connections associated to a certain peer.
@@ -88,17 +92,8 @@ pub struct Peerset<TPeer, TConn, TPending> {
     /// Contains combinations where the peer belongs to the overlay network.
     peers_overlays: BTreeSet<(usize, usize)>,
 
-    /// Container that holds tuples of `(overlay_index, peer_index)` where `overlay_index` is an
-    /// index in [`Peerset::overlay_networks`] and `peer_index` is an index in [`Peerset::peers`].
-    /// Only contains combinations where the peer belongs to the overlay network and is connected
-    /// to the local node through this overlay network.
-    overlay_peers_connected: BTreeSet<(usize, usize)>,
-
-    /// Container that holds tuples of `(overlay_index, peer_index)` where `overlay_index` is an
-    /// index in [`Peerset::overlay_networks`] and `peer_index` is an index in [`Peerset::peers`].
-    /// Only contains combinations where the peer belongs to the overlay network but is not
-    /// connected to the local node through this overlay network.
-    overlay_peers_disconnected: BTreeSet<(usize, usize)>,
+    /// Container that holds tuples of `(connection_index, overlay_index, direction)`.
+    connection_overlays: BTreeMap<(usize, usize, SubstreamDirection), SubstreamState>,
 }
 
 struct Peer<TPeer> {
@@ -108,28 +103,70 @@ struct Peer<TPeer> {
     connected: bool,
 }
 
-struct Connection<TConn> {
+struct Connection<TConn, TPending> {
     peer_index: usize,
-    user_data: TConn,
-    inbound: bool,
+    ty: ConnectionTy<TConn, TPending>,
+}
+
+enum ConnectionTy<TConn, TPending> {
+    Poisoned,
+    Connected {
+        user_data: TConn,
+        inbound: bool,
+    },
+    Pending {
+        user_data: TPending,
+        target: Multiaddr,
+    },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+enum SubstreamDirection {
+    In,
+    Out,
+}
+
+/// > **Note**: There is `Closed` variant, as this corresponds to a lack of entry in the hashmap.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+enum SubstreamState {
+    Pending,
+    Open,
 }
 
 impl<TPeer, TConn, TPending> Peerset<TPeer, TConn, TPending> {
     /// Creates a [`Peerset`] with the given configuration.
     pub fn new(config: Config) -> Self {
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
+
+        let peer_ids = {
+            let k0 = rng.next_u64();
+            let k1 = rng.next_u64();
+            HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
+                RandomState::with_seeds(k0, k1),
+            )
+        };
+
         Peerset {
             num_overlay_networks: config.num_overlay_networks,
-            // TODO: randomness seed
-            peer_ids: HashMap::with_capacity_and_hasher(config.peers_capacity, Default::default()),
+            rng,
+            peer_ids,
             peers: slab::Slab::with_capacity(config.peers_capacity),
-            pending: slab::Slab::with_capacity(config.peers_capacity * 2), // TODO: correct capacity?
-            connections: slab::Slab::with_capacity(config.peers_capacity * 2),
+            connections: slab::Slab::with_capacity(config.peers_capacity * 2), // TODO: correct capacity?
             peer_connections: BTreeSet::new(),
             overlay_peers: BTreeSet::new(),
             peers_overlays: BTreeSet::new(),
-            overlay_peers_connected: BTreeSet::new(),
-            overlay_peers_disconnected: BTreeSet::new(),
+            connection_overlays: BTreeMap::new(),
         }
+    }
+
+    /// Returns the number of established connections in the peerset.
+    pub fn num_established_connections(&self) -> usize {
+        // TODO: O(n)
+        self.connections
+            .iter()
+            .filter(|(_, c)| matches!(c.ty, ConnectionTy::Connected { .. }))
+            .count()
     }
 
     /// Returns the list of nodes that belong to the given overlay network.
@@ -148,9 +185,99 @@ impl<TPeer, TConn, TPending> Peerset<TPeer, TConn, TPending> {
             .map(move |(_, id)| &self.peers[*id].peer_id)
     }
 
+    /// Returns a random node in the list of nodes that match the following criterias:
+    ///
+    /// - Peerset has at least one outbound connection towards this node.
+    /// - None of the connections towards this node have an outbound substream with the given
+    /// overlay network.
+    ///
+    pub fn random_connected_closed_node(
+        &mut self,
+        overlay_network_index: usize,
+    ) -> Option<NodeMutKnown<TPeer, TConn, TPending>> {
+        let peer_connections = &self.peer_connections;
+        let connection_overlays = &self.connection_overlays;
+        let connections = &self.connections;
+
+        let peer_index = self
+            .overlay_peers
+            .range((overlay_network_index, 0)..=(overlay_network_index, usize::max_value()))
+            .map(|(_, index)| *index)
+            .filter(move |peer_index| {
+                let mut iter = peer_connections
+                    .range((*peer_index, 0)..=(*peer_index, usize::max_value()))
+                    .map(|(_, connec_id)| *connec_id);
+                if iter
+                    .clone()
+                    .filter(|connec_id| match connections[*connec_id].ty {
+                        ConnectionTy::Connected { inbound, .. } => !inbound,
+                        ConnectionTy::Pending { .. } => true,
+                        ConnectionTy::Poisoned => unreachable!(),
+                    })
+                    .next()
+                    .is_none()
+                {
+                    return false;
+                }
+
+                !iter.any(|connec_id| {
+                    connection_overlays.contains_key(&(
+                        connec_id,
+                        overlay_network_index,
+                        SubstreamDirection::Out,
+                    ))
+                })
+            })
+            .choose(&mut self.rng)?;
+
+        Some(NodeMutKnown {
+            peerset: self,
+            peer_index,
+        })
+    }
+
+    /// Returns a random node in the list of nodes that match the following criterias:
+    ///
+    /// - Peerset has no connection nor pending connection towards this node.
+    /// - Node belongs to the given overlay network.
+    ///
+    /// Returns `None` if no such node is available.
+    pub fn random_not_connected(
+        &mut self,
+        overlay_network_index: usize,
+    ) -> Option<NodeMutKnown<TPeer, TConn, TPending>> {
+        let peer_connections = &self.peer_connections;
+
+        let peer_index = self
+            .overlay_peers
+            .range((overlay_network_index, 0)..=(overlay_network_index, usize::max_value()))
+            .map(|(_, index)| *index)
+            .filter(move |peer_index| {
+                if peer_connections
+                    .range((*peer_index, 0)..=(*peer_index, usize::max_value()))
+                    .next()
+                    .is_some()
+                {
+                    return false;
+                }
+                // TODO: check pending too
+                true
+            })
+            .choose(&mut self.rng)?;
+
+        Some(NodeMutKnown {
+            peerset: self,
+            peer_index,
+        })
+    }
+
     /// Gives access to a pending connection within the [`Peerset`].
     pub fn pending_mut(&mut self, id: PendingId) -> Option<PendingMut<TPeer, TConn, TPending>> {
-        if self.pending.contains(id.0) {
+        if self
+            .connections
+            .get(id.0)
+            .map_or(false, |c| matches!(c.ty, ConnectionTy::Pending { .. }))
+        {
             Some(PendingMut { peerset: self, id })
         } else {
             None
@@ -196,6 +323,11 @@ pub struct ConnectionMut<'a, TPeer, TConn, TPending> {
 }
 
 impl<'a, TPeer, TConn, TPending> ConnectionMut<'a, TPeer, TConn, TPending> {
+    /// Returns the identifier of this connection.
+    pub fn id(&self) -> ConnectionId {
+        self.id
+    }
+
     /// [`PeerId`] the connection is connected to.
     pub fn peer_id(&self) -> &PeerId {
         let index = self.peerset.connections[self.id.0].peer_index;
@@ -204,17 +336,26 @@ impl<'a, TPeer, TConn, TPending> ConnectionMut<'a, TPeer, TConn, TPending> {
 
     /// Returns true if the connection is inbound.
     pub fn is_inbound(&self) -> bool {
-        self.peerset.connections[self.id.0].inbound
+        match self.peerset.connections[self.id.0].ty {
+            ConnectionTy::Connected { inbound, .. } => inbound,
+            _ => unreachable!(),
+        }
     }
 
     /// Gives access to the user data associated with the connection.
     pub fn user_data_mut(&mut self) -> &mut TConn {
-        &mut self.peerset.connections[self.id.0].user_data
+        match &mut self.peerset.connections[self.id.0].ty {
+            ConnectionTy::Connected { user_data, .. } => user_data,
+            _ => unreachable!(),
+        }
     }
 
     /// Gives access to the user data associated with the connection.
     pub fn into_user_data(self) -> &'a mut TConn {
-        &mut self.peerset.connections[self.id.0].user_data
+        match &mut self.peerset.connections[self.id.0].ty {
+            ConnectionTy::Connected { user_data, .. } => user_data,
+            _ => unreachable!(),
+        }
     }
 
     /// Removes the connection from the data structure.
@@ -225,7 +366,10 @@ impl<'a, TPeer, TConn, TPending> ConnectionMut<'a, TPeer, TConn, TPending> {
             .peer_connections
             .remove(&(connection.peer_index, self.id.0));
         debug_assert!(_was_in);
-        connection.user_data
+        match connection.ty {
+            ConnectionTy::Connected { user_data, .. } => user_data,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -240,26 +384,70 @@ pub struct PendingMut<'a, TPeer, TConn, TPending> {
 }
 
 impl<'a, TPeer, TConn, TPending> PendingMut<'a, TPeer, TConn, TPending> {
-    /// [`PeerId`] the connection is trying to connected to.
+    /// [`PeerId`] the connection is trying to connect to.
     pub fn peer_id(&self) -> &PeerId {
-        let index = self.peerset.pending[self.id.0].peer_index;
+        let index = self.peerset.connections[self.id.0].peer_index;
         &self.peerset.peers[index].peer_id
+    }
+
+    /// Address the connection is trying to reach.
+    pub fn address(&self) -> &Multiaddr {
+        match &self.peerset.connections[self.id.0].ty {
+            ConnectionTy::Pending { target, .. } => target,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Turns this pending connection into an established connection by applying `map` on the
+    /// user data.
+    pub fn into_established(
+        self,
+        map: impl FnOnce(TPending) -> TConn,
+    ) -> ConnectionMut<'a, TPeer, TConn, TPending> {
+        let connec = self.peerset.connections.get_mut(self.id.0).unwrap();
+        let old_user_data = match mem::replace(&mut connec.ty, ConnectionTy::Poisoned) {
+            ConnectionTy::Pending { user_data, .. } => user_data,
+            _ => unreachable!(),
+        };
+        let new_user_data = map(old_user_data);
+        connec.ty = ConnectionTy::Connected {
+            user_data: new_user_data,
+            inbound: false,
+        };
+        ConnectionMut {
+            peerset: self.peerset,
+            id: ConnectionId(self.id.0),
+        }
     }
 
     /// Gives access to the user data associated with the connection.
     pub fn user_data_mut(&mut self) -> &mut TPending {
-        &mut self.peerset.pending[self.id.0].user_data
+        match &mut self.peerset.connections[self.id.0].ty {
+            ConnectionTy::Pending { user_data, .. } => user_data,
+            _ => unreachable!(),
+        }
     }
 
     /// Gives access to the user data associated with the connection.
     pub fn into_user_data(self) -> &'a mut TPending {
-        &mut self.peerset.pending[self.id.0].user_data
+        match &mut self.peerset.connections[self.id.0].ty {
+            ConnectionTy::Pending { user_data, .. } => user_data,
+            _ => unreachable!(),
+        }
     }
 
     /// Removes the pending connection from the data structure.
     pub fn remove(self) -> TPending {
-        // TODO: remove from everywhere?
-        self.peerset.pending.remove(self.id.0).user_data
+        let connection = self.peerset.connections.remove(self.id.0);
+        let _was_in = self
+            .peerset
+            .peer_connections
+            .remove(&(connection.peer_index, self.id.0));
+        debug_assert!(_was_in);
+        match connection.ty {
+            ConnectionTy::Pending { user_data, .. } => user_data,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -304,8 +492,10 @@ impl<'a, TPeer, TConn, TPending> NodeMutKnown<'a, TPeer, TConn, TPending> {
     pub fn add_inbound_connection(&mut self, connection: TConn) -> ConnectionId {
         let index = self.peerset.connections.insert(Connection {
             peer_index: self.peer_index,
-            user_data: connection,
-            inbound: true,
+            ty: ConnectionTy::Connected {
+                user_data: connection,
+                inbound: true,
+            },
         });
 
         let _newly_inserted = self
@@ -315,6 +505,47 @@ impl<'a, TPeer, TConn, TPending> NodeMutKnown<'a, TPeer, TConn, TPending> {
         debug_assert!(_newly_inserted);
 
         ConnectionId(index)
+    }
+
+    // TODO: what if Multiaddr isn't in known addresses? do we add it?
+    pub fn add_outbound_attempt(&mut self, target: Multiaddr, connection: TPending) -> PendingId {
+        let index = self.peerset.connections.insert(Connection {
+            peer_index: self.peer_index,
+            ty: ConnectionTy::Pending {
+                user_data: connection,
+                target,
+            },
+        });
+
+        let _newly_inserted = self
+            .peerset
+            .peer_connections
+            .insert((self.peer_index, index));
+        debug_assert!(_newly_inserted);
+
+        PendingId(index)
+    }
+
+    /// Returns an iterator to the list of current connections to that node.
+    pub fn connections<'b>(&'b self) -> impl Iterator<Item = ConnectionId> + 'b {
+        self.peerset.peer_connections
+            .range((self.peer_index, 0)..=(self.peer_index, usize::max_value()))
+            .map(|(_, i)| *i)
+            .filter(move |idx| {
+                matches!(self.peerset.connections[*idx].ty, ConnectionTy::Connected { .. })
+            })
+            .map(ConnectionId)
+    }
+
+    /// Returns an iterator to the list of current pending connections to that node.
+    pub fn pending_connections<'b>(&'b self) -> impl Iterator<Item = PendingId> + 'b {
+        self.peerset.peer_connections
+            .range((self.peer_index, 0)..=(self.peer_index, usize::max_value()))
+            .map(|(_, i)| *i)
+            .filter(move |idx| {
+                matches!(self.peerset.connections[*idx].ty, ConnectionTy::Pending { .. })
+            })
+            .map(PendingId)
     }
 
     /// Adds an address to the list of addresses the node is reachable through.
@@ -327,6 +558,39 @@ impl<'a, TPeer, TConn, TPending> NodeMutKnown<'a, TPeer, TConn, TPending> {
         }
 
         list.push(address);
+    }
+
+    /// Removes an address from the list of known addresses.
+    ///
+    /// Returns `Ok` if this address was in the list and was removed. Returns `Err` if the address
+    /// wasn't in the list.
+    pub fn remove_known_address(&mut self, address: &Multiaddr) -> Result<(), ()> {
+        let addresses = &mut self.peerset.peers[self.peer_index].addresses;
+        if let Some(pos) = addresses.iter().position(|a| a == address) {
+            addresses.remove(pos);
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// Returns an iterator to the list of addresses known for this peer.
+    pub fn known_addresses<'b>(&'b self) -> impl ExactSizeIterator<Item = &'b Multiaddr> + 'b {
+        self.peerset.peers[self.peer_index].addresses.iter()
+    }
+
+    /// Returns an iterator to the list of addresses known for this peer.
+    ///
+    /// Filters out addresses to which there is an ongoing connection attempt.
+    pub fn known_addresses_no_pending<'b>(&'b self) -> impl Iterator<Item = &'b Multiaddr> + 'b {
+        self.known_addresses().filter(move |addr| {
+            !self
+                .pending_connections()
+                .any(move |idx| match &self.peerset.connections[idx.0].ty {
+                    ConnectionTy::Pending { target, .. } => target == *addr,
+                    _ => false,
+                })
+        })
     }
 
     /// Adds the node to an overlay network.

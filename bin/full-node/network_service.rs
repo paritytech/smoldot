@@ -29,13 +29,17 @@ use ahash::RandomState;
 use core::{iter, pin::Pin, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
-    lock::Mutex,
+    lock::{Mutex, MutexGuard},
     prelude::*,
 };
 use hashbrown::HashMap;
-use std::{io, sync::Arc, time::Instant};
+use std::{io, net::SocketAddr, sync::Arc, time::Instant};
 use substrate_lite::network::{
-    libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId},
+    libp2p::{
+        connection,
+        multiaddr::{Multiaddr, Protocol},
+        peer_id::PeerId,
+    },
     peerset, request_response, with_buffers,
 };
 
@@ -46,6 +50,10 @@ pub struct Config {
 
     /// Addresses to listen for incoming connections.
     pub listen_addresses: Vec<Multiaddr>,
+
+    /// List of node identities and addresses that are known to belong to the chain's peer-to-pee
+    /// network.
+    pub bootstrap_nodes: Vec<(PeerId, Multiaddr)>,
 
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specifications.
@@ -84,11 +92,9 @@ struct Guarded {
     /// See [`Config::tasks_executor`].
     tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
-    connections: slab::Slab<mpsc::Sender<ToConnection>>,
-
-    peers: HashMap<PeerId, Vec<usize>, RandomState>,
-
-    peerset: peerset::Peerset<(), (), ()>,
+    /// Holds the state of all the known nodes of the network, and of all the connections (pending
+    /// or not).
+    peerset: peerset::Peerset<(), mpsc::Sender<ToConnection>, mpsc::Sender<ToConnection>>,
 }
 
 impl NetworkService {
@@ -134,21 +140,22 @@ impl NetworkService {
             }))
         }
 
+        // The peerset, created below, is a data structure that helps keep track of the state of
+        // the current peers and connections.
         let mut peerset = peerset::Peerset::new(peerset::Config {
             randomness_seed: rand::random(),
             peers_capacity: 50,
             num_overlay_networks: 1,
         });
 
-        peerset
-            .node_mut(
-                "12D3KooWEdsXX9657ppNqqrRuaCHFvuNemasgU5msLDwSJ6WqsKc"
-                    .parse()
-                    .unwrap(),
-            )
-            .or_default()
-            .add_known_address("/dns/p2p.cc1-0.polkadot.network/tcp/30100".parse().unwrap());
+        // Add to overlay #0 the nodes known to belong to the network.
+        for (peer_id, address) in config.bootstrap_nodes {
+            let mut node = peerset.node_mut(peer_id).or_default();
+            node.add_known_address(address);
+            node.add_to_overlay(0);
+        }
 
+        // TODO:
         // peerset.insert("/dns/p2p.cc1-0.polkadot.network/tcp/30100/p2p/12D3KooWEdsXX9657ppNqqrRuaCHFvuNemasgU5msLDwSJ6WqsKc");
         // peerset.insert("/dns/p2p.cc1-1.polkadot.network/tcp/30100/p2p/12D3KooWAtx477KzC8LwqLjWWUG6WF4Gqp2eNXmeqAG98ehAMWYH");
         // peerset.insert("/dns/p2p.cc1-2.polkadot.network/tcp/30100/p2p/12D3KooWAGCCPZbr9UWGXPtBosTZo91Hb5M3hU8v6xbKgnC5LVao");
@@ -158,59 +165,24 @@ impl NetworkService {
         // peerset.insert("/dns/cc1-0.parity.tech/tcp/30333/p2p/12D3KooWSz8r2WyCdsfWHgPyvD8GKQdJ1UAiRmrcrs8sQB3fe2KU");
         // peerset.insert("/dns/cc1-1.parity.tech/tcp/30333/p2p/12D3KooWFN2mhgpkJsDBuNuE5427AcDrsib8EoqGMZmkxWwx3Md4");
 
-        /*while num_outgoing_connected_pending < 25 {
-            if let Some(node) = peerset.overlay(0).unwrap().random_disconnected() {
-                for address in node.addresses() {
-
-                }
-
-                node.connect();
-            }
-        }*/
-
-        /*
-
-        Peer state:
-
-        - Known addresses.
-            - For each address, the current or previous dialing attempt.
-        - Inbound connections.
-        - Overlay networks it belongs to.
-
-        */
-
-        // TODO: temporary, for testing
-        let mut connections = slab::Slab::new();
-        {
-            let tcp_socket = async_std::net::TcpStream::connect("p2p.cc1-4.polkadot.network:30100")
-                .await
-                .unwrap();
-            let (tx, rx) = mpsc::channel(8);
-            let connection_id = connections.insert(tx);
-            (config.tasks_executor)(Box::pin(connection_task(
-                tcp_socket,
-                true,
-                noise_key.clone(),
-                connection_id,
-                to_foreground.clone(),
-                rx,
-            )));
-        }
-
         Ok(Arc::new(NetworkService {
             guarded: Mutex::new(Guarded {
                 tasks_executor: config.tasks_executor,
-                connections,
-                peers: HashMap::with_hasher(RandomState::with_seeds(
-                    rand::random(),
-                    rand::random(),
-                )),
                 peerset,
             }),
             noise_key,
             from_background: Mutex::new(from_background),
             to_foreground,
         }))
+    }
+
+    /// Returns the number of established TCP connections, both incoming and outgoing.
+    pub async fn num_established_connections(&self) -> usize {
+        self.guarded
+            .lock()
+            .await
+            .peerset
+            .num_established_connections()
     }
 
     /// Sends a blocks request to the given peer.
@@ -223,8 +195,10 @@ impl NetworkService {
     ) -> Result<Vec<request_response::BlockData>, ()> {
         let mut guarded = self.guarded.lock().await;
 
-        // TODO: don't unwrap and all
-        let connection = *guarded.peers.get(&target).unwrap().first().unwrap();
+        let connection = match guarded.peerset.node_mut(target) {
+            peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
+            peerset::NodeMut::Unknown(n) => return Err(()),
+        };
 
         let (send_back, receive_result) = oneshot::channel();
 
@@ -232,9 +206,10 @@ impl NetworkService {
         // It is possible for the channel to be closed, if the background task has ended but the
         // frontend hasn't processed this yet.
         guarded
-            .connections
-            .get_mut(connection)
+            .peerset
+            .connection_mut(connection)
             .unwrap()
+            .into_user_data()
             .send(ToConnection::BlocksRequest { config, send_back })
             .await
             .map_err(|_| ())?;
@@ -255,6 +230,8 @@ impl NetworkService {
     /// amongst the different calls in an unpredictable way.
     pub async fn next_event(&self) -> Event {
         loop {
+            self.fill_out_slots(&mut self.guarded.lock().await).await;
+
             match self.from_background.lock().await.next().await.unwrap() {
                 FromBackground::NewConnection {
                     socket,
@@ -262,40 +239,84 @@ impl NetworkService {
                 } => {
                     // A new socket has been accepted by a listener.
                     // Add the socket to the local state, and spawn the task of that connection.
-                    let (tx, rx) = mpsc::channel(8);
+                    /*let (tx, rx) = mpsc::channel(8);
                     let mut guarded = self.guarded.lock().await;
-                    let connection_id = guarded.connections.insert(tx);
+                    let connection_id = guarded.peerset
                     (guarded.tasks_executor)(Box::pin(connection_task(
-                        socket,
+                        future::ok(socket),
                         is_initiator,
                         self.noise_key.clone(),
                         connection_id,
                         self.to_foreground.clone(),
                         rx,
-                    )));
+                    )));*/
+                    // TODO: there's nothing in place for pending incoming at the moment
+                    todo!()
                 }
                 FromBackground::HandshakeError { connection_id, .. } => {
                     let mut guarded = self.guarded.lock().await;
-                    guarded.connections.remove(connection_id);
+                    guarded.peerset.pending_mut(connection_id).unwrap().remove();
                 }
                 FromBackground::HandshakeSuccess {
                     connection_id,
                     peer_id,
+                    accept_tx,
                 } => {
                     let mut guarded = self.guarded.lock().await;
-                    guarded
-                        .peers
-                        .entry(peer_id.clone())
-                        .or_default()
-                        .push(connection_id);
+                    let id = guarded
+                        .peerset
+                        .pending_mut(connection_id)
+                        .unwrap()
+                        .into_established(|tx| tx)
+                        .id();
+                    accept_tx.send(id).unwrap();
                     return Event::Connected(peer_id);
                 }
                 FromBackground::Disconnected { connection_id } => {
                     let mut guarded = self.guarded.lock().await;
-                    guarded.connections.remove(connection_id);
-                    // TODO: remove from peers as well
+                    guarded
+                        .peerset
+                        .connection_mut(connection_id)
+                        .unwrap()
+                        .remove();
                 }
             }
+        }
+    }
+
+    /// Spawns new outgoing connections in order to fill empty outgoing slots.
+    ///
+    /// Must be passed as parameter an existing lock to a [`Guarded`].
+    async fn fill_out_slots<'a>(&self, guarded: &mut MutexGuard<'a, Guarded>) {
+        // Solves borrow checking errors regarding the borrow of multiple different fields at the
+        // same time.
+        let guarded = &mut **guarded;
+
+        // TODO: very wip
+        while let Some(mut node) = guarded.peerset.random_not_connected(0) {
+            // TODO: collecting into a Vec, annoying
+            for address in node.known_addresses().cloned().collect::<Vec<_>>() {
+                let tcp_socket = match multiaddr_to_socket(&address) {
+                    Ok(s) => s,
+                    Err(()) => {
+                        node.remove_known_address(&address).unwrap();
+                        continue;
+                    }
+                };
+
+                let (tx, rx) = mpsc::channel(8);
+                let connection_id = node.add_outbound_attempt(address.clone(), tx);
+                (guarded.tasks_executor)(Box::pin(connection_task(
+                    tcp_socket,
+                    true,
+                    self.noise_key.clone(),
+                    connection_id,
+                    self.to_foreground.clone(),
+                    rx,
+                )));
+            }
+
+            break;
         }
     }
 }
@@ -319,12 +340,13 @@ enum FromBackground {
     },
 
     HandshakeError {
-        connection_id: usize,
+        connection_id: peerset::PendingId,
         error: HandshakeError,
     },
     HandshakeSuccess {
-        connection_id: usize,
+        connection_id: peerset::PendingId,
         peer_id: PeerId,
+        accept_tx: oneshot::Sender<peerset::ConnectionId>,
     },
 
     /// Connection has closed.
@@ -332,18 +354,32 @@ enum FromBackground {
     /// This only concerns connections onto which the handshake had succeeded. For connections on
     /// which the handshake hadn't succeeded, a [`FromBackground::HandshakeError`] is emitted
     /// instead.
-    Disconnected { connection_id: usize },
+    Disconnected {
+        connection_id: peerset::ConnectionId,
+    },
 }
 
 /// Asynchronous task managing a specific TCP connection.
 async fn connection_task(
-    tcp_socket: async_std::net::TcpStream,
+    tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
     is_initiator: bool,
     noise_key: Arc<connection::NoiseKey>,
-    connection_id: usize,
+    connection_id: peerset::PendingId,
     mut to_foreground: mpsc::Sender<FromBackground>,
     mut to_connection: mpsc::Receiver<ToConnection>,
 ) {
+    // Finishing any ongoing connection process.
+    let tcp_socket = match tcp_socket.await {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = to_foreground.send(FromBackground::HandshakeError {
+                connection_id,
+                error: HandshakeError::Io,
+            });
+            return;
+        }
+    };
+
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
     // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
     // reading/writing the socket.
@@ -365,26 +401,40 @@ async fn connection_task(
         };
 
     // Configure the `connection_prototype` to turn it into an actual connection.
+    // The protocol names are hardcoded here.
     let mut connection = connection_prototype.into_connection::<_, oneshot::Sender<_>, (), _, _>(
         connection::established::Config {
-            in_request_protocols: iter::once("/ipfs/ping/1.0.0"),
-            in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO:
+            in_request_protocols: iter::once("/foo"), // TODO: should be empty; hack because iterator type is identical to notification protocols list
+            in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO: correct protocolId
             ping_protocol: "/ipfs/ping/1.0.0",
             randomness_seed: rand::random(),
         },
     );
 
-    // Notify the outside of the transition from handshake to actual connection.
-    if to_foreground
-        .send(FromBackground::HandshakeSuccess {
-            connection_id,
-            peer_id,
-        })
-        .await
-        .is_err()
-    {
-        return;
-    }
+    // Notify the outside of the transition from handshake to actual connection, and obtain an
+    // updated `connection_id` in return.
+    // It is possible for the outside to refuse the connection after the handshake (if e.g. the
+    // `PeerId` isn't the one that is expected), in which case the task stops entirely.
+    let connection_id = {
+        let (accept_tx, accept_rx) = oneshot::channel();
+
+        if to_foreground
+            .send(FromBackground::HandshakeSuccess {
+                connection_id,
+                peer_id,
+                accept_tx,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        match accept_rx.await {
+            Ok(id) => id,
+            Err(_) => return,
+        }
+    };
 
     // Set to a timer after which the state machine of the connection needs an update.
     let mut poll_after: futures_timer::Delay;
@@ -468,6 +518,52 @@ async fn connection_task(
             }
         }
     }
+}
+
+/// Builds a future that connects to the given multiaddress. Returns an error if the multiaddress
+/// protocols aren't supported.
+fn multiaddr_to_socket(
+    addr: &Multiaddr,
+) -> Result<impl Future<Output = Result<async_std::net::TcpStream, io::Error>>, ()> {
+    let mut iter = addr.iter();
+    let proto1 = iter.next().ok_or(())?;
+    let proto2 = iter.next().ok_or(())?;
+
+    if iter.next().is_some() {
+        return Err(());
+    }
+
+    // Ensure ahead of time that the multiaddress is supported.
+    match (&proto1, &proto2) {
+        (Protocol::Ip4(_), Protocol::Tcp(_))
+        | (Protocol::Ip6(_), Protocol::Tcp(_))
+        | (Protocol::Dns(_), Protocol::Tcp(_))
+        | (Protocol::Dns4(_), Protocol::Tcp(_))
+        | (Protocol::Dns6(_), Protocol::Tcp(_)) => {}
+        _ => return Err(()),
+    }
+
+    let proto1 = proto1.acquire();
+    let proto2 = proto2.acquire();
+
+    Ok(async move {
+        match (proto1, proto2) {
+            (Protocol::Ip4(ip), Protocol::Tcp(port)) => {
+                async_std::net::TcpStream::connect(SocketAddr::new(ip.into(), port)).await
+            }
+            (Protocol::Ip6(ip), Protocol::Tcp(port)) => {
+                async_std::net::TcpStream::connect(SocketAddr::new(ip.into(), port)).await
+            }
+            // TODO: for DNS, do things a bit more explicitly? with for example a library that does the resolution?
+            // TODO: differences between DNS, DNS4, DNS6 not respected
+            (Protocol::Dns(addr), Protocol::Tcp(port))
+            | (Protocol::Dns4(addr), Protocol::Tcp(port))
+            | (Protocol::Dns6(addr), Protocol::Tcp(port)) => {
+                async_std::net::TcpStream::connect((&*addr, port)).await
+            }
+            _ => unreachable!(),
+        }
+    })
 }
 
 /// Drives the handshake of the given connection.

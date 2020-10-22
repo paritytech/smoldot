@@ -24,6 +24,7 @@ use futures::{
 use std::{
     borrow::Cow,
     collections::BTreeMap,
+    convert::TryFrom as _,
     fs,
     net::{SocketAddr, ToSocketAddrs as _},
     num::{NonZeroU32, NonZeroU64},
@@ -38,7 +39,7 @@ use substrate_lite::{
     chain::{self, sync::full_optimistic},
     chain_spec, header, network,
     network::{
-        libp2p::{connection, peer_id::PeerId},
+        libp2p::{connection, multiaddr, peer_id::PeerId},
         request_response, with_buffers,
     },
 };
@@ -136,6 +137,19 @@ async fn async_main() {
 
     let network_service = network_service::NetworkService::new(network_service::Config {
         listen_addresses: Vec::new(),
+        bootstrap_nodes: {
+            let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
+            for node in chain_spec.boot_nodes() {
+                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                    list.push((peer_id, address));
+                } else {
+                    panic!() // TODO:
+                }
+            }
+            list
+        },
         noise_key: connection::NoiseKey::new(&rand::random()), // TODO: not random
         tasks_executor: {
             let threads_pool = threads_pool.clone();
@@ -206,7 +220,8 @@ async fn async_main() {
                 eprint!("{}\r", substrate_lite::informant::InformantLine {
                     chain_name: chain_spec.name(),
                     max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(80),
-                    num_network_connections: 0, // TODO: network_state.num_network_connections.load(Ordering::Relaxed),
+                    num_network_connections: u64::try_from(network_service.num_established_connections().await)
+                        .unwrap_or(u64::max_value()),
                     best_number: sync_state.best_block_number,
                     finalized_number: sync_state.finalized_block_number,
                     best_hash: &sync_state.best_block_hash,
