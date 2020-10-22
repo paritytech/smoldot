@@ -65,7 +65,7 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
     Poisoned,
 
     /// Protocol negotiation in progress in an incoming substream.
-    Negotiating(
+    InboundNegotiating(
         multistream_select::InProgress<
             iter::Chain<iter::Chain<TProtoList, TProtoList>, iter::Once<TProto>>,
             TProto,
@@ -78,7 +78,29 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
     /// ignored.
     NegotiationFailed,
 
+    /// Negotiating a protocol for a notifications protocol substream.
+    NotificationsOutNegotiating {
+        /// When the opening will time out in the absence of response.
+        timeout: TNow,
+        /// State of the protocol negotiation.
+        negotiation: multistream_select::InProgress<TProtoList, TProto>,
+        /// Bytes of the handshake to send after the substream is open.
+        handshake: Vec<u8>,
+    },
+
+    /// A notifications protocol has been negotiated on a substream. Either a successful handshake
+    /// or an abrupt closing is now expected.
+    NotificationsOutHandshakeRecv {
+        /// Buffer for the incoming handshake.
+        handshake: leb128::Framed,
+        /// Protocol that was negotiated.
+        protocol: TProto,
+    },
+
+    /// A notifications protocol has been negotiated, and the remote accepted it. Can now send
+    /// notifications.
     NotificationsOut,
+
     /// A notifications protocol has been negotiated on an incoming substream. A handshake from
     /// the remote is expected.
     NotificationsInHandshake {
@@ -94,7 +116,9 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
     RequestOutNegotiating {
         /// When the request will time out in the absence of response.
         timeout: TNow,
+        /// State of the protocol negotiation.
         negotiation: multistream_select::InProgress<TProtoList, TProto>,
+        /// Bytes of the request to send after the substream is open.
         request: Vec<u8>,
         /// Data passed by the user to [`Established::add_request`].
         user_data: TRqUd,
@@ -223,7 +247,7 @@ where
                                 .chain(iter::once(self.ping_protocol.clone())),
                         });
                     self.yamux
-                        .accept_pending_substream(Substream::Negotiating(nego));
+                        .accept_pending_substream(Substream::InboundNegotiating(nego));
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                     continue;
@@ -235,7 +259,7 @@ where
                 }) => {
                     match user_data {
                         Substream::Poisoned => unreachable!(),
-                        Substream::Negotiating(_) => {}
+                        Substream::InboundNegotiating(_) => {}
                         Substream::NegotiationFailed => {}
                         Substream::RequestOutNegotiating { user_data, .. }
                         | Substream::RequestOut { user_data, .. } => {
@@ -248,7 +272,7 @@ where
                                 event: Some(Event::Response {
                                     id: SubstreamId(substream_id),
                                     user_data,
-                                    response: Err(()),
+                                    response: Err(RequestError::SubstreamReset),
                                 }),
                             });
                         }
@@ -284,7 +308,7 @@ where
                 // proper state.
                 match mem::replace(substream.user_data(), Substream::Poisoned) {
                     Substream::Poisoned => unreachable!(),
-                    Substream::Negotiating(nego) => {
+                    Substream::InboundNegotiating(nego) => {
                         match nego.read_write_vec(data) {
                             Ok((
                                 multistream_select::Negotiation::InProgress(nego),
@@ -294,7 +318,7 @@ where
                                 debug_assert_eq!(_read, data.len());
                                 data = &data[_read..];
                                 substream.write(out_buffer);
-                                *substream.user_data() = Substream::Negotiating(nego);
+                                *substream.user_data() = Substream::InboundNegotiating(nego);
                             }
                             Ok((
                                 multistream_select::Negotiation::Success(protocol),
@@ -371,7 +395,7 @@ where
                                 };
                             }
                             Ok((
-                                multistream_select::Negotiation::Success(protocol),
+                                multistream_select::Negotiation::Success(_),
                                 num_read,
                                 out_buffer,
                             )) => {
@@ -386,7 +410,7 @@ where
                                     response: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper max size
                                 };
                             }
-                            Err(_) => {
+                            Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
                                 let substream_id = substream.id();
                                 substream.reset();
                                 let wake_up_after = self.next_timeout.clone();
@@ -398,11 +422,26 @@ where
                                     event: Some(Event::Response {
                                         id: SubstreamId(substream_id),
                                         user_data,
-                                        response: Err(()),
+                                        response: Err(RequestError::ProtocolNotAvailable),
                                     }),
                                 });
                             }
-                            _ => todo!("other state"),
+                            Err(err) => {
+                                let substream_id = substream.id();
+                                substream.reset();
+                                let wake_up_after = self.next_timeout.clone();
+                                return Ok(ReadWrite {
+                                    connection: self,
+                                    read_bytes: total_read,
+                                    written_bytes: total_written,
+                                    wake_up_after,
+                                    event: Some(Event::Response {
+                                        id: SubstreamId(substream_id),
+                                        user_data,
+                                        response: Err(RequestError::NegotiationError(err)),
+                                    }),
+                                });
+                            }
                         }
                     }
                     Substream::RequestOut {
@@ -605,7 +644,7 @@ where
                 Substream::RequestOutNegotiating { user_data, .. }
                 | Substream::RequestOut { user_data, .. } => Event::Response {
                     id: SubstreamId(timed_out_substream),
-                    response: Err(()),
+                    response: Err(RequestError::Timeout),
                     user_data,
                 },
                 _ => unreachable!(),
@@ -720,10 +759,14 @@ where
         match self {
             Substream::Poisoned => f.debug_tuple("poisoned").finish(),
             Substream::NegotiationFailed => f.debug_tuple("incoming-negotiation-failed").finish(),
-            Substream::Negotiating(_) => f.debug_tuple("incoming-negotiating").finish(),
-            Substream::NotificationsOut => {
+            Substream::InboundNegotiating(_) => f.debug_tuple("incoming-negotiating").finish(),
+            Substream::NotificationsOutNegotiating { .. } => {
                 todo!() // TODO:
             }
+            Substream::NotificationsOutHandshakeRecv { .. } => {
+                todo!() // TODO:
+            }
+            Substream::NotificationsOut => f.debug_tuple("notifications-out").finish(),
             Substream::NotificationsInHandshake { protocol, .. } => f
                 .debug_tuple("notifications-in")
                 .field(&AsRef::<str>::as_ref(protocol))
@@ -793,8 +836,7 @@ pub enum Event<TRqUd, TNotifUd, TProto> {
     /// Received a response to a previously emitted request on a request-response protocol.
     Response {
         /// Bytes of the response. Its interpretation is out of scope of this module.
-        // TODO: error type
-        response: Result<Vec<u8>, ()>,
+        response: Result<Vec<u8>, RequestError>,
         /// Identifier of the request. Value that was returned by [`Established::add_request`].
         id: SubstreamId,
         /// Value that was passed to [`Established::add_request`].
@@ -838,6 +880,20 @@ pub enum Error {
     Noise(noise::CipherError),
     /// Error in the yamux multiplexing protocol.
     Yamux(yamux::Error),
+}
+
+/// Error that can happen during a request in a request-response scheme.
+#[derive(Debug, derive_more::Display)]
+pub enum RequestError {
+    /// Remote hasn't answered in time.
+    Timeout,
+    /// Remote doesn't support this protocol.
+    ProtocolNotAvailable,
+    /// Remote has decided to RST the substream. This most likely indicates that the remote has
+    /// detected a protocol error.
+    SubstreamReset,
+    /// Error during protocol negotiation.
+    NegotiationError(multistream_select::Error),
 }
 
 /// Successfully negotiated connection. Ready to be turned into a [`Established`].

@@ -614,7 +614,9 @@ async fn perform_handshake(
 ) -> Result<(connection::established::ConnectionPrototype, PeerId), HandshakeError> {
     let mut handshake = connection::handshake::Handshake::new(is_initiator);
 
-    let timeout = futures_timer::Delay::new(Duration::from_secs(20)); // TODO: proper value
+    // Delay that triggers after we consider the remote is considered unresponsive.
+    // The constant here has been chosen arbitrary.
+    let timeout = futures_timer::Delay::new(Duration::from_secs(20));
     futures::pin_mut!(timeout);
 
     loop {
