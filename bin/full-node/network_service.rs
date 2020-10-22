@@ -99,21 +99,56 @@ struct Guarded {
 
 impl NetworkService {
     /// Initializes the network service with the given configuration.
-    pub async fn new(mut config: Config) -> Result<Arc<Self>, io::Error> {
-        let noise_key = Arc::new(config.noise_key);
-
-        let (to_foreground, from_background) = mpsc::channel(64); // TODO: size
+    pub async fn new(mut config: Config) -> Result<Arc<Self>, InitError> {
+        // Channel used for the background to communicate to the foreground.
+        // Once this channel is full, background tasks that need to send a message to the network
+        // service will block and wait for some space to be available.
+        //
+        // The ideal size of this channel depends on the volume of messages, the time it takes for
+        // the network service to be polled after being waken up, and the speed of messages
+        // processing. All these components are pretty hard to know in advance, and as such we go
+        // for the approach of choosing an arbitrary constant value.
+        let (to_foreground, from_background) = mpsc::channel(256);
 
         // For each listening address in the configuration, create a background task dedicated to
         // listening on that address.
         for listen_address in config.listen_addresses {
-            // TODO: proper address
-            let tcp_listener = async_std::net::TcpListener::bind("0.0.0.0:30333").await?;
-            let mut to_foreground = to_foreground.clone();
+            // Try to parse the requested address and create the corresponding listening socket.
+            let tcp_listener: async_std::net::TcpListener = {
+                let mut iter = listen_address.iter();
+                let proto1 = match iter.next() {
+                    Some(p) => p,
+                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
+                let proto2 = match iter.next() {
+                    Some(p) => p,
+                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
 
-            // TODO: don't spawn immediately, or have some sort of barrier, so that we liberate the TCP listeners in case of error.
+                if iter.next().is_some() {
+                    return Err(InitError::BadListenMultiaddr(listen_address));
+                }
+
+                let addr = match (proto1, proto2) {
+                    (Protocol::Ip4(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
+                    (Protocol::Ip6(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
+                    _ => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
+
+                match async_std::net::TcpListener::bind(addr).await {
+                    Ok(l) => l,
+                    Err(err) => {
+                        return Err(InitError::ListenerIo(listen_address, err));
+                    }
+                }
+            };
+
+            // Spawn a background task dedicated to this listener.
+            let mut to_foreground = to_foreground.clone();
             (config.tasks_executor)(Box::pin(async move {
                 loop {
+                    // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
+
                     let (socket, _addr) = match tcp_listener.accept().await {
                         Ok(v) => v,
                         Err(_) => {
@@ -155,22 +190,12 @@ impl NetworkService {
             node.add_to_overlay(0);
         }
 
-        // TODO:
-        // peerset.insert("/dns/p2p.cc1-0.polkadot.network/tcp/30100/p2p/12D3KooWEdsXX9657ppNqqrRuaCHFvuNemasgU5msLDwSJ6WqsKc");
-        // peerset.insert("/dns/p2p.cc1-1.polkadot.network/tcp/30100/p2p/12D3KooWAtx477KzC8LwqLjWWUG6WF4Gqp2eNXmeqAG98ehAMWYH");
-        // peerset.insert("/dns/p2p.cc1-2.polkadot.network/tcp/30100/p2p/12D3KooWAGCCPZbr9UWGXPtBosTZo91Hb5M3hU8v6xbKgnC5LVao");
-        // peerset.insert("/dns/p2p.cc1-3.polkadot.network/tcp/30100/p2p/12D3KooWJ4eyPowiVcPU46pXuE2cDsiAmuBKXnFcFPapm4xKFdMJ");
-        // peerset.insert("/dns/p2p.cc1-4.polkadot.network/tcp/30100/p2p/12D3KooWNMUcqwSj38oEq1zHeGnWKmMvrCFnpMftw7JzjAtRj2rU");
-        // peerset.insert("/dns/p2p.cc1-5.polkadot.network/tcp/30100/p2p/12D3KooWDs6LnpmWDWgZyGtcLVr3E75CoBxzg1YZUPL5Bb1zz6fM");
-        // peerset.insert("/dns/cc1-0.parity.tech/tcp/30333/p2p/12D3KooWSz8r2WyCdsfWHgPyvD8GKQdJ1UAiRmrcrs8sQB3fe2KU");
-        // peerset.insert("/dns/cc1-1.parity.tech/tcp/30333/p2p/12D3KooWFN2mhgpkJsDBuNuE5427AcDrsib8EoqGMZmkxWwx3Md4");
-
         Ok(Arc::new(NetworkService {
             guarded: Mutex::new(Guarded {
                 tasks_executor: config.tasks_executor,
                 peerset,
             }),
-            noise_key,
+            noise_key: Arc::new(config.noise_key),
             from_background: Mutex::new(from_background),
             to_foreground,
         }))
@@ -319,6 +344,16 @@ impl NetworkService {
             break;
         }
     }
+}
+
+/// Error when initializing the network service.
+#[derive(Debug, derive_more::Display)]
+pub enum InitError {
+    /// I/O error when initializing a listener.
+    #[display(fmt = "I/O error when creating listener for {}: {}", _0, _1)]
+    ListenerIo(Multiaddr, io::Error),
+    /// A listening address passed through the configuration isn't valid.
+    BadListenMultiaddr(Multiaddr),
 }
 
 /// Message sent to a background task dedicated to a connection.
