@@ -20,7 +20,7 @@
 //! The traditional model used in the blockchain ecosystem is this one:
 //!
 //! ```notrust
-//! 
+//!
 //! +---------------+              +--------+            +----------------------+
 //! |               |   JSON-RPC   |        |   libp2p   |                      |
 //! |  Application  |  <-------->  |  Node  |  <------>  |  Blockchain network  |
