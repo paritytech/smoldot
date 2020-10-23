@@ -29,6 +29,7 @@
 //! ```
 //! use substrate_lite::informant::InformantLine;
 //! eprint!("{}\r", InformantLine {
+//!     enable_colors: true,
 //!     chain_name: "My chain",
 //!     max_line_width: 80,
 //!     num_network_connections: 12,
