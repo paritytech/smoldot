@@ -82,7 +82,7 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
             fields |= 0b00000010;
         }
         if config.fields.justification {
-            fields |= 0b00000010;
+            fields |= 0b00010000;
         }
 
         schema::BlockRequest {
