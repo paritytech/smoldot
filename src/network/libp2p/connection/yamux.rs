@@ -257,6 +257,42 @@ impl<T> Yamux<T> {
 
                 Incoming::DataFrame {
                     substream_id,
+                    remaining_bytes: 0,
+                    fin: true,
+                } => {
+                    self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+
+                    let substream = match self.substreams.get_mut(&substream_id.0) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+
+                    substream.remote_write_closed = true;
+
+                    if substream.local_write_closed {
+                        let user_data = self.substreams.remove(&substream_id.0).unwrap().user_data;
+                        return Ok(IncomingDataOutcome {
+                            yamux: self,
+                            bytes_read: total_read,
+                            detail: Some(IncomingDataDetail::StreamClosed {
+                                substream_id,
+                                user_data: Some(user_data),
+                            }),
+                        });
+                    } else {
+                        return Ok(IncomingDataOutcome {
+                            yamux: self,
+                            bytes_read: total_read,
+                            detail: Some(IncomingDataDetail::StreamClosed {
+                                substream_id,
+                                user_data: None,
+                            }),
+                        });
+                    }
+                }
+
+                Incoming::DataFrame {
+                    substream_id,
                     ref mut remaining_bytes,
                     fin,
                 } => {
@@ -275,9 +311,13 @@ impl<T> Yamux<T> {
                     if let Some(substream) = self.substreams.get_mut(&substream_id.0) {
                         debug_assert!(!substream.remote_write_closed);
                         if *remaining_bytes == 0 {
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                             if fin {
+                                // If `fin`, leave `incoming` as `DataFrame`, so that it gets
+                                // picked at the next iteration and a `StreamClosed` gets
+                                // returned.
                                 substream.remote_write_closed = true;
+                            } else {
+                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                             }
                         }
 
@@ -485,20 +525,25 @@ impl<T> Yamux<T> {
                         };
                     } else if incoming_header[1] == 1 {
                         // Window size frame.
+                        self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+
                         if let Some(substream) = substream {
                             // Note that the specs are a unclear about whether the remote can or
                             // should continue sending FIN flags on window size frames after their
                             // side of the substream has already been closed before.
                             if (flags_field & 0x4) != 0 {
-                                substream.remote_write_closed = true;
+                                self.incoming = Incoming::DataFrame {
+                                    substream_id,
+                                    remaining_bytes: 0,
+                                    fin: true,
+                                };
                             }
+
                             substream.allowed_window = substream
                                 .allowed_window
                                 .checked_add(u64::from(length_field))
                                 .ok_or(Error::LocalCreditsOverflow)?;
                         }
-
-                        self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                     } else {
                         unreachable!()
                     }
@@ -876,18 +921,29 @@ impl<'a, T> SubstreamMut<'a, T> {
             .fold(0, |n, buf| n + buf.len())
     }
 
-    /// Marks the substream as closed. It is no longer possible to write data on it. The remote
-    /// can still send data.
+    /// Marks the substream as closed. It is no longer possible to write data on it.
+    ///
+    /// If the remote writing side is still open, this method returns `None` and the remote can
+    /// continue to send data.
+    ///
+    /// If the remote writing side is already closed, this method returns `Some` with the user
+    /// data, and the substream is now destroyed.
     ///
     /// # Panic
     ///
     /// Panics if [`SubstreamMut::close`] has already been called on this substream.
     ///
-    pub fn close(&mut self) {
+    pub fn close(mut self) -> Option<T> {
         let substream = self.substream.get_mut();
         assert!(!substream.local_write_closed);
         substream.local_write_closed = true;
         // TODO: what is write_buffers is empty? need to send the close frame
+
+        if substream.remote_write_closed {
+            Some(self.substream.remove().user_data)
+        } else {
+            None
+        }
     }
 
     /// Abruptly shuts down the substream. Its identifier is now invalid. Sends a frame with the
@@ -962,6 +1018,14 @@ pub enum IncomingDataDetail<T> {
         start_offset: usize,
         /// Substream the data belongs to. Guaranteed to be valid.
         substream_id: SubstreamId,
+    },
+    /// Remote has closed its writing side of the substream.
+    StreamClosed {
+        /// Substream that got closed.
+        substream_id: SubstreamId,
+        /// If `None`, the local writing side is still open and needs to be closed. If `Some`, the
+        /// local writing side is already closed and the substream is now considered destroyed.
+        user_data: Option<T>,
     },
     /// Remote has asked to reset a substream.
     ///

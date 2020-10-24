@@ -294,6 +294,51 @@ where
                     continue;
                 }
 
+                Some(yamux::IncomingDataDetail::StreamClosed {
+                    substream_id,
+                    mut user_data,
+                }) => {
+                    let user_data = match &mut user_data {
+                        Some(ud) => ud,
+                        None => self
+                            .yamux
+                            .substream_by_id(substream_id)
+                            .unwrap()
+                            .into_user_data(),
+                    };
+
+                    match user_data {
+                        Substream::Poisoned => unreachable!(),
+                        Substream::InboundNegotiating(_) => {}
+                        Substream::NegotiationFailed => {}
+                        Substream::RequestOutNegotiating { user_data, .. }
+                        | Substream::RequestOut { user_data, .. } => {
+                            let wake_up_after = self.next_timeout.clone();
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                wake_up_after,
+                                event: Some(Event::Response {
+                                    id: SubstreamId(substream_id),
+                                    user_data: todo!(), // TODO:
+                                    response: Err(RequestError::SubstreamReset), // TODO: no
+                                }),
+                            });
+                        }
+                        Substream::RequestInRecv { .. } => {}
+                        Substream::NotificationsInHandshake { .. } => {}
+                        Substream::NotificationsInWait => {
+                            // TODO: report to user
+                            //todo!()
+                        }
+                        Substream::PingIn(_) => {}
+                        _ => todo!("other substream kind"),
+                    }
+
+                    continue;
+                }
+
                 Some(yamux::IncomingDataDetail::DataFrame {
                     start_offset,
                     substream_id,
@@ -361,8 +406,9 @@ where
                             )) => {
                                 data = &data[num_read..];
                                 substream.write(out_buffer);
-                                substream.close();
                                 *substream.user_data() = Substream::NegotiationFailed;
+                                substream.close();
+                                break;
                             }
                             Err(_) => {
                                 substream.reset();
@@ -474,12 +520,15 @@ where
                                 data = &data[num_read..];
                                 substream.write(leb128::encode_usize(request.len()).collect());
                                 substream.write(request);
-                                substream.close();
                                 *substream.user_data() = Substream::RequestOut {
                                     timeout,
                                     user_data,
                                     response: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper max size
                                 };
+                                let substream_id = substream.id();
+                                let _already_closed = substream.close();
+                                debug_assert!(_already_closed.is_none());
+                                substream = self.yamux.substream_by_id(substream_id).unwrap();
                             }
                             Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
                                 let substream_id = substream.id();
@@ -912,8 +961,8 @@ where
         if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
             panic!()
         }
-        substream.close();
         *substream.user_data() = Substream::NotificationsOutClosed;
+        substream.close();
     }
 }
 
@@ -1033,6 +1082,14 @@ pub enum Event<TRqUd, TNotifUd, TProto> {
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
+    /// Remote has sent a notification on an inbound substream. Can only happen after the
+    /// substream has been accepted.
+    NotificationIn {
+        /// Identifier of the substream.
+        id: SubstreamId,
+        /// Notification sent by the remote.
+        notification: Vec<u8>,
+    },
     /// Remote has accepted a substream opened with [`Established::open_notifications_substream`].
     ///
     /// It is now possible to send notifications on this substream.
@@ -1050,6 +1107,13 @@ pub enum Event<TRqUd, TNotifUd, TProto> {
         id: SubstreamId,
         /// Value that was passed to [`Established::open_notifications_substream`].
         user_data: TNotifUd,
+    },
+    /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
+    /// of the substream.
+    NotificationsOutCloseDemanded {
+        /// Identifier of the substream. Value that was returned by
+        /// [`Established::open_notifications_substream`].
+        id: SubstreamId,
     },
 }
 
