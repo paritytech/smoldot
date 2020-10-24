@@ -40,7 +40,7 @@ use substrate_lite::{
     chain_spec, header, network,
     network::{
         libp2p::{connection, multiaddr, peer_id::PeerId},
-        request_response, with_buffers,
+        protocol, with_buffers,
     },
 };
 
@@ -419,13 +419,11 @@ async fn start_sync(
                     } => {
                         let block_request = network.blocks_request(
                             source.clone(),
-                            request_response::BlocksRequestConfig {
-                                start: request_response::BlocksRequestConfigStart::Number(
-                                    block_height,
-                                ),
+                            protocol::BlocksRequestConfig {
+                                start: protocol::BlocksRequestConfigStart::Number(block_height),
                                 desired_count: num_blocks,
-                                direction: request_response::BlocksRequestDirection::Ascending,
-                                fields: request_response::BlocksRequestFields {
+                                direction: protocol::BlocksRequestDirection::Ascending,
+                                fields: protocol::BlocksRequestFields {
                                     header: true,
                                     body: true,
                                     justification: true,

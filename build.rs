@@ -19,9 +19,9 @@ fn main() {
             "src/network/discovery/dht.proto",
             "src/network/libp2p/connection/noise/payload.proto",
             "src/network/libp2p/peer_id/keys.proto",
-            "src/network/request_response/api.v1.proto",
-            "src/network/request_response/finality.v1.proto",
-            "src/network/request_response/light.v1.proto",
+            "src/network/protocol/api.v1.proto",
+            "src/network/protocol/finality.v1.proto",
+            "src/network/protocol/light.v1.proto",
         ],
         &["src"],
     )

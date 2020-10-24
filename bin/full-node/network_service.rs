@@ -25,14 +25,12 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use ahash::RandomState;
 use core::{iter, pin::Pin, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
-use hashbrown::HashMap;
 use std::{io, net::SocketAddr, sync::Arc, time::Instant};
 use substrate_lite::network::{
     libp2p::{
@@ -40,7 +38,7 @@ use substrate_lite::network::{
         multiaddr::{Multiaddr, Protocol},
         peer_id::PeerId,
     },
-    peerset, request_response, with_buffers,
+    peerset, protocol, with_buffers,
 };
 
 /// Configuration for a [`NetworkService`].
@@ -216,8 +214,8 @@ impl NetworkService {
     pub async fn blocks_request(
         self: &Arc<Self>,
         target: PeerId,
-        config: request_response::BlocksRequestConfig,
-    ) -> Result<Vec<request_response::BlockData>, ()> {
+        config: protocol::BlocksRequestConfig,
+    ) -> Result<Vec<protocol::BlockData>, ()> {
         let mut guarded = self.guarded.lock().await;
 
         let connection = match guarded.peerset.node_mut(target) {
@@ -360,8 +358,8 @@ pub enum InitError {
 enum ToConnection {
     /// Start a block request. See [`NetworkService::blocks_request`].
     BlocksRequest {
-        config: request_response::BlocksRequestConfig,
-        send_back: oneshot::Sender<Result<Vec<request_response::BlockData>, ()>>,
+        config: protocol::BlocksRequestConfig,
+        send_back: oneshot::Sender<Result<Vec<protocol::BlockData>, ()>>,
     },
 }
 
@@ -517,7 +515,7 @@ async fn connection_task(
                 ..
             }) => {
                 if let Ok(response) = response {
-                    let decoded = request_response::decode_block_response(&response).unwrap();
+                    let decoded = protocol::decode_block_response(&response).unwrap();
                     let _ = user_data.send(Ok(decoded));
                 } else {
                     let _ = user_data.send(Err(()));
@@ -542,7 +540,7 @@ async fn connection_task(
                 match message {
                     ToConnection::BlocksRequest { config, send_back } => {
                         let start = config.start.clone();
-                        let request = request_response::build_block_request(config)
+                        let request = protocol::build_block_request(config)
                             .fold(Vec::new(), |mut a, b| {
                                 a.extend_from_slice(b.as_ref());
                                 a

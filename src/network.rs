@@ -21,9 +21,8 @@
 pub mod discovery;
 pub mod leb128;
 pub mod libp2p;
-pub mod notifications;
 pub mod peerset;
-pub mod request_response;
+pub mod protocol;
 pub mod with_buffers;
 
 pub use libp2p::peer_id::PeerId;
