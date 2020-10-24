@@ -41,7 +41,7 @@ pub struct Established<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// Consists in a collection of substreams, each of which holding a [`Substream`] object.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
-    yamux: yamux::Yamux<Substream<TNow, TRqUd, TProtoList, TProto>>,
+    yamux: yamux::Yamux<Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto>>,
 
     /// Next substream timeout. When the current time is superior to this value, means that one of
     /// the substreams in `yamux` might have timed out.
@@ -56,11 +56,9 @@ pub struct Established<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     in_notifications_protocols: TProtoList,
     /// See [`Config::ping_protocol`].
     ping_protocol: TProto,
-
-    marker: core::marker::PhantomData<TNotifUd>, // TODO: remove
 }
 
-enum Substream<TNow, TRqUd, TProtoList, TProto> {
+enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// Temporary transition state.
     Poisoned,
 
@@ -86,6 +84,8 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
         negotiation: multistream_select::InProgress<TProtoList, TProto>,
         /// Bytes of the handshake to send after the substream is open.
         handshake: Vec<u8>,
+        /// Data passed by the user to [`Established::open_notifications_substream`].
+        user_data: TNotifUd,
     },
 
     /// A notifications protocol has been negotiated on a substream. Either a successful handshake
@@ -93,11 +93,16 @@ enum Substream<TNow, TRqUd, TProtoList, TProto> {
     NotificationsOutHandshakeRecv {
         /// Buffer for the incoming handshake.
         handshake: leb128::Framed,
+        /// Data passed by the user to [`Established::open_notifications_substream`].
+        user_data: TNotifUd,
     },
 
     /// A notifications protocol has been negotiated, and the remote accepted it. Can now send
     /// notifications.
-    NotificationsOut,
+    NotificationsOut {
+        /// Data passed by the user to [`Established::open_notifications_substream`].
+        user_data: TNotifUd,
+    },
 
     /// A notifications protocol has been negotiated on an incoming substream. A handshake from
     /// the remote is expected.
@@ -374,20 +379,22 @@ where
                         negotiation,
                         timeout,
                         handshake,
+                        user_data,
                     } => {
                         match negotiation.read_write_vec(data) {
                             Ok((
                                 multistream_select::Negotiation::InProgress(nego),
-                                _read,
+                                read,
                                 out_buffer,
                             )) => {
-                                debug_assert_eq!(_read, data.len());
-                                data = &data[_read..];
+                                debug_assert_eq!(read, data.len());
+                                data = &data[read..];
                                 substream.write(out_buffer);
                                 *substream.user_data() = Substream::NotificationsOutNegotiating {
                                     negotiation: nego,
                                     timeout,
                                     handshake,
+                                    user_data,
                                 };
                             }
                             Ok((
@@ -400,21 +407,38 @@ where
                                 substream.write(leb128::encode_usize(handshake.len()).collect());
                                 substream.write(handshake);
                                 *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
-                                    handshake: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper max size
+                                    handshake: leb128::Framed::new(10 * 1024), // TODO: proper max size
+                                    user_data,
                                 };
                             }
                             _ => todo!(), // TODO:
                         }
                     }
-                    Substream::NotificationsOutHandshakeRecv { mut handshake } => {
+                    Substream::NotificationsOutHandshakeRecv {
+                        mut handshake,
+                        user_data,
+                    } => {
                         let num_read = handshake.inject_data(&data).unwrap(); // TODO: don't unwrap
                         data = &data[num_read..];
-                        if let Some(handshake) = handshake.take_frame() {
+                        if let Some(remote_handshake) = handshake.take_frame() {
                             let substream_id = substream.id();
-                            todo!() // TODO:
+                            let wake_up_after = self.next_timeout.clone();
+                            *substream.user_data() = Substream::NotificationsOut { user_data };
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                wake_up_after,
+                                event: Some(Event::NotificationsOutAccept {
+                                    id: SubstreamId(substream_id),
+                                    remote_handshake: remote_handshake.into(),
+                                }),
+                            });
                         }
-                        *substream.user_data() =
-                            Substream::NotificationsOutHandshakeRecv { handshake };
+                        *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
+                            handshake,
+                            user_data,
+                        };
                     }
                     Substream::RequestOutNegotiating {
                         negotiation,
@@ -797,6 +821,7 @@ where
         now: TNow,
         protocol: TProto,
         handshake: Vec<u8>,
+        user_data: TNotifUd,
     ) -> SubstreamId {
         let mut negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Dialer {
@@ -821,6 +846,7 @@ where
                 timeout,
                 negotiation,
                 handshake,
+                user_data,
             });
 
         substream.write(out_buffer);
@@ -840,7 +866,8 @@ where
     }
 }
 
-impl<TNow, TRqUd, TProtoList, TProto> fmt::Debug for Substream<TNow, TRqUd, TProtoList, TProto>
+impl<TNow, TRqUd, TNotifUd, TProtoList, TProto> fmt::Debug
+    for Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto>
 where
     TRqUd: fmt::Debug,
     TProto: AsRef<str>,
@@ -856,7 +883,7 @@ where
             Substream::NotificationsOutHandshakeRecv { .. } => {
                 todo!() // TODO:
             }
-            Substream::NotificationsOut => f.debug_tuple("notifications-out").finish(),
+            Substream::NotificationsOut { .. } => f.debug_tuple("notifications-out").finish(),
             Substream::NotificationsInHandshake { protocol, .. } => f
                 .debug_tuple("notifications-in")
                 .field(&AsRef::<str>::as_ref(protocol))
@@ -948,8 +975,6 @@ pub enum Event<TRqUd, TNotifUd, TProto> {
         /// Identifier of the substream. Value that was returned by
         /// [`Established::open_notifications_substream`].
         id: SubstreamId,
-        /// Value that was passed to [`Established::open_notifications_substream`].
-        user_data: TNotifUd,
         /// Handshake sent back by the remote. Its interpretation is out of scope of this module.
         remote_handshake: Vec<u8>,
     },
@@ -1019,7 +1044,6 @@ impl ConnectionPrototype {
             in_request_protocols: config.in_request_protocols,
             in_notifications_protocols: config.in_notifications_protocols,
             ping_protocol: config.ping_protocol,
-            marker: core::marker::PhantomData,
         }
     }
 }
