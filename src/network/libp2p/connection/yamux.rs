@@ -860,10 +860,20 @@ impl<'a, T> SubstreamMut<'a, T> {
     ///
     pub fn write(&mut self, data: Vec<u8>) {
         let substream = self.substream.get_mut();
+        assert!(!substream.local_write_closed);
         debug_assert!(
             !substream.write_buffers.is_empty() || substream.first_write_buffer_offset == 0
         );
         substream.write_buffers.push(data);
+    }
+
+    /// Returns the number of bytes queued for writing on this substream.
+    pub fn queued_bytes(&self) -> usize {
+        let substream = self.substream.get();
+        substream
+            .write_buffers
+            .iter()
+            .fold(0, |n, buf| n + buf.len())
     }
 
     /// Marks the substream as closed. It is no longer possible to write data on it. The remote

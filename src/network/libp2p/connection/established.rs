@@ -104,6 +104,9 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
         user_data: TNotifUd,
     },
 
+    /// A notifications protocol has been closed. Waiting for the remote to close it as well.
+    NotificationsOutClosed,
+
     /// A notifications protocol has been negotiated on an incoming substream. A handshake from
     /// the remote is expected.
     NotificationsInHandshake {
@@ -853,6 +856,65 @@ where
 
         SubstreamId(substream.id())
     }
+
+    /// Queues a notification to be written out on the given substream.
+    ///
+    /// # About back-pressure
+    ///
+    /// This method unconditionally queues up data. You must be aware that the remote, however,
+    /// can decide to delay indefinitely the sending of that data, which can potentially lead to
+    /// an unbounded increase in memory.
+    ///
+    /// As such, you are encouraged to call this method only if the amount of queued data (as
+    /// determined by calling [`Established::notification_substream_queued_bytes`]) is below a
+    /// certain threshold. If above, the notification should be silently discarded.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    pub fn write_notification_unbounded(&mut self, id: SubstreamId, notification: Vec<u8>) {
+        let mut substream = self.yamux.substream_by_id(id.0).unwrap();
+        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
+            panic!()
+        }
+        substream.write(notification)
+    }
+
+    /// Returns the number of bytes waiting to be sent out on that substream.
+    ///
+    /// See the documentation of [`Established::write_notification_unbounded`] for context.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    // TODO: shouldn't require `&mut self`
+    pub fn notification_substream_queued_bytes(&mut self, id: SubstreamId) -> usize {
+        let mut substream = self.yamux.substream_by_id(id.0).unwrap();
+        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
+            panic!()
+        }
+        substream.queued_bytes()
+    }
+
+    /// Closes a notifications substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    pub fn close_notifications_substream(&mut self, id: SubstreamId) {
+        let mut substream = self.yamux.substream_by_id(id.0).unwrap();
+        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
+            panic!()
+        }
+        substream.close();
+        *substream.user_data() = Substream::NotificationsOutClosed;
+    }
 }
 
 impl<TNow, TRqUd, TNotifUd, TProtoList, TProto> fmt::Debug
@@ -884,6 +946,9 @@ where
                 todo!() // TODO:
             }
             Substream::NotificationsOut { .. } => f.debug_tuple("notifications-out").finish(),
+            Substream::NotificationsOutClosed { .. } => {
+                f.debug_tuple("notifications-out-closed").finish()
+            }
             Substream::NotificationsInHandshake { protocol, .. } => f
                 .debug_tuple("notifications-in")
                 .field(&AsRef::<str>::as_ref(protocol))
