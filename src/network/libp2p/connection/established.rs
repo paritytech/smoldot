@@ -28,8 +28,6 @@ use core::{
     time::Duration,
 };
 
-// TODO: needs a timeout for the handshake?
-
 /// State machine of a fully-established connection.
 pub struct Established<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// Encryption layer applied directly on top of the incoming data and outgoing data.
@@ -69,7 +67,6 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
             TProto,
         >,
     ),
-
     /// Incoming substream has failed to negotiate a protocol. Waiting for a close from the remote.
     /// In order to save a round-trip time, the remote might assume that the protocol negotiation
     /// has succeeded. As such, it might send additional data on this substream that should be
@@ -87,7 +84,6 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
         /// Data passed by the user to [`Established::open_notifications_substream`].
         user_data: TNotifUd,
     },
-
     /// A notifications protocol has been negotiated on a substream. Either a successful handshake
     /// or an abrupt closing is now expected.
     NotificationsOutHandshakeRecv {
@@ -96,14 +92,12 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
         /// Data passed by the user to [`Established::open_notifications_substream`].
         user_data: TNotifUd,
     },
-
     /// A notifications protocol has been negotiated, and the remote accepted it. Can now send
     /// notifications.
     NotificationsOut {
         /// Data passed by the user to [`Established::open_notifications_substream`].
         user_data: TNotifUd,
     },
-
     /// A notifications protocol has been closed. Waiting for the remote to close it as well.
     NotificationsOutClosed,
 
@@ -118,6 +112,7 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// A handshake on a notifications protocol has been received. Now waiting for an action from
     /// the API user.
     NotificationsInWait,
+
     /// Negotiating a protocol for an outgoing request.
     RequestOutNegotiating {
         /// When the request will time out in the absence of response.
@@ -139,6 +134,7 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
         /// Buffer for the incoming response.
         response: leb128::Framed,
     },
+
     /// A request-response protocol has been negotiated on an inbound substream. A request is now
     /// expected.
     RequestInRecv {
@@ -1184,6 +1180,7 @@ impl fmt::Debug for ConnectionPrototype {
 }
 
 /// Configuration to turn a [`ConnectionPrototype`] into a [`Established`].
+#[derive(Debug)]
 pub struct Config<TProtoList, TProto> {
     /// List of request-response protocols supported for incoming substreams.
     pub in_request_protocols: TProtoList,
