@@ -2672,7 +2672,6 @@ dependencies = [
  "hex",
  "impl-serde 0.2.3",
  "js-sys",
- "lazy_static",
  "libsecp256k1",
  "lru",
  "merlin",

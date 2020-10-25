@@ -135,7 +135,7 @@ impl UnsignedNoiseKey {
     pub fn new() -> Self {
         UnsignedNoiseKey {
             // TODO: can panic if there's no RNG
-            key: snow::Builder::new(NOISE_PARAMS.clone())
+            key: snow::Builder::new(noise_params())
                 .generate_keypair()
                 .unwrap(),
         }
@@ -497,8 +497,7 @@ impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
     pub fn new(key: &NoiseKey, is_initiator: bool) -> Self {
         let inner = {
-            let builder =
-                snow::Builder::new(NOISE_PARAMS.clone()).local_private_key(&key.key.private);
+            let builder = snow::Builder::new(noise_params()).local_private_key(&key.key.private);
             if is_initiator {
                 builder.build_initiator()
             } else {
@@ -791,9 +790,12 @@ impl fmt::Debug for HandshakeInProgress {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref NOISE_PARAMS: snow::params::NoiseParams =
-        "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap();
+/// Returns the Noise configuration.
+//
+// Note that we don't use `lazy_static` because of `no_std` compatibility.
+// TODO: do this at compilation time, ideally
+fn noise_params() -> snow::params::NoiseParams {
+    "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap()
 }
 
 /// Potential error during the noise handshake.
