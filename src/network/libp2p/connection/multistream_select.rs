@@ -106,6 +106,8 @@ pub struct InProgress<I, P> {
     config: Option<Config<I, P>>,
     /// Current state of the negotiation.
     state: InProgressState<P>,
+    /// Maximum allowed size of a frame for `recv_buffer`.
+    max_frame_len: usize,
     /// Incoming data is buffered in this `recv_buffer` before being decoded.
     recv_buffer: leb128::Framed,
 }
@@ -179,7 +181,8 @@ where
             state: InProgressState::SendHandshake {
                 num_bytes_written: 0,
             },
-            recv_buffer: leb128::Framed::new(max_frame_len),
+            max_frame_len,
+            recv_buffer: leb128::Framed::InProgress(leb128::FramedInProgress::new(max_frame_len)),
         }
     }
 
@@ -205,13 +208,13 @@ where
         loop {
             // `self.recv_buffer` serves as a helper to delimit `data` into frames. The first step
             // is to inject the received data into `recv_buffer`.
-            // `recv_buffer` doesn't necessarily consume all of `data`.
-            let num_read = self
-                .recv_buffer
-                .inject_data(incoming_data)
-                .map_err(Error::Frame)?;
-            total_read += num_read;
-            incoming_data = &incoming_data[num_read..];
+            if let leb128::Framed::InProgress(recv_buffer) = self.recv_buffer {
+                let (num_read, framed_result) =
+                    recv_buffer.update(incoming_data).map_err(Error::Frame)?;
+                self.recv_buffer = framed_result;
+                total_read += num_read;
+                incoming_data = &incoming_data[num_read..];
+            }
 
             match (self.state, &mut self.config) {
                 (
@@ -333,11 +336,17 @@ where
                 }
 
                 (InProgressState::HandshakeExpected, Some(Config::Dialer { .. })) => {
-                    let frame = match self.recv_buffer.take_frame() {
-                        Some(f) => f,
-                        None => {
+                    let frame = match self.recv_buffer {
+                        leb128::Framed::Finished(frame) => {
+                            self.recv_buffer = leb128::Framed::InProgress(
+                                leb128::FramedInProgress::new(self.max_frame_len),
+                            );
+                            frame
+                        }
+                        leb128::Framed::InProgress(f) => {
                             // No frame is available.
                             debug_assert!(incoming_data.is_empty());
+                            self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::HandshakeExpected;
                             break;
                         }
@@ -354,11 +363,17 @@ where
                 }
 
                 (InProgressState::HandshakeExpected, Some(Config::Listener { .. })) => {
-                    let frame = match self.recv_buffer.take_frame() {
-                        Some(f) => f,
-                        None => {
+                    let frame = match self.recv_buffer {
+                        leb128::Framed::Finished(frame) => {
+                            self.recv_buffer = leb128::Framed::InProgress(
+                                leb128::FramedInProgress::new(self.max_frame_len),
+                            );
+                            frame
+                        }
+                        leb128::Framed::InProgress(f) => {
                             // No frame is available.
                             debug_assert!(incoming_data.is_empty());
+                            self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::HandshakeExpected;
                             break;
                         }
@@ -379,11 +394,17 @@ where
                         supported_protocols,
                     }),
                 ) => {
-                    let frame = match self.recv_buffer.take_frame() {
-                        Some(f) => f,
-                        None => {
+                    let frame = match self.recv_buffer {
+                        leb128::Framed::Finished(frame) => {
+                            self.recv_buffer = leb128::Framed::InProgress(
+                                leb128::FramedInProgress::new(self.max_frame_len),
+                            );
+                            frame
+                        }
+                        leb128::Framed::InProgress(f) => {
                             // No frame is available.
                             debug_assert!(incoming_data.is_empty());
+                            self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::CommandExpected;
                             break;
                         }
@@ -417,11 +438,12 @@ where
                     InProgressState::ProtocolRequestAnswerExpected,
                     cfg @ Some(Config::Dialer { .. }),
                 ) => {
-                    let frame = match self.recv_buffer.take_frame() {
-                        Some(f) => f,
-                        None => {
+                    let frame = match self.recv_buffer {
+                        leb128::Framed::Finished(f) => f,
+                        leb128::Framed::InProgress(f) => {
                             // No frame is available.
                             debug_assert!(incoming_data.is_empty());
+                            self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::ProtocolRequestAnswerExpected;
                             break;
                         }

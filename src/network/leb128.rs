@@ -20,7 +20,7 @@
 //!
 //! See https://en.wikipedia.org/wiki/LEB128
 
-use core::{cmp, convert::TryFrom as _, fmt, mem, ops::Deref};
+use core::{cmp, convert::TryFrom as _, mem};
 
 /// Returns an LEB128-encoded integer as a list of bytes.
 ///
@@ -98,7 +98,12 @@ pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
 
 // TODO: document all this below
 
-pub struct Framed {
+pub enum Framed {
+    InProgress(FramedInProgress),
+    Finished(Vec<u8>),
+}
+
+pub struct FramedInProgress {
     max_len: usize,
     buffer: Vec<u8>,
     inner: FramedInner,
@@ -109,33 +114,23 @@ enum FramedInner {
     Body { expected_len: usize },
 }
 
-impl Framed {
+impl FramedInProgress {
     pub fn new(max_len: usize) -> Self {
-        Framed {
+        FramedInProgress {
             max_len,
             buffer: Vec::with_capacity(max_len),
             inner: FramedInner::Length,
         }
     }
 
-    pub fn take_frame(&mut self) -> Option<FrameDrain> {
-        match self.inner {
-            FramedInner::Body { expected_len } if expected_len == self.buffer.len() => {
-                Some(FrameDrain(self))
-            }
-            _ => None,
-        }
-    }
-
-    // TODO: corruption state after error returned?
-    pub fn inject_data(&mut self, mut data: &[u8]) -> Result<usize, FramedError> {
+    pub fn update(mut self, mut data: &[u8]) -> Result<(usize, Framed), FramedError> {
         let mut total_read = 0;
 
         loop {
             match self.inner {
                 FramedInner::Length => {
                     if data.is_empty() {
-                        return Ok(total_read);
+                        return Ok((total_read, Framed::InProgress(self)));
                     }
 
                     self.buffer.push(data[0]);
@@ -162,7 +157,12 @@ impl Framed {
                     self.buffer.extend_from_slice(&data[..available]);
                     debug_assert!(self.buffer.len() <= expected_len);
                     total_read += available;
-                    return Ok(total_read);
+
+                    if expected_len == self.buffer.len() {
+                        return Ok((total_read, Framed::Finished(self.buffer)));
+                    } else {
+                        return Ok((total_read, Framed::InProgress(self)));
+                    }
                 }
             }
         }
@@ -190,48 +190,6 @@ fn decode_leb128(buffer: &[u8]) -> Option<Result<usize, FramedError>> {
 #[derive(Debug, derive_more::Display)]
 pub enum FramedError {
     LengthPrefixTooLarge,
-}
-
-pub struct FrameDrain<'a>(&'a mut Framed);
-
-impl<'a> FrameDrain<'a> {
-    pub fn into_vec(self) -> Vec<u8> {
-        mem::replace(&mut self.0.buffer, Vec::new())
-    }
-}
-
-impl<'a> Deref for FrameDrain<'a> {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        &self.0.buffer
-    }
-}
-
-impl<'a> AsRef<[u8]> for FrameDrain<'a> {
-    fn as_ref(&self) -> &[u8] {
-        &self.0.buffer
-    }
-}
-
-impl<'a> From<FrameDrain<'a>> for Vec<u8> {
-    fn from(drain: FrameDrain<'a>) -> Vec<u8> {
-        drain.into_vec()
-    }
-}
-
-impl<'a> fmt::Debug for FrameDrain<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0.buffer, f)
-    }
-}
-
-impl<'a> Drop for FrameDrain<'a> {
-    fn drop(&mut self) {
-        debug_assert!(matches!(self.0.inner, FramedInner::Body { .. }));
-        self.0.buffer.clear();
-        self.0.inner = FramedInner::Length;
-    }
 }
 
 #[cfg(test)]

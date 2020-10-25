@@ -116,7 +116,7 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// or an abrupt closing is now expected.
     NotificationsOutHandshakeRecv {
         /// Buffer for the incoming handshake.
-        handshake: leb128::Framed,
+        handshake: leb128::FramedInProgress,
         /// Data passed by the user to [`Established::open_notifications_substream`].
         user_data: TNotifUd,
     },
@@ -133,7 +133,7 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
     /// the remote is expected.
     NotificationsInHandshake {
         /// Buffer for the incoming handshake.
-        handshake: leb128::Framed,
+        handshake: leb128::FramedInProgress,
         /// Protocol that was negotiated.
         protocol: TProto,
     },
@@ -160,14 +160,14 @@ enum Substream<TNow, TRqUd, TNotifUd, TProtoList, TProto> {
         /// Data passed by the user to [`Established::add_request`].
         user_data: TRqUd,
         /// Buffer for the incoming response.
-        response: leb128::Framed,
+        response: leb128::FramedInProgress,
     },
 
     /// A request-response protocol has been negotiated on an inbound substream. A request is now
     /// expected.
     RequestInRecv {
         /// Buffer for the incoming request.
-        request: leb128::Framed,
+        request: leb128::FramedInProgress,
         /// Protocol that was negotiated.
         protocol: TProto,
     },
@@ -415,13 +415,17 @@ where
                                     if is_request_response {
                                         *substream.user_data() = Substream::RequestInRecv {
                                             protocol,
-                                            request: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper size
+                                            request: leb128::FramedInProgress::new(
+                                                10 * 1024 * 1024,
+                                            ), // TODO: proper size
                                         };
                                     } else {
                                         *substream.user_data() =
                                             Substream::NotificationsInHandshake {
                                                 protocol,
-                                                handshake: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper size
+                                                handshake: leb128::FramedInProgress::new(
+                                                    10 * 1024 * 1024,
+                                                ), // TODO: proper size
                                             };
                                     }
                                 }
@@ -483,7 +487,7 @@ where
                                 substream.write(leb128::encode_usize(handshake.len()).collect());
                                 substream.write(handshake);
                                 *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
-                                    handshake: leb128::Framed::new(10 * 1024), // TODO: proper max size
+                                    handshake: leb128::FramedInProgress::new(10 * 1024), // TODO: proper max size
                                     user_data,
                                 };
                             }
@@ -494,27 +498,34 @@ where
                         mut handshake,
                         user_data,
                     } => {
-                        let num_read = handshake.inject_data(&data).unwrap(); // TODO: don't unwrap
-                        data = &data[num_read..];
-                        if let Some(remote_handshake) = handshake.take_frame() {
-                            let substream_id = substream.id();
-                            let wake_up_after = self.next_timeout.clone();
-                            *substream.user_data() = Substream::NotificationsOut { user_data };
-                            return Ok(ReadWrite {
-                                connection: self,
-                                read_bytes: total_read,
-                                written_bytes: total_written,
-                                wake_up_after,
-                                event: Some(Event::NotificationsOutAccept {
-                                    id: SubstreamId(substream_id),
-                                    remote_handshake: remote_handshake.into(),
-                                }),
-                            });
+                        match handshake.update(&data) {
+                            Ok((num_read, leb128::Framed::Finished(remote_handshake))) => {
+                                data = &data[num_read..];
+                                let substream_id = substream.id();
+                                let wake_up_after = self.next_timeout.clone();
+                                *substream.user_data() = Substream::NotificationsOut { user_data };
+                                return Ok(ReadWrite {
+                                    connection: self,
+                                    read_bytes: total_read,
+                                    written_bytes: total_written,
+                                    wake_up_after,
+                                    event: Some(Event::NotificationsOutAccept {
+                                        id: SubstreamId(substream_id),
+                                        remote_handshake: remote_handshake.into(),
+                                    }),
+                                });
+                            }
+                            Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                                data = &data[num_read..];
+                                *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
+                                    handshake,
+                                    user_data,
+                                };
+                            }
+                            Err(_) => {
+                                todo!() // TODO: report to user and all
+                            }
                         }
-                        *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
-                            handshake,
-                            user_data,
-                        };
                     }
                     Substream::RequestOutNegotiating {
                         negotiation,
@@ -550,7 +561,7 @@ where
                                 *substream.user_data() = Substream::RequestOut {
                                     timeout,
                                     user_data,
-                                    response: leb128::Framed::new(10 * 1024 * 1024), // TODO: proper max size
+                                    response: leb128::FramedInProgress::new(10 * 1024 * 1024), // TODO: proper max size
                                 };
                                 let substream_id = substream.id();
                                 let _already_closed = substream.close();
@@ -596,8 +607,33 @@ where
                         user_data,
                         mut response,
                     } => {
-                        let num_read = match response.inject_data(&data) {
-                            Ok(n) => n,
+                        match response.update(&data) {
+                            Ok((num_read, leb128::Framed::Finished(response))) => {
+                                data = &data[num_read..];
+                                let substream_id = substream.id();
+                                // TODO: proper state transition
+                                *substream.user_data() = Substream::NegotiationFailed;
+                                let wake_up_after = self.next_timeout.clone();
+                                return Ok(ReadWrite {
+                                    connection: self,
+                                    read_bytes: total_read,
+                                    written_bytes: total_written,
+                                    wake_up_after,
+                                    event: Some(Event::Response {
+                                        id: SubstreamId(substream_id),
+                                        user_data,
+                                        response: Ok(response.into()),
+                                    }),
+                                });
+                            }
+                            Ok((num_read, leb128::Framed::InProgress(response))) => {
+                                data = &data[num_read..];
+                                *substream.user_data() = Substream::RequestOut {
+                                    timeout,
+                                    user_data,
+                                    response,
+                                };
+                            }
                             Err(err) => {
                                 let substream_id = substream.id();
                                 substream.reset();
@@ -614,31 +650,7 @@ where
                                     }),
                                 });
                             }
-                        };
-
-                        data = &data[num_read..];
-                        if let Some(response) = response.take_frame() {
-                            let substream_id = substream.id();
-                            // TODO: proper state transition
-                            *substream.user_data() = Substream::NegotiationFailed;
-                            let wake_up_after = self.next_timeout.clone();
-                            return Ok(ReadWrite {
-                                connection: self,
-                                read_bytes: total_read,
-                                written_bytes: total_written,
-                                wake_up_after,
-                                event: Some(Event::Response {
-                                    id: SubstreamId(substream_id),
-                                    user_data,
-                                    response: Ok(response.into()),
-                                }),
-                            });
                         }
-                        *substream.user_data() = Substream::RequestOut {
-                            timeout,
-                            user_data,
-                            response,
-                        };
                     }
                     Substream::RequestInRecv {
                         mut request,
@@ -669,10 +681,9 @@ where
                     Substream::NotificationsInHandshake {
                         mut handshake,
                         protocol,
-                    } => {
-                        let num_read = handshake.inject_data(&data).unwrap(); // TODO: don't unwrap
-                        data = &data[num_read..];
-                        if let Some(handshake) = handshake.take_frame() {
+                    } => match handshake.update(&data) {
+                        Ok((num_read, leb128::Framed::Finished(handshake))) => {
+                            data = &data[num_read..];
                             let substream_id = substream.id();
                             *substream.user_data() = Substream::NotificationsInWait;
                             let wake_up_after = self.next_timeout.clone();
@@ -688,11 +699,18 @@ where
                                 }),
                             });
                         }
-                        *substream.user_data() = Substream::NotificationsInHandshake {
-                            handshake,
-                            protocol,
-                        };
-                    }
+                        Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                            data = &data[num_read..];
+                            *substream.user_data() = Substream::NotificationsInHandshake {
+                                handshake,
+                                protocol,
+                            };
+                        }
+                        Err(_) => {
+                            substream.reset();
+                            break;
+                        }
+                    },
                     Substream::NotificationsInWait => {
                         // TODO: what to do with data?
                         data = &data[data.len()..];
