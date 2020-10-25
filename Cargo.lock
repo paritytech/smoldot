@@ -213,17 +213,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a265e3abeffdce30b2e26b7a11b222fe37c6067404001b434101457d0385eb92"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "atomic"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1322,12 +1311,6 @@ dependencies = [
  "autocfg 1.0.0",
  "hashbrown 0.8.1",
 ]
-
-[[package]]
-name = "ip_network"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee15951c035f79eddbef745611ec962f63f4558f1dadf98ab723cc603487c6f"
 
 [[package]]
 name = "itertools"
@@ -2670,7 +2653,6 @@ dependencies = [
  "arrayvec 0.5.1",
  "async-std",
  "async-tls",
- "async-trait",
  "atomic",
  "bitflags",
  "blake2-rfc",
@@ -2689,7 +2671,6 @@ dependencies = [
  "hashbrown 0.7.2",
  "hex",
  "impl-serde 0.2.3",
- "ip_network",
  "js-sys",
  "lazy_static",
  "libsecp256k1",
