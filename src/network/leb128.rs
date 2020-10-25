@@ -115,6 +115,11 @@ enum FramedInner {
 }
 
 impl FramedInProgress {
+    /// Initializes a new buffer for a frame.
+    ///
+    /// Must be passed the maximum allowed length of the frame, according to the protocol. This
+    /// value is also used as the size to use to pre-allocate the buffer that is later returned
+    /// in [`Framed::Finished`].
     pub fn new(max_len: usize) -> Self {
         FramedInProgress {
             max_len,
@@ -124,6 +129,24 @@ impl FramedInProgress {
     }
 
     pub fn update(mut self, mut data: &[u8]) -> Result<(usize, Framed), FramedError> {
+        fn decode_leb128(buffer: &[u8]) -> Option<Result<usize, FramedError>> {
+            let mut out = 0usize;
+
+            for (n, byte) in buffer.iter().enumerate() {
+                match usize::from(*byte & 0b1111111).checked_mul(1 << (7 * n)) {
+                    Some(o) => out |= o,
+                    None => return Some(Err(FramedError::LengthPrefixTooLarge)),
+                };
+
+                if (*byte & 0x80) == 0 {
+                    assert_eq!(n, buffer.len() - 1);
+                    return Some(Ok(out));
+                }
+            }
+
+            None
+        }
+
         let mut total_read = 0;
 
         loop {
@@ -144,7 +167,9 @@ impl FramedInProgress {
                     if let Some(expected_len) = decode_leb128(&self.buffer) {
                         let expected_len = expected_len?;
                         if expected_len > self.max_len {
-                            return Err(FramedError::LengthPrefixTooLarge);
+                            return Err(FramedError::MaxLengthExceeded {
+                                max_allowed: self.max_len,
+                            });
                         }
                         self.buffer.clear();
                         self.inner = FramedInner::Body { expected_len };
@@ -169,27 +194,16 @@ impl FramedInProgress {
     }
 }
 
-fn decode_leb128(buffer: &[u8]) -> Option<Result<usize, FramedError>> {
-    let mut out = 0usize;
-
-    for (n, byte) in buffer.iter().enumerate() {
-        match usize::from(*byte & 0b1111111).checked_mul(1 << (7 * n)) {
-            Some(o) => out |= o,
-            None => return Some(Err(FramedError::LengthPrefixTooLarge)),
-        };
-
-        if (*byte & 0x80) == 0 {
-            assert_eq!(n, buffer.len() - 1);
-            return Some(Ok(out));
-        }
-    }
-
-    None
-}
-
+/// Error potentially returned by [`FramedInProgress::update`].
 #[derive(Debug, derive_more::Display)]
 pub enum FramedError {
+    /// The variable-length prefix is too large and cannot possibly represent a valid size.
     LengthPrefixTooLarge,
+    /// Maximum length of the frame has been exceeded.
+    MaxLengthExceeded {
+        /// Maximum number of bytes allowed.
+        max_allowed: usize,
+    },
 }
 
 #[cfg(test)]
