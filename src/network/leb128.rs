@@ -15,15 +15,29 @@
 
 //! Little Endian Base 128
 //!
-//! The LEB128 encoding is used throughout the networking code.
+//! The LEB128 encoding is used throughout the networking code. This module provides utilities for
+//! encoding/decoding this format.
 //!
 //! See https://en.wikipedia.org/wiki/LEB128
-
-// TODO: better doc
 
 use core::{cmp, convert::TryFrom as _, fmt, mem, ops::Deref};
 
 /// Returns an LEB128-encoded integer as a list of bytes.
+///
+/// This function accepts as parameter an `Into<u64>`. As such, one can also pass a `u8`, `u16`,
+/// or `u32` for example. Use [`encode_usize`] for the `usize` equivalent.
+///
+/// # Example
+///
+/// ```
+/// use substrate_lite::network::leb128;
+///
+/// assert_eq!(leb128::encode(0u64).collect::<Vec<_>>(), &[0]);
+/// assert_eq!(
+///     leb128::encode(0x123456789abcdefu64).collect::<Vec<_>>(),
+///     &[239, 155, 175, 205, 248, 172, 209, 145, 1]
+/// );
+/// ```
 pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clone {
     #[derive(Clone)]
     struct EncodeIter {
@@ -64,11 +78,25 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 }
 
 /// Returns an LEB128-encoded `usize` as a list of bytes.
-pub fn encode_usize(value: usize) -> impl Iterator<Item = u8> {
+///
+/// See also [`encode`].
+///
+/// # Example
+///
+/// ```
+/// use substrate_lite::network::leb128;
+///
+/// assert_eq!(leb128::encode_usize(0).collect::<Vec<_>>(), &[0]);
+/// assert_eq!(
+///     leb128::encode_usize(0x1234567).collect::<Vec<_>>(),
+///     &[231, 138, 141, 9]
+/// );
+/// ```
+pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
     encode(u64::try_from(value).unwrap())
 }
 
-// TODO: document all this
+// TODO: document all this below
 
 pub struct Framed {
     max_len: usize,
@@ -218,6 +246,16 @@ mod tests {
     fn encode_zero() {
         let obtained = super::encode(0u64).collect::<Vec<_>>();
         assert_eq!(obtained, &[0x0u8]);
+    }
+
+    #[test]
+    fn exact_size_iterator() {
+        for _ in 0..128 {
+            let iter = super::encode(rand::random::<u64>());
+            let expected = iter.len();
+            let obtained = iter.count();
+            assert_eq!(expected, obtained);
+        }
     }
 
     // TODO: more tests
