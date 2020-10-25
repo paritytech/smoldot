@@ -211,6 +211,9 @@ where
                     .map_err(Error::Noise)?;
                 total_read += num_read;
                 *incoming_data = &incoming_data[num_read..];
+            } else {
+                // TODO: must properly send a yamux close frame
+                return Err(Error::ConnectionClosed);
             }
 
             // TODO: handle incoming_data being None
@@ -1116,6 +1119,8 @@ pub enum Event<TRqUd, TNotifUd, TProto> {
 /// Error during a connection. The connection should be shut down.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
+    /// Connection has been closed on both sides. There isn't anything to do anymore.
+    ConnectionClosed,
     /// Error in the noise cipher. Data has most likely been corrupted.
     Noise(noise::CipherError),
     /// Error in the yamux multiplexing protocol.
