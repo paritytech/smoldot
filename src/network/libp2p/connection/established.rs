@@ -15,8 +15,36 @@
 
 //! State machine handling a single TCP or WebSocket libp2p connection.
 //!
-//! This state machine tries to negotiate and apply the noise and yamux protocols on top of the
-//! connection.
+//! # About resources allocation and back-pressure
+//!
+//! In order to avoid DoS attacks, it is important, in networking code, to make sure that the
+//! amount of memory allocated directly or indirectly by a connection stays bounded.
+//!
+//! The situations in the [`Established`] that lead to an increase in memory consumption are:
+//!
+//! 1- On incoming or outgoing substreams.
+//! 2- When sending a request or receiving a response in a request-response protocol.
+//! 3- When sending a notification.
+//! 4- When receiving a request and sending back a response.
+//! 5- When receiving a notification.
+//! // TODO: 6- on yamux ping frames
+//!
+//! In order to solve 1-, there exists a maximum number of simultaneous substreams allowed by the
+//! protocol, thereby guaranteeing that the memory consumption doesn't exceed a certain bound.
+//! Since receiving a request and a response is a one-time process that occupies an entire
+//! substream, allocations referenced by points 2- and 4- are also bounded thanks to this limit.
+//! Request-response protocols enforce a limit to the size of the request and response, again
+//! guaranteeing a bound on the memory consumption.
+//!
+//! In order to solve 3-, always use [`Established::notification_substream_queued_bytes`] in order
+//! to check the current amount of buffered data before calling
+//! [`Established::write_notification_unbounded`]. See the documentation of
+//! [`Established::write_notification_unbounded`] for more details.
+//!
+//! In order to solve 5-, // TODO: .
+//!
+
+// TODO: expand docs ^
 
 use crate::network::leb128;
 
@@ -1083,6 +1111,7 @@ pub enum Event<TRqUd, TNotifUd, TProto> {
     },
     /// Remote has sent a notification on an inbound substream. Can only happen after the
     /// substream has been accepted.
+    // TODO: give a way to back-pressure notifications
     NotificationIn {
         /// Identifier of the substream.
         id: SubstreamId,
