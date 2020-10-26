@@ -61,7 +61,7 @@ pub enum Handshake {
 }
 
 impl Handshake {
-    /// Shortcut for [`HealthyHandshake::new`] wrapped in a [`Connection`].
+    /// Shortcut for [`HealthyHandshake::new`] wrapped in a [`Handshake`].
     pub fn new(is_initiator: bool) -> Self {
         HealthyHandshake::new(is_initiator).into()
     }
