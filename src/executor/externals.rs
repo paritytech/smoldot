@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Wasm virtual machine specific to the Substrate/Polkadot Runtime Environment.
 //!
@@ -349,6 +351,9 @@ impl ReadyToRun {
                 Externality::ext_storage_child_clear_prefix_version_1 => todo!(),
                 Externality::ext_storage_child_root_version_1 => todo!(),
                 Externality::ext_storage_child_next_key_version_1 => todo!(),
+                Externality::ext_storage_start_transaction_version_1 => todo!(),
+                Externality::ext_storage_rollback_transaction_version_1 => todo!(),
+                Externality::ext_storage_commit_transaction_version_1 => todo!(),
                 Externality::ext_default_child_storage_get_version_1 => todo!(),
                 Externality::ext_default_child_storage_storage_kill_version_1 => todo!(),
                 Externality::ext_default_child_storage_set_version_1 => todo!(),
@@ -391,6 +396,14 @@ impl ReadyToRun {
                 Externality::ext_offchain_http_response_wait_version_1 => todo!(),
                 Externality::ext_offchain_http_response_headers_version_1 => todo!(),
                 Externality::ext_offchain_http_response_read_body_version_1 => todo!(),
+                Externality::ext_sandbox_instantiate_version_1 => todo!(),
+                Externality::ext_sandbox_invoke_version_1 => todo!(),
+                Externality::ext_sandbox_memory_new_version_1 => todo!(),
+                Externality::ext_sandbox_memory_get_version_1 => todo!(),
+                Externality::ext_sandbox_memory_set_version_1 => todo!(),
+                Externality::ext_sandbox_memory_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_instance_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_get_global_val_version_1 => todo!(),
                 Externality::ext_trie_blake2_256_root_version_1 => 1,
                 Externality::ext_trie_blake2_256_ordered_root_version_1 => 1,
                 Externality::ext_misc_chain_id_version_1 => 0,
@@ -625,6 +638,9 @@ impl ReadyToRun {
                 Externality::ext_storage_child_clear_prefix_version_1 => todo!(),
                 Externality::ext_storage_child_root_version_1 => todo!(),
                 Externality::ext_storage_child_next_key_version_1 => todo!(),
+                Externality::ext_storage_start_transaction_version_1 => todo!(),
+                Externality::ext_storage_rollback_transaction_version_1 => todo!(),
+                Externality::ext_storage_commit_transaction_version_1 => todo!(),
                 Externality::ext_default_child_storage_get_version_1 => todo!(),
                 Externality::ext_default_child_storage_storage_kill_version_1 => todo!(),
                 Externality::ext_default_child_storage_set_version_1 => todo!(),
@@ -634,10 +650,22 @@ impl ReadyToRun {
                 Externality::ext_crypto_ed25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_sign_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_verify_version_1 => {
+                    let sig = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
+                    let pubkey = expect_pointer_constant_size!(2, 32);
+
+                    // The two `unwrap()`s below can only panic if the input is the wrong length,
+                    // which we know can't happen.
+                    // TODO: copy overhead?
+                    let public_key = ed25519_dalek::PublicKey::from_bytes(&pubkey).unwrap();
+                    // TODO: copy overhead?
+                    let signature =
+                        ed25519_dalek::Signature::new(<[u8; 64]>::try_from(&sig[..]).unwrap());
+
+                    let success = public_key.verify_strict(&message, &signature).is_ok();
+
                     self = ReadyToRun {
-                        // TODO: wrong! this is a dummy implementation meaning that all
-                        // signature verifications are always successful
-                        resume_value: Some(vm::WasmValue::I32(1)),
+                        resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                         inner: self.inner,
                     };
                 }
@@ -645,18 +673,41 @@ impl ReadyToRun {
                 Externality::ext_crypto_sr25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_sign_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_verify_version_1 => {
+                    let sig = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
+                    let pubkey = expect_pointer_constant_size!(2, 32);
+
+                    // The `unwrap()` below can only panic if the input is the wrong length, which
+                    // we know can't happen.
+                    // TODO: copy overhead?
+                    let signing_public_key = schnorrkel::PublicKey::from_bytes(&pubkey).unwrap();
+                    let success = signing_public_key
+                        .verify_simple_preaudit_deprecated(b"substrate", &message, &sig)
+                        .is_ok();
+
                     self = ReadyToRun {
-                        // TODO: wrong! this is a dummy implementation meaning that all
-                        // signature verifications are always successful
-                        resume_value: Some(vm::WasmValue::I32(1)),
+                        resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                         inner: self.inner,
                     };
                 }
                 Externality::ext_crypto_sr25519_verify_version_2 => {
+                    let sig = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
+                    let pubkey = expect_pointer_constant_size!(2, 32);
+
+                    // The two `unwrap()`s below can only panic if the input is the wrong length,
+                    // which we know can't happen.
+                    // TODO: copy overhead?
+                    let signing_public_key = schnorrkel::PublicKey::from_bytes(&pubkey).unwrap();
+                    // TODO: copy overhead?
+                    let signature = schnorrkel::Signature::from_bytes(&sig).unwrap();
+
+                    let success = signing_public_key
+                        .verify_simple(b"substrate", &message, &signature)
+                        .is_ok();
+
                     self = ReadyToRun {
-                        // TODO: wrong! this is a dummy implementation meaning that all
-                        // signature verifications are always successful
-                        resume_value: Some(vm::WasmValue::I32(1)),
+                        resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                         inner: self.inner,
                     };
                 }
@@ -664,8 +715,8 @@ impl ReadyToRun {
                     // TODO: clean up
                     #[derive(parity_scale_codec::Encode)]
                     enum EcdsaVerifyError {
-                        BadRS,
-                        BadV,
+                        RSError,
+                        VError,
                         BadSignature,
                     }
 
@@ -674,13 +725,13 @@ impl ReadyToRun {
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
                         let rs = secp256k1::Signature::parse_slice(&sig[0..64])
-                            .map_err(|_| EcdsaVerifyError::BadRS)?;
+                            .map_err(|_| EcdsaVerifyError::RSError)?;
                         let v = secp256k1::RecoveryId::parse(if sig[64] > 26 {
                             sig[64] - 27
                         } else {
                             sig[64]
                         } as u8)
-                        .map_err(|_| EcdsaVerifyError::BadV)?;
+                        .map_err(|_| EcdsaVerifyError::VError)?;
                         let pubkey = secp256k1::recover(
                             &secp256k1::Message::parse_slice(&msg).unwrap(),
                             &rs,
@@ -862,6 +913,14 @@ impl ReadyToRun {
                 Externality::ext_offchain_http_response_wait_version_1 => todo!(),
                 Externality::ext_offchain_http_response_headers_version_1 => todo!(),
                 Externality::ext_offchain_http_response_read_body_version_1 => todo!(),
+                Externality::ext_sandbox_instantiate_version_1 => todo!(),
+                Externality::ext_sandbox_invoke_version_1 => todo!(),
+                Externality::ext_sandbox_memory_new_version_1 => todo!(),
+                Externality::ext_sandbox_memory_get_version_1 => todo!(),
+                Externality::ext_sandbox_memory_set_version_1 => todo!(),
+                Externality::ext_sandbox_memory_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_instance_teardown_version_1 => todo!(),
+                Externality::ext_sandbox_get_global_val_version_1 => todo!(),
                 Externality::ext_trie_blake2_256_root_version_1 => {
                     let encoded = expect_pointer_size!(0);
 
@@ -1930,6 +1989,9 @@ externalities! {
     ext_storage_child_clear_prefix_version_1,
     ext_storage_child_root_version_1,
     ext_storage_child_next_key_version_1,
+    ext_storage_start_transaction_version_1,
+    ext_storage_rollback_transaction_version_1,
+    ext_storage_commit_transaction_version_1,
     ext_default_child_storage_get_version_1,
     ext_default_child_storage_storage_kill_version_1,
     ext_default_child_storage_set_version_1,
@@ -1972,6 +2034,14 @@ externalities! {
     ext_offchain_http_response_wait_version_1,
     ext_offchain_http_response_headers_version_1,
     ext_offchain_http_response_read_body_version_1,
+    ext_sandbox_instantiate_version_1,
+    ext_sandbox_invoke_version_1,
+    ext_sandbox_memory_new_version_1,
+    ext_sandbox_memory_get_version_1,
+    ext_sandbox_memory_set_version_1,
+    ext_sandbox_memory_teardown_version_1,
+    ext_sandbox_instance_teardown_version_1,
+    ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
     ext_trie_blake2_256_ordered_root_version_1,
     ext_misc_chain_id_version_1,

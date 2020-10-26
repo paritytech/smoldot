@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Finalized block header, plus tree of authenticated non-finalized block headers.
 //!
@@ -99,7 +101,7 @@ pub struct NonFinalizedTree<T> {
     grandpa_finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
 
     /// Configuration for BABE, retrieved from the genesis block.
-    babe_genesis_config: babe::BabeGenesisConfiguration,
+    babe_genesis_config: chain_information::babe::BabeGenesisConfiguration,
 
     /// See [`chain_information::ChainInformation::babe_finalized_block_epoch_information`].
     babe_finalized_block_epoch_information:
@@ -429,14 +431,12 @@ impl<T> NonFinalizedTree<T> {
                         } else {
                             &parent.babe_next_epoch
                         }
+                    } else if epoch_info_rq.same_epoch_as_parent() {
+                        self.babe_finalized_block_epoch_information
+                            .as_ref()
+                            .unwrap()
                     } else {
-                        if epoch_info_rq.same_epoch_as_parent() {
-                            self.babe_finalized_block_epoch_information
-                                .as_ref()
-                                .unwrap()
-                        } else {
-                            self.babe_finalized_next_epoch_transition.as_ref().unwrap()
-                        }
+                        self.babe_finalized_next_epoch_transition.as_ref().unwrap()
                     };
 
                     process = epoch_info_rq
@@ -1151,20 +1151,18 @@ impl<T> BodyVerifyStep2<T> {
                         } else {
                             &parent.babe_next_epoch
                         }
+                    } else if epoch_info_rq.same_epoch_as_parent() {
+                        chain
+                            .chain
+                            .babe_finalized_block_epoch_information
+                            .as_ref()
+                            .unwrap()
                     } else {
-                        if epoch_info_rq.same_epoch_as_parent() {
-                            chain
-                                .chain
-                                .babe_finalized_block_epoch_information
-                                .as_ref()
-                                .unwrap()
-                        } else {
-                            chain
-                                .chain
-                                .babe_finalized_next_epoch_transition
-                                .as_ref()
-                                .unwrap()
-                        }
+                        chain
+                            .chain
+                            .babe_finalized_next_epoch_transition
+                            .as_ref()
+                            .unwrap()
                     };
 
                     inner = epoch_info_rq.inject_epoch((From::from(&epoch_info.0), epoch_info.1));

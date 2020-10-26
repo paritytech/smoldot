@@ -1,9 +1,8 @@
 [package]
 name = "substrate-lite"
 version = "0.1.0"
-authors = ["Pierre Krieger <pierre.krieger1708@gmail.com>"]
-license = "GPL3" # TODO: at the moment some code is still straight-up copy-pasted from Substrate; need to ask on a case-by-case basis whether it's ok to relicense
-# TODO: license = "Apache-2.0"
+authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
 edition = "2018"
 keywords = ["blockchain", "peer-to-peer"]
 default-run = "full-node"
@@ -48,7 +47,6 @@ path = "bin/json-rpc-test/main.rs"
 required-features = ["os-networking"]
 
 [dependencies]
-ansi_term = "0.12.1"
 app_dirs = "1.2.1"
 arrayvec = "0.5.1"
 async-trait = "0.1"
@@ -66,6 +64,7 @@ futures-timer = "3.0"
 hashbrown = { version = "0.7.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.2", default-features = false }
 ip_network = "0.3.4"
+isatty = "0.1.9"
 lazy_static = "1.4.0"
 libsecp256k1 = "0.3.5"
 lru = "0.5.3"   # TODO: audit the unsafe code in that crate
@@ -79,7 +78,7 @@ pin-project = "0.4"
 prost = "0.6.1"
 rand = "0.7.0"
 rand_chacha = "0.2.2"
-schnorrkel = { version = "0.9.1", default-features = false }
+schnorrkel = { version = "0.9.1", default-features = false, features = ["preaudit_deprecated"] }
 send_wrapper = "0.4.0"
 serde = { version = "1.0.101", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.57", default-features = false, features = ["alloc", "raw_value"] }
