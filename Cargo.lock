@@ -1038,7 +1038,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e64b03909df88034c26dc1547e8970b91f98bdb65165d6a4e9110d94263dbb2c"
 dependencies = [
  "gloo-timers",
- "send_wrapper 0.4.0",
+ "send_wrapper",
 ]
 
 [[package]]
@@ -1696,38 +1696,12 @@ checksum = "50d4a6da31f8144a32532fe38fe8fb439a6842e0ec633f0037f0144c14e7f907"
 
 [[package]]
 name = "parking_lot"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f842b1982eb6c2fe34036a4fbfb06dd185a3f5c8edfaacdf7d1ea10b07de6252"
-dependencies = [
- "lock_api",
- "parking_lot_core 0.6.2",
- "rustc_version",
-]
-
-[[package]]
-name = "parking_lot"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3a704eb390aafdc107b0e392f56a82b668e3a71366993b5340f5833fd62505e"
 dependencies = [
  "lock_api",
- "parking_lot_core 0.7.2",
-]
-
-[[package]]
-name = "parking_lot_core"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b876b1b9e7ac6e1a74a6da34d25c42e17e8862aa409cbbbdcfc8d86c6f3bc62b"
-dependencies = [
- "cfg-if",
- "cloudabi",
- "libc",
- "redox_syscall",
- "rustc_version",
- "smallvec 0.6.13",
- "winapi 0.3.9",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -2248,12 +2222,6 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "send_wrapper"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0eddf2e8f50ced781f288c19f18621fa72a3779e3cb58dbf23b07469b0abeb4"
-
-[[package]]
-name = "send_wrapper"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f638d531eccd6e23b980caf34876660d38e265409d8e99b397ab71eb3612fad0"
@@ -2521,10 +2489,8 @@ dependencies = [
  "async-std",
  "async-tls",
  "atomic",
- "bitflags",
  "blake2-rfc",
  "bs58",
- "bytes",
  "chrono",
  "corooteen",
  "derive_more",
@@ -2534,7 +2500,6 @@ dependencies = [
  "fnv",
  "futures",
  "futures-timer",
- "futures_codec",
  "hashbrown 0.7.2",
  "hex",
  "impl-serde 0.2.3",
@@ -2550,7 +2515,7 @@ dependencies = [
  "num-traits",
  "parity-multiaddr",
  "parity-scale-codec",
- "parking_lot 0.10.2",
+ "parking_lot",
  "pin-project 0.4.27",
  "primitive-types",
  "prost",
@@ -2558,7 +2523,7 @@ dependencies = [
  "rand",
  "rand_chacha",
  "schnorrkel",
- "send_wrapper 0.4.0",
+ "send_wrapper",
  "serde",
  "serde_json",
  "sha2 0.9.1",
@@ -2573,7 +2538,6 @@ dependencies = [
  "unsigned-varint 0.3.3",
  "url",
  "wasm-bindgen",
- "wasm-timer",
  "wasmi",
  "wasmtime",
  "web-sys",
@@ -2943,22 +2907,6 @@ name = "wasm-bindgen-shared"
 version = "0.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93b162580e34310e5931c4b792560108b10fd14d64915d7fff8ff00180e70092"
-
-[[package]]
-name = "wasm-timer"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "324c5e65a08699c9c4334ba136597ab22b85dccd4b65dd1e36ccf8f723a95b54"
-dependencies = [
- "futures",
- "js-sys",
- "parking_lot 0.9.0",
- "pin-utils",
- "send_wrapper 0.2.0",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
 
 [[package]]
 name = "wasmi"
