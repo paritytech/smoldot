@@ -128,11 +128,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # The `advisories` check is done separately, in order to not block merging in case of a
+        # sudden announcement of a new advisory.
         checks:
           - advisories
           - bans licenses sources
-    # Prevent sudden announcement of a new advisory from failing ci
-    continue-on-error: ${{ matrix.checks == 'advisories' }}
     steps:
     - uses: actions/checkout@v2
     - uses: EmbarkStudios/cargo-deny-action@v1
