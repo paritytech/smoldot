@@ -74,7 +74,7 @@ pin-project = "0.4.26"
 prost = "0.6.1"
 rand = "0.7.0"
 rand_chacha = "0.2.2"
-schnorrkel = { git = "https://github.com/w3f/schnorrkel", rev = "cfdbe9ae865a4d3ffa2566d896d4dbedf5107028" } # TODO: waiting for a publication { version = "0.9.1", default-features = false }
+schnorrkel = { git = "https://github.com/w3f/schnorrkel", rev = "cfdbe9ae865a4d3ffa2566d896d4dbedf5107028", features = ["preaudit_deprecated"] } # TODO: waiting for a publication { version = "0.9.1", default-features = false, features = ["preaudit_deprecated"] }
 send_wrapper = "0.4.0"
 serde = { version = "1.0.101", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.57", default-features = false, features = ["alloc", "raw_value"] }
