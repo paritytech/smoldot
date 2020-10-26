@@ -495,7 +495,7 @@ where
                         }
                     }
                     Substream::NotificationsOutHandshakeRecv {
-                        mut handshake,
+                        handshake,
                         user_data,
                     } => {
                         match handshake.update(&data) {
@@ -605,7 +605,7 @@ where
                     Substream::RequestOut {
                         timeout,
                         user_data,
-                        mut response,
+                        response,
                     } => {
                         match response.update(&data) {
                             Ok((num_read, leb128::Framed::Finished(response))) => {
@@ -653,7 +653,7 @@ where
                         }
                     }
                     Substream::RequestInRecv {
-                        mut request,
+                        request,
                         protocol,
                     } => {
                         data = &data[data.len()..];
@@ -679,7 +679,7 @@ where
                         todo!()*/
                     }
                     Substream::NotificationsInHandshake {
-                        mut handshake,
+                        handshake,
                         protocol,
                     } => match handshake.update(&data) {
                         Ok((num_read, leb128::Framed::Finished(handshake))) => {
