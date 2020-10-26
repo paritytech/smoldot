@@ -650,10 +650,22 @@ impl ReadyToRun {
                 Externality::ext_crypto_ed25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_sign_version_1 => todo!(),
                 Externality::ext_crypto_ed25519_verify_version_1 => {
+                    let sig = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
+                    let pubkey = expect_pointer_constant_size!(2, 32);
+
+                    // The two `unwrap()`s below can only panic if the input is the wrong length,
+                    // which we know can't happen.
+                    // TODO: copy overhead?
+                    let public_key = ed25519_dalek::PublicKey::from_bytes(&pubkey).unwrap();
+                    // TODO: copy overhead?
+                    let signature =
+                        ed25519_dalek::Signature::new(<[u8; 64]>::try_from(&sig[..]).unwrap());
+
+                    let success = public_key.verify_strict(&message, &signature).is_ok();
+
                     self = ReadyToRun {
-                        // TODO: wrong! this is a dummy implementation meaning that all
-                        // signature verifications are always successful
-                        resume_value: Some(vm::WasmValue::I32(1)),
+                        resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                         inner: self.inner,
                     };
                 }
@@ -661,18 +673,41 @@ impl ReadyToRun {
                 Externality::ext_crypto_sr25519_generate_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_sign_version_1 => todo!(),
                 Externality::ext_crypto_sr25519_verify_version_1 => {
+                    let sig = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
+                    let pubkey = expect_pointer_constant_size!(2, 32);
+
+                    // The `unwrap()` below can only panic if the input is the wrong length, which
+                    // we know can't happen.
+                    // TODO: copy overhead?
+                    let signing_public_key = schnorrkel::PublicKey::from_bytes(&pubkey).unwrap();
+                    let success = signing_public_key
+                        .verify_simple_preaudit_deprecated(b"substrate", &message, &sig)
+                        .is_ok();
+
                     self = ReadyToRun {
-                        // TODO: wrong! this is a dummy implementation meaning that all
-                        // signature verifications are always successful
-                        resume_value: Some(vm::WasmValue::I32(1)),
+                        resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                         inner: self.inner,
                     };
                 }
                 Externality::ext_crypto_sr25519_verify_version_2 => {
+                    let sig = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
+                    let pubkey = expect_pointer_constant_size!(2, 32);
+
+                    // The two `unwrap()`s below can only panic if the input is the wrong length,
+                    // which we know can't happen.
+                    // TODO: copy overhead?
+                    let signing_public_key = schnorrkel::PublicKey::from_bytes(&pubkey).unwrap();
+                    // TODO: copy overhead?
+                    let signature = schnorrkel::Signature::from_bytes(&sig).unwrap();
+
+                    let success = signing_public_key
+                        .verify_simple(b"substrate", &message, &signature)
+                        .is_ok();
+
                     self = ReadyToRun {
-                        // TODO: wrong! this is a dummy implementation meaning that all
-                        // signature verifications are always successful
-                        resume_value: Some(vm::WasmValue::I32(1)),
+                        resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                         inner: self.inner,
                     };
                 }
