@@ -25,6 +25,7 @@ pub mod leb128;
 pub mod libp2p;
 pub mod peerset;
 pub mod protocol;
+pub mod wasm_websocket;
 pub mod with_buffers;
 
 pub use libp2p::peer_id::PeerId;
