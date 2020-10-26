@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::Error;
 
@@ -466,7 +468,7 @@ impl<'a> From<&'a BabePreDigest> for BabePreDigestRef<'a> {
 }
 
 /// Raw BABE primary slot assignment pre-digest.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BabePrimaryPreDigestRef<'a> {
     /// Authority index
     pub authority_index: u32,
@@ -489,10 +491,7 @@ impl<'a> BabePrimaryPreDigestRef<'a> {
             authority_index: u32::from_le_bytes(<[u8; 4]>::try_from(&slice[0..4]).unwrap()),
             slot_number: u64::from_le_bytes(<[u8; 8]>::try_from(&slice[4..12]).unwrap()),
             vrf_output: TryFrom::try_from(&slice[12..44]).unwrap(),
-            vrf_proof: unsafe {
-                // TODO: ugh, how do you even get a &[u8; 64] from a &[u8]
-                &*(slice[44..108].as_ptr() as *const [u8; 64])
-            },
+            vrf_proof: TryFrom::try_from(&slice[44..108]).unwrap(),
         })
     }
 
@@ -501,11 +500,9 @@ impl<'a> BabePrimaryPreDigestRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        // TODO: don't allocate
-        let header = iter::once(either::Either::Left(parity_scale_codec::Encode::encode(&(
-            self.authority_index,
-            self.slot_number,
-        ))));
+        let header = iter::once(either::Left(self.authority_index.to_le_bytes()))
+            .chain(iter::once(either::Right(self.slot_number.to_le_bytes())))
+            .map(either::Left);
 
         header
             .chain(iter::once(either::Either::Right(&self.vrf_output[..])))
@@ -535,15 +532,8 @@ impl<'a> From<&'a BabePrimaryPreDigest> for BabePrimaryPreDigestRef<'a> {
     }
 }
 
-// This custom Debug implementation exists because `[u8; 64]` doesn't implement `Debug`
-impl<'a> fmt::Debug for BabePrimaryPreDigestRef<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("BabePrimaryPreDigestRef").finish()
-    }
-}
-
 /// Raw BABE primary slot assignment pre-digest.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BabePrimaryPreDigest {
     /// Authority index
     pub authority_index: u32,
@@ -563,13 +553,6 @@ impl<'a> From<BabePrimaryPreDigestRef<'a>> for BabePrimaryPreDigest {
             vrf_output: *a.vrf_output,
             vrf_proof: *a.vrf_proof,
         }
-    }
-}
-
-// This custom Debug implementation exists because `[u8; 64]` doesn't implement `Debug`
-impl fmt::Debug for BabePrimaryPreDigest {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("BabePrimaryPreDigest").finish()
     }
 }
 
@@ -602,16 +585,13 @@ impl BabeSecondaryPlainPreDigest {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
     pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
-        // TODO: don't allocate
-        iter::once(parity_scale_codec::Encode::encode(&(
-            self.authority_index,
-            self.slot_number,
-        )))
+        iter::once(either::Left(self.authority_index.to_le_bytes()))
+            .chain(iter::once(either::Right(self.slot_number.to_le_bytes())))
     }
 }
 
 /// BABE secondary deterministic slot assignment with VRF outputs.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BabeSecondaryVRFPreDigestRef<'a> {
     /// Authority index
     pub authority_index: u32,
@@ -634,10 +614,7 @@ impl<'a> BabeSecondaryVRFPreDigestRef<'a> {
             authority_index: u32::from_le_bytes(<[u8; 4]>::try_from(&slice[0..4]).unwrap()),
             slot_number: u64::from_le_bytes(<[u8; 8]>::try_from(&slice[4..12]).unwrap()),
             vrf_output: TryFrom::try_from(&slice[12..44]).unwrap(),
-            vrf_proof: unsafe {
-                // TODO: ugh, how do you even get a &[u8; 64] from a &[u8]
-                &*(slice[44..108].as_ptr() as *const [u8; 64])
-            },
+            vrf_proof: TryFrom::try_from(&slice[44..108]).unwrap(),
         })
     }
 
@@ -646,11 +623,9 @@ impl<'a> BabeSecondaryVRFPreDigestRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        // TODO: don't allocate
-        let header = iter::once(either::Either::Left(parity_scale_codec::Encode::encode(&(
-            self.authority_index,
-            self.slot_number,
-        ))));
+        let header = iter::once(either::Left(self.authority_index.to_le_bytes()))
+            .chain(iter::once(either::Right(self.slot_number.to_le_bytes())))
+            .map(either::Left);
 
         header
             .chain(iter::once(either::Either::Right(&self.vrf_output[..])))
@@ -680,15 +655,8 @@ impl<'a> From<&'a BabeSecondaryVRFPreDigest> for BabeSecondaryVRFPreDigestRef<'a
     }
 }
 
-// This custom Debug implementation exists because `[u8; 64]` doesn't implement `Debug`
-impl<'a> fmt::Debug for BabeSecondaryVRFPreDigestRef<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("BabeSecondaryVRFPreDigestRef").finish()
-    }
-}
-
 /// BABE secondary deterministic slot assignment with VRF outputs.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BabeSecondaryVRFPreDigest {
     /// Authority index
     pub authority_index: u32,
@@ -708,12 +676,5 @@ impl<'a> From<BabeSecondaryVRFPreDigestRef<'a>> for BabeSecondaryVRFPreDigest {
             vrf_output: *a.vrf_output,
             vrf_proof: *a.vrf_proof,
         }
-    }
-}
-
-// This custom Debug implementation exists because `[u8; 64]` doesn't implement `Debug`
-impl fmt::Debug for BabeSecondaryVRFPreDigest {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("BabeSecondaryVRFPreDigest").finish()
     }
 }

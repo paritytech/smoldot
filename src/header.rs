@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Parsing SCALE-encoded header.
 //!
@@ -69,7 +71,6 @@
 // TODO: consider rewriting the encoding/decoding into a more legible style
 // TODO: consider nom for decoding
 
-use blake2::digest::{Input as _, VariableOutput as _};
 use core::{convert::TryFrom, fmt, iter, slice};
 
 mod babe;
@@ -93,17 +94,16 @@ pub fn hash_from_scale_encoded_header(header: impl AsRef<[u8]>) -> [u8; 32] {
 pub fn hash_from_scale_encoded_header_vectored(
     header: impl Iterator<Item = impl AsRef<[u8]>>,
 ) -> [u8; 32] {
-    let mut out = [0; 32];
-
-    let mut hasher = blake2::VarBlake2b::new_keyed(&[], 32);
+    let mut hasher = blake2_rfc::blake2b::Blake2b::with_key(32, &[]);
     for buf in header {
-        hasher.input(buf.as_ref());
+        hasher.update(buf.as_ref());
     }
-    hasher.variable_result(|result| {
-        debug_assert_eq!(result.len(), 32);
-        out.copy_from_slice(result)
-    });
 
+    let result = hasher.finalize();
+    debug_assert_eq!(result.as_bytes().len(), 32);
+
+    let mut out = [0; 32];
+    out.copy_from_slice(result.as_bytes());
     out
 }
 
@@ -320,8 +320,8 @@ enum DigestRefInner<'a> {
     /// Source of data is an undecoded slice of bytes.
     Undecoded {
         /// Number of log items in the header.
-        /// Must always match the actual number of items in [`DigestRef::digest`]. The validity
-        /// must be verified before a [`DigestRef`] object is instantiated.
+        /// Must always match the actual number of items in [`DigestRefInner::digest`]. The
+        /// validity must be verified before a [`DigestRef`] object is instantiated.
         digest_logs_len: usize,
         /// Encoded digest. Its validity must be verified before a [`DigestRef`] object is
         /// instantiated.
@@ -334,7 +334,6 @@ impl<'a> DigestRef<'a> {
     /// Returns a digest with empty logs.
     pub fn empty() -> DigestRef<'a> {
         DigestRef {
-            // TODO: Parsed instead
             inner: DigestRefInner::Parsed(&[]),
             babe_seal_index: None,
             babe_predigest_index: None,
@@ -344,8 +343,7 @@ impl<'a> DigestRef<'a> {
     }
 
     /// Returns the Babe seal digest item, if any.
-    // TODO: guaranteed to be 64 bytes long; type system stupidity again
-    pub fn babe_seal(&self) -> Option<&'a [u8]> {
+    pub fn babe_seal(&self) -> Option<&'a [u8; 64]> {
         if let Some(babe_seal_index) = self.babe_seal_index {
             if let DigestItemRef::BabeSeal(seal) = self.logs().nth(babe_seal_index).unwrap() {
                 Some(seal)
@@ -403,9 +401,8 @@ impl<'a> DigestRef<'a> {
     }
 
     /// If the last element of the list is a Babe seal, removes it from the [`DigestRef`].
-    // TODO: guaranteed 64 bytes
     // TODO: have a `Seal` enum or something, maybe?
-    pub fn pop_babe_seal(&mut self) -> Option<&'a [u8]> {
+    pub fn pop_babe_seal(&mut self) -> Option<&'a [u8; 64]> {
         let seal_pos = self.babe_seal_index?;
 
         match &mut self.inner {
@@ -417,7 +414,7 @@ impl<'a> DigestRef<'a> {
                 *list = &list[..seal_pos];
 
                 match item {
-                    DigestItem::BabeSeal(seal) => Some(&seal[..]),
+                    DigestItem::BabeSeal(seal) => Some(seal),
                     _ => unreachable!(),
                 }
             }
@@ -609,8 +606,7 @@ impl Digest {
     }
 
     /// Returns the Babe seal digest item, if any.
-    // TODO: [u8; 64]
-    pub fn babe_seal(&self) -> Option<&[u8]> {
+    pub fn babe_seal(&self) -> Option<&[u8; 64]> {
         DigestRef::from(self).babe_seal()
     }
 
@@ -707,10 +703,7 @@ pub enum DigestItemRef<'a> {
     BabePreDigest(BabePreDigestRef<'a>),
     BabeConsensus(BabeConsensusLogRef<'a>),
     /// Block signature made using the BABE consensus engine.
-    ///
-    /// Guaranteed to be 64 bytes long.
-    // TODO: we don't use a &[u8; 64] because traits aren't defined on this type; need to fix after Rust gets proper support or use a newtype
-    BabeSeal(&'a [u8]),
+    BabeSeal(&'a [u8; 64]),
 
     GrandpaConsensus(GrandpaConsensusLogRef<'a>),
 
@@ -780,7 +773,7 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(&parity_scale_codec::Encode::encode(
                     &parity_scale_codec::Compact(64u32),
                 ));
-                ret.extend_from_slice(&seal);
+                ret.extend_from_slice(seal);
                 iter::once(ret)
             }
             DigestItemRef::ChangesTrieSignal(ref changes) => {
@@ -811,8 +804,7 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
 }
 
 // TODO: document
-// TODO: Debug impl
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum DigestItem {
     BabePreDigest(BabePreDigest),
     BabeConsensus(BabeConsensusLog),
@@ -942,10 +934,7 @@ fn decode_item_from_parts<'a>(
         }
         (4, e) => return Err(Error::UnknownConsensusEngine(*e)),
         (5, b"BABE") => DigestItemRef::BabeSeal({
-            if content.len() != 64 {
-                return Err(Error::BadBabeSealLength);
-            }
-            content
+            TryFrom::try_from(content).map_err(|_| Error::BadBabeSealLength)?
         }),
         (5, e) => return Err(Error::UnknownConsensusEngine(*e)),
         (6, b"BABE") => DigestItemRef::BabePreDigest(BabePreDigestRef::from_slice(content)?),

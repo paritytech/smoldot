@@ -1,19 +1,21 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 
-use crate::{header, verify::babe};
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use crate::{chain::chain_information::babe::BabeGenesisConfiguration, header, verify::babe};
 
 use core::{num::NonZeroU64, time::Duration};
 
@@ -26,8 +28,8 @@ pub struct Config<'a> {
 
     /// BABE configuration retrieved from the genesis block.
     ///
-    /// See the documentation of [`babe::BabeGenesisConfiguration`] to know how to get this.
-    pub babe_genesis_configuration: &'a babe::BabeGenesisConfiguration,
+    /// See the documentation of [`BabeGenesisConfiguration`] to know how to get this.
+    pub babe_genesis_configuration: &'a BabeGenesisConfiguration,
 
     /// Slot number of block #1. **Must** be provided, unless the block being verified is block
     /// #1 itself.
@@ -49,8 +51,8 @@ pub struct Config<'a> {
 /// Block successfully verified.
 pub struct Success {
     /// If `Some`, the verified block contains an epoch transition describing the given epoch.
-    /// This epoch transition must later be provided back as part of the [`VerifyConfig`] of the
-    /// blocks that are part of that epoch.
+    /// This epoch transition must later be provided back as part of the [`Config`] when verifying
+    /// the blocks that are part of that epoch.
     pub babe_epoch_transition_target: Option<NonZeroU64>,
 
     /// Slot number the block belongs to.
@@ -175,18 +177,18 @@ pub struct BabeEpochInformation {
 
 impl BabeEpochInformation {
     /// Returns the epoch number whose information must be passed to
-    /// [`EpochInformation::inject_epoch`].
+    /// [`BabeEpochInformation::inject_epoch`].
     pub fn epoch_number(&self) -> u64 {
         self.inner.epoch_number()
     }
 
-    /// Returns true if the epoch is the same as the parent's.
+    /// Returns true if the epoch of the verified block is the same as its parent's.
     pub fn same_epoch_as_parent(&self) -> bool {
         self.inner.same_epoch_as_parent()
     }
 
     /// Finishes the verification. Must provide the information about the epoch whose number is
-    /// obtained with [`EpochInformation::epoch_number`].
+    /// obtained with [`BabeEpochInformation::epoch_number`].
     pub fn inject_epoch(
         self,
         epoch_info: (header::BabeNextEpochRef, header::BabeNextConfig),

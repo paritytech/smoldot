@@ -1,40 +1,41 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 
-//! Contains `wasm-bindgen` bindings.
-//!
-//! When this library is compiled for `wasm`, this library contains the types and functions that
-//! can be accessed from the user through the `wasm-bindgen` library.
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
 
-#![cfg(feature = "wasm-bindings")]
-#![cfg_attr(docsrs, doc(cfg(feature = "wasm-bindings")))]
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{
-    chain, chain::sync::headers_optimistic, chain_spec, database, header, json_rpc, network,
-    verify::babe,
-};
+//! Contains a light client implementation usable from a browser environment, using the
+//! `wasm-bindgen` library.
 
-use core::num::{NonZeroU32, NonZeroU64};
+#![recursion_limit = "512"]
+
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
 use libp2p::wasm_ext::{ffi, ExtTransport};
+use std::{
+    collections::HashMap,
+    num::{NonZeroU32, NonZeroU64},
+};
+use substrate_lite::{
+    chain, chain::chain_information::babe, chain::sync::headers_optimistic, chain_spec, database,
+    header, json_rpc, network,
+};
 use wasm_bindgen::prelude::*;
 
-// TODO: should that be here?
+// This custom allocator is used in order to reduce the size of the Wasm binary.
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
@@ -52,10 +53,9 @@ pub struct BrowserLightClient {
 /// >           is thrown.
 #[wasm_bindgen]
 pub async fn start_client(chain_spec: String) -> Result<BrowserLightClient, JsValue> {
-    // TODO: don't put that here, it's a global setting that doesn't have its place in a library
-    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    #[cfg(debug_assertions)]
+    console_error_panic_hook::set_once();
 
-    // TODO: this entire function is just some temporary code before we figure out where to put it
     let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&chain_spec) {
         Ok(cs) => cs,
         Err(err) => {
@@ -215,7 +215,7 @@ async fn start_sync(
     );
 
     async move {
-        let mut peers_source_id_map = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
+        let mut peers_source_id_map = HashMap::new();
         let mut block_requests_finished = stream::FuturesUnordered::new();
 
         loop {
@@ -282,7 +282,7 @@ async fn start_sync(
                 // take a long time. In order to avoid blocking the rest of the program in the
                 // meanwhile, the `yield_once` function interrupts the current task and gives a
                 // chance for other tasks to progress.
-                crate::util::yield_once().await;
+                yield_once().await;
             }
 
             // TODO: save less often
@@ -351,8 +351,10 @@ async fn start_network(
             known_addresses,
             chain_spec_protocol_id: chain_spec.protocol_id().as_bytes().to_vec(),
             tasks_executor: Box::new(|fut| wasm_bindgen_futures::spawn_local(fut)),
-            local_genesis_hash: crate::calculate_genesis_block_header(chain_spec.genesis_storage())
-                .hash(),
+            local_genesis_hash: substrate_lite::calculate_genesis_block_header(
+                chain_spec.genesis_storage(),
+            )
+            .hash(),
             wasm_external_transport: Some(ExtTransport::new(ffi::websocket_transport())),
         })
         .await
@@ -360,7 +362,7 @@ async fn start_network(
 
     async move {
         // TODO: store send back channel in a network user data rather than having this hashmap
-        let mut block_requests = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
+        let mut block_requests = HashMap::new();
 
         loop {
             futures::select! {
@@ -444,4 +446,22 @@ enum ToNetwork {
             Result<Vec<headers_optimistic::RequestSuccessBlock>, headers_optimistic::RequestFail>,
         >,
     },
+}
+
+/// Use in an asynchronous context to interrupt the current task execution and schedule it back.
+///
+/// This function is useful in order to guarantee a fine granularity of tasks execution time in
+/// situations where a CPU-heavy task is being performed.
+async fn yield_once() {
+    let mut pending = true;
+    futures::future::poll_fn(move |cx| {
+        if pending {
+            pending = false;
+            cx.waker().wake_by_ref();
+            core::task::Poll::Pending
+        } else {
+            core::task::Poll::Ready(())
+        }
+    })
+    .await
 }

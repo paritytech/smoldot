@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{executor, header};
 
@@ -63,45 +65,28 @@ impl BabeGenesisConfiguration {
         vm: executor::WasmVmPrototype,
         mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
     ) -> Result<(Self, executor::WasmVmPrototype), FromVmPrototypeError> {
-        let mut vm = vm
+        let mut vm: executor::WasmVm = vm
             .run_no_param("BabeApi_configuration")
-            .map_err(FromVmPrototypeError::VmInitialization)?;
+            .map_err(FromVmPrototypeError::VmInitialization)?
+            .into();
 
-        let inner = loop {
-            match vm.state() {
-                executor::State::ReadyToRun(r) => r.run(),
-                executor::State::Finished(data) => {
-                    break match OwnedGenesisConfiguration::decode_all(&data) {
-                        Ok(cfg) => cfg,
+        let (inner, vm_prototype) = loop {
+            match vm {
+                executor::WasmVm::ReadyToRun(r) => vm = r.run(),
+                executor::WasmVm::Finished(finished) => {
+                    break match OwnedGenesisConfiguration::decode_all(finished.value()) {
+                        Ok(cfg) => (cfg, finished.into_prototype()),
                         Err(err) => return Err(FromVmPrototypeError::OutputDecode(err)),
                     };
                 }
-                executor::State::Trapped => return Err(FromVmPrototypeError::Trapped),
+                executor::WasmVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
-                executor::State::ExternalStorageGet {
-                    storage_key,
-                    offset,
-                    max_size,
-                    resolve,
-                } => {
-                    let mut value = genesis_storage_access(storage_key);
-
-                    // TODO: maybe this could be a utility function in `executor`
-                    if let Some(value) = &mut value {
-                        if usize::try_from(offset).unwrap() < value.len() {
-                            *value = value[usize::try_from(offset).unwrap()..].to_vec();
-                            if usize::try_from(max_size).unwrap() < value.len() {
-                                *value = value[..usize::try_from(max_size).unwrap()].to_vec();
-                            }
-                        } else {
-                            *value = Vec::new();
-                        }
-                    }
-
-                    resolve.finish_call(value);
+                executor::WasmVm::ExternalStorageGet(req) => {
+                    let value = genesis_storage_access(req.key());
+                    vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
-                executor::State::LogEmit { resolve, .. } => resolve.finish_call(()),
+                executor::WasmVm::LogEmit(req) => vm = req.resume(),
 
                 _ => return Err(FromVmPrototypeError::ExternalityNotAllowed),
             }
@@ -124,7 +109,7 @@ impl BabeGenesisConfiguration {
             epoch0_information,
         };
 
-        Ok((outcome, vm.into_prototype()))
+        Ok((outcome, vm_prototype))
     }
 
     /// Returns the number of slots contained in each epoch.

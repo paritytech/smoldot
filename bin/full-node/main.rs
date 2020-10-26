@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #![recursion_limit = "1024"]
 
@@ -49,6 +51,12 @@ struct CliOptions {
     /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
     chain: CliChain,
+    /// No output printed to stderr.
+    #[structopt(short, long)]
+    quiet: bool,
+    /// Coloring: auto, always, never
+    #[structopt(long, default_value = "auto")]
+    color: ColorChoice,
 }
 
 #[derive(Debug)]
@@ -74,6 +82,33 @@ impl core::str::FromStr for CliChain {
         }
     }
 }
+
+#[derive(Debug)]
+enum ColorChoice {
+    Always,
+    Auto,
+    Never,
+}
+
+impl core::str::FromStr for ColorChoice {
+    type Err = ColorChoiceParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "always" {
+            Ok(ColorChoice::Always)
+        } else if s == "auto" {
+            Ok(ColorChoice::Auto)
+        } else if s == "never" {
+            Ok(ColorChoice::Never)
+        } else {
+            Err(ColorChoiceParseError)
+        }
+    }
+}
+
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "Color must be one of: always, auto, never")]
+struct ColorChoiceParseError;
 
 async fn async_main() {
     let cli_options = CliOptions::from_args();
@@ -204,23 +239,30 @@ async fn async_main() {
     loop {
         futures::select! {
             _ = informant_timer.next() => {
-                // We end the informant line with a `\r` so that it overwrites itself every time.
-                // If any other line gets printed, it will overwrite the informant, and the
-                // informant will then print itself below, which is a fine behaviour.
-                let sync_state = sync_state.lock().await.clone();
-                eprint!("{}\r", substrate_lite::informant::InformantLine {
-                    chain_name: chain_spec.name(),
-                    max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(80),
-                    num_network_connections: network_state.num_network_connections.load(Ordering::Relaxed),
-                    best_number: sync_state.best_block_number,
-                    finalized_number: sync_state.finalized_block_number,
-                    best_hash: &sync_state.best_block_hash,
-                    finalized_hash: &sync_state.finalized_block_hash,
-                    network_known_best: match network_state.best_network_block_height.load(Ordering::Relaxed) {
-                        0 => None,
-                        n => Some(n)
-                    },
-                });
+                if !cli_options.quiet {
+                    // We end the informant line with a `\r` so that it overwrites itself every time.
+                    // If any other line gets printed, it will overwrite the informant, and the
+                    // informant will then print itself below, which is a fine behaviour.
+                    let sync_state = sync_state.lock().await.clone();
+                    eprint!("{}\r", substrate_lite::informant::InformantLine {
+                        enable_colors: match cli_options.color {
+                            ColorChoice::Always => true,
+                            ColorChoice::Auto => isatty::stderr_isatty(),
+                            ColorChoice::Never => false,
+                        },
+                        chain_name: chain_spec.name(),
+                        max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(100),
+                        num_network_connections: network_state.num_network_connections.load(Ordering::Relaxed),
+                        best_number: sync_state.best_block_number,
+                        finalized_number: sync_state.finalized_block_number,
+                        best_hash: &sync_state.best_block_hash,
+                        finalized_hash: &sync_state.finalized_block_hash,
+                        network_known_best: match network_state.best_network_block_height.load(Ordering::Relaxed) {
+                            0 => None,
+                            n => Some(n)
+                        },
+                    });
+                }
             },
 
             telemetry_event = telemetry.next_event().fuse() => {
@@ -304,10 +346,16 @@ async fn start_sync(
             let mut process = sync.process_one();
             loop {
                 match process {
+                    full_optimistic::ProcessOne::Idle { sync: s } => {
+                        sync = s;
+                        break;
+                    }
                     full_optimistic::ProcessOne::Finished {
                         sync: s,
                         finalized_blocks,
                     } => {
+                        process = s.process_one();
+
                         if let Some(last_finalized) = finalized_blocks.last() {
                             let mut lock = sync_state.lock().await;
                             lock.finalized_block_hash = last_finalized.header.hash();
@@ -320,13 +368,11 @@ async fn start_sync(
                                     finalized_block_storage.insert(key, value);
                                 } else {
                                     let _was_there = finalized_block_storage.remove(&key);
-                                    // TODO: panics?! assert!(_was_there.is_some());
+                                    // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
+                                    // assert!(_was_there.is_some());
                                 }
                             }
                         }
-
-                        sync = s;
-                        break;
                     }
 
                     full_optimistic::ProcessOne::InProgress {
@@ -345,22 +391,24 @@ async fn start_sync(
                         process = resume.resume();
                     }
 
-                    full_optimistic::ProcessOne::FinalizedStorageGet(mut req) => {
+                    full_optimistic::ProcessOne::FinalizedStorageGet(req) => {
                         let value = finalized_block_storage
                             .get(&req.key_as_vec())
                             .map(|v| &v[..]);
                         process = req.inject_value(value);
                     }
-                    full_optimistic::ProcessOne::FinalizedStorageNextKey(mut req) => {
+                    full_optimistic::ProcessOne::FinalizedStorageNextKey(req) => {
+                        // TODO: to_vec() :-/
+                        let req_key = req.key().to_vec();
                         // TODO: to_vec() :-/
                         let next_key = finalized_block_storage
                             .range(req.key().to_vec()..)
-                            .skip(1)
+                            .skip_while(move |(k, _)| &k[..] <= &req_key[..])
                             .next()
                             .map(|(k, _)| k);
                         process = req.inject_key(next_key);
                     }
-                    full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(mut req) => {
+                    full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(req) => {
                         // TODO: to_vec() :-/
                         let prefix = req.prefix().to_vec();
                         // TODO: to_vec() :-/

@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Parse JSON-RPC method calls and notifications, and build responses messages.
 
@@ -60,6 +62,16 @@ pub struct ParseError(serde_json::Error);
 /// `id_json` must be the JSON-formatted identifier of the request, found in [`Call::id_json`].
 /// `result_json` must be the JSON-formatted result of the request.
 ///
+/// # Example
+///
+/// ```
+/// # use substrate_lite::json_rpc::parse;
+/// let result_json = parse::build_success_response("27", r#"[1, 2, {"foo":"bar"}]"#);
+///
+/// // Note that the output is guaranteed to be stable.
+/// assert_eq!(result_json, r#"{"jsonrpc":"2.0","id":27,"result":[1, 2, {"foo":"bar"}]}"#);
+/// ```
+///
 /// # Panic
 ///
 /// Panics if `id_json` or `result_json` aren't valid JSON.
@@ -67,8 +79,8 @@ pub struct ParseError(serde_json::Error);
 pub fn build_success_response(id_json: &str, result_json: &str) -> String {
     serde_json::to_string(&SerdeSuccess {
         jsonrpc: SerdeVersion::V2,
-        result: serde_json::from_str(result_json).expect("invalid result_json"),
         id: serde_json::from_str(id_json).expect("invalid id_json"),
+        result: serde_json::from_str(result_json).expect("invalid result_json"),
     })
     .unwrap()
 }

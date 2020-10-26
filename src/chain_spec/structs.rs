@@ -1,24 +1,26 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
-// This file is part of Substrate.
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Substrate is free software: you can redistribute it and/or modify
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Type definitions that implement the [`serde::Serialize`] and [`serde::Deserialize`] traits and
 //! that match the chain specs JSON file structure.
 //!
 //! The main type is [`ClientSpec`].
 
+use super::light_sync_state::LightSyncState;
 use fnv::FnvBuildHasher;
 use hashbrown::{HashMap, HashSet};
 use primitive_types::H256;
@@ -44,6 +46,7 @@ pub(super) struct ClientSpec {
     pub(super) consensus_engine: (),
     // TODO: looks deprecated?
     pub(super) genesis: Genesis,
+    pub(super) light_sync_state: Option<LightSyncState>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -1,22 +1,24 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Type definitions to help with serializing/deserializing from/to the local storage.
 
 use crate::{chain::chain_information, header};
-use core::convert::TryFrom;
+use core::{convert::TryFrom, fmt};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "version")]
@@ -223,7 +225,7 @@ struct SerializedBabeNextConfigConstantV1 {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum SerializedBabeAllowedSlotsV1 {
     #[serde(rename = "primary")]
-    PrimarySlots,
+    OnlyPrimarySlots,
     #[serde(rename = "primary-and-secondary-plain")]
     PrimaryAndSecondaryPlainSlots,
     #[serde(rename = "primary-and-secondary-vrf")]
@@ -233,7 +235,9 @@ enum SerializedBabeAllowedSlotsV1 {
 impl From<header::BabeAllowedSlots> for SerializedBabeAllowedSlotsV1 {
     fn from(from: header::BabeAllowedSlots) -> Self {
         match from {
-            header::BabeAllowedSlots::PrimarySlots => SerializedBabeAllowedSlotsV1::PrimarySlots,
+            header::BabeAllowedSlots::PrimarySlots => {
+                SerializedBabeAllowedSlotsV1::OnlyPrimarySlots
+            }
             header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots => {
                 SerializedBabeAllowedSlotsV1::PrimaryAndSecondaryPlainSlots
             }
@@ -247,7 +251,9 @@ impl From<header::BabeAllowedSlots> for SerializedBabeAllowedSlotsV1 {
 impl From<SerializedBabeAllowedSlotsV1> for header::BabeAllowedSlots {
     fn from(from: SerializedBabeAllowedSlotsV1) -> Self {
         match from {
-            SerializedBabeAllowedSlotsV1::PrimarySlots => header::BabeAllowedSlots::PrimarySlots,
+            SerializedBabeAllowedSlotsV1::OnlyPrimarySlots => {
+                header::BabeAllowedSlots::PrimarySlots
+            }
             SerializedBabeAllowedSlotsV1::PrimaryAndSecondaryPlainSlots => {
                 header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
             }
@@ -313,29 +319,36 @@ impl From<SerializedGrandpaAuthorityV1> for header::GrandpaAuthority {
 }
 
 fn serialize_bytes<S: serde::Serializer>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-    // TODO: there's probably a more optimized way to do it
-    serializer.serialize_str(&hex::encode(data))
+    struct Writer<'a>(&'a [u8]);
+    impl<'a> fmt::Display for Writer<'a> {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            for byte in self.0 {
+                write!(f, "{:02x}", byte)?
+            }
+            Ok(())
+        }
+    }
+
+    serializer.collect_str(&Writer(data))
 }
 
 fn deserialize_bytes<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<u8>, D::Error> {
-    // TODO: not sure that's the correct way to do it
-    let string = <String as serde::Deserialize>::deserialize(deserializer)?;
-    Ok(hex::decode(&string).map_err(serde::de::Error::custom)?)
+    let string = <&str as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(hex::decode(string).map_err(serde::de::Error::custom)?)
 }
 
 fn deserialize_hash32<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<[u8; 32], D::Error> {
-    // TODO: not sure that's the correct way to do it
-    let string = <String as serde::Deserialize>::deserialize(deserializer)?;
-    let value = hex::decode(&string).map_err(serde::de::Error::custom)?;
-    if value.len() > 32 {
+    let string = <&str as serde::Deserialize>::deserialize(deserializer)?;
+    if string.len() > 64 {
         return Err(serde::de::Error::custom("invalid hash length"));
     }
 
     let mut out = [0u8; 32];
-    out[(32 - value.len())..].copy_from_slice(&value);
+    hex::decode_to_slice(string, &mut out[(32 - string.len() / 2)..])
+        .map_err(serde::de::Error::custom)?;
     Ok(out)
 }

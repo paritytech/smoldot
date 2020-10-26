@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Optimistic header and body syncing.
 //!
@@ -218,7 +220,6 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
     ///
     /// This method takes ownership of the [`OptimisticFullSync`] and starts a verification
     /// process. The [`OptimisticFullSync`] is yielded back at the end of this process.
-    // TODO: rename, since we process more than one
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc> {
         let sync = self.sync.take().unwrap();
 
@@ -226,10 +227,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
             Ok(tp) => tp,
             Err(sync) => {
                 self.sync = Some(sync);
-                return ProcessOne::Finished {
-                    sync: self,
-                    finalized_blocks: Vec::new(),
-                };
+                return ProcessOne::Idle { sync: self };
             }
         };
 
@@ -257,7 +255,18 @@ pub struct RequestSuccessBlock {
 
 /// State of the processing of blocks.
 pub enum ProcessOne<TRq, TSrc> {
+    /// No processing is necessary.
+    ///
+    /// Calling [`OptimisticFullSync::process_one`] again is unnecessary.
+    Idle {
+        /// The state machine.
+        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
+        /// [`OptimisticFullSync`]. This field yields it back.
+        sync: OptimisticFullSync<TRq, TSrc>,
+    },
     /// Processing is over.
+    ///
+    /// There might be more blocks remaining. Call [`OptimisticFullSync::process_one`] again.
     Finished {
         /// The state machine.
         /// The [`OptimisticFullSync::process_one`] method takes ownership of the
@@ -265,6 +274,7 @@ pub enum ProcessOne<TRq, TSrc> {
         sync: OptimisticFullSync<TRq, TSrc>,
         /// Blocks that have been finalized after the verification.
         /// Ordered by increasing block number.
+        // TODO: consider returning them one at a time?
         finalized_blocks: Vec<Block>,
     },
     /// A step in the processing has been completed.
@@ -529,6 +539,26 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         // diff.
                         debug_assert!(chain.is_empty());
                         shared.best_to_finalized_storage_diff.clear();
+
+                        // Since the verification process requires querying the finalized block
+                        // storage from the user, we need to report changes to the finalized
+                        // blocks to the user before we can continue.
+                        let sync = shared
+                            .to_process
+                            .report
+                            .update_block_height(chain.best_block_header().number);
+                        break ProcessOne::Finished {
+                            sync: OptimisticFullSync {
+                                chain,
+                                best_to_finalized_storage_diff: shared
+                                    .best_to_finalized_storage_diff,
+                                runtime_code_cache: shared.runtime_code_cache,
+                                top_trie_root_calculation_cache: shared
+                                    .top_trie_root_calculation_cache,
+                                sync: Some(sync),
+                            },
+                            finalized_blocks: shared.finalized_blocks,
+                        };
                     }
 
                     // Before looping again, report the progress to the user.
@@ -576,11 +606,10 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                 Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
                     // The underlying verification process is asking for the key that follows
                     // the requested one.
-
-                    // TODO: no; must look through hierarchy
                     break ProcessOne::FinalizedStorageNextKey(StorageNextKey {
                         inner: req,
                         shared,
+                        key_overwrite: None,
                     });
                 }
 
@@ -621,9 +650,8 @@ enum StorageGetTarget {
 
 impl<TRq, TBl> StorageGet<TRq, TBl> {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    // TODO: shouldn't be mut
-    pub fn key<'b>(&'b mut self) -> impl Iterator<Item = impl AsRef<[u8]> + 'b> + 'b {
-        match &mut self.inner {
+    pub fn key<'b>(&'b self) -> impl Iterator<Item = impl AsRef<[u8]> + 'b> + 'b {
+        match &self.inner {
             StorageGetTarget::Storage(inner) => {
                 either::Either::Left(inner.key().map(either::Either::Left))
             }
@@ -639,9 +667,8 @@ impl<TRq, TBl> StorageGet<TRq, TBl> {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     ///
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    // TODO: shouldn't be mut
-    pub fn key_as_vec(&mut self) -> Vec<u8> {
-        match &mut self.inner {
+    pub fn key_as_vec(&self) -> Vec<u8> {
+        match &self.inner {
             StorageGetTarget::Storage(inner) => inner.key_as_vec(),
             StorageGetTarget::HeapPagesAndRuntime(_) | StorageGetTarget::HeapPages(_, _) => {
                 b":heappages".to_vec()
@@ -707,26 +734,22 @@ pub struct StoragePrefixKeys<TRq, TBl> {
 
 impl<TRq, TBl> StoragePrefixKeys<TRq, TBl> {
     /// Returns the prefix whose keys to load.
-    // TODO: don't take &mut self but &self
-    pub fn prefix(&mut self) -> &[u8] {
+    pub fn prefix(&self) -> &[u8] {
         self.inner.prefix()
     }
 
     /// Injects the list of keys.
-    pub fn inject_keys(
-        mut self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> ProcessOne<TRq, TBl> {
+    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> ProcessOne<TRq, TBl> {
         let mut keys = keys
             .map(|k| k.as_ref().to_owned())
             .collect::<HashSet<_, fnv::FnvBuildHasher>>();
 
-        let prefix = self.inner.prefix().to_owned(); // TODO: meh
+        let prefix = self.inner.prefix();
         for (k, v) in self
             .shared
             .best_to_finalized_storage_diff
-            .range(prefix.clone()..)
-            .take_while(|(k, _)| k.starts_with(&prefix))
+            .range(prefix.to_owned()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
         {
             if v.is_some() {
                 keys.insert(k.clone());
@@ -745,19 +768,84 @@ impl<TRq, TBl> StoragePrefixKeys<TRq, TBl> {
 pub struct StorageNextKey<TRq, TBl> {
     inner: blocks_tree::StorageNextKey<Block>,
     shared: ProcessOneShared<TRq, TBl>,
+
+    /// If `Some`, ask for the key inside of this field rather than the one of `inner`. Used in
+    /// corner-case situations where the key provided by the user has been erased from storage.
+    key_overwrite: Option<Vec<u8>>,
 }
 
 impl<TRq, TBl> StorageNextKey<TRq, TBl> {
     /// Returns the key whose next key must be passed back.
-    // TODO: don't take &mut self but &self
-    pub fn key(&mut self) -> &[u8] {
-        self.inner.key()
+    pub fn key(&self) -> &[u8] {
+        if let Some(key_overwrite) = &self.key_overwrite {
+            key_overwrite
+        } else {
+            self.inner.key()
+        }
     }
 
     /// Injects the key.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> ProcessOne<TRq, TBl> {
-        // TODO: finish
-        let inner = self.inner.inject_key(key);
+        let key = key.as_ref().map(|k| k.as_ref());
+
+        // The key provided by the user as parameter is the next key in the storage of the
+        // finalized block.
+        // `best_to_finalized_storage_diff` needs to be taken into account in order to provide
+        // the next key in the best block instead.
+
+        let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
+            key_overwrite
+        } else {
+            self.inner.key()
+        };
+
+        if let Some(key) = key {
+            assert!(key > requested_key);
+        }
+
+        let in_diff = self
+            .shared
+            .best_to_finalized_storage_diff
+            .range(requested_key.to_vec()..) // TODO: don't use to_vec()
+            .map(|(k, v)| (k, v.is_some()))
+            .filter(|(k, _)| &***k > requested_key)
+            .next();
+
+        let outcome = match (key, in_diff) {
+            (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
+            (Some(a), Some((b, false))) if a < &b[..] => Some(a),
+            (Some(a), Some((b, false))) => {
+                debug_assert!(a >= &b[..]);
+                debug_assert_ne!(&b[..], requested_key);
+
+                // The next key according to the finalized block storage has been erased since
+                // then. It is necessary to ask the user again, this time for the key after the
+                // one that has been erased.
+                // This `clone()` is necessary, as `b` borrows from
+                // `self.shared.best_to_finalized_storage_diff`.
+                let key_overwrite = Some(b.clone());
+                return ProcessOne::FinalizedStorageNextKey(StorageNextKey {
+                    inner: self.inner,
+                    shared: self.shared,
+                    key_overwrite,
+                });
+            }
+            (Some(a), Some((b, true))) => {
+                debug_assert!(a >= &b[..]);
+                Some(&b[..])
+            }
+
+            (Some(a), None) => Some(a),
+            (None, Some((b, _))) => Some(&b[..]),
+            (None, None) => None,
+        };
+
+        let inner = self.inner.inject_key(outcome);
         ProcessOne::from(Inner::Step2(inner), self.shared)
     }
 }

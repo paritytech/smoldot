@@ -1,32 +1,32 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{ExecOutcome, GlobalValueErr, NewErr, RunErr, Signature, WasmValue};
 
 use alloc::{boxed::Box, vec::Vec};
 use core::{cmp, convert::TryFrom, fmt};
 
-mod coroutine;
-
 // TODO: this entire module is unsatisfactory
 
 /// Prototype for a [`Jit`].
 pub struct JitPrototype {
     /// Coroutine that contains the Wasm execution stack.
-    coroutine: coroutine::Coroutine<
-        Box<dyn FnOnce() -> ()>, // TODO: `!`
+    coroutine: corooteen::Coroutine<
+        Box<dyn FnOnce()>, // TODO: return `!`
         FromCoroutine,
         ToCoroutine,
     >,
@@ -53,7 +53,7 @@ impl JitPrototype {
         let store = wasmtime::Store::new(&engine);
         let module = wasmtime::Module::from_binary(&engine, module.as_ref()).unwrap();
 
-        let builder = coroutine::CoroutineBuilder::new();
+        let builder = corooteen::CoroutineBuilder::new();
 
         let mut imported_memory = None;
 
@@ -94,12 +94,12 @@ impl JitPrototype {
                     wasmtime::ExternType::Table(_) => unimplemented!(),
                     wasmtime::ExternType::Memory(m) => {
                         let limits = {
-                            let heap_pages =
-                                usize::try_from(heap_pages).unwrap_or(usize::max_value());
+                            // TODO: shouldn't heap_pages be u32 in the first place?
+                            let heap_pages = u32::try_from(heap_pages).unwrap_or(u32::max_value());
                             let min = cmp::max(m.limits().min(), heap_pages);
                             let max = m.limits().max(); // TODO: make sure it's > to min, otherwise error
                             let num = min + heap_pages;
-                            wasmtime::Limits::new(num, num)
+                            wasmtime::Limits::new(num, Some(num))
                         };
 
                         // TODO: check name and all?
@@ -121,7 +121,7 @@ impl JitPrototype {
         // We now build the coroutine of the main thread.
         let mut coroutine = {
             let interrupter = builder.interrupter();
-            builder.build(Box::new(move || -> () {
+            builder.build(Box::new(move || {
                 // TODO: no, don't send this now but below; need to adjust for this elsewhere
                 let mut request = interrupter.interrupt(FromCoroutine::Init(Ok(())));
 
@@ -240,8 +240,8 @@ impl JitPrototype {
         // Execute the coroutine once, as described above.
         // The first yield must always be an `FromCoroutine::Init`.
         match coroutine.run(None) {
-            coroutine::RunOut::Interrupted(FromCoroutine::Init(Err(err))) => return Err(err),
-            coroutine::RunOut::Interrupted(FromCoroutine::Init(Ok(()))) => {}
+            corooteen::RunOut::Interrupted(FromCoroutine::Init(Err(err))) => return Err(err),
+            corooteen::RunOut::Interrupted(FromCoroutine::Init(Ok(()))) => {}
             _ => unreachable!(),
         }
 
@@ -257,7 +257,7 @@ impl JitPrototype {
             .coroutine
             .run(Some(ToCoroutine::GetGlobal(name.to_owned())))
         {
-            coroutine::RunOut::Interrupted(FromCoroutine::GetGlobalResponse(outcome)) => outcome,
+            corooteen::RunOut::Interrupted(FromCoroutine::GetGlobalResponse(outcome)) => outcome,
             _ => unreachable!(),
         }
     }
@@ -267,7 +267,7 @@ impl JitPrototype {
     pub fn start(mut self, function_name: &str, params: &[WasmValue]) -> Result<Jit, NewErr> {
         let (exported_memory, indirect_table) =
             match self.coroutine.run(Some(ToCoroutine::GetMemoryTable)) {
-                coroutine::RunOut::Interrupted(FromCoroutine::GetMemoryTableResponse {
+                corooteen::RunOut::Interrupted(FromCoroutine::GetMemoryTableResponse {
                     memory,
                     indirect_table,
                 }) => (memory, indirect_table),
@@ -278,8 +278,8 @@ impl JitPrototype {
             function_name.to_owned(),
             params.to_owned(),
         ))) {
-            coroutine::RunOut::Interrupted(FromCoroutine::Init(Err(err))) => return Err(err),
-            coroutine::RunOut::Interrupted(FromCoroutine::Init(Ok(()))) => {}
+            corooteen::RunOut::Interrupted(FromCoroutine::Init(Err(err))) => return Err(err),
+            corooteen::RunOut::Interrupted(FromCoroutine::Init(Ok(()))) => {}
             _ => unreachable!(),
         }
 
@@ -342,8 +342,8 @@ enum FromCoroutine {
 /// Wasm VM that uses JITted compilation.
 pub struct Jit {
     /// Coroutine that contains the Wasm execution stack.
-    coroutine: coroutine::Coroutine<
-        Box<dyn FnOnce() -> ()>, // TODO: `!`
+    coroutine: corooteen::Coroutine<
+        Box<dyn FnOnce()>, // TODO: return `!`
         FromCoroutine,
         ToCoroutine,
     >,
@@ -368,9 +368,9 @@ impl Jit {
 
     /// Starts or continues execution of this thread.
     ///
-    /// If this is the first call you call [`run`](Thread::run) for this thread, then you must pass
+    /// If this is the first call you call [`run`](Jit::run) for this thread, then you must pass
     /// a value of `None`.
-    /// If, however, you call this function after a previous call to [`run`](Thread::run) that was
+    /// If, however, you call this function after a previous call to [`run`](Jit::run) that was
     /// interrupted by an external function call, then you must pass back the outcome of that call.
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         if self.coroutine.is_finished() {
@@ -385,19 +385,19 @@ impl Jit {
             .run(Some(ToCoroutine::Resume(value.map(From::from))))
         {
             // TODO: use `!`
-            coroutine::RunOut::Finished(_) => unreachable!(),
+            corooteen::RunOut::Finished(_) => unreachable!(),
 
-            coroutine::RunOut::Interrupted(FromCoroutine::Done(Err(err))) => {
+            corooteen::RunOut::Interrupted(FromCoroutine::Done(Err(err))) => {
                 Ok(ExecOutcome::Finished {
                     return_value: Err(()),
                 })
             }
-            coroutine::RunOut::Interrupted(FromCoroutine::Done(Ok(val))) => {
+            corooteen::RunOut::Interrupted(FromCoroutine::Done(Ok(val))) => {
                 Ok(ExecOutcome::Finished {
                     return_value: Ok(val.map(From::from)),
                 })
             }
-            coroutine::RunOut::Interrupted(FromCoroutine::Interrupt {
+            corooteen::RunOut::Interrupted(FromCoroutine::Interrupt {
                 function_index,
                 parameters,
             }) => Ok(ExecOutcome::Interrupted {
@@ -406,11 +406,11 @@ impl Jit {
             }),
 
             // `Init` must only be produced at initialization.
-            coroutine::RunOut::Interrupted(FromCoroutine::Init(_)) => unreachable!(),
+            corooteen::RunOut::Interrupted(FromCoroutine::Init(_)) => unreachable!(),
             // `GetGlobalResponse` only happens in response to a request.
-            coroutine::RunOut::Interrupted(FromCoroutine::GetGlobalResponse(_)) => unreachable!(),
+            corooteen::RunOut::Interrupted(FromCoroutine::GetGlobalResponse(_)) => unreachable!(),
             // `GetMemoryTableResponse` only happens in response to a request.
-            coroutine::RunOut::Interrupted(FromCoroutine::GetMemoryTableResponse { .. }) => {
+            corooteen::RunOut::Interrupted(FromCoroutine::GetMemoryTableResponse { .. }) => {
                 unreachable!()
             }
         }

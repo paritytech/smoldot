@@ -1,17 +1,19 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Finalized block header, plus tree of authenticated non-finalized block headers.
 //!
@@ -99,13 +101,13 @@ pub struct NonFinalizedTree<T> {
     grandpa_finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
 
     /// Configuration for BABE, retrieved from the genesis block.
-    babe_genesis_config: babe::BabeGenesisConfiguration,
+    babe_genesis_config: chain_information::babe::BabeGenesisConfiguration,
 
-    /// See [`ChainInformation::babe_finalized_block_epoch_information`].
+    /// See [`chain_information::ChainInformation::babe_finalized_block_epoch_information`].
     babe_finalized_block_epoch_information:
         Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
 
-    /// See [`ChainInformation::babe_finalized_next_epoch_transition`].
+    /// See [`chain_information::ChainInformation::babe_finalized_next_epoch_transition`].
     babe_finalized_next_epoch_transition:
         Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
 
@@ -143,7 +145,7 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// Panics if the chain information is incorrect.
     ///
-    pub fn new(mut config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
         if config
             .chain_information_config
             .chain_information
@@ -429,14 +431,12 @@ impl<T> NonFinalizedTree<T> {
                         } else {
                             &parent.babe_next_epoch
                         }
+                    } else if epoch_info_rq.same_epoch_as_parent() {
+                        self.babe_finalized_block_epoch_information
+                            .as_ref()
+                            .unwrap()
                     } else {
-                        if epoch_info_rq.same_epoch_as_parent() {
-                            self.babe_finalized_block_epoch_information
-                                .as_ref()
-                                .unwrap()
-                        } else {
-                            self.babe_finalized_next_epoch_transition.as_ref().unwrap()
-                        }
+                        self.babe_finalized_next_epoch_transition.as_ref().unwrap()
                     };
 
                     process = epoch_info_rq
@@ -938,7 +938,7 @@ where
     /// block.
     ///
     /// The value of `top_trie_root_calculation_cache` can be the one provided by the
-    /// [`BodyVerifyStep2::finished`] variant when the parent block has been verified. `None` can
+    /// [`BodyVerifyStep2::Finished`] variant when the parent block has been verified. `None` can
     /// be passed if this information isn't available.
     ///
     /// While `top_trie_root_calculation_cache` is optional, providing a value will considerably
@@ -1151,20 +1151,18 @@ impl<T> BodyVerifyStep2<T> {
                         } else {
                             &parent.babe_next_epoch
                         }
+                    } else if epoch_info_rq.same_epoch_as_parent() {
+                        chain
+                            .chain
+                            .babe_finalized_block_epoch_information
+                            .as_ref()
+                            .unwrap()
                     } else {
-                        if epoch_info_rq.same_epoch_as_parent() {
-                            chain
-                                .chain
-                                .babe_finalized_block_epoch_information
-                                .as_ref()
-                                .unwrap()
-                        } else {
-                            chain
-                                .chain
-                                .babe_finalized_next_epoch_transition
-                                .as_ref()
-                                .unwrap()
-                        }
+                        chain
+                            .chain
+                            .babe_finalized_next_epoch_transition
+                            .as_ref()
+                            .unwrap()
                     };
 
                     inner = epoch_info_rq.inject_epoch((From::from(&epoch_info.0), epoch_info.1));
@@ -1192,16 +1190,14 @@ pub struct StorageGet<T> {
 
 impl<T> StorageGet<T> {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    // TODO: shouldn't be mut
-    pub fn key<'b>(&'b mut self) -> impl Iterator<Item = impl AsRef<[u8]> + 'b> + 'b {
+    pub fn key<'b>(&'b self) -> impl Iterator<Item = impl AsRef<[u8]> + 'b> + 'b {
         self.inner.key()
     }
 
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     ///
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    // TODO: shouldn't be mut
-    pub fn key_as_vec(&mut self) -> Vec<u8> {
+    pub fn key_as_vec(&self) -> Vec<u8> {
         self.inner.key_as_vec()
     }
 
@@ -1258,8 +1254,7 @@ pub struct StoragePrefixKeys<T> {
 
 impl<T> StoragePrefixKeys<T> {
     /// Returns the prefix whose keys to load.
-    // TODO: don't take &mut self but &self
-    pub fn prefix(&mut self) -> &[u8] {
+    pub fn prefix(&self) -> &[u8] {
         self.inner.prefix()
     }
 
@@ -1315,8 +1310,7 @@ pub struct StorageNextKey<T> {
 
 impl<T> StorageNextKey<T> {
     /// Returns the key whose next key must be passed back.
-    // TODO: don't take &mut self but &self
-    pub fn key(&mut self) -> &[u8] {
+    pub fn key(&self) -> &[u8] {
         self.inner.key()
     }
 
@@ -1357,6 +1351,11 @@ impl<T> StorageNextKey<T> {
     }
 
     /// Injects the key.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
+    ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_key(key);
         BodyVerifyStep2::from_inner(inner, self.chain)
@@ -1384,7 +1383,7 @@ pub enum HeaderVerifySuccess<'c, T> {
 #[must_use]
 pub struct HeaderInsert<'c, T> {
     chain: &'c mut NonFinalizedTree<T>,
-    /// Copy of the value in [`VerifySuccess::is_new_best`].
+    /// Copy of the value in [`HeaderVerifySuccess::is_new_best`].
     is_new_best: bool,
     /// Index of the parent in [`NonFinalizedTree::blocks`].
     parent_tree_index: Option<fork_tree::NodeIndex>,
@@ -1565,7 +1564,6 @@ pub enum SetFinalizedError {
 #[must_use]
 pub struct BodyInsert<T> {
     chain: NonFinalizedTree<T>,
-    /// Copy of the value in [`VerifySuccess::is_new_best`].
     is_new_best: bool,
     /// Index of the parent in [`NonFinalizedTree::blocks`].
     parent_tree_index: Option<fork_tree::NodeIndex>,

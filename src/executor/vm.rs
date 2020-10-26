@@ -1,29 +1,31 @@
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
-// SPDX-License-Identifier: Apache-2.0
+// Substrate-lite
+// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// 	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 mod interpreter;
-#[cfg(all(target_arch = "x86_64", feature = "wasmtime"))]
+#[cfg(target_arch = "x86_64")]
 mod jit;
 
 use core::fmt;
 use smallvec::SmallVec;
 
-#[cfg(all(target_arch = "x86_64", feature = "wasmtime"))]
+#[cfg(target_arch = "x86_64")]
 pub use jit::{Jit as VirtualMachine, JitPrototype as VirtualMachinePrototype};
 
-#[cfg(not(all(target_arch = "x86_64", feature = "wasmtime")))]
+#[cfg(not(target_arch = "x86_64"))]
 pub use interpreter::*;
 
 // TODO: wrap around the content of the submodules here, and make the submodules private
@@ -86,7 +88,7 @@ impl<'a> From<&'a wasmi::Signature> for Signature {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "wasmtime"))]
+#[cfg(target_arch = "x86_64")]
 impl<'a> From<&'a wasmtime::FuncType> for Signature {
     fn from(sig: &'a wasmtime::FuncType) -> Signature {
         // TODO: we only support one return type at the moment; what even is multiple
@@ -173,7 +175,7 @@ impl From<WasmValue> for wasmi::RuntimeValue {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "wasmtime"))]
+#[cfg(target_arch = "x86_64")]
 impl From<WasmValue> for wasmtime::Val {
     fn from(val: WasmValue) -> Self {
         match val {
@@ -183,7 +185,7 @@ impl From<WasmValue> for wasmtime::Val {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "wasmtime"))]
+#[cfg(target_arch = "x86_64")]
 impl From<wasmtime::Val> for WasmValue {
     fn from(val: wasmtime::Val) -> Self {
         match val {
@@ -213,7 +215,7 @@ impl From<wasmi::ValueType> for ValueType {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "wasmtime"))]
+#[cfg(target_arch = "x86_64")]
 impl From<wasmtime::ValType> for ValueType {
     fn from(val: wasmtime::ValType) -> Self {
         match val {
@@ -336,7 +338,7 @@ impl fmt::Display for RunErr {
     }
 }
 
-/// Error that can happen when calling [`VirtualMachine::global_value`].
+/// Error that can happen when calling [`VirtualMachinePrototype::global_value`].
 #[derive(Debug, derive_more::Display)]
 pub enum GlobalValueErr {
     NotFound,
