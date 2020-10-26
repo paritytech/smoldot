@@ -303,6 +303,15 @@ impl NetworkService {
                         .unwrap()
                         .remove();
                 }
+                FromBackground::NotificationsOpenResult {
+                    connection_id,
+                    result,
+                } => todo!(),
+                FromBackground::NotificationsCloseResult { connection_id } => todo!(),
+
+                FromBackground::NotificationsOpenDesired { connection_id } => todo!(),
+
+                FromBackground::NotificationsCloseDesired { connection_id } => todo!(),
             }
         }
     }
@@ -361,6 +370,8 @@ enum ToConnection {
         config: protocol::BlocksRequestConfig,
         send_back: oneshot::Sender<Result<Vec<protocol::BlockData>, ()>>,
     },
+    OpenNotifications,
+    CloseNotifications,
 }
 
 /// Messsage sent from a background task and dedicated to the main [`NetworkService`]. Processed
@@ -388,6 +399,39 @@ enum FromBackground {
     /// which the handshake hadn't succeeded, a [`FromBackground::HandshakeError`] is emitted
     /// instead.
     Disconnected {
+        connection_id: peerset::ConnectionId,
+    },
+
+    /// Response to a [`ToConnection::OpenNotifications`].
+    NotificationsOpenResult {
+        connection_id: peerset::ConnectionId,
+        /// Outcome of the opening. If `Ok`, the notifications protocol is now open. If `Err`, it
+        /// is still closed.
+        result: Result<(), ()>,
+    },
+
+    /// Response to a [`ToConnection::CloseNotifications`].
+    ///
+    /// Contrary to [`FromBackground::NotificationsOpenResult`], a closing request never fails.
+    NotificationsCloseResult {
+        connection_id: peerset::ConnectionId,
+    },
+
+    /// The remote requests that a notification substream be opened.
+    ///
+    /// No action has been taken. Send [`ToConnection::OpenNotifications`] to open the substream,
+    /// or [`ToConnection::CloseNotifications`] to reject the request from the remote.
+    NotificationsOpenDesired {
+        connection_id: peerset::ConnectionId,
+    },
+
+    /// The remote requests that a notification substream be closed.
+    ///
+    /// No action has been taken. Send [`ToConnection::CloseNotifications`] in order to close the
+    /// substream.
+    ///
+    /// If this follows a [`FromBackground::NotificationsOpenDesired`], it cancels it.
+    NotificationsCloseDesired {
         connection_id: peerset::ConnectionId,
     },
 }
@@ -547,6 +591,19 @@ async fn connection_task(
                             });
                         connection.add_request(Instant::now(), "/dot/sync/2", request, send_back);
                     }
+                    ToConnection::OpenNotifications => {
+                        // TODO: finish
+                        let id = connection.open_notifications_substream(
+                            Instant::now(),
+                            "/dot/block-announces/1",
+                            Vec::new(), // TODO:
+                            ()
+                        );
+                        todo!()
+                    },
+                    ToConnection::CloseNotifications => {
+                        todo!()
+                    },
                 }
             }
         }
