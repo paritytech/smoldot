@@ -181,8 +181,7 @@
 //! documentation.
 //! - A JSON-RPC client, in order to put a convenient-to-use UI on top of the client. See the
 //! [`json_rpc`] module.
-//! - A telemetry client, in order to report information to a telemetry server. See the
-//! [`telemetry`] module.
+//! - TODO: telemetry
 //!
 
 // TODO: for `no_std`, fix all the compilation errors caused by the copy-pasted code

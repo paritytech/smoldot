@@ -171,8 +171,8 @@ impl<T> WithBuffers<T> {
     /// # Panic
     ///
     /// Panics if `read_n` or `write_n` are larger than the lengths of the buffers returned by
-    /// [`WriteBuffers::buffers`].
-    /// Panics if [`WriteBuffers::buffers`] has returned an error.
+    /// [`WithBuffers::buffers`].
+    /// Panics if [`WithBuffers::buffers`] has returned an error.
     ///
     pub fn advance(&mut self, read_n: usize, write_n: usize) {
         // Read cursor.
@@ -231,7 +231,7 @@ where
     /// Also returns if an error happened on the socket. If an error has already happened in the
     /// past, returns immediately.
     ///
-    /// After this function has returned, the buffers returned by [`WriteBuffers::buffers`] might
+    /// After this function has returned, the buffers returned by [`WithBuffers::buffers`] might
     /// have changed. The read buffer might have been extended with more data, and the write buffer
     /// might have been extended.
     pub async fn process(self: Pin<&mut Self>) {

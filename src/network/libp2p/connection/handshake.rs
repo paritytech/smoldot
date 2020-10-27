@@ -90,8 +90,8 @@ enum HandshakeState {
 impl HealthyHandshake {
     /// Initializes a new state machine.
     ///
-    /// Must pass [`Endpoint::Dialer`] if the connection has been opened by the local machine,
-    /// and [`Endpoint::Listener`] if it has been opened by the remote.
+    /// Must pass `true` if the connection has been opened by the local machine, or `false` if it
+    /// has been opened by the remote.
     pub fn new(is_initiator: bool) -> Self {
         let negotiation = multistream_select::InProgress::new(if is_initiator {
             multistream_select::Config::Dialer {
@@ -325,7 +325,7 @@ pub struct NoiseKeyRequired {
 }
 
 impl NoiseKeyRequired {
-    /// Turn this [`NoiseKeyRequired`] back into a [`Healthy`] by indicating the noise key.
+    /// Turn this [`NoiseKeyRequired`] back into a [`HealthyHandshake`] by indicating the noise key.
     pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
         HealthyHandshake {
             state: HandshakeState::NegotiatingEncryption {

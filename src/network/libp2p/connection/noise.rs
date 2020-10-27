@@ -49,13 +49,13 @@
 //! [`HandshakeInProgress`], passing a [`NoiseKey`]. This [`NoiseKey`] is typically generated at
 //! startup and doesn't need to be persisted after a restart.
 //!
-//! Use [`HandshakeInProgress::write_out`] to send out handshake messages ready to be sent out,
-//! and [`HandshakeInProgress::inject_data`] when data is received from the wire. At every call,
-//! a [`Handshake`] is returned, potentially indicating the end of the handshake.
+//! Use [`HandshakeInProgress::read_write`] when data is received from the wire or when the remote
+//! is ready to receive more data. At every call, a [`NoiseHandshake`] is returned, potentially
+//! indicating the end of the handshake.
 //!
-//! If the handshake is finished, a [`Handshake::Success`] is returned, containing the [`PeerId`]
-//! of the remote, which is known to be legitimate, and a [`Noise`] object through which all
-//! further communications should go through.
+//! If the handshake is finished, a [`NoiseHandshake::Success`] is returned, containing the
+//! [`PeerId`] of the remote, which is known to be legitimate, and a [`Noise`] object through
+//! which all further communications should go through.
 //!
 //! Use [`Noise::inject_outbound_data`] and [`Noise::write_out`] in order to send out data to the
 //! remote, and [`Noise::inject_inbound_data`] when data is received.
@@ -575,7 +575,7 @@ impl HandshakeInProgress {
         self.tx_buffer_encrypted.push_front(length_bytes[0]);
     }
 
-    /// Try to turn this [`InProgress`] into a [`NoiseHandshake::Success`] if possible.
+    /// Try to turn this [`HandshakeInProgress`] into a [`NoiseHandshake::Success`] if possible.
     fn try_finish(self) -> NoiseHandshake {
         if !self.tx_buffer_encrypted.is_empty() {
             return NoiseHandshake::InProgress(self);

@@ -461,9 +461,9 @@ pub enum Event<TProto, TRqUd, TNow> {
     /// If using multiple tasks, be aware that it is possible for this event to be emitted right
     /// before [`Network::cancel_request`] is called.
     RequestOutDone {
-        /// Identifier of the request data originally returned by [`Network::start_request`].
+        /// Identifier of the request data originally returned by [`Network::send_request`].
         id: OutRequestId,
-        /// User data originally passed to [`Network::start_request`].
+        /// User data originally passed to [`Network::send_request`].
         user_data: TRqUd,
         result: Result<Vec<u8>, ()>, // TODO: proper error
     },

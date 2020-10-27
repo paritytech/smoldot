@@ -31,12 +31,13 @@
 //! all currently-open substreams.
 //!
 //! Call [`Yamux::incoming_data`] when data is available on the socket. This function parses
-//! the received data, updates the internal state machine, and possibly returns an [`Event`].
+//! the received data, updates the internal state machine, and possibly returns an
+//! [`IncomingDataDetail`].
 //! Call [`Yamux::extract_out`] when the remote is ready to accept more data.
 //!
 //! The generic parameter of [`Yamux`] is an opaque "user data" associated to each substream.
 //!
-//! When [`Substream::write`] is called, the buffer of data to send out is stored within the
+//! When [`SubstreamMut::write`] is called, the buffer of data to send out is stored within the
 //! [`Yamux`] object. This data will then be progressively returned by
 //! [`Yamux::extract_out`].
 //!
@@ -70,7 +71,7 @@ pub struct Yamux<T> {
     next_outbound_substream: NonZeroU32,
 
     /// Header currently being written out. Finishing to write this header is the first and
-    /// foremost priority of [`Yamux::read_write`].
+    /// foremost priority of [`Yamux::extract_out`].
     pending_out_header: arrayvec::ArrayVec<[u8; 12]>,
 
     /// If `Some`, contains a substream ID and a number of bytes. A data frame header has been
@@ -127,7 +128,7 @@ enum Incoming {
         substream_id: SubstreamId,
         /// Extra local window size to give to this substream.
         extra_window: u32,
-        /// If non-zero, must transition to a [`IncomingDataFrame`].
+        /// If non-zero, must transition to a [`Incoming::DataFrame`].
         data_frame_size: u32,
         /// True if the remote writing side of the substream should be closed after receiving the
         /// `data_frame_size` bytes.

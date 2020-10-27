@@ -453,7 +453,7 @@ impl<'a, TPeer, TConn, TPending> PendingMut<'a, TPeer, TConn, TPending> {
     }
 }
 
-/// Access to a node in the [`PeerSet`].
+/// Access to a node in the [`Peerset`].
 pub enum NodeMut<'a, TPeer, TConn, TPending> {
     /// Node is already known to the data structure.
     Known(NodeMutKnown<'a, TPeer, TConn, TPending>),
