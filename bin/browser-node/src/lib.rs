@@ -24,7 +24,6 @@ use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
 };
-use libp2p::wasm_ext::{ffi, ExtTransport};
 use std::{
     collections::HashMap,
     num::{NonZeroU32, NonZeroU64},
@@ -34,6 +33,8 @@ use substrate_lite::{
     header, json_rpc, network,
 };
 use wasm_bindgen::prelude::*;
+
+mod network_service;
 
 // This custom allocator is used in order to reduce the size of the Wasm binary.
 #[global_allocator]
