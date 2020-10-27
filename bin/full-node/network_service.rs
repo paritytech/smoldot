@@ -35,11 +35,9 @@ use futures::{
 };
 use std::{io, net::SocketAddr, sync::Arc, time::Instant};
 use substrate_lite::network::{
-    libp2p::{
-        connection,
-        multiaddr::{Multiaddr, Protocol},
-        peer_id::PeerId,
-    },
+    connection,
+    multiaddr::{Multiaddr, Protocol},
+    peer_id::PeerId,
     peerset, protocol, with_buffers,
 };
 

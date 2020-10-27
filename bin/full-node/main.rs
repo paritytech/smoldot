@@ -40,10 +40,7 @@ use structopt::StructOpt as _;
 use substrate_lite::{
     chain::{self, sync::full_optimistic},
     chain_spec, header, network,
-    network::{
-        libp2p::{connection, multiaddr, peer_id::PeerId},
-        protocol, with_buffers,
-    },
+    network::{connection, multiaddr, peer_id::PeerId, protocol, with_buffers},
 };
 
 mod network_service;

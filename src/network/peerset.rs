@@ -44,7 +44,7 @@
 
 // TODO: finish documentation
 
-use crate::network::libp2p::peer_id::PeerId;
+use crate::network::peer_id::PeerId;
 
 use ahash::RandomState;
 use alloc::collections::{BTreeMap, BTreeSet};

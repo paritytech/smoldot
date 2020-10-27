@@ -21,6 +21,7 @@
 //! While this module is generic, the targeted use-case is TCP connections.
 
 // TODO: usage and example
+// TODO: this is opinionated towards futures/async-std and means we can't use tokio :(
 
 // The `AsyncRead` and `AsyncWrite` traits, which are core the API of this module, are only
 // available in a "std environment".
