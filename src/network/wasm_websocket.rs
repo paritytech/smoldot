@@ -20,7 +20,11 @@
 #![cfg(feature = "wasm-bindings")]
 #![cfg_attr(docsrs, doc(cfg(feature = "wasm-bindings")))]
 
-use core::{future::Future, pin::Pin, task::{Context, Poll}};
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 use wasm_bindgen::JsCast as _;
 
 /// WebSocket client using `wasm-bindgen` for its implementation.
@@ -35,14 +39,14 @@ impl WebSocketClient {
         let socket = web_sys::WebSocket::new(url).map_err(|_| ConnectError::Unsupported)?;
         socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
-        let on_open = wasm_bindgen::closure::Closure::wrap(Box::new(|_| {
-
-        }) as Box<dyn FnMut(web_sys::Event)>);
+        let on_open = wasm_bindgen::closure::Closure::wrap(
+            Box::new(|_| {}) as Box<dyn FnMut(web_sys::Event)>
+        );
         socket.set_onopen(Some(on_open.as_ref().dyn_ref().unwrap()));
 
-        let on_close = wasm_bindgen::closure::Closure::wrap(Box::new(|_| {
-
-        }) as Box<dyn FnMut(web_sys::CloseEvent)>);
+        let on_close = wasm_bindgen::closure::Closure::wrap(
+            Box::new(|_| {}) as Box<dyn FnMut(web_sys::CloseEvent)>
+        );
         socket.set_onclose(Some(on_close.as_ref().dyn_ref().unwrap()));
 
         // A manual implementation of `Future` is needed in order to properly clean up the
@@ -73,7 +77,8 @@ impl WebSocketClient {
             inner: Some(socket),
             on_open: Some(on_open),
             on_close: Some(on_close),
-        }.await
+        }
+        .await
     }
 
     /// Returns the next message received on the WebSocket.

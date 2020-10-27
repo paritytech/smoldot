@@ -25,16 +25,12 @@ mod dht_proto {
 }
 
 /// Data structure containing the k-buckets and the state of the current Kademlia queries.
-pub struct Kademlia {
-
-}
+pub struct Kademlia {}
 
 impl Kademlia {
     /// Initializes a new empty data structure with empty k-buckets.
     pub fn new() -> Self {
-        Kademlia {
-
-        }
+        Kademlia {}
     }
 }
 
@@ -45,7 +41,7 @@ pub fn build_find_node_request(peer_id: &[u8]) -> Vec<u8> {
     let protobuf = dht_proto::Message {
         r#type: dht_proto::message::MessageType::FindNode as i32,
         key: peer_id.to_vec(),
-        .. Default::default()
+        ..Default::default()
     };
 
     let mut buf = Vec::with_capacity(protobuf.encoded_len());

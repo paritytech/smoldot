@@ -654,10 +654,7 @@ where
                             }
                         }
                     }
-                    Substream::RequestInRecv {
-                        request,
-                        protocol,
-                    } => {
+                    Substream::RequestInRecv { request, protocol } => {
                         data = &data[data.len()..];
                         *substream.user_data() = Substream::RequestInRecv { request, protocol };
                         // TODO:
