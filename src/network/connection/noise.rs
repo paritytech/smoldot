@@ -57,8 +57,8 @@
 //! [`PeerId`] of the remote, which is known to be legitimate, and a [`Noise`] object through
 //! which all further communications should go through.
 //!
-//! Use [`Noise::inject_outbound_data`] and [`Noise::write_out`] in order to send out data to the
-//! remote, and [`Noise::inject_inbound_data`] when data is received.
+//! Use [`Noise::encrypt`] in order to send out data to the remote, and
+//! [`Noise::inject_inbound_data`] when data is received.
 // TODO: review this last sentence, as this API might change after some experience with it
 
 use crate::network::peer_id::{PeerId, PublicKey};

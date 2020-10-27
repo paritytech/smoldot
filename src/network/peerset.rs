@@ -38,8 +38,6 @@
 //! It is assumed that some discovery mechanism, not covered by this module, is in place in order
 //! to discover the identities and addresses of nodes that belong to these various overlay
 //! networks.
-//! When this discovery mechanism discovers a node that is part of an overlay network, insert it
-//! in the [`Peerset`] by calling [`Peerset::insert`].
 //!
 
 // TODO: finish documentation
