@@ -44,18 +44,18 @@ required-features = ["os-networking"]
 ahash = { version = "0.4.5", default-features = false }
 app_dirs = "1.2.1"
 arrayvec = "0.5.1"
-atomic = "0.4.6"
+atomic = "0.5.0"
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.3.1", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", features = ["serde"] }   # TODO: remove serde feature
 derive_more = "0.99.7"
 ed25519-dalek = { version = "1.0.0", default-features = false, features = ["alloc", "batch", "u64_backend"] }
 either = "1.6.1"
-env_logger = "0.7.1"
+env_logger = "0.8.1"
 fnv = "1.0"
 futures = { version = "0.3.6", features = ["thread-pool"] }   # TODO: should be default-features = false, but we use some std-only types at the moment
 futures-timer = "3.0"
-hashbrown = { version = "0.7.0", default-features = false, features = ["serde"] }   # TODO: remove serde feature
+hashbrown = { version = "0.8.1", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.2", default-features = false }
 isatty = "0.1.9"
 libsecp256k1 = "0.3.5"
@@ -73,9 +73,9 @@ prost = "0.6.1"
 rand = "0.7.0"
 rand_chacha = "0.2.2"
 schnorrkel = { git = "https://github.com/w3f/schnorrkel", rev = "cfdbe9ae865a4d3ffa2566d896d4dbedf5107028", features = ["preaudit_deprecated"] } # TODO: waiting for a publication { version = "0.9.1", default-features = false, features = ["preaudit_deprecated"] }
-send_wrapper = "0.4.0"
+send_wrapper = "0.5.0"
 serde = { version = "1.0.101", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1.0.57", default-features = false, features = ["alloc", "raw_value"] }
+serde_json = { version = "1.0.59", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = "0.9.1"
 slab = "0.4.2"
 smallvec = "0.6.10"
@@ -96,7 +96,7 @@ webpki = { version = "0.21.0", optional = true }
 
 # `wasm-bindings` feature
 js-sys = { version = "0.3.44", optional = true }
-wasm-bindgen = { version = "0.2.67", optional = true }
+wasm-bindgen = { version = "0.2.68", optional = true }
 web-sys = { version = "0.3.44", optional = true, features = ["BinaryType", "CloseEvent", "DomException", "Event", "Storage", "WebSocket", "Window"] }
 
 # BELOW: DEPENDENCIES TO REMOVE
