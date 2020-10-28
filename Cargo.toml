@@ -68,7 +68,7 @@ num-rational = "0.3.0"
 num-traits = "0.2.12"
 parity-multiaddr = "0.9.2"
 parking_lot = "0.11.0"
-pin-project = "0.4.26"
+pin-project = "1.0.1"
 prost = "0.6.1"
 rand = "0.7.0"
 rand_chacha = "0.2.2"
@@ -108,7 +108,7 @@ primitive-types = { version = "0.7.2", default-features = false, features = ["co
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 corooteen = { git = "https://github.com/tomaka/corooteen" } # TODO: CRITICAL /!\ this code is veeery unsafe at the moment
-wasmtime = { version = "0.18.0", default-features = false }
+wasmtime = { version = "0.20.0", default-features = false }
 
 [build-dependencies]
 prost-build = "0.6.1"
