@@ -36,7 +36,6 @@ mod network_service;
 mod sync_service;
 
 fn main() {
-    env_logger::init();
     futures::executor::block_on(async_main())
 }
 
