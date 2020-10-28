@@ -142,7 +142,12 @@ impl<T> Yamux<T> {
         Yamux {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.capacity,
-                ahash::RandomState::with_seeds(config.randomness_seed.0, config.randomness_seed.1, config.randomness_seed.2, config.randomness_seed.3),
+                ahash::RandomState::with_seeds(
+                    config.randomness_seed.0,
+                    config.randomness_seed.1,
+                    config.randomness_seed.2,
+                    config.randomness_seed.3,
+                ),
             ),
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
             next_outbound_substream: if config.is_initiator {
