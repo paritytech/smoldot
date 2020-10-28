@@ -114,7 +114,7 @@ pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> +
             array.push(u8::try_from(value & 0xff).unwrap());
             value >>= 8;
         }
-        array[0] = (u8::try_from(array.len() - 1 - 4).unwrap() << 2) & 0b11;
+        array[0] = (u8::try_from(array.len() - 1 - 4).unwrap() << 2) | 0b11;
     }
 
     array
