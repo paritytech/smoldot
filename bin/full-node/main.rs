@@ -22,7 +22,6 @@ use std::{
     borrow::Cow,
     convert::TryFrom as _,
     fs,
-    path::PathBuf,
     time::Duration,
 };
 use structopt::StructOpt as _;
@@ -32,6 +31,7 @@ use substrate_lite::{
     network::{connection, multiaddr, peer_id::PeerId},
 };
 
+mod cli;
 mod network_service;
 mod sync_service;
 
@@ -40,79 +40,15 @@ fn main() {
     futures::executor::block_on(async_main())
 }
 
-#[derive(Debug, structopt::StructOpt)]
-struct CliOptions {
-    /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
-    #[structopt(long, default_value = "polkadot")]
-    chain: CliChain,
-    /// No output printed to stderr.
-    #[structopt(short, long)]
-    quiet: bool,
-    /// Coloring: auto, always, never
-    #[structopt(long, default_value = "auto")]
-    color: ColorChoice,
-}
-
-#[derive(Debug)]
-enum CliChain {
-    Polkadot,
-    Kusama,
-    Westend,
-    Custom(PathBuf),
-}
-
-impl core::str::FromStr for CliChain {
-    type Err = core::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "polkadot" {
-            Ok(CliChain::Polkadot)
-        } else if s == "kusama" {
-            Ok(CliChain::Kusama)
-        } else if s == "westend" {
-            Ok(CliChain::Westend)
-        } else {
-            Ok(CliChain::Custom(s.parse()?))
-        }
-    }
-}
-
-#[derive(Debug)]
-enum ColorChoice {
-    Always,
-    Auto,
-    Never,
-}
-
-impl core::str::FromStr for ColorChoice {
-    type Err = ColorChoiceParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "always" {
-            Ok(ColorChoice::Always)
-        } else if s == "auto" {
-            Ok(ColorChoice::Auto)
-        } else if s == "never" {
-            Ok(ColorChoice::Never)
-        } else {
-            Err(ColorChoiceParseError)
-        }
-    }
-}
-
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = "Color must be one of: always, auto, never")]
-struct ColorChoiceParseError;
-
 async fn async_main() {
-    let cli_options = CliOptions::from_args();
+    let cli_options = cli::CliOptions::from_args();
 
     let chain_spec = {
         let json: Cow<[u8]> = match cli_options.chain {
-            CliChain::Polkadot => (&include_bytes!("../polkadot.json")[..]).into(),
-            CliChain::Kusama => (&include_bytes!("../kusama.json")[..]).into(),
-            CliChain::Westend => (&include_bytes!("../westend.json")[..]).into(),
-            CliChain::Custom(path) => fs::read(&path).expect("Failed to read chain specs").into(),
+            cli::CliChain::Polkadot => (&include_bytes!("../polkadot.json")[..]).into(),
+            cli::CliChain::Kusama => (&include_bytes!("../kusama.json")[..]).into(),
+            cli::CliChain::Westend => (&include_bytes!("../westend.json")[..]).into(),
+            cli::CliChain::Custom(path) => fs::read(&path).expect("Failed to read chain specs").into(),
         };
 
         substrate_lite::chain_spec::ChainSpec::from_json_bytes(&json)
@@ -224,9 +160,9 @@ async fn async_main() {
                     let sync_state = sync_service.sync_state().await;
                     eprint!("{}\r", substrate_lite::informant::InformantLine {
                         enable_colors: match cli_options.color {
-                            ColorChoice::Always => true,
-                            ColorChoice::Auto => isatty::stderr_isatty(),
-                            ColorChoice::Never => false,
+                            cli::ColorChoice::Always => true,
+                            cli::ColorChoice::Auto => isatty::stderr_isatty(),
+                            cli::ColorChoice::Never => false,
                         },
                         chain_name: chain_spec.name(),
                         max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(80),
