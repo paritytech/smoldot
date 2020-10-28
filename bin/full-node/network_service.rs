@@ -457,12 +457,12 @@ async fn connection_task(
         }
     };
 
-    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to being
-    // sent out on the socket and waits a bit before flushing, in anticipation of more data being
-    // pushed. In the implementation below, it is guaranteed that the buffer in `WithBuffers` is
-    // filled with as much data as possible before the operating system gets involved.
-    // As such, we disable the Nagle algorithm, in order to avoid adding an artificial delay to
-    // all sends.
+    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
+    // out and waiting a bit before actually sending it out, in order to potentially merge
+    // multiple writes in a row into one packet. In the implementation below, it is guaranteed
+    // that the buffer in `WithBuffers` is filled with as much data as possible before the
+    // operating system gets involved. As such, we disable the Nagle algorithm, in order to avoid
+    // adding an artificial delay to all sends.
     let _ = tcp_socket.set_nodelay(true);
 
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
