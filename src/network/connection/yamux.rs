@@ -50,6 +50,7 @@
 
 // TODO: the code of this module is rather complicated; either simplify it or write a lot of tests, including fuzzing tests
 
+use alloc::vec::Vec;
 use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU32};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
 
@@ -142,7 +143,12 @@ impl<T> Yamux<T> {
         Yamux {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.capacity,
-                ahash::RandomState::with_seeds(config.randomness_seed.0, config.randomness_seed.1),
+                ahash::RandomState::with_seeds(
+                    config.randomness_seed.0,
+                    config.randomness_seed.1,
+                    config.randomness_seed.2,
+                    config.randomness_seed.3,
+                ),
             ),
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
             next_outbound_substream: if config.is_initiator {
@@ -875,7 +881,7 @@ pub struct Config {
     pub capacity: usize,
     /// Seed used for the randomness. Used to avoid HashDos attack and determines the order in
     /// which the data on substreams is sent out.
-    pub randomness_seed: (u64, u64),
+    pub randomness_seed: (u64, u64, u64, u64),
 }
 
 /// Reference to a substream within the [`Yamux`].
