@@ -440,7 +440,7 @@ impl PendingVerify {
 
             // These `unwrap()`s can only panic if `vrf_output` or `vrf_proof` are of the wrong
             // length, which we know can't happen as they're of types `[u8; 32]` and `[u8; 64]`.
-            let vrf_output = schnorrkel::vrf::VRFOutput::from_bytes(&vrf_output[..]).unwrap();
+            let vrf_output = schnorrkel::vrf::VRFPreOut::from_bytes(&vrf_output[..]).unwrap();
             let vrf_proof = schnorrkel::vrf::VRFProof::from_bytes(&vrf_proof[..]).unwrap();
 
             let (vrf_in_out, _) = signing_public_key
@@ -479,13 +479,13 @@ impl PendingVerify {
 
             // The expected authority index is `hash % num_authorities`.
             let expected_authority_index = {
-                let hash = primitive_types::U256::from_big_endian(hash.as_bytes());
-                let authorities_len = primitive_types::U256::from(epoch_info.0.authorities.len());
+                let hash = num_bigint::BigUint::from_bytes_be(hash.as_bytes());
+                let authorities_len = num_bigint::BigUint::from(epoch_info.0.authorities.len());
                 debug_assert_ne!(epoch_info.0.authorities.len(), 0);
                 hash % authorities_len
             };
 
-            if expected_authority_index.as_u32() != self.authority_index {
+            if u32::try_from(expected_authority_index).map_or(true, |v| v != self.authority_index) {
                 return Err(VerifyError::BadSecondarySlotAuthor);
             }
         }
@@ -541,7 +541,7 @@ fn calculate_primary_threshold(
     let p = num_rational::BigRational::from_float(1f64 - (1f64 - c).powf(theta)).unwrap();
     let numer = p.numer().to_biguint().unwrap();
     let denom = p.denom().to_biguint().unwrap();
-    ((num_bigint::BigUint::one() << 128) * numer / denom)
+    ((num_bigint::BigUint::one() << 128u32) * numer / denom)
         .to_u128()
         .unwrap()
 }

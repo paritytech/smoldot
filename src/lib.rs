@@ -181,15 +181,16 @@
 //! documentation.
 //! - A JSON-RPC client, in order to put a convenient-to-use UI on top of the client. See the
 //! [`json_rpc`] module.
-//! - A telemetry client, in order to report information to a telemetry server. See the
-//! [`telemetry`] module.
+//! - TODO: telemetry
 //!
 
 // TODO: for `no_std`, fix all the compilation errors caused by the copy-pasted code
-//#![cfg_attr(not(test), no_std)]
+//#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![recursion_limit = "1024"]
 
 extern crate alloc;
+
+use alloc::vec::Vec;
 
 pub mod chain;
 pub mod chain_spec;
@@ -200,9 +201,7 @@ pub mod header;
 pub mod informant;
 pub mod json_rpc;
 pub mod metadata;
-#[allow(warnings)] // TODO: temporary because code has been copy-pasted from Substrate
 pub mod network;
-pub mod telemetry;
 pub mod trie;
 pub mod verify;
 

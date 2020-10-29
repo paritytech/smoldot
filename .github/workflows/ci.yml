@@ -72,8 +72,13 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - run: cargo check --package substrate-lite --locked --no-default-features
+<<<<<<< HEAD
     - run: cargo check --package substrate-lite --locked --no-default-features --features os-networking
     - run: cargo check --package substrate-lite --locked --no-default-features --features sled
+=======
+    - run: cargo check --package substrate-lite --locked --no-default-features --features std
+    - run: cargo check --package substrate-lite --locked --no-default-features --features std --features wasm-bindings
+>>>>>>> upstream/main
     - run: cargo check --package substrate-lite --locked --no-default-features --features wasm-bindings
     - run: cargo check --package substrate-lite --locked --no-default-features --features os-networking --features sled
     - run: cargo check --package substrate-lite --locked --no-default-features --features os-networking --features wasm-bindings
