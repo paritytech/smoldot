@@ -18,10 +18,13 @@
 #![recursion_limit = "1024"]
 
 use futures::{channel::oneshot, prelude::*};
-use std::{borrow::Cow, convert::TryFrom as _, fs, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{
+    borrow::Cow, convert::TryFrom as _, fs, path::PathBuf, sync::Arc, thread, time::Duration,
+};
 use structopt::StructOpt as _;
 use substrate_lite::{
-    chain, chain_spec, database::full_sled,
+    chain, chain_spec,
+    database::full_sled,
     network::{connection, multiaddr, peer_id::PeerId},
 };
 
