@@ -18,16 +18,10 @@
 #![recursion_limit = "1024"]
 
 use futures::prelude::*;
-use std::{
-    borrow::Cow,
-    convert::TryFrom as _,
-    fs,
-    time::Duration,
-};
+use std::{borrow::Cow, convert::TryFrom as _, fs, time::Duration};
 use structopt::StructOpt as _;
 use substrate_lite::{
-    chain,
-    chain_spec,
+    chain, chain_spec,
     network::{connection, multiaddr, peer_id::PeerId},
 };
 
@@ -47,7 +41,9 @@ async fn async_main() {
             cli::CliChain::Polkadot => (&include_bytes!("../polkadot.json")[..]).into(),
             cli::CliChain::Kusama => (&include_bytes!("../kusama.json")[..]).into(),
             cli::CliChain::Westend => (&include_bytes!("../westend.json")[..]).into(),
-            cli::CliChain::Custom(path) => fs::read(&path).expect("Failed to read chain specs").into(),
+            cli::CliChain::Custom(path) => {
+                fs::read(&path).expect("Failed to read chain specs").into()
+            }
         };
 
         substrate_lite::chain_spec::ChainSpec::from_json_bytes(&json)
@@ -190,13 +186,19 @@ async fn async_main() {
 
             sync_message = sync_service.next_event().fuse() => {
                 match sync_message {
-                    sync_service::Event::BlocksRequest { target, request } => {
-                        let block_request = network_service.blocks_request(
+                    sync_service::Event::BlocksRequest { id, target, request } => {
+                        let block_request = network_service.clone().blocks_request(
                             target,
                             request
                         );
 
-                        todo!()
+                        threads_pool.spawn_ok({
+                            let sync_service = sync_service.clone();
+                            async move {
+                                let result = block_request.await;
+                                sync_service.answer_blocks_request(id, result).await;
+                            }
+                        });
                     }
                 }
             }

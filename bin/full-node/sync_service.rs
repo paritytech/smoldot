@@ -52,10 +52,15 @@ pub struct Config<'a> {
 #[derive(Debug)]
 pub enum Event {
     BlocksRequest {
+        id: BlocksRequestId,
         target: network::PeerId,
         request: network::protocol::BlocksRequestConfig,
     },
 }
+
+/// Identifier for a blocks request to be performed.
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct BlocksRequestId(usize);
 
 /// Summary of the state of the [`SyncService`].
 #[derive(Debug, Clone)]
@@ -76,6 +81,10 @@ pub struct SyncService {
 
     /// Receiver of events sent by the background task.
     from_background: Mutex<mpsc::Receiver<FromBackground>>,
+
+    /// For each emitted blocks request, an element is stored here.
+    blocks_requests:
+        Mutex<slab::Slab<oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>>>,
 }
 
 impl SyncService {
@@ -106,6 +115,7 @@ impl SyncService {
             sync_state,
             to_background: Mutex::new(to_background),
             from_background: Mutex::new(from_background),
+            blocks_requests: Mutex::new(slab::Slab::new()),
         })
     }
 
@@ -134,6 +144,27 @@ impl SyncService {
             .unwrap()
     }
 
+    /// Sets the answer to a previously-emitted [`Event::BlocksRequest`].
+    ///
+    /// After this has been called, the `id` is no longer valid.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the `id` is invalid.
+    ///
+    pub async fn answer_blocks_request(
+        &self,
+        id: BlocksRequestId,
+        response: Result<Vec<network::protocol::BlockData>, ()>,
+    ) {
+        let _ = self
+            .blocks_requests
+            .lock()
+            .await
+            .remove(id.0)
+            .send(response);
+    }
+
     /// Returns the next event that happened in the sync service.
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed
@@ -145,7 +176,14 @@ impl SyncService {
                     target,
                     request,
                     send_back,
-                } => todo!(),
+                } => {
+                    let id = BlocksRequestId(self.blocks_requests.lock().await.insert(send_back));
+                    return Event::BlocksRequest {
+                        id,
+                        target,
+                        request,
+                    };
+                }
             }
         }
     }
