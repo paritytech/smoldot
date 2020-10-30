@@ -52,6 +52,7 @@ use crate::network::leb128;
 
 use super::{multistream_select, noise, yamux};
 
+use alloc::vec::Vec;
 use core::{
     cmp, fmt, iter, mem,
     ops::{Add, Sub},
@@ -1240,5 +1241,5 @@ pub struct Config<TProtoList, TProto> {
     /// Name of the ping protocol on the network.
     pub ping_protocol: TProto,
     /// Seed used for the randomness specific to this connection.
-    pub randomness_seed: (u64, u64),
+    pub randomness_seed: (u64, u64, u64, u64),
 }

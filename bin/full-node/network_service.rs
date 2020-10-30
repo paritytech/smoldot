@@ -53,6 +53,12 @@ pub struct Config {
     /// network.
     pub bootstrap_nodes: Vec<(PeerId, Multiaddr)>,
 
+    /// Identifier of the chain to connect to.
+    ///
+    /// Each blockchain has (or should have) a different "protocol id". This value identifies the
+    /// chain, so as to not introduce conflicts in the networking messages.
+    pub protocol_id: String,
+
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specifications.
     /// Signed using the actual libp2p key.
@@ -68,6 +74,9 @@ pub enum Event {
 pub struct NetworkService {
     /// Fields behind a mutex.
     guarded: Mutex<Guarded>,
+
+    /// See [`Config::protocol_id`].
+    protocol_id: String,
 
     /// See [`Config::noise_key`].
     noise_key: Arc<connection::NoiseKey>,
@@ -193,6 +202,7 @@ impl NetworkService {
                 tasks_executor: config.tasks_executor,
                 peerset,
             }),
+            protocol_id: config.protocol_id,
             noise_key: Arc::new(config.noise_key),
             from_background: Mutex::new(from_background),
             to_foreground,
@@ -225,6 +235,8 @@ impl NetworkService {
 
         let (send_back, receive_result) = oneshot::channel();
 
+        let protocol = format!("/{}/sync/2", self.protocol_id);
+
         // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
         // It is possible for the channel to be closed, if the background task has ended but the
         // frontend hasn't processed this yet.
@@ -233,7 +245,11 @@ impl NetworkService {
             .connection_mut(connection)
             .unwrap()
             .into_user_data()
-            .send(ToConnection::BlocksRequest { config, send_back })
+            .send(ToConnection::BlocksRequest {
+                config,
+                protocol,
+                send_back,
+            })
             .await
             .map_err(|_| ())?;
 
@@ -368,6 +384,7 @@ enum ToConnection {
     /// Start a block request. See [`NetworkService::blocks_request`].
     BlocksRequest {
         config: protocol::BlocksRequestConfig,
+        protocol: String,
         send_back: oneshot::Sender<Result<Vec<protocol::BlockData>, ()>>,
     },
     OpenNotifications,
@@ -457,6 +474,14 @@ async fn connection_task(
         }
     };
 
+    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
+    // out and waiting a bit before actually sending it out, in order to potentially merge
+    // multiple writes in a row into one packet. In the implementation below, it is guaranteed
+    // that the buffer in `WithBuffers` is filled with as much data as possible before the
+    // operating system gets involved. As such, we disable the Nagle algorithm, in order to avoid
+    // adding an artificial delay to all sends.
+    let _ = tcp_socket.set_nodelay(true);
+
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
     // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
     // reading/writing the socket.
@@ -481,9 +506,9 @@ async fn connection_task(
     // The protocol names are hardcoded here.
     let mut connection = connection_prototype.into_connection::<_, oneshot::Sender<_>, (), _, _>(
         connection::established::Config {
-            in_request_protocols: iter::once("/foo"), // TODO: should be empty; hack because iterator type is identical to notification protocols list
-            in_notifications_protocols: iter::once("/dot/block-announces/1"), // TODO: correct protocolId
-            ping_protocol: "/ipfs/ping/1.0.0",
+            in_request_protocols: iter::once("/foo".to_string()), // TODO: should be empty; hack because iterator type is identical to notification protocols list
+            in_notifications_protocols: iter::once("/dot/block-announces/1".to_string()), // TODO: correct protocolId
+            ping_protocol: "/ipfs/ping/1.0.0".to_string(),
             randomness_seed: rand::random(),
         },
     );
@@ -582,20 +607,19 @@ async fn connection_task(
             },
             message = to_connection.select_next_some().fuse() => {
                 match message {
-                    ToConnection::BlocksRequest { config, send_back } => {
-                        let start = config.start.clone();
+                    ToConnection::BlocksRequest { config, protocol, send_back } => {
                         let request = protocol::build_block_request(config)
                             .fold(Vec::new(), |mut a, b| {
                                 a.extend_from_slice(b.as_ref());
                                 a
                             });
-                        connection.add_request(Instant::now(), "/dot/sync/2", request, send_back);
+                        connection.add_request(Instant::now(), protocol, request, send_back);
                     }
                     ToConnection::OpenNotifications => {
                         // TODO: finish
                         let id = connection.open_notifications_substream(
                             Instant::now(),
-                            "/dot/block-announces/1",
+                            "/dot/block-announces/1".to_string(),  // TODO: should contain correct ProtocolId
                             Vec::new(), // TODO:
                             ()
                         );

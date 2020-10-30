@@ -185,10 +185,12 @@
 //!
 
 // TODO: for `no_std`, fix all the compilation errors caused by the copy-pasted code
-//#![cfg_attr(not(test), no_std)]
+//#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![recursion_limit = "1024"]
 
 extern crate alloc;
+
+use alloc::vec::Vec;
 
 pub mod chain;
 pub mod chain_spec;
