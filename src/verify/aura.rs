@@ -99,6 +99,10 @@ pub enum VerifyError {
     TooFarInFuture,
     /// Block header signature is invalid.
     BadSignature,
+    /// Failed to parse ed25519 public key.
+    BadPublicKey,
+    /// List of authorities is empty.
+    EmptyAuthorities,
 }
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
@@ -156,7 +160,9 @@ pub fn verify_header<'a>(
     let (seal_signature, pre_seal_hash) = {
         let mut unsealed_header = config.header;
         let seal_signature = match unsealed_header.digest.pop_seal() {
-            Some(header::Seal::Aura(seal)) => ed25519_dalek::Signature::new(*seal),
+            Some(header::Seal::Aura(seal)) => {
+                schnorrkel::Signature::from_bytes(seal).map_err(|_| VerifyError::BadSignature)?
+            }
             _ => return Err(VerifyError::MissingSeal),
         };
         (seal_signature, unsealed_header.hash())
@@ -164,13 +170,17 @@ pub fn verify_header<'a>(
 
     // Fetch the authority that has supposedly signed the block.
     // It is assumed that no more than 2^64 authorities are passed.
+    if config.current_authorities.len() == 0 {
+        // Checked beforehand in order to not do a modulo 0 operation.
+        return Err(VerifyError::EmptyAuthorities);
+    }
     let signing_authority =
         usize::try_from(slot_number % u64::try_from(config.current_authorities.len()).unwrap())
             .unwrap();
 
     // This `unwrap()` can only panic if `public_key` is the wrong length, which we know can't
     // happen as it's of type `[u8; 32]`.
-    let signing_public_key = ed25519_dalek::PublicKey::from_bytes(
+    let authority_public_key = schnorrkel::PublicKey::from_bytes(
         config
             .current_authorities
             .nth(signing_authority)
@@ -180,8 +190,8 @@ pub fn verify_header<'a>(
     .unwrap();
 
     // Now verifying the signature in the seal.
-    signing_public_key
-        .verify_strict(&pre_seal_hash, &seal_signature)
+    authority_public_key
+        .verify_simple(b"substrate", &pre_seal_hash, &seal_signature)
         .map_err(|_| VerifyError::BadSignature)?;
 
     // Success! 🚀

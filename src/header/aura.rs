@@ -201,7 +201,7 @@ impl<'a> fmt::Debug for AuraAuthoritiesIter<'a> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct AuraAuthorityRef<'a> {
-    /// Ed25519 public key.
+    /// Sr25519 public key.
     pub public_key: &'a [u8; 32],
 }
 
@@ -225,7 +225,7 @@ impl<'a> From<&'a AuraAuthority> for AuraAuthorityRef<'a> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct AuraAuthority {
-    /// Er25519 public key.
+    /// Sr25519 public key.
     pub public_key: [u8; 32],
 }
 

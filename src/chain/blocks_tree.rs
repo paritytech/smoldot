@@ -71,7 +71,7 @@ use crate::{
 };
 
 use alloc::{sync::Arc, vec::Vec};
-use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU64};
+use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
 /// Configuration for the [`NonFinalizedTree`].
@@ -384,10 +384,14 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// If the verification succeeds, an [`HeaderInsert`] object might be returned which can be
     /// used to then insert the block in the chain.
+    ///
+    /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
+    /// come from the future.
     #[must_use]
     pub fn verify_header(
         &mut self,
         scale_encoded_header: Vec<u8>,
+        now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess<T>, HeaderVerifyError> {
         // TODO: lots of code here is duplicated from verify_body
 
@@ -469,26 +473,18 @@ impl<T> NonFinalizedTree<T> {
                     verify::header_only::ConfigConsensus::Aura {
                         // TODO: meh for allocating :-/
                         current_authorities: authorities_list.iter().map(|a| a.into()).collect(),
-                        now_from_unix_epoch: {
-                            // TODO: actually implement
-                            core::time::Duration::new(0, 0)
-                        },
+                        now_from_unix_epoch,
                         slot_duration: *slot_duration,
                     }
                 }
                 (
                     FinalizedConsensus::Babe { genesis_config, .. },
                     VerifyConsensusSpecific::Babe { block1_slot_number },
-                ) => {
-                    verify::header_only::ConfigConsensus::Babe {
-                        genesis_configuration: &genesis_config,
-                        block1_slot_number: *block1_slot_number,
-                        now_from_unix_epoch: {
-                            // TODO: actually implement
-                            core::time::Duration::new(0, 0)
-                        },
-                    }
-                }
+                ) => verify::header_only::ConfigConsensus::Babe {
+                    genesis_configuration: &genesis_config,
+                    block1_slot_number: *block1_slot_number,
+                    now_from_unix_epoch,
+                },
                 // TODO: don't panic! this is before any verification
                 _ => unreachable!(),
             },
@@ -686,7 +682,15 @@ impl<T> NonFinalizedTree<T> {
     /// finished or the process aborted, at which point the [`NonFinalizedTree`] can be retrieved
     /// back. The state of the [`NonFinalizedTree`] isn't modified until [`BodyInsert::insert`] is
     /// called after the end of the verification.
-    pub fn verify_body<I, E>(self, scale_encoded_header: Vec<u8>, body: I) -> BodyVerifyStep1<T, I>
+    ///
+    /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
+    /// come from the future.
+    pub fn verify_body<I, E>(
+        self,
+        scale_encoded_header: Vec<u8>,
+        now_from_unix_epoch: Duration,
+        body: I,
+    ) -> BodyVerifyStep1<T, I>
     where
         I: ExactSizeIterator<Item = E> + Clone,
         E: AsRef<[u8]> + Clone,
@@ -764,6 +768,7 @@ impl<T> NonFinalizedTree<T> {
             parent_tree_index,
             body,
             consensus,
+            now_from_unix_epoch,
         })
     }
 
@@ -1070,6 +1075,7 @@ pub struct BodyVerifyRuntimeRequired<T, I> {
     parent_tree_index: Option<fork_tree::NodeIndex>,
     body: I,
     consensus: VerifyConsensusSpecific,
+    now_from_unix_epoch: Duration,
 }
 
 impl<T, I, E> BodyVerifyRuntimeRequired<T, I>
@@ -1142,26 +1148,18 @@ where
                     verify::header_body::ConfigConsensus::Aura {
                         // TODO: meh for allocation
                         current_authorities: authorities_list.iter().map(|a| a.into()).collect(),
-                        now_from_unix_epoch: {
-                            // TODO: actually implement
-                            core::time::Duration::new(0, 0)
-                        },
+                        now_from_unix_epoch: self.now_from_unix_epoch,
                         slot_duration: *slot_duration,
                     }
                 }
                 (
                     FinalizedConsensus::Babe { genesis_config, .. },
                     VerifyConsensusSpecific::Babe { block1_slot_number },
-                ) => {
-                    verify::header_body::ConfigConsensus::Babe {
-                        genesis_configuration: &genesis_config,
-                        block1_slot_number: *block1_slot_number,
-                        now_from_unix_epoch: {
-                            // TODO: actually implement
-                            core::time::Duration::new(0, 0)
-                        },
-                    }
-                }
+                ) => verify::header_body::ConfigConsensus::Babe {
+                    genesis_configuration: &genesis_config,
+                    block1_slot_number: *block1_slot_number,
+                    now_from_unix_epoch: self.now_from_unix_epoch,
+                },
                 // TODO: don't panic /!\ this is before the verification
                 _ => unreachable!(),
             },

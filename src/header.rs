@@ -843,7 +843,7 @@ impl<'a> DigestItemRef<'a> {
                     });
 
                 let mut ret = vec![6];
-                ret.extend_from_slice(b"AURA");
+                ret.extend_from_slice(b"aura");
                 ret.extend_from_slice(util::encode_scale_compact_usize(encoded.len()).as_ref());
                 ret.extend_from_slice(&encoded);
                 iter::once(ret)
@@ -852,7 +852,7 @@ impl<'a> DigestItemRef<'a> {
                 assert_eq!(seal.len(), 64);
 
                 let mut ret = vec![5];
-                ret.extend_from_slice(b"AURA");
+                ret.extend_from_slice(b"aura");
                 ret.extend_from_slice(util::encode_scale_compact_usize(64).as_ref());
                 ret.extend_from_slice(seal);
                 iter::once(ret)
@@ -866,7 +866,7 @@ impl<'a> DigestItemRef<'a> {
                     });
 
                 let mut ret = vec![4];
-                ret.extend_from_slice(b"AURA");
+                ret.extend_from_slice(b"aura");
                 ret.extend_from_slice(util::encode_scale_compact_usize(encoded.len()).as_ref());
                 ret.extend_from_slice(&encoded);
                 iter::once(ret)
