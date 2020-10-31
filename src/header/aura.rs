@@ -134,6 +134,13 @@ enum AuraAuthoritiesIterInner<'a> {
     Raw(slice::Chunks<'a, u8>),
 }
 
+impl<'a> AuraAuthoritiesIter<'a> {
+    /// Builds an iterator corresponding to the given slice.
+    pub fn from_slice(slice: &'a [AuraAuthority]) -> Self {
+        AuraAuthoritiesIter(AuraAuthoritiesIterInner::List(slice.iter()))
+    }
+}
+
 impl<'a> Iterator for AuraAuthoritiesIter<'a> {
     type Item = AuraAuthorityRef<'a>;
 
