@@ -54,7 +54,7 @@ pub enum ConfigConsensus<'a> {
 
         /// Duration of a slot in seconds.
         /// Can be found by calling the `AuraApi_slot_duration` runtime function.
-        slot_duration: u64,
+        slot_duration: NonZeroU64,
 
         /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
         /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.

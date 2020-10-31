@@ -17,7 +17,7 @@
 
 //! AURA consensus.
 //!
-//! AURA, for Authority Round, is one of the consensus algorithm available for Substrate-based
+//! AURA, for Authority Round, is one of the consensus algorithm available to Substrate-based
 //! chains in order to determine who is authorized to generate a block.
 //!
 //! Every block (with the exception of the genesis block) must contain, in its header, some data
@@ -47,7 +47,7 @@
 
 use crate::header;
 
-use core::{convert::TryFrom as _, time::Duration};
+use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a, TAuthList> {
@@ -63,7 +63,6 @@ pub struct VerifyConfig<'a, TAuthList> {
 
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
-    // TODO: unused, should check against a block's slot
     pub now_from_unix_epoch: Duration,
 
     /// Aura authorities that must validate the block.
@@ -74,7 +73,7 @@ pub struct VerifyConfig<'a, TAuthList> {
 
     /// Duration of a slot in seconds.
     /// Can be found by calling the `AuraApi_slot_duration` runtime function.
-    pub slot_duration: u64,
+    pub slot_duration: NonZeroU64,
 }
 
 /// Information yielded back after successfully verifying a block.
@@ -96,6 +95,8 @@ pub enum VerifyError {
     ParentIsntAuraConsensus,
     /// Slot number must be strictly increasing between a parent and its child.
     SlotNumberNotIncreasing,
+    /// Slot number starts too far in the future.
+    TooFarInFuture,
     /// Block header signature is invalid.
     BadSignature,
 }
@@ -134,6 +135,21 @@ pub fn verify_header<'a>(
             return Err(VerifyError::SlotNumberNotIncreasing);
         }
     }
+
+    // Check that the slot number isn't a slot in the future.
+    // Since there might be a clock drift (either locally or on the authority that created the
+    // block), a tolerance period is added.
+    // If the local node is an authority itself, and the best block uses a slot number `N` seconds
+    // in the future, then for the next `N` seconds the local node won't produce any block. As
+    // such, a high tolerance level constitutes an attack vector.
+    {
+        const TOLERANCE: Duration = Duration::from_secs(30);
+        let current_slot =
+            (config.now_from_unix_epoch + TOLERANCE).as_secs() / config.slot_duration.get();
+        if slot_number > current_slot {
+            return Err(VerifyError::TooFarInFuture);
+        }
+    };
 
     // The signature in the seal applies to the header from where the signature isn't present.
     // Extract the signature and build the hash that is expected to be signed.

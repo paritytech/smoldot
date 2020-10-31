@@ -41,6 +41,7 @@
 use crate::{finality::grandpa, header};
 
 use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 pub mod babe;
 
@@ -161,7 +162,7 @@ pub enum ChainInformationConsensus {
         finalized_authorities_list: Vec<header::AuraAuthority>,
 
         /// Duration, in seconds, of an Aura slot.
-        slot_duration: u64,
+        slot_duration: NonZeroU64,
     },
 
     /// Chain is using the Babe consensus engine.
@@ -264,7 +265,7 @@ pub enum ChainInformationConsensusRef<'a> {
         finalized_authorities_list: header::AuraAuthoritiesIter<'a>,
 
         /// See equivalent field in [`ChainInformationConsensus`].
-        slot_duration: u64,
+        slot_duration: NonZeroU64,
     },
 
     /// Chain is using the Babe consensus engine.
