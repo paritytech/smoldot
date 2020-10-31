@@ -155,6 +155,15 @@ pub fn verify_header<'a>(
         }
     };
 
+    // Check whether there is an authority change in the block.
+    // This information is used in case of success.
+    let authorities_change = config.header.digest.logs().any(|item| {
+        matches!(
+            item,
+            header::DigestItemRef::AuraConsensus(header::AuraConsensusLogRef::AuthoritiesChange(_))
+        )
+    });
+
     // The signature in the seal applies to the header from where the signature isn't present.
     // Extract the signature and build the hash that is expected to be signed.
     let (seal_signature, pre_seal_hash) = {
@@ -195,7 +204,5 @@ pub fn verify_header<'a>(
         .map_err(|_| VerifyError::BadSignature)?;
 
     // Success! 🚀
-    Ok(VerifySuccess {
-        authorities_change: todo!(), // TODO:
-    })
+    Ok(VerifySuccess { authorities_change })
 }
