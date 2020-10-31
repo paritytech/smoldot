@@ -47,7 +47,7 @@
 
 use crate::header;
 
-use core::convert::TryFrom as _;
+use core::{convert::TryFrom as _, time::Duration};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a, TAuthList> {
@@ -60,6 +60,11 @@ pub struct VerifyConfig<'a, TAuthList> {
     ///
     /// The hash of this header must be the one referenced in [`VerifyConfig::header`].
     pub parent_block_header: header::HeaderRef<'a>,
+
+    /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
+    /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
+    // TODO: unused, should check against a block's slot
+    pub now_from_unix_epoch: Duration,
 
     /// Aura authorities that must validate the block.
     ///

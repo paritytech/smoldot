@@ -100,24 +100,31 @@ pub struct NonFinalizedTree<T> {
     /// number where the changes are to be triggered.
     grandpa_finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
 
-    /// Configuration for BABE, retrieved from the genesis block.
-    babe_genesis_config: chain_information::babe::BabeGenesisConfiguration,
+    /// State of the consensus of the finalized block.
+    finalized_consensus: FinalizedConsensus,
 
-    /// See [`chain_information::ChainInformation::babe_finalized_block_epoch_information`].
-    babe_finalized_block_epoch_information:
-        Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
-
-    /// See [`chain_information::ChainInformation::babe_finalized_next_epoch_transition`].
-    babe_finalized_next_epoch_transition:
-        Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
-
-    /// If block 1 is finalized, contains its slot number.
-    babe_finalized_block1_slot_number: Option<u64>,
     /// Container for non-finalized blocks.
     blocks: fork_tree::ForkTree<Block<T>>,
     /// Index within [`NonFinalizedTree::blocks`] of the current best block. `None` if and only
     /// if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,
+}
+
+/// State of the consensus of the finalized block.
+enum FinalizedConsensus {
+    Babe {
+        /// Configuration for BABE, retrieved from the genesis block.
+        genesis_config: chain_information::babe::BabeGenesisConfiguration,
+
+        /// See [`chain_information::ChainInformation::babe_finalized_block_epoch_information`].
+        block_epoch_information: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
+
+        /// See [`chain_information::ChainInformation::babe_finalized_next_epoch_transition`].
+        next_epoch_transition: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
+
+        /// If block 1 is finalized, contains its slot number.
+        block1_slot_number: Option<u64>,
+    },
 }
 
 struct Block<T> {
@@ -126,16 +133,24 @@ struct Block<T> {
     /// Cache of the hash of the block. Always equal to the hash of the header stored in this
     /// same struct.
     hash: [u8; 32],
-    /// If this block is block #1 of the chain, contains its babe slot number. Otherwise, contains
-    /// the slot number of the block #1 that is an ancestor of this block.
-    babe_block1_slot_number: u64,
-    /// Information about the Babe epoch the block belongs to. `None` if the block belongs to
-    /// epoch #0.
-    babe_current_epoch: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
-    /// Information about the Babe epoch the block belongs to.
-    babe_next_epoch: Arc<(header::BabeNextEpoch, header::BabeNextConfig)>,
+    /// Changes to the consensus made by the block.
+    consensus: BlockConsensus,
     /// Opaque data decided by the user.
     user_data: T,
+}
+
+/// Changes to the consensus made by a block.
+enum BlockConsensus {
+    Babe {
+        /// If this block is block #1 of the chain, contains its babe slot number. Otherwise, contains
+        /// the slot number of the block #1 that is an ancestor of this block.
+        block1_slot_number: u64,
+        /// Information about the Babe epoch the block belongs to. `None` if the block belongs to
+        /// epoch #0.
+        current_epoch: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
+        /// Information about the Babe epoch the block belongs to.
+        next_epoch: Arc<(header::BabeNextEpoch, header::BabeNextConfig)>,
+    },
 }
 
 impl<T> NonFinalizedTree<T> {
@@ -225,21 +240,23 @@ impl<T> NonFinalizedTree<T> {
                 .chain_information_config
                 .chain_information
                 .grandpa_finalized_scheduled_change,
-            babe_genesis_config: config.chain_information_config.babe_genesis_config,
-            babe_finalized_block1_slot_number: config
-                .chain_information_config
-                .chain_information
-                .babe_finalized_block1_slot_number,
-            babe_finalized_block_epoch_information: config
-                .chain_information_config
-                .chain_information
-                .babe_finalized_block_epoch_information
-                .map(Arc::new),
-            babe_finalized_next_epoch_transition: config
-                .chain_information_config
-                .chain_information
-                .babe_finalized_next_epoch_transition
-                .map(Arc::new),
+            finalized_consensus: FinalizedConsensus::Babe {
+                genesis_config: config.chain_information_config.babe_genesis_config,
+                block1_slot_number: config
+                    .chain_information_config
+                    .chain_information
+                    .babe_finalized_block1_slot_number,
+                block_epoch_information: config
+                    .chain_information_config
+                    .chain_information
+                    .babe_finalized_block_epoch_information
+                    .map(Arc::new),
+                next_epoch_transition: config
+                    .chain_information_config
+                    .chain_information
+                    .babe_finalized_next_epoch_transition
+                    .map(Arc::new),
+            },
             blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
             current_best: None,
         }

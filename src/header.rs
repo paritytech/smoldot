@@ -359,6 +359,16 @@ impl<'a> DigestRef<'a> {
         }
     }
 
+    /// Returns true if the list has any item that belong to the Aura consensus engine.
+    pub fn has_any_aura(&self) -> bool {
+        self.logs().any(|l| l.is_aura())
+    }
+
+    /// Returns true if the list has any item that belong to the Babe consensus engine.
+    pub fn has_any_babe(&self) -> bool {
+        self.logs().any(|l| l.is_babe())
+    }
+
     /// Returns the Aura seal digest item, if any.
     pub fn aura_seal(&self) -> Option<&'a [u8; 64]> {
         if let Some(aura_seal_index) = self.aura_seal_index {
@@ -797,6 +807,26 @@ pub enum DigestItemRef<'a> {
 }
 
 impl<'a> DigestItemRef<'a> {
+    /// True if the item is relevant to the Aura consensus engine.
+    pub fn is_aura(&self) -> bool {
+        match self {
+            DigestItemRef::AuraPreDigest(_) => true,
+            DigestItemRef::AuraSeal(_) => true,
+            DigestItemRef::AuraConsensus(_) => true,
+            _ => false,
+        }
+    }
+
+    /// True if the item is relevant to the Babe consensus engine.
+    pub fn is_babe(&self) -> bool {
+        match self {
+            DigestItemRef::BabePreDigest(_) => true,
+            DigestItemRef::BabeConsensus(_) => true,
+            DigestItemRef::BabeSeal(_) => true,
+            _ => false,
+        }
+    }
+
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that digest item.
     pub fn scale_encoding(
