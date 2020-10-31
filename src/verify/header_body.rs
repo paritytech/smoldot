@@ -126,7 +126,7 @@ pub fn verify<'a>(
     // BABE adds a seal at the end of the digest logs. This seal is guaranteed to be the last
     // item. We need to remove it before we can verify the unsealed header.
     let mut unsealed_header = config.block_header.clone();
-    let _seal_log = unsealed_header.digest.pop_babe_seal();
+    let _seal_log = unsealed_header.digest.pop_seal();
     debug_assert!(_seal_log.is_some());
 
     let import_process = execute_block::execute_block(execute_block::Config {

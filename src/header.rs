@@ -445,10 +445,9 @@ impl<'a> DigestRef<'a> {
         }
     }
 
-    /// If the last element of the list is a Babe seal, removes it from the [`DigestRef`].
-    // TODO: have a `Seal` enum or something, maybe?
-    pub fn pop_babe_seal(&mut self) -> Option<&'a [u8; 64]> {
-        let seal_pos = self.babe_seal_index?;
+    /// If the last element of the list is a seal, removes it from the [`DigestRef`].
+    pub fn pop_seal(&mut self) -> Option<Seal<'a>> {
+        let seal_pos = self.babe_seal_index.or(self.aura_seal_index)?;
 
         match &mut self.inner {
             DigestRefInner::Parsed(list) => {
@@ -459,7 +458,8 @@ impl<'a> DigestRef<'a> {
                 *list = &list[..seal_pos];
 
                 match item {
-                    DigestItem::BabeSeal(seal) => Some(seal),
+                    DigestItem::AuraSeal(seal) => Some(Seal::Aura(seal)),
+                    DigestItem::BabeSeal(seal) => Some(Seal::Babe(seal)),
                     _ => unreachable!(),
                 }
             }
@@ -495,7 +495,8 @@ impl<'a> DigestRef<'a> {
                 }
 
                 match iter.next() {
-                    Some(DigestItemRef::BabeSeal(seal)) => Some(seal),
+                    Some(DigestItemRef::AuraSeal(seal)) => Some(Seal::Aura(seal)),
+                    Some(DigestItemRef::BabeSeal(seal)) => Some(Seal::Babe(seal)),
                     _ => unreachable!(),
                 }
             }
@@ -642,6 +643,12 @@ impl<'a> From<&'a Digest> for DigestRef<'a> {
             babe_next_config_data_index: digest.babe_next_config_data_index,
         }
     }
+}
+
+/// Seal poped using [`DigestRef::pop_seal`].
+pub enum Seal<'a> {
+    Aura(&'a [u8; 64]),
+    Babe(&'a [u8; 64]),
 }
 
 /// Generic header digest.
