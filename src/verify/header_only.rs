@@ -82,7 +82,10 @@ pub enum ConfigConsensus<'a> {
 
 /// Block successfully verified.
 pub enum Success {
-    Aura,
+    Aura {
+        /// True if the list of authorities is modified by this block.
+        authorities_change: bool,
+    },
     Babe {
         /// If `Some`, the verified block contains an epoch transition describing the given epoch.
         /// This epoch transition must later be provided back as part of the [`Config`] when
@@ -159,7 +162,9 @@ pub fn verify<'a>(config: Config<'a>) -> Verify {
             });
 
             match result {
-                Ok(s) => Verify::Finished(Ok(Success::Aura)),
+                Ok(s) => Verify::Finished(Ok(Success::Aura {
+                    authorities_change: s.authorities_change,
+                })),
                 Err(err) => Verify::Finished(Err(Error::AuraVerification(err))),
             }
         }

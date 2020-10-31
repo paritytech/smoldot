@@ -118,7 +118,10 @@ pub struct Success {
 /// Extra items in [`Success`] relevant to the consensus engine.
 pub enum SuccessConsensus {
     /// Chain is using the Aura consensus engine.
-    Aura,
+    Aura {
+        /// True if the list of authorities is modified by this block.
+        authorities_change: bool,
+    },
 
     /// Chain is using the Babe consensus engine.
     Babe {
@@ -155,7 +158,7 @@ pub fn verify<'a>(
     config: Config<'a, impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
     // Start the consensus engine verification process.
-    let babe_verification = match config.consensus {
+    let (consensus_success, babe_verification) = match config.consensus {
         ConfigConsensus::Aura {
             current_authorities,
             slot_duration,
@@ -174,7 +177,12 @@ pub fn verify<'a>(
             });
 
             match result {
-                Ok(_) => None,
+                Ok(s) => (
+                    Some(SuccessConsensus::Aura {
+                        authorities_change: s.authorities_change,
+                    }),
+                    None,
+                ),
                 Err(err) => return Verify::Finished(Err(Error::AuraVerification(err))),
             }
         }
@@ -196,7 +204,7 @@ pub fn verify<'a>(
             });
 
             match result {
-                Ok(s) => Some(s),
+                Ok(s) => (None, Some(s)),
                 Err(err) => return Verify::Finished(Err(Error::BabeVerification(err))),
             }
         }
@@ -222,11 +230,13 @@ pub fn verify<'a>(
             babe_verification,
             import_process,
         }
-    } else {
+    } else if let Some(consensus_success) = consensus_success {
         VerifyInner::Unsealed {
             inner: import_process,
-            consensus_success: SuccessConsensus::Aura,
+            consensus_success,
         }
+    } else {
+        unreachable!()
     }
     .run()
 }

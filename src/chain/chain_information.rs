@@ -221,7 +221,7 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
     fn from(info: &'a ChainInformation) -> ChainInformationRef<'a> {
         ChainInformationRef {
             finalized_block_header: (&info.finalized_block_header).into(),
-            consensus: match info.consensus {
+            consensus: match &info.consensus {
                 ChainInformationConsensus::Aura {
                     finalized_authorities_list,
                     slot_duration,
@@ -229,14 +229,14 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
                     finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
                         &finalized_authorities_list,
                     ),
-                    slot_duration,
+                    slot_duration: *slot_duration,
                 },
                 ChainInformationConsensus::Babe {
                     finalized_block1_slot_number,
                     finalized_block_epoch_information,
                     finalized_next_epoch_transition,
                 } => ChainInformationConsensusRef::Babe {
-                    finalized_block1_slot_number: finalized_block1_slot_number,
+                    finalized_block1_slot_number: *finalized_block1_slot_number,
                     finalized_block_epoch_information: finalized_block_epoch_information
                         .as_ref()
                         .map(|(i, c)| (i.into(), *c)),

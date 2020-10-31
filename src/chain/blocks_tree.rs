@@ -314,7 +314,7 @@ impl<T> NonFinalizedTree<T> {
     pub fn as_chain_information(&self) -> chain_information::ChainInformationRef {
         chain_information::ChainInformationRef {
             finalized_block_header: (&self.finalized_block_header).into(),
-            consensus: match self.finalized_consensus {
+            consensus: match &self.finalized_consensus {
                 FinalizedConsensus::Aura {
                     authorities_list,
                     slot_duration,
@@ -322,7 +322,7 @@ impl<T> NonFinalizedTree<T> {
                     finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
                         &authorities_list,
                     ),
-                    slot_duration,
+                    slot_duration: *slot_duration,
                 },
                 FinalizedConsensus::Babe {
                     block1_slot_number,
@@ -330,7 +330,7 @@ impl<T> NonFinalizedTree<T> {
                     next_epoch_transition,
                     ..
                 } => chain_information::ChainInformationConsensusRef::Babe {
-                    finalized_block1_slot_number: block1_slot_number,
+                    finalized_block1_slot_number: *block1_slot_number,
                     finalized_block_epoch_information: block_epoch_information
                         .as_ref()
                         .map(|info| ((&info.0).into(), info.1)),
@@ -435,23 +435,25 @@ impl<T> NonFinalizedTree<T> {
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
         let consensus_specific = if let Some(parent_tree_index) = parent_tree_index {
-            match self.blocks.get(parent_tree_index).unwrap().consensus {
-                BlockConsensus::Aura { authorities_list } => {
-                    VerifyConsensusSpecific::Aura { authorities_list }
-                }
+            match &self.blocks.get(parent_tree_index).unwrap().consensus {
+                BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
+                    authorities_list: authorities_list.clone(),
+                },
                 BlockConsensus::Babe {
                     block1_slot_number, ..
                 } => VerifyConsensusSpecific::Babe {
-                    block1_slot_number: Some(block1_slot_number),
+                    block1_slot_number: Some(*block1_slot_number),
                 },
             }
         } else {
             // Can only happen if parent is the block #0.
             assert_eq!(decoded_header.number, 1);
-            match self.finalized_consensus {
+            match &self.finalized_consensus {
                 FinalizedConsensus::Aura {
                     authorities_list, ..
-                } => VerifyConsensusSpecific::Aura { authorities_list },
+                } => VerifyConsensusSpecific::Aura {
+                    authorities_list: authorities_list.clone(),
+                },
                 FinalizedConsensus::Babe { .. } => VerifyConsensusSpecific::Babe {
                     block1_slot_number: None,
                 },
@@ -459,7 +461,7 @@ impl<T> NonFinalizedTree<T> {
         };
 
         let mut process = verify::header_only::verify(verify::header_only::Config {
-            consensus: match (self.finalized_consensus, consensus_specific) {
+            consensus: match (&self.finalized_consensus, &consensus_specific) {
                 (
                     FinalizedConsensus::Aura { slot_duration, .. },
                     VerifyConsensusSpecific::Aura { authorities_list },
@@ -471,27 +473,24 @@ impl<T> NonFinalizedTree<T> {
                             // TODO: actually implement
                             core::time::Duration::new(0, 0)
                         },
-                        slot_duration,
+                        slot_duration: *slot_duration,
                     }
                 }
                 (
-                    FinalizedConsensus::Babe {
-                        next_epoch_transition,
-                        block_epoch_information,
-                        genesis_config,
-                        ..
-                    },
+                    FinalizedConsensus::Babe { genesis_config, .. },
                     VerifyConsensusSpecific::Babe { block1_slot_number },
                 ) => {
                     verify::header_only::ConfigConsensus::Babe {
                         genesis_configuration: &genesis_config,
-                        block1_slot_number,
+                        block1_slot_number: *block1_slot_number,
                         now_from_unix_epoch: {
                             // TODO: actually implement
                             core::time::Duration::new(0, 0)
                         },
                     }
                 }
+                // TODO: don't panic! this is before any verification
+                _ => unreachable!(),
             },
             block_header: decoded_header.clone(),
             parent_block_header: parent_block_header.into(),
@@ -522,7 +521,7 @@ impl<T> NonFinalizedTree<T> {
                             _ => unreachable!(),
                         }
                     } else if epoch_info_rq.same_epoch_as_parent() {
-                        match self.finalized_consensus {
+                        match &self.finalized_consensus {
                             FinalizedConsensus::Babe {
                                 block_epoch_information,
                                 ..
@@ -530,7 +529,7 @@ impl<T> NonFinalizedTree<T> {
                             _ => unreachable!(),
                         }
                     } else {
-                        match self.finalized_consensus {
+                        match &self.finalized_consensus {
                             FinalizedConsensus::Babe {
                                 next_epoch_transition,
                                 ..
@@ -557,74 +556,110 @@ impl<T> NonFinalizedTree<T> {
             true
         };
 
-        let babe_block1_slot_number = block1_slot_number.unwrap_or_else(|| {
-            debug_assert_eq!(decoded_header.number, 1);
-            result.slot_number
-        });
-
-        let babe_current_epoch = if result.babe_epoch_transition_target.is_some() {
-            if let Some(parent_tree_index) = parent_tree_index {
-                Some(
-                    self.blocks
-                        .get(parent_tree_index)
-                        .unwrap()
-                        .babe_next_epoch
-                        .clone(),
-                )
-            } else {
-                self.babe_finalized_next_epoch_transition.clone()
-            }
-        } else if let Some(parent_tree_index) = parent_tree_index {
-            self.blocks
-                .get(parent_tree_index)
-                .unwrap()
-                .babe_current_epoch
-                .clone()
-        } else {
-            self.babe_finalized_block_epoch_information.clone()
-        };
-
-        let babe_next_epoch = match (
-            decoded_header.digest.babe_epoch_information(),
-            parent_tree_index,
-            &self.babe_finalized_next_epoch_transition,
+        let consensus = match (
+            result,
+            consensus_specific,
+            &self.finalized_consensus,
+            parent_tree_index.map(|idx| &self.blocks.get(idx).unwrap().consensus),
         ) {
-            (Some((ref new_epoch, Some(new_config))), _, _) => {
-                Arc::new((new_epoch.clone().into(), new_config))
+            (
+                verify::header_only::Success::Aura { authorities_change },
+                VerifyConsensusSpecific::Aura {
+                    authorities_list: parent_authorities,
+                },
+                FinalizedConsensus::Aura { .. },
+                _,
+            ) => {
+                if authorities_change {
+                    BlockConsensus::Aura {
+                        authorities_list: todo!(), // TODO: fetch from header
+                    }
+                } else {
+                    BlockConsensus::Aura {
+                        authorities_list: parent_authorities,
+                    }
+                }
             }
-            (Some((ref new_epoch, None)), Some(parent_tree_index), _) => {
-                let new_config = self
-                    .blocks
-                    .get(parent_tree_index)
-                    .unwrap()
-                    .babe_next_epoch
-                    .1
-                    .clone();
-                Arc::new((new_epoch.clone().into(), new_config))
+
+            (
+                verify::header_only::Success::Babe {
+                    epoch_number,
+                    epoch_transition_target,
+                    slot_number,
+                },
+                VerifyConsensusSpecific::Babe { block1_slot_number },
+                FinalizedConsensus::Babe {
+                    block_epoch_information: finalized_block_epoch_information,
+                    next_epoch_transition: finalized_next_epoch_transition,
+                    genesis_config: babe_genesis_config,
+                    ..
+                },
+                parent_babe,
+            ) => {
+                let block1_slot_number = block1_slot_number.unwrap_or_else(|| {
+                    debug_assert_eq!(decoded_header.number, 1);
+                    slot_number
+                });
+
+                let current_epoch = if epoch_transition_target.is_some() {
+                    if let Some(BlockConsensus::Babe { next_epoch, .. }) = parent_babe {
+                        Some(next_epoch.clone())
+                    } else {
+                        finalized_next_epoch_transition.clone()
+                    }
+                } else if let Some(BlockConsensus::Babe { current_epoch, .. }) = parent_babe {
+                    current_epoch.clone()
+                } else {
+                    finalized_block_epoch_information.clone()
+                };
+
+                let next_epoch = match (
+                    decoded_header.digest.babe_epoch_information(),
+                    parent_babe,
+                    &finalized_next_epoch_transition,
+                ) {
+                    (Some((ref new_epoch, Some(new_config))), _, _) => {
+                        Arc::new((new_epoch.clone().into(), new_config))
+                    }
+                    (
+                        Some((ref new_epoch, None)),
+                        Some(BlockConsensus::Babe { next_epoch, .. }),
+                        _,
+                    ) => {
+                        let new_config = next_epoch.1.clone();
+                        Arc::new((new_epoch.clone().into(), new_config))
+                    }
+                    (Some((ref new_epoch, None)), None, Some(finalized_next)) => {
+                        Arc::new((new_epoch.clone().into(), finalized_next.1))
+                    }
+                    (Some((ref new_epoch, None)), None, None) => Arc::new((
+                        new_epoch.clone().into(),
+                        babe_genesis_config.epoch0_configuration(),
+                    )),
+                    (None, Some(BlockConsensus::Babe { next_epoch, .. }), _) => next_epoch.clone(),
+                    (None, None, _) => {
+                        // Block 1 always contains a Babe epoch transition. Consequently, this block
+                        // can't be reached for block 1.
+                        // `babe_finalized_next_epoch_transition` is `None` only if the finalized
+                        // block is 0.
+                        // `babe_finalized_next_epoch_transition` is therefore always `Some`
+                        // Q.E.D.
+                        debug_assert_ne!(decoded_header.number, 1);
+                        finalized_next_epoch_transition.clone().unwrap()
+                    }
+                    (_, Some(BlockConsensus::Aura { .. }), _) => unreachable!(),
+                };
+
+                BlockConsensus::Babe {
+                    block1_slot_number,
+                    current_epoch,
+                    next_epoch,
+                }
             }
-            (Some((ref new_epoch, None)), None, Some(finalized_next)) => {
-                Arc::new((new_epoch.clone().into(), finalized_next.1))
-            }
-            (Some((ref new_epoch, None)), None, None) => Arc::new((
-                new_epoch.clone().into(),
-                self.babe_genesis_config.epoch0_configuration(),
-            )),
-            (None, Some(parent_tree_index), _) => self
-                .blocks
-                .get(parent_tree_index)
-                .unwrap()
-                .babe_next_epoch
-                .clone(),
-            (None, None, _) => {
-                // Block 1 always contains a Babe epoch transition. Consequently, this block
-                // can't be reached for block 1.
-                // `babe_finalized_next_epoch_transition` is `None` only if the finalized
-                // block is 0.
-                // `babe_finalized_next_epoch_transition` is therefore always `Some`
-                // Q.E.D.
-                debug_assert_ne!(decoded_header.number, 1);
-                self.babe_finalized_next_epoch_transition.clone().unwrap()
-            }
+
+            // Any mismatch between consensus algorithms should have been detected by the
+            // block verification.
+            _ => unreachable!(),
         };
 
         Ok(HeaderVerifySuccess::Insert {
@@ -636,9 +671,7 @@ impl<T> NonFinalizedTree<T> {
                 is_new_best,
                 header: decoded_header.into(),
                 hash,
-                babe_block1_slot_number,
-                babe_current_epoch,
-                babe_next_epoch,
+                consensus,
             },
         })
     }
@@ -697,26 +730,31 @@ impl<T> NonFinalizedTree<T> {
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
         let consensus = if let Some(parent_tree_index) = parent_tree_index {
-            match self.blocks.get(parent_tree_index).unwrap().consensus {
-                BlockConsensus::Aura { authorities_list } => {
-                    VerifyConsensusSpecific::Aura { authorities_list }
-                }
+            match &self.blocks.get(parent_tree_index).unwrap().consensus {
+                BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
+                    authorities_list: authorities_list.clone(),
+                },
                 BlockConsensus::Babe {
                     block1_slot_number, ..
                 } => VerifyConsensusSpecific::Babe {
-                    block1_slot_number: Some(block1_slot_number),
+                    block1_slot_number: Some(*block1_slot_number),
                 },
             }
         } else {
-            // Can only happen if parent is the block #0.
-            assert_eq!(decoded_header.number, 1);
-            match self.finalized_consensus {
+            match &self.finalized_consensus {
                 FinalizedConsensus::Aura {
                     authorities_list, ..
-                } => VerifyConsensusSpecific::Aura { authorities_list },
-                FinalizedConsensus::Babe { .. } => VerifyConsensusSpecific::Babe {
-                    block1_slot_number: None,
+                } => VerifyConsensusSpecific::Aura {
+                    authorities_list: authorities_list.clone(),
                 },
+                FinalizedConsensus::Babe {
+                    block1_slot_number, ..
+                } => {
+                    assert!(block1_slot_number.is_some() || decoded_header.number == 1);
+                    VerifyConsensusSpecific::Babe {
+                        block1_slot_number: *block1_slot_number,
+                    }
+                }
             }
         };
 
@@ -924,7 +962,10 @@ impl<T> NonFinalizedTree<T> {
 
         let new_finalized_block = self.blocks.get_mut(block_index).unwrap();
 
-        match (&mut self.finalized_consensus, new_finalized_block.consensus) {
+        match (
+            &mut self.finalized_consensus,
+            &new_finalized_block.consensus,
+        ) {
             (
                 FinalizedConsensus::Aura {
                     authorities_list, ..
@@ -952,8 +993,8 @@ impl<T> NonFinalizedTree<T> {
                 *next_epoch_transition = Some(next_epoch.clone());
 
                 if block1_slot_number.is_none() {
-                    debug_assert!(self.finalized_block_header.number >= 1);
-                    *block1_slot_number = Some(new_block1_slot_number);
+                    debug_assert!(new_finalized_block.header.number >= 1);
+                    *block1_slot_number = Some(*new_block1_slot_number);
                 }
             }
             // Any mismatch of consensus engines between the chain and the newly-finalized block
@@ -1093,7 +1134,7 @@ where
 
         let process = verify::header_body::verify(verify::header_body::Config {
             parent_runtime,
-            consensus: match (self.chain.finalized_consensus, self.consensus) {
+            consensus: match (&self.chain.finalized_consensus, &self.consensus) {
                 (
                     FinalizedConsensus::Aura { slot_duration, .. },
                     VerifyConsensusSpecific::Aura { authorities_list },
@@ -1105,27 +1146,24 @@ where
                             // TODO: actually implement
                             core::time::Duration::new(0, 0)
                         },
-                        slot_duration,
+                        slot_duration: *slot_duration,
                     }
                 }
                 (
-                    FinalizedConsensus::Babe {
-                        next_epoch_transition,
-                        block_epoch_information,
-                        genesis_config,
-                        ..
-                    },
+                    FinalizedConsensus::Babe { genesis_config, .. },
                     VerifyConsensusSpecific::Babe { block1_slot_number },
                 ) => {
                     verify::header_body::ConfigConsensus::Babe {
                         genesis_configuration: &genesis_config,
-                        block1_slot_number,
+                        block1_slot_number: *block1_slot_number,
                         now_from_unix_epoch: {
                             // TODO: actually implement
                             core::time::Duration::new(0, 0)
                         },
                     }
                 }
+                // TODO: don't panic /!\ this is before the verification
+                _ => unreachable!(),
             },
             block_header: (&self.header).into(),
             parent_block_header: parent_block_header.into(),
@@ -1206,84 +1244,114 @@ impl<T> BodyVerifyStep2<T> {
                         true
                     };
 
-                    let babe_block1_slot_number = chain.block1_slot_number.unwrap_or_else(|| {
-                        debug_assert_eq!(chain.header.number, 1);
-                        success.slot_number
-                    });
-
-                    let babe_current_epoch = if success.babe_epoch_transition_target.is_some() {
-                        if let Some(parent_tree_index) = chain.parent_tree_index {
-                            Some(
-                                chain
-                                    .chain
-                                    .blocks
-                                    .get(parent_tree_index)
-                                    .unwrap()
-                                    .babe_next_epoch
-                                    .clone(),
-                            )
-                        } else {
-                            chain.chain.babe_finalized_next_epoch_transition.clone()
-                        }
-                    } else if let Some(parent_tree_index) = chain.parent_tree_index {
+                    let consensus = match (
+                        success.consensus,
+                        &chain.consensus,
+                        &chain.chain.finalized_consensus,
                         chain
-                            .chain
-                            .blocks
-                            .get(parent_tree_index)
-                            .unwrap()
-                            .babe_current_epoch
-                            .clone()
-                    } else {
-                        chain.chain.babe_finalized_block_epoch_information.clone()
-                    };
-
-                    let babe_next_epoch = match (
-                        chain.header.digest.babe_epoch_information(),
-                        chain.parent_tree_index,
-                        &chain.chain.babe_finalized_next_epoch_transition,
+                            .parent_tree_index
+                            .map(|idx| &chain.chain.blocks.get(idx).unwrap().consensus),
                     ) {
-                        (Some((ref new_epoch, Some(new_config))), _, _) => {
-                            Arc::new((new_epoch.clone().into(), new_config))
+                        (
+                            verify::header_body::SuccessConsensus::Aura { authorities_change },
+                            VerifyConsensusSpecific::Aura {
+                                authorities_list: parent_authorities,
+                            },
+                            FinalizedConsensus::Aura { .. },
+                            _,
+                        ) => {
+                            if authorities_change {
+                                BlockConsensus::Aura {
+                                    authorities_list: todo!(), // TODO: fetch from header
+                                }
+                            } else {
+                                BlockConsensus::Aura {
+                                    authorities_list: parent_authorities.clone(),
+                                }
+                            }
                         }
-                        (Some((ref new_epoch, None)), Some(parent_tree_index), _) => {
-                            let new_config = chain
-                                .chain
-                                .blocks
-                                .get(parent_tree_index)
-                                .unwrap()
-                                .babe_next_epoch
-                                .1
-                                .clone();
-                            Arc::new((new_epoch.clone().into(), new_config))
+
+                        (
+                            verify::header_body::SuccessConsensus::Babe {
+                                babe_epoch_transition_target: epoch_transition_target,
+                                slot_number,
+                                ..
+                            },
+                            VerifyConsensusSpecific::Babe { block1_slot_number },
+                            FinalizedConsensus::Babe {
+                                block_epoch_information: finalized_block_epoch_information,
+                                next_epoch_transition: finalized_next_epoch_transition,
+                                genesis_config: babe_genesis_config,
+                                ..
+                            },
+                            parent_babe,
+                        ) => {
+                            let block1_slot_number = block1_slot_number.unwrap_or_else(|| {
+                                debug_assert_eq!(chain.header.number, 1);
+                                slot_number
+                            });
+
+                            let current_epoch = if epoch_transition_target.is_some() {
+                                if let Some(BlockConsensus::Babe { next_epoch, .. }) = parent_babe {
+                                    Some(next_epoch.clone())
+                                } else {
+                                    finalized_next_epoch_transition.clone()
+                                }
+                            } else if let Some(BlockConsensus::Babe { current_epoch, .. }) =
+                                parent_babe
+                            {
+                                current_epoch.clone()
+                            } else {
+                                finalized_block_epoch_information.clone()
+                            };
+
+                            let next_epoch = match (
+                                chain.header.digest.babe_epoch_information(),
+                                parent_babe,
+                                &finalized_next_epoch_transition,
+                            ) {
+                                (Some((ref new_epoch, Some(new_config))), _, _) => {
+                                    Arc::new((new_epoch.clone().into(), new_config))
+                                }
+                                (
+                                    Some((ref new_epoch, None)),
+                                    Some(BlockConsensus::Babe { next_epoch, .. }),
+                                    _,
+                                ) => {
+                                    let new_config = next_epoch.1.clone();
+                                    Arc::new((new_epoch.clone().into(), new_config))
+                                }
+                                (Some((ref new_epoch, None)), None, Some(finalized_next)) => {
+                                    Arc::new((new_epoch.clone().into(), finalized_next.1))
+                                }
+                                (Some((ref new_epoch, None)), None, None) => Arc::new((
+                                    new_epoch.clone().into(),
+                                    babe_genesis_config.epoch0_configuration(),
+                                )),
+                                (None, Some(BlockConsensus::Babe { next_epoch, .. }), _) => {
+                                    next_epoch.clone()
+                                }
+                                (None, None, _) => {
+                                    // Block 1 always contains a Babe epoch transition. Consequently, this block
+                                    // can't be reached for block 1.
+                                    // `babe_finalized_next_epoch_transition` is `None` only if the finalized
+                                    // block is 0.
+                                    // `babe_finalized_next_epoch_transition` is therefore always `Some`
+                                    // Q.E.D.
+                                    debug_assert_ne!(chain.header.number, 1);
+                                    finalized_next_epoch_transition.clone().unwrap()
+                                }
+                                (_, Some(BlockConsensus::Aura { .. }), _) => unreachable!(),
+                            };
+
+                            BlockConsensus::Babe {
+                                block1_slot_number,
+                                current_epoch,
+                                next_epoch,
+                            }
                         }
-                        (Some((ref new_epoch, None)), None, Some(finalized_next)) => {
-                            Arc::new((new_epoch.clone().into(), finalized_next.1))
-                        }
-                        (Some((ref new_epoch, None)), None, None) => Arc::new((
-                            new_epoch.clone().into(),
-                            chain.chain.babe_genesis_config.epoch0_configuration(),
-                        )),
-                        (None, Some(parent_tree_index), _) => chain
-                            .chain
-                            .blocks
-                            .get(parent_tree_index)
-                            .unwrap()
-                            .babe_next_epoch
-                            .clone(),
-                        (None, None, _) => {
-                            // Block 1 always contains a Babe epoch transition. Consequently, this block
-                            // can't be reached for block 1.
-                            // `babe_finalized_next_epoch_transition` is `None` only if the finalized
-                            // block is 0.
-                            // `babe_finalized_next_epoch_transition` is therefore always `Some`
-                            // Q.E.D.
-                            debug_assert_ne!(chain.header.number, 1);
-                            chain
-                                .chain
-                                .babe_finalized_next_epoch_transition
-                                .clone()
-                                .unwrap()
-                        }
+
+                        _ => unreachable!(),
                     };
 
                     let hash = chain.header.hash();
@@ -1299,9 +1367,7 @@ impl<T> BodyVerifyStep2<T> {
                             is_new_best,
                             header: chain.header,
                             hash,
-                            babe_block1_slot_number,
-                            babe_current_epoch,
-                            babe_next_epoch,
+                            consensus,
                         }),
                     };
                 }
@@ -1324,7 +1390,7 @@ impl<T> BodyVerifyStep2<T> {
                             _ => unreachable!(),
                         }
                     } else if epoch_info_rq.same_epoch_as_parent() {
-                        match chain.chain.finalized_consensus {
+                        match &chain.chain.finalized_consensus {
                             FinalizedConsensus::Babe {
                                 block_epoch_information,
                                 ..
@@ -1332,7 +1398,7 @@ impl<T> BodyVerifyStep2<T> {
                             _ => unreachable!(),
                         }
                     } else {
-                        match chain.chain.finalized_consensus {
+                        match &chain.chain.finalized_consensus {
                             FinalizedConsensus::Babe {
                                 next_epoch_transition,
                                 ..
@@ -1565,9 +1631,7 @@ pub struct HeaderInsert<'c, T> {
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
     hash: [u8; 32],
-    babe_block1_slot_number: u64,
-    babe_current_epoch: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
-    babe_next_epoch: Arc<(header::BabeNextEpoch, header::BabeNextConfig)>,
+    consensus: BlockConsensus,
 }
 
 impl<'c, T> HeaderInsert<'c, T> {
@@ -1578,9 +1642,7 @@ impl<'c, T> HeaderInsert<'c, T> {
             Block {
                 header: self.header,
                 hash: self.hash,
-                babe_block1_slot_number: self.babe_block1_slot_number,
-                babe_current_epoch: self.babe_current_epoch,
-                babe_next_epoch: self.babe_next_epoch,
+                consensus: self.consensus,
                 user_data,
             },
         );
@@ -1745,9 +1807,7 @@ pub struct BodyInsert<T> {
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
     hash: [u8; 32],
-    babe_block1_slot_number: u64,
-    babe_current_epoch: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
-    babe_next_epoch: Arc<(header::BabeNextEpoch, header::BabeNextConfig)>,
+    consensus: BlockConsensus,
 }
 
 impl<T> BodyInsert<T> {
@@ -1763,9 +1823,7 @@ impl<T> BodyInsert<T> {
             Block {
                 header: self.header,
                 hash: self.hash,
-                babe_block1_slot_number: self.babe_block1_slot_number,
-                babe_current_epoch: self.babe_current_epoch,
-                babe_next_epoch: self.babe_next_epoch,
+                consensus: self.consensus,
                 user_data,
             },
         );
