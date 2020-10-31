@@ -123,10 +123,10 @@ enum FinalizedConsensus {
         /// Configuration for BABE, retrieved from the genesis block.
         genesis_config: chain_information::babe::BabeGenesisConfiguration,
 
-        /// See [`chain_information::ChainInformation::babe_finalized_block_epoch_information`].
+        /// See [`chain_information::ChainInformationConsensus::Babe::finalized_block_epoch_information`].
         block_epoch_information: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
 
-        /// See [`chain_information::ChainInformation::babe_finalized_next_epoch_transition`].
+        /// See [`chain_information::ChainInformationConsensus::Babe::finalized_next_epoch_transition`].
         next_epoch_transition: Option<Arc<(header::BabeNextEpoch, header::BabeNextConfig)>>,
 
         /// If block 1 is finalized, contains its slot number.

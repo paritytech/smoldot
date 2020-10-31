@@ -85,7 +85,7 @@ pub enum ConfigConsensus<'a> {
         /// Slot number of block #1. **Must** be provided, unless the block being verified is block
         /// #1 itself.
         ///
-        /// Must be the value of [`Success::slot_number`] for block #1.
+        /// Must be the value of [`SuccessConsensus::Babe::slot_number`] for block #1.
         block1_slot_number: Option<u64>,
 
         /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.

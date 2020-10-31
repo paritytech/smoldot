@@ -107,13 +107,9 @@ pub enum VerifyError {
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
 ///
-/// Returns either a [`PendingVerify`] if more information is needed, or a [`VerifySuccess`] if
-/// the verification could be successfully performed.
-///
 /// # Panic
 ///
 /// Panics if `config.parent_block_header` is invalid.
-/// Panics if `config.block1_slot_number` is `None` and `config.header.number` is not 1.
 ///
 pub fn verify_header<'a>(
     mut config: VerifyConfig<'a, impl ExactSizeIterator<Item = header::AuraAuthorityRef<'a>>>,
