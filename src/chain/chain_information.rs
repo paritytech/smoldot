@@ -43,6 +43,7 @@ use crate::{finality::grandpa, header};
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
+pub mod aura;
 pub mod babe;
 
 /// Information about the latest finalized block and state found in its ancestors.
@@ -87,7 +88,7 @@ impl ChainInformation {
     ///
     /// Must be passed a closure that returns the storage value corresponding to the given key in
     /// the genesis block storage.
-    pub fn from_genesis_storage<'a>(
+    fn from_genesis_storage<'a>(
         genesis_storage: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
     ) -> Result<Self, FromGenesisStorageError> {
         let grandpa_genesis_config =
@@ -309,7 +310,44 @@ impl ChainInformationConfig {
         })
         .ok(); // TODO: differentiate between errors and lack of Babe
 
-        let chain_information = ChainInformation::from_genesis_storage(genesis_storage)?;
+        let grandpa_genesis_config =
+            grandpa::chain_config::GrandpaGenesisConfiguration::from_genesis_storage(|key| {
+                genesis_storage
+                    .clone()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_owned())
+            })
+            .unwrap();
+
+        let consensus = if babe_genesis_config.is_some() {
+            ChainInformationConsensus::Babe {
+                finalized_block1_slot_number: None,
+                finalized_block_epoch_information: None,
+                finalized_next_epoch_transition: None,
+            }
+        } else {
+            // If not Babe, we assume Aura.
+            let aura_genesis_config = aura::AuraGenesisConfiguration::from_genesis_storage(|k| {
+                genesis_storage
+                    .clone()
+                    .find(|(k2, _)| *k2 == k)
+                    .map(|(_, v)| v.to_owned())
+            })
+            .unwrap(); // TODO: don't unwrap
+
+            ChainInformationConsensus::Aura {
+                finalized_authorities_list: aura_genesis_config.authorities_list,
+                slot_duration: aura_genesis_config.slot_duration,
+            }
+        };
+
+        let chain_information = ChainInformation {
+            finalized_block_header: crate::calculate_genesis_block_header(genesis_storage),
+            consensus,
+            grandpa_after_finalized_block_authorities_set_id: 0,
+            grandpa_finalized_scheduled_change: None,
+            grandpa_finalized_triggered_authorities: grandpa_genesis_config.initial_authorities,
+        };
 
         Ok(ChainInformationConfig {
             chain_information,

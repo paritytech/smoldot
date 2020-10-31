@@ -36,12 +36,7 @@ impl<'a> AuraConsensusLogRef<'a> {
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
         Ok(match slice.get(0) {
             Some(1) => {
-                if (slice.len() - 1) % 32 != 0 {
-                    return Err(Error::BadAuraAuthoritiesListLen);
-                }
-                AuraConsensusLogRef::AuthoritiesChange(AuraAuthoritiesIter(
-                    AuraAuthoritiesIterInner::Raw(slice[1..].chunks(32)),
-                ))
+                AuraConsensusLogRef::AuthoritiesChange(AuraAuthoritiesIter::decode(&slice[1..])?)
             }
             Some(2) => AuraConsensusLogRef::OnDisabled(
                 u32::decode_all(&slice[1..]).map_err(Error::DigestItemDecodeError)?,
@@ -135,6 +130,21 @@ enum AuraAuthoritiesIterInner<'a> {
 }
 
 impl<'a> AuraAuthoritiesIter<'a> {
+    /// Decodes a list of authorities from a SCALE-encoded blob of data.
+    pub fn decode(data: &'a [u8]) -> Result<Self, Error> {
+        let (data, num_items) =
+            util::nom_scale_compact_usize::<(&'a [u8], nom::error::ErrorKind)>(data)
+                .map_err(|_| Error::TooShort)?;
+
+        if data.len() != num_items * 32 {
+            return Err(Error::BadAuraAuthoritiesListLen);
+        }
+
+        Ok(AuraAuthoritiesIter(AuraAuthoritiesIterInner::Raw(
+            data.chunks(32),
+        )))
+    }
+
     /// Builds an iterator corresponding to the given slice.
     pub fn from_slice(slice: &'a [AuraAuthority]) -> Self {
         AuraAuthoritiesIter(AuraAuthoritiesIterInner::List(slice.iter()))

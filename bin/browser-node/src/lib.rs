@@ -92,7 +92,7 @@ pub async fn start_client(chain_spec: String) -> Result<BrowserLightClient, JsVa
                     .find(|(k2, _)| *k2 == k)
                     .map(|(_, v)| v.to_owned())
             })
-            .unwrap();
+            .ok();
 
             chain::chain_information::ChainInformationConfig {
                 chain_information: i,
