@@ -1087,20 +1087,20 @@ fn decode_item_from_parts<'a>(
     content: &'a [u8],
 ) -> Result<DigestItemRef<'a>, Error> {
     Ok(match (index, engine_id) {
-        (4, b"AURA") => DigestItemRef::AuraConsensus(AuraConsensusLogRef::from_slice(content)?),
+        (4, b"aura") => DigestItemRef::AuraConsensus(AuraConsensusLogRef::from_slice(content)?),
         (4, b"BABE") => DigestItemRef::BabeConsensus(BabeConsensusLogRef::from_slice(content)?),
         (4, b"FRNK") => {
             DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(content)?)
         }
         (4, e) => return Err(Error::UnknownConsensusEngine(*e)),
-        (5, b"AURA") => DigestItemRef::AuraSeal({
+        (5, b"aura") => DigestItemRef::AuraSeal({
             TryFrom::try_from(content).map_err(|_| Error::BadAuraSealLength)?
         }),
         (5, b"BABE") => DigestItemRef::BabeSeal({
             TryFrom::try_from(content).map_err(|_| Error::BadBabeSealLength)?
         }),
         (5, e) => return Err(Error::UnknownConsensusEngine(*e)),
-        (6, b"AURA") => DigestItemRef::AuraPreDigest(AuraPreDigest::from_slice(content)?),
+        (6, b"aura") => DigestItemRef::AuraPreDigest(AuraPreDigest::from_slice(content)?),
         (6, b"BABE") => DigestItemRef::BabePreDigest(BabePreDigestRef::from_slice(content)?),
         (6, e) => return Err(Error::UnknownConsensusEngine(*e)),
         _ => unreachable!(),

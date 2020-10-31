@@ -358,6 +358,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
 
                 Inner::Step1(blocks_tree::BodyVerifyStep1::InvalidHeader(chain, error)) => {
                     // TODO: DRY
+                    println!("invalid header: {:?}", error);  // TODO: remove
                     let sync = shared
                         .to_process
                         .report
