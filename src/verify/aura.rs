@@ -71,7 +71,7 @@ pub struct VerifyConfig<'a, TAuthList> {
     /// authorities, equal to that new modified list.
     pub current_authorities: TAuthList,
 
-    /// Duration of a slot in seconds.
+    /// Duration of a slot in milliseconds.
     /// Can be found by calling the `AuraApi_slot_duration` runtime function.
     pub slot_duration: NonZeroU64,
 }
@@ -145,7 +145,7 @@ pub fn verify_header<'a>(
     {
         const TOLERANCE: Duration = Duration::from_secs(30);
         let current_slot =
-            (config.now_from_unix_epoch + TOLERANCE).as_secs() / config.slot_duration.get();
+            (config.now_from_unix_epoch + TOLERANCE).as_secs() * 1000 / config.slot_duration.get();
         if slot_number > current_slot {
             return Err(VerifyError::TooFarInFuture);
         }

@@ -162,7 +162,7 @@ pub enum ChainInformationConsensus {
         /// [`ChainInformation::finalized_block_header`].
         finalized_authorities_list: Vec<header::AuraAuthority>,
 
-        /// Duration, in seconds, of an Aura slot.
+        /// Duration, in milliseconds, of an Aura slot.
         slot_duration: NonZeroU64,
     },
 

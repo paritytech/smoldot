@@ -116,7 +116,7 @@ enum FinalizedConsensus {
         /// List of authorities that must sign the child of the finalized block.
         authorities_list: Arc<Vec<header::AuraAuthority>>,
 
-        /// Duration, in seconds, of a slot.
+        /// Duration, in milliseconds, of a slot.
         slot_duration: NonZeroU64,
     },
     Babe {

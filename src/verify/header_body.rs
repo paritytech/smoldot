@@ -66,7 +66,7 @@ pub enum ConfigConsensus<'a> {
         // TODO: consider not using a Vec
         current_authorities: Vec<header::AuraAuthorityRef<'a>>,
 
-        /// Duration of a slot in seconds.
+        /// Duration of a slot in milliseconds.
         /// Can be found by calling the `AuraApi_slot_duration` runtime function.
         slot_duration: NonZeroU64,
 
