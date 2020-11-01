@@ -15,8 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Builds upon the functionnalities of the [`externals`] module and implements some of the
-//! external calls.
+//! Builds upon the functionnalities of [`externals::ExternalsVm`] module and implements some of
+//! the external calls.
 //!
 //! In details, this module:
 //!
@@ -446,8 +446,8 @@ struct Inner {
     /// Pending changes to the offchain storage that this execution performs.
     offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 
-    /// Cache passed by the user in the [`Config`]. Always `Some` except when we are currently
-    /// calculating the trie state root.
+    /// Cache passed by the user. Always `Some` except when we are currently calculating the trie
+    /// state root.
     top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// Trie root calculation in progress.
