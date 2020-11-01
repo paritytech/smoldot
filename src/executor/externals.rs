@@ -230,15 +230,16 @@ pub enum ExternalsVm {
     /// still SCALE-encoded), or an error if the call has failed.
     #[from]
     CallRuntimeVersion(CallRuntimeVersion),
-    /// Declares the start of a storage transaction.
+    /// Declares the start of a storage transaction. See [`ExternalsVm::EndStorageTransaction`].
     ///
     /// Guaranteed by the code in this module to never happen while already within a transaction.
     /// If the runtime attempts to start a nested transaction, an [`ExternalsVm::Error`] is
     /// generated instead.
     #[from]
     StartStorageTransaction(StartStorageTransaction),
-    /// Ends a storage transaction. All changes made since the previous
-    /// [`ExternalsVm::StartTransaction`] must be rolled back if `rollback` is true.
+    /// Ends a storage transaction. All changes made to the storage (e.g. through a
+    /// [`ExternalsVm::ExternalStorageSet`]) since the previous [`ExternalsVm::StartTransaction`]
+    /// must be rolled back if `rollback` is true.
     ///
     /// Guaranteed by the code in this module to never happen if no transaction is in progress.
     /// If the runtime attempts to end a non-existing transaction, an [`ExternalsVm::Error`] is
