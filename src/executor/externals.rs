@@ -238,8 +238,8 @@ pub enum ExternalsVm {
     #[from]
     StartStorageTransaction(StartStorageTransaction),
     /// Ends a storage transaction. All changes made to the storage (e.g. through a
-    /// [`ExternalsVm::ExternalStorageSet`]) since the previous [`ExternalsVm::StartTransaction`]
-    /// must be rolled back if `rollback` is true.
+    /// [`ExternalsVm::ExternalStorageSet`]) since the previous
+    /// [`ExternalsVm::StartStorageTransaction`] must be rolled back if `rollback` is true.
     ///
     /// Guaranteed by the code in this module to never happen if no transaction is in progress.
     /// If the runtime attempts to end a non-existing transaction, an [`ExternalsVm::Error`] is
