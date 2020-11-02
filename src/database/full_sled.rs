@@ -24,7 +24,10 @@
 #![cfg(feature = "database-sled")]
 #![cfg_attr(docsrs, doc(cfg(feature = "database-sled")))]
 
-use crate::{chain::chain_information::ChainInformation, header};
+use crate::{
+    chain::chain_information::{ChainInformation, ChainInformationConsensus},
+    header,
+};
 
 use core::{convert::TryFrom as _, fmt, iter, ops};
 use sled::Transactional as _;
@@ -493,9 +496,12 @@ impl SledFullDatabase {
 
                 Ok(ChainInformation {
                     finalized_block_header,
-                    babe_finalized_block1_slot_number,
-                    babe_finalized_block_epoch_information,
-                    babe_finalized_next_epoch_transition,
+                    // TODO: don't assume Babe
+                    consensus: ChainInformationConsensus::Babe {
+                        finalized_block1_slot_number: babe_finalized_block1_slot_number,
+                        finalized_block_epoch_information: babe_finalized_block_epoch_information,
+                        finalized_next_epoch_transition: babe_finalized_next_epoch_transition,
+                    },
                     grandpa_after_finalized_block_authorities_set_id,
                     grandpa_finalized_triggered_authorities,
                     grandpa_finalized_scheduled_change,
