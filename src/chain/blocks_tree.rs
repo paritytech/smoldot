@@ -78,7 +78,7 @@ use hashbrown::HashMap;
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Information about the latest finalized block and its ancestors.
-    pub chain_information_config: chain_information::ChainInformationConfig,
+    pub chain_information: chain_information::ChainInformation,
 
     /// Pre-allocated size of the chain, in number of non-finalized blocks.
     pub blocks_capacity: usize,
@@ -179,15 +179,10 @@ impl<T> NonFinalizedTree<T> {
             finalized_next_epoch_transition,
             finalized_block_epoch_information,
             finalized_block1_slot_number,
-        } = &config.chain_information_config.chain_information.consensus
+            ..
+        } = &config.chain_information.consensus
         {
-            if config
-                .chain_information_config
-                .chain_information
-                .finalized_block_header
-                .number
-                >= 1
-            {
+            if config.chain_information.finalized_block_header.number >= 1 {
                 assert!(finalized_block1_slot_number.is_some());
                 assert!(finalized_next_epoch_transition.is_some());
             } else {
@@ -196,16 +191,9 @@ impl<T> NonFinalizedTree<T> {
             }
         }
 
-        if config
-            .chain_information_config
-            .chain_information
-            .finalized_block_header
-            .number
-            == 0
-        {
+        if config.chain_information.finalized_block_header.number == 0 {
             assert_eq!(
                 config
-                    .chain_information_config
                     .chain_information
                     .grandpa_after_finalized_block_authorities_set_id,
                 0
@@ -214,47 +202,29 @@ impl<T> NonFinalizedTree<T> {
 
         // TODO: also check that babe_finalized_block_epoch_information is None if and only if block is in epoch #0
 
-        let finalized_block_hash = config
-            .chain_information_config
-            .chain_information
-            .finalized_block_header
-            .hash();
+        let finalized_block_hash = config.chain_information.finalized_block_header.hash();
 
         if let Some(scheduled) = config
-            .chain_information_config
             .chain_information
             .grandpa_finalized_scheduled_change
             .as_ref()
         {
-            assert!(
-                scheduled.0
-                    > config
-                        .chain_information_config
-                        .chain_information
-                        .finalized_block_header
-                        .number
-            );
+            assert!(scheduled.0 > config.chain_information.finalized_block_header.number);
         }
 
         NonFinalizedTree {
-            finalized_block_header: config
-                .chain_information_config
-                .chain_information
-                .finalized_block_header,
+            finalized_block_header: config.chain_information.finalized_block_header,
             finalized_block_hash,
             grandpa_after_finalized_block_authorities_set_id: config
-                .chain_information_config
                 .chain_information
                 .grandpa_after_finalized_block_authorities_set_id,
             grandpa_finalized_triggered_authorities: config
-                .chain_information_config
                 .chain_information
                 .grandpa_finalized_triggered_authorities,
             grandpa_finalized_scheduled_change: config
-                .chain_information_config
                 .chain_information
                 .grandpa_finalized_scheduled_change,
-            finalized_consensus: match config.chain_information_config.chain_information.consensus {
+            finalized_consensus: match config.chain_information.consensus {
                 chain_information::ChainInformationConsensus::Aura {
                     finalized_authorities_list,
                     slot_duration,

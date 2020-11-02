@@ -131,7 +131,7 @@
 //! information contained in an ancestor of the block being verified must be provided.
 //!
 
-use crate::{chain::chain_information::babe::BabeGenesisConfiguration, header};
+use crate::{chain::chain_information, header};
 
 use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
 use num_traits::{cast::ToPrimitive as _, identities::One as _};
@@ -141,11 +141,6 @@ pub struct VerifyConfig<'a> {
     /// Header of the block to verify.
     pub header: header::HeaderRef<'a>,
 
-    /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
-    /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
-    // TODO: unused, should check against a block's slot
-    pub now_from_unix_epoch: Duration,
-
     /// Header of the parent of the block to verify.
     ///
     /// [`start_verify_header`] assumes that this block has been successfully verified before.
@@ -153,33 +148,25 @@ pub struct VerifyConfig<'a> {
     /// The hash of this header must be the one referenced in [`VerifyConfig::header`].
     pub parent_block_header: header::HeaderRef<'a>,
 
-    /// BABE configuration retrieved from the genesis block.
-    ///
-    /// Can be obtained by calling [`BabeGenesisConfiguration::from_virtual_machine_prototype`]
-    /// with the runtime of the genesis block.
-    pub genesis_configuration: &'a BabeGenesisConfiguration,
+    /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
+    /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
+    // TODO: unused, should check against a block's slot
+    pub now_from_unix_epoch: Duration,
 
-    /// Slot number of block #1. **Must** be provided, unless the block being verified is block
-    /// #1 itself.
-    pub block1_slot_number: Option<u64>,
+    /// Number of slots per epoch in the Babe configuration.
+    pub slots_per_epoch: NonZeroU64,
 }
 
 /// Information yielded back after successfully verifying a block.
 #[derive(Debug)]
 pub struct VerifySuccess {
     /// Slot number the block belongs to.
-    // TODO: the info is already in the header, maybe replace this field with a `header::BabePreDigestRef`?
     pub slot_number: u64,
-
-    /// Epoch number the block belongs to.
-    pub epoch_number: u64,
 
     /// If `Some`, the verified block contains an epoch transition describing the given epoch.
     /// This epoch transition must later be provided back when calling [`PendingVerify::finish`]
     /// when verifying blocks that are part of that epoch.
-    ///
-    /// > **Note**: If `Some`, the value is always equal to [`VerifySuccess::epoch_number`] + 1.
-    pub epoch_transition_target: Option<NonZeroU64>,
+    pub epoch_transition_target: Option<(u64, chain_information::BabeEpochInformation)>,
 }
 
 /// Failure to verify a block.
@@ -221,7 +208,7 @@ pub enum VerifyError {
 /// Panics if `config.parent_block_header` is invalid.
 /// Panics if `config.block1_slot_number` is `None` and `config.header.number` is not 1.
 ///
-pub fn start_verify_header<'a>(config: VerifyConfig<'a>) -> Result<SuccessOrPending, VerifyError> {
+pub fn start_verify_header<'a>(config: VerifyConfig<'a>) -> Result<PendingVerify, VerifyError> {
     // TODO: handle OnDisabled
 
     // Gather the BABE-related information from the header.
@@ -245,17 +232,8 @@ pub fn start_verify_header<'a>(config: VerifyConfig<'a>) -> Result<SuccessOrPend
         None => return Err(VerifyError::MissingPreRuntimeDigest),
     };
 
-    // Determine the epoch number the block we verify belongs to.
-    let epoch_number = match (slot_number, config.block1_slot_number) {
-        (curr, Some(block1)) => {
-            slot_number_to_epoch(curr, config.genesis_configuration, block1).unwrap()
-        } // TODO: don't unwrap
-        (_, None) if config.header.number == 1 => 0,
-        (_, None) => panic!(), // Bad `VerifyConfig`.
-    };
-
-    // Determine the epoch number of the parent block. `None` if the parent is the genesis block.
-    let parent_epoch_number = if config.parent_block_header.number != 0 {
+    // Make sure that the slot of the block is increasing compared to its parent's.
+    let parent_slot_number = if config.parent_block_header.number != 0 {
         let parent_slot_number = match config.parent_block_header.digest.babe_pre_runtime() {
             Some(pr) => pr.slot_number(),
             None => return Err(VerifyError::ParentIsntBabeConsensus),
@@ -265,40 +243,24 @@ pub fn start_verify_header<'a>(config: VerifyConfig<'a>) -> Result<SuccessOrPend
             return Err(VerifyError::SlotNumberNotIncreasing);
         }
 
-        Some(
-            slot_number_to_epoch(
-                parent_slot_number,
-                config.genesis_configuration,
-                config.block1_slot_number.unwrap(),
-            )
-            .unwrap(),
-        )
+        Some(parent_slot_number)
     } else {
         None
     };
 
-    // Extract the epoch change information stored in the header, if any.
-    let epoch_transition_target = config
+    // Check whether the block contains an epoch transition.
+    // If so, store it for later.
+    let epoch_transition = config
         .header
         .digest
         .babe_epoch_information()
-        .map(|_| NonZeroU64::new(epoch_number + 1).unwrap());
+        .map(|(i, c)| (i.into(), c));
 
     // TODO: in case of epoch change, should also check the randomness value; while the runtime
     //       checks that the randomness value is correct, light clients in particular do not
     //       execute the runtime
 
-    // Make sure that the expected epoch transitions correspond to what the blocks report.
-    match (
-        &epoch_transition_target,
-        Some(epoch_number) != parent_epoch_number,
-    ) {
-        (Some(_), true) => {}
-        (None, false) => {}
-        (Some(_), false) => return Err(VerifyError::UnexpectedEpochChangeLog),
-        (None, true) => return Err(VerifyError::MissingEpochChangeLog),
-    };
-
+    // Signature contained in the seal is copied and stored for later.
     let seal_signature = match config.header.digest.babe_seal() {
         Some(seal) => {
             schnorrkel::Signature::from_bytes(seal).map_err(|_| VerifyError::BadSignature)?
@@ -308,6 +270,7 @@ pub fn start_verify_header<'a>(config: VerifyConfig<'a>) -> Result<SuccessOrPend
 
     // The signature in the seal applies to the header from where the signature isn't present.
     // Build the hash that is expected to be signed.
+    // The signature cannot be verified yet, as the public key of the signer isn't known.
     let pre_seal_hash = {
         let mut unsealed_header = config.header;
         let _popped = unsealed_header.digest.pop_seal();
@@ -316,37 +279,18 @@ pub fn start_verify_header<'a>(config: VerifyConfig<'a>) -> Result<SuccessOrPend
     };
 
     // Intermediary object representing the state of the verification at this point.
-    let pending = PendingVerify {
+    Ok(PendingVerify {
         pre_seal_hash,
         seal_signature,
-        epoch_transition_target,
-        epoch_number,
+        epoch_transition,
+        parent_slot_number,
+        is_block1: config.header.number == 1,
         slot_number,
         authority_index,
         primary_slot_claim: primary,
         vrf_output_and_proof: vrf,
-    };
-
-    // The information about epoch number 0 is never given by any block and is instead found in
-    // the BABE genesis configuration.
-    Ok(if epoch_number == 0 {
-        SuccessOrPending::Success(pending.finish((
-            From::from(&config.genesis_configuration.epoch0_information),
-            config.genesis_configuration.epoch0_configuration,
-        ))?)
-    } else {
-        SuccessOrPending::Pending(pending)
+        slots_per_epoch: config.slots_per_epoch,
     })
-}
-
-/// Verification in progress. The block is **not** fully verified yet. You must call
-/// [`PendingVerify::finish`] in order to finish the verification.
-#[must_use]
-pub enum SuccessOrPending {
-    /// Need information about an epoch in order to finish verifying the block.
-    Pending(PendingVerify),
-    /// Block has been successfully verified.
-    Success(VerifySuccess),
 }
 
 /// Verification in progress. The block is **not** fully verified yet. You must call
@@ -357,11 +301,13 @@ pub struct PendingVerify {
     pre_seal_hash: [u8; 32],
     /// Block signature contained in the header that we verify.
     seal_signature: schnorrkel::Signature,
-    /// If `Some`, block is at an epoch transition.
+    /// If `true`, block contains an epoch transition.
     /// This can only happen for blocks that are the first block of an epoch.
-    epoch_transition_target: Option<NonZeroU64>,
-    /// Epoch number the block belongs to.
-    epoch_number: u64,
+    epoch_transition: Option<(header::BabeNextEpoch, Option<header::BabeNextConfig>)>,
+    /// Slot number of the parent of the block. `None` if the parent is block 0.
+    parent_slot_number: Option<u64>,
+    /// True if the block being verified has number 1.
+    is_block1: bool,
     /// Slot number the block belongs to.
     slot_number: u64,
     /// Index of the authority that has signed the block, according to the block header.
@@ -371,28 +317,27 @@ pub struct PendingVerify {
     /// VRF output and proof contained in the block header. Cannot be `None` if
     /// `primary_slot_claim` is true.
     vrf_output_and_proof: Option<([u8; 32], [u8; 64])>,
+    /// Value passed by [`Config::slots_per_epoch`].
+    slots_per_epoch: NonZeroU64,
 }
 
 impl PendingVerify {
-    /// Returns the epoch number whose information must be passed to [`PendingVerify::finish`].
-    pub fn epoch_number(&self) -> u64 {
-        self.epoch_number
-    }
-
-    /// Returns true if the epoch of the verified block is the same as its parent's.
+    /// Returns true if the epoch of the block being verified is the same as its parent's.
     pub fn same_epoch_as_parent(&self) -> bool {
-        self.epoch_transition_target.is_none()
+        self.epoch_transition.is_none()
     }
 
-    /// Finishes the verification. Must provide the information about the epoch whose number is
-    /// obtained with [`PendingVerify::epoch_number`].
+    /// Finishes the verification. If [`PendingVerify::same_epoch_as_parent`] returns true, must
+    /// provide the information about the epoch the parent belongs to. Otherwise, must provide the
+    /// information about the following epoch.
     pub fn finish(
         self,
-        epoch_info: (header::BabeNextEpochRef, header::BabeNextConfig),
+        epoch_info: chain_information::BabeEpochInformationRef,
+        epoch_info_start_slot: Option<u64>,
     ) -> Result<VerifySuccess, VerifyError> {
         // Check that the claim is one of the allowed slot types.
         match (
-            epoch_info.1.allowed_slots,
+            epoch_info.allowed_slots,
             self.primary_slot_claim,
             self.vrf_output_and_proof,
         ) {
@@ -403,9 +348,49 @@ impl PendingVerify {
             _ => return Err(VerifyError::ForbiddenSlotType),
         }
 
+        // If the passed epoch starts after the block to verify, it means that the verification
+        // code got fooled into thinking that the block to verify is supposed to be the start of a
+        // new epoch while it is not.
+        if epoch_info
+            .start_slot_number
+            .map_or(!self.is_block1, |n| n > self.slot_number)
+        {
+            return Err(VerifyError::UnexpectedEpochChangeLog);
+        }
+
+        // TODO: check MissingEpochChangeLog ; this is quite complicated because we don't know at which slot epoch #0 ends
+
+        // If the block contains an epoch transition, build the information about the new epoch.
+        let epoch_transition_target = match self.epoch_transition {
+            None => None,
+            Some((info, None)) => Some(chain_information::BabeEpochInformation {
+                epoch_index: epoch_info.epoch_index.checked_add(1).unwrap(),
+                start_slot_number: Some(
+                    epoch_info_start_slot
+                        .checked_add(self.slots_per_epoch.get())
+                        .unwrap(),
+                ),
+                authorities: info.authorities,
+                randomness: info.randomness,
+                c: epoch_info.c,
+                allowed_slots: epoch_info.allowed_slots,
+            }),
+            Some((info, Some(config))) => Some(chain_information::BabeEpochInformation {
+                epoch_index: epoch_info.epoch_index.checked_add(1).unwrap(),
+                start_slot_number: Some(
+                    epoch_info_start_slot
+                        .checked_add(self.slots_per_epoch.get())
+                        .unwrap(),
+                ),
+                authorities: info.authorities,
+                randomness: info.randomness,
+                c: config.c,
+                allowed_slots: config.allowed_slots,
+            }),
+        };
+
         // Fetch the authority that has supposedly signed the block.
         let signing_authority = epoch_info
-            .0
             .authorities
             .clone()
             .nth(
@@ -433,8 +418,8 @@ impl PendingVerify {
             let transcript = {
                 let mut transcript = merlin::Transcript::new(&b"BABE"[..]);
                 transcript.append_u64(b"slot number", self.slot_number);
-                transcript.append_u64(b"current epoch", self.epoch_number);
-                transcript.append_message(b"chain randomness", &epoch_info.0.randomness[..]);
+                transcript.append_u64(b"current epoch", epoch_info.epoch_index);
+                transcript.append_message(b"chain randomness", &epoch_info.randomness[..]);
                 transcript
             };
 
@@ -451,8 +436,8 @@ impl PendingVerify {
             // a certain threshold, otherwise all the authorities could claim all the slots.
             if self.primary_slot_claim {
                 let threshold = calculate_primary_threshold(
-                    epoch_info.1.c,
-                    epoch_info.0.authorities.clone().map(|a| a.weight),
+                    epoch_info.c,
+                    epoch_info.authorities.clone().map(|a| a.weight),
                     signing_authority.weight,
                 );
                 if u128::from_le_bytes(vrf_in_out.make_bytes::<[u8; 16]>(b"substrate-babe-vrf"))
@@ -472,7 +457,7 @@ impl PendingVerify {
             // Expected author is determined based on `blake2(randomness | slot_number)`.
             let hash = {
                 let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
-                hash.update(epoch_info.0.randomness);
+                hash.update(epoch_info.randomness);
                 hash.update(&self.slot_number.to_le_bytes());
                 hash.finalize()
             };
@@ -480,8 +465,8 @@ impl PendingVerify {
             // The expected authority index is `hash % num_authorities`.
             let expected_authority_index = {
                 let hash = num_bigint::BigUint::from_bytes_be(hash.as_bytes());
-                let authorities_len = num_bigint::BigUint::from(epoch_info.0.authorities.len());
-                debug_assert_ne!(epoch_info.0.authorities.len(), 0);
+                let authorities_len = num_bigint::BigUint::from(epoch_info.authorities.len());
+                debug_assert_ne!(epoch_info.authorities.len(), 0);
                 hash % authorities_len
             };
 
@@ -492,23 +477,10 @@ impl PendingVerify {
 
         // Success! 🚀
         Ok(VerifySuccess {
-            epoch_transition_target: self.epoch_transition_target,
+            epoch_transition_target,
             slot_number: self.slot_number,
-            epoch_number: self.epoch_number,
         })
     }
-}
-
-/// Turns a slot number into an epoch number.
-///
-/// Returns an error if `slot_number` is inferior to `block1_slot_number`.
-fn slot_number_to_epoch(
-    slot_number: u64,
-    genesis_config: &BabeGenesisConfiguration,
-    block1_slot_number: u64,
-) -> Result<u64, ()> {
-    let slots_diff = slot_number.checked_sub(block1_slot_number).ok_or(())?;
-    Ok(slots_diff / genesis_config.slots_per_epoch.get())
 }
 
 /// Calculates the primary selection threshold for a given authority, taking
