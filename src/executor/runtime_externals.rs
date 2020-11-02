@@ -121,7 +121,7 @@ impl fmt::Debug for SuccessVirtualMachine {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
-    #[display(fmt = "Error while executing Wasm VM: {}", error)]
+    #[display(fmt = "Error while executing Wasm VM: {}\n{:?}", error, logs)]
     WasmVm {
         /// Error that happened.
         error: externals::Error,

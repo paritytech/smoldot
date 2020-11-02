@@ -53,7 +53,7 @@ fn block_building_works() {
                 assert_eq!(*decoded.parent_hash, parent_hash);
                 break;
             }
-            super::BlockBuild::Finished(Err(_)) => panic!(),
+            super::BlockBuild::Finished(Err(err)) => panic!("{}", err),
             super::BlockBuild::ApplyExtrinsic(ext) => builder = ext.finish(),
             super::BlockBuild::InherentExtrinsics(ext) => {
                 builder = ext.inject_extrinsics(
