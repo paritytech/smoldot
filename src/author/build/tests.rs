@@ -56,7 +56,8 @@ fn block_building_works() {
             super::BlockBuild::Finished(Err(_)) => panic!(),
             super::BlockBuild::ApplyExtrinsic(ext) => builder = ext.finish(),
             super::BlockBuild::InherentExtrinsics(ext) => {
-                builder = ext.inject_extrinsics(iter::empty::<(_, &[u8])>())
+                builder =
+                    ext.inject_extrinsics(iter::once((*b"auraslot", &1234u64.to_le_bytes()[..])));
             }
             super::BlockBuild::StorageGet(get) => {
                 let key = get.key_as_vec();
