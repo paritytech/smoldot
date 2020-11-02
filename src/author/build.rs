@@ -360,7 +360,10 @@ impl ApplyExtrinsic {
     ///
     /// See the module-level documentation for more information.
     pub fn add_extrinsic(self, extrinsic: &[u8]) -> BlockBuild {
-        debug_assert!(matches!(self.shared.stage, Stage::ApplyExtrinsic));
+        debug_assert!(
+            matches!(self.shared.stage, Stage::ApplyExtrinsic)
+                || matches!(self.shared.stage, Stage::InherentExtrinsics)
+        );
 
         let init_result = runtime_externals::run(runtime_externals::Config {
             virtual_machine: self.parent_runtime,
@@ -393,7 +396,10 @@ impl ApplyExtrinsic {
 
     /// Indicate that no more extrinsics will be added, and resume execution.
     pub fn finish(self) -> BlockBuild {
-        debug_assert!(matches!(self.shared.stage, Stage::ApplyExtrinsic));
+        debug_assert!(
+            matches!(self.shared.stage, Stage::ApplyExtrinsic)
+                || matches!(self.shared.stage, Stage::InherentExtrinsics)
+        );
 
         let init_result = runtime_externals::run(runtime_externals::Config {
             virtual_machine: self.parent_runtime,
