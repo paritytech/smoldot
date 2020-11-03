@@ -423,11 +423,32 @@ pub struct InherentExtrinsics {
 }
 
 impl InherentExtrinsics {
-    /// Injects the extrinsics and resumes execution.
+    /// Injects the inherents extrinsics and resumes execution.
     ///
     /// See the module-level documentation for more information.
-    // TODO: should probably pass a struct so that the list of inherent extrinsics is hardcoded
-    pub fn inject_extrinsics(
+    pub fn inject_inherents<'a>(self, inherents: InherentData) -> BlockBuild {
+        self.inject_raw_inherents_list(
+            [
+                (*b"timstap0", inherents.timestamp.to_le_bytes()),
+                match inherents.consensus {
+                    InherentDataConsensus::Aura { slot_number } => {
+                        (*b"auraslot", slot_number.to_le_bytes())
+                    }
+                    InherentDataConsensus::Babe { slot_number } => {
+                        (*b"babeslot", slot_number.to_le_bytes())
+                    }
+                },
+            ]
+            .iter()
+            .cloned(),
+        )
+    }
+
+    /// Injects a raw list of inherents and resumes execution.
+    ///
+    /// This method is a more weakly-typed equivalent to [`InherentExtrinsics::inject_inherents`].
+    /// Only use this method if you know what you're doing.
+    pub fn inject_raw_inherents_list<'a>(
         self,
         list: impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone)> + Clone,
     ) -> BlockBuild {
@@ -466,6 +487,47 @@ impl InherentExtrinsics {
 
         BlockBuild::from_inner(vm, self.shared)
     }
+}
+
+/// Values of the inherents to pass to the runtime.
+#[derive(Debug)]
+pub struct InherentData {
+    /// Number of milliseconds since the UNIX epoch when the block is generated, ignoring leap
+    /// seconds.
+    ///
+    /// Its identifier passed to the runtime is: `timstap0`.
+    pub timestamp: u64,
+
+    /// Consensus-specific fields.
+    pub consensus: InherentDataConsensus,
+    // TODO: figure out uncles
+    /*/// List of valid block headers that have the same height as the parent of the one being
+    /// generated.
+    ///
+    /// Its identifier passed to the runtime is: `uncles00`.
+    ///
+    /// `TUnc` must be an iterator of [`header::HeaderRef`] structs.
+    pub uncles: TUnc,*/
+}
+
+/// Extra consensus-specific items in [`InherentData`].
+#[derive(Debug)]
+pub enum InherentDataConsensus {
+    /// Aura-specific items.
+    Aura {
+        /// Number of the Aura slot being claimed to generate this block.
+        ///
+        /// Its identifier passed to the runtime is: `auraslot`.
+        slot_number: u64,
+    },
+
+    /// Babe-specific items.
+    Babe {
+        /// Number of the Babe slot being claimed to generate this block.
+        ///
+        /// Its identifier passed to the runtime is: `auraslot`.
+        slot_number: u64,
+    },
 }
 
 /// More transactions can be added.

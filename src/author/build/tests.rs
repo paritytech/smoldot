@@ -58,14 +58,10 @@ fn block_building_works() {
             super::BlockBuild::ApplyExtrinsic(ext) => builder = ext.finish(),
             super::BlockBuild::ApplyExtrinsicResult { .. } => unreachable!(),
             super::BlockBuild::InherentExtrinsics(ext) => {
-                builder = ext.inject_extrinsics(
-                    [
-                        (*b"auraslot", &1234u64.to_le_bytes()[..]),
-                        (*b"timstap0", &1234u64.to_le_bytes()[..]),
-                    ]
-                    .iter()
-                    .cloned(),
-                );
+                builder = ext.inject_inherents(super::InherentData {
+                    timestamp: 1234,
+                    consensus: super::InherentDataConsensus::Aura { slot_number: 1234 },
+                });
             }
             super::BlockBuild::StorageGet(get) => {
                 let key = get.key_as_vec();
