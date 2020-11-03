@@ -85,6 +85,7 @@ pub struct Config<'a> {
 }
 
 /// Extra configuration depending on the consensus algorithm.
+// TODO: consider not exposing `header` in the API
 pub enum ConfigPreRuntime<'a> {
     /// Chain uses the Aura consensus algorithm.
     Aura(header::AuraPreDigest),
@@ -544,7 +545,7 @@ pub struct InherentData {
     ///
     /// Its identifier passed to the runtime is: `uncles00`.
     ///
-    /// `TUnc` must be an iterator of [`header::HeaderRef`] structs.
+    /// `TUnc` must be an iterator yielding SCALE-encoded headers.
     pub uncles: TUnc,*/
 }
 

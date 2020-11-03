@@ -31,7 +31,8 @@ fn block_building_works() {
             .next()
             .unwrap()
             .1;
-        crate::executor::WasmVmPrototype::new(code, 1024).unwrap()
+        crate::executor::WasmVmPrototype::new(code, 1024, crate::executor::vm::ExecHint::Oneshot)
+            .unwrap()
     };
 
     let parent_hash = crate::calculate_genesis_block_header(chain_specs.genesis_storage()).hash();
