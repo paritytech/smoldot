@@ -349,6 +349,8 @@ impl BlockBuild {
                         _ => todo!(), // TODO: proper errors
                     }
 
+                    // TODO: IMPORTANT /!\ must throw away storage changes in case of error
+
                     return BlockBuild::ApplyExtrinsicResult {
                         result: Ok(Ok(())), // TODO:
                         resume: ApplyExtrinsic {
