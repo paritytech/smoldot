@@ -55,7 +55,7 @@ use crate::{
 };
 
 use alloc::{string::String, vec::Vec};
-use core::iter;
+use core::{iter, mem};
 use hashbrown::HashMap;
 
 /// Configuration for a block generation.
@@ -333,7 +333,6 @@ impl BlockBuild {
                 }
 
                 (Inner::Transition(success), Stage::ApplyInherentExtrinsic { .. }) => {
-                    shared.stage = Stage::ApplyExtrinsic;
                     return BlockBuild::ApplyExtrinsic(ApplyExtrinsic {
                         shared,
                         parent_runtime: success.virtual_machine.into_prototype(),
@@ -375,18 +374,29 @@ impl BlockBuild {
                         Err(err) => return BlockBuild::Finished(Err(err)),
                     }
 
+                    shared.block_body.push(extrinsic);
+
                     inner = Inner::Transition(success);
                 }
 
                 (
                     Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
-                    Stage::ApplyExtrinsic,
+                    Stage::ApplyExtrinsic(_),
                 ) => {
                     let result =
                         match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
                             Ok(r) => r,
                             Err(err) => return BlockBuild::Finished(Err(err)),
                         };
+
+                    if result.is_ok() {
+                        shared.block_body.push(match &mut shared.stage {
+                            Stage::ApplyExtrinsic(ext) => mem::replace(ext, Vec::new()),
+                            _ => unreachable!(),
+                        });
+                    }
+
+                    // TODO: consider giving back extrinsic to user in case of failure
 
                     // TODO: IMPORTANT /!\ must throw away storage changes in case of error
 
@@ -447,7 +457,7 @@ enum Stage {
         /// This list should thus never be empty.
         extrinsics: Vec<Vec<u8>>,
     },
-    ApplyExtrinsic,
+    ApplyExtrinsic(Vec<u8>),
     FinalizeBlock,
 }
 
@@ -588,12 +598,10 @@ pub struct ApplyExtrinsic {
 }
 
 impl ApplyExtrinsic {
-    /// Adds an extrinsic and resumes execution.
+    /// Adds a SCALE-encoded extrinsic and resumes execution.
     ///
     /// See the module-level documentation for more information.
-    pub fn add_extrinsic(self, extrinsic: &[u8]) -> BlockBuild {
-        debug_assert!(matches!(self.shared.stage, Stage::ApplyExtrinsic));
-
+    pub fn add_extrinsic(mut self, extrinsic: Vec<u8>) -> BlockBuild {
         let init_result = runtime_externals::run(runtime_externals::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
@@ -602,12 +610,14 @@ impl ApplyExtrinsic {
                 let len = util::encode_scale_compact_usize(extrinsic.len());
                 iter::once(len)
                     .map(either::Left)
-                    .chain(iter::once(extrinsic).map(either::Right))
+                    .chain(iter::once(&extrinsic).map(either::Right))
             },
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
         });
+
+        self.shared.stage = Stage::ApplyExtrinsic(extrinsic);
 
         let vm = match init_result {
             Ok(vm) => vm,
@@ -619,7 +629,6 @@ impl ApplyExtrinsic {
 
     /// Indicate that no more extrinsics will be added, and resume execution.
     pub fn finish(mut self) -> BlockBuild {
-        debug_assert!(matches!(self.shared.stage, Stage::ApplyExtrinsic));
         self.shared.stage = Stage::FinalizeBlock;
 
         let init_result = runtime_externals::run(runtime_externals::Config {
