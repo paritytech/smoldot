@@ -158,9 +158,12 @@ impl VirtualMachine {
         Ok(match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => either::Left(inner.read_memory(offset, size)?),
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Interpreter(inner) => {
                 either::Right(inner.read_memory(offset, size)?)
             }
+            #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+            VirtualMachineInner::Interpreter(inner) => inner.read_memory(offset, size)?,
         })
     }
 
