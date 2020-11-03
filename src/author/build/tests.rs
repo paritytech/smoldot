@@ -17,8 +17,6 @@
 
 #![cfg(test)]
 
-use core::iter;
-
 #[test]
 fn block_building_works() {
     let chain_specs = crate::chain_spec::ChainSpec::from_json_bytes(
@@ -58,6 +56,7 @@ fn block_building_works() {
             }
             super::BlockBuild::Finished(Err(err)) => panic!("{}", err),
             super::BlockBuild::ApplyExtrinsic(ext) => builder = ext.finish(),
+            super::BlockBuild::ApplyExtrinsicResult { .. } => unreachable!(),
             super::BlockBuild::InherentExtrinsics(ext) => {
                 builder = ext.inject_extrinsics(
                     [

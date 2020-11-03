@@ -23,6 +23,24 @@
 //! After a block has been generated, it must still be sealed (in other words, signed by its
 //! author) by adding a corresponding entry to the log items in its header. This is out of scope
 //! of this module.
+//!
+//! # Detail
+//!
+//! Building a block consists in four steps:
+//!
+//! - A runtime call to `Core_initialize_block`, passing a header prototype as input. This call
+//!   performs some initial storage writes.
+//! - A runtime call to `BlockBuilder_inherent_extrinsics`, passing as input a list of
+//!   *intrinsics*. This pure call returns a list of extrinsics.
+//! - Zero or more runtime calls to `BlockBuilder_apply_extrinsic`, passing as input an extrinsic.
+//!   This must be done once per extrinsic returned by the previous step, plus once for each
+//!   transaction to push in the block.
+//! - A runtime call to `BlockBuilder_finalize_block`, which returns the newly-created unsealed
+//! block header.
+//!
+//! The body of the newly-generated block consists in the extrinsics pushed using
+//! `BlockBuilder_apply_extrinsic` (including the intrinsics).
+//!
 
 // TODO: expand docs
 // TODO: explain what an inherent extrinsic is
@@ -107,6 +125,8 @@ pub enum Error {
     InitializeBlockNonEmptyOutput,
     /// Error while parsing output of `BlockBuilder_inherent_extrinsics`.
     BadInherentExtrinsicsOutput,
+    /// Error while parsing output of `BlockBuilder_apply_extrinsic`.
+    BadApplyExtrinsicOutput,
 }
 
 /// Start a block building process.
@@ -160,17 +180,31 @@ pub enum BlockBuild {
 
     /// The inherent extrinsics are required in order to continue.
     ///
-    /// Guaranteed to only be produced once per block building process.
+    /// [`BlockBuild::InherentExtrinsics`] is guaranteed to only be emitted once per block
+    /// building process.
+    ///
+    /// The extrinsics returned by the call to `BlockBuilder_inherent_extrinsics` are
+    /// automatically pushed to the runtime.
     InherentExtrinsics(InherentExtrinsics),
 
     /// Block building is ready to accept extrinsics.
     ///
-    /// If [`ApplyExtrinsic::add_extrinsic`] is used, then another [`BlockBuild::ApplyExtrinsic`]
-    /// stage will be emitted again later.
+    /// If [`ApplyExtrinsic::add_extrinsic`] is used, then a [`BlockBuild::ApplyExtrinsicResult`]
+    /// stage will be emitted later.
     ///
     /// > **Note**: These extrinsics are generally coming from a transactions pool, but this is
     /// >           out of scope of this module.
     ApplyExtrinsic(ApplyExtrinsic),
+
+    /// Result of the previous call to [`ApplyExtrinsic::add_extrinsic`].
+    ///
+    /// An [`ApplyExtrinsic`] object is provided in order to continue the operation.
+    ApplyExtrinsicResult {
+        /// Result of the previous call to [`ApplyExtrinsic::add_extrinsic`].
+        result: Result<Result<(), DispatchError>, TransactionValidityError>,
+        /// Object to use to continue trying to push other transactions or finish the block.
+        resume: ApplyExtrinsic,
+    },
 
     /// Loading a storage value from the parent storage is required in order to continue.
     StorageGet(StorageGet),
@@ -186,95 +220,166 @@ pub enum BlockBuild {
 
 impl BlockBuild {
     fn from_inner(inner: runtime_externals::RuntimeExternalsVm, mut shared: Shared) -> Self {
-        match (inner, shared.stage) {
-            (runtime_externals::RuntimeExternalsVm::Finished(Err(err)), _) => {
-                BlockBuild::Finished(Err(Error::WasmVm(err)))
-            }
-            (runtime_externals::RuntimeExternalsVm::StorageGet(inner), _) => {
-                BlockBuild::StorageGet(StorageGet(inner, shared))
-            }
-            (runtime_externals::RuntimeExternalsVm::PrefixKeys(inner), _) => {
-                BlockBuild::PrefixKeys(PrefixKeys(inner, shared))
-            }
-            (runtime_externals::RuntimeExternalsVm::NextKey(inner), _) => {
-                BlockBuild::NextKey(NextKey(inner, shared))
-            }
+        enum Inner {
+            Runtime(runtime_externals::RuntimeExternalsVm),
+            Transition(runtime_externals::Success),
+        }
 
-            (
-                runtime_externals::RuntimeExternalsVm::Finished(Ok(success)),
-                Stage::InitializeBlock,
-            ) => {
-                if !success.virtual_machine.value().is_empty() {
-                    return BlockBuild::Finished(Err(Error::InitializeBlockNonEmptyOutput));
+        let mut inner = Inner::Runtime(inner);
+
+        loop {
+            match (inner, &mut shared.stage) {
+                (Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Err(err))), _) => {
+                    return BlockBuild::Finished(Err(Error::WasmVm(err)))
+                }
+                (Inner::Runtime(runtime_externals::RuntimeExternalsVm::StorageGet(inner)), _) => {
+                    return BlockBuild::StorageGet(StorageGet(inner, shared))
+                }
+                (Inner::Runtime(runtime_externals::RuntimeExternalsVm::PrefixKeys(inner)), _) => {
+                    return BlockBuild::PrefixKeys(PrefixKeys(inner, shared))
+                }
+                (Inner::Runtime(runtime_externals::RuntimeExternalsVm::NextKey(inner)), _) => {
+                    return BlockBuild::NextKey(NextKey(inner, shared))
                 }
 
-                shared.logs.push_str(&success.logs);
+                (
+                    Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
+                    Stage::InitializeBlock,
+                ) => {
+                    if !success.virtual_machine.value().is_empty() {
+                        return BlockBuild::Finished(Err(Error::InitializeBlockNonEmptyOutput));
+                    }
 
-                BlockBuild::InherentExtrinsics(InherentExtrinsics {
-                    shared,
-                    parent_runtime: success.virtual_machine.into_prototype(),
-                    storage_top_trie_changes: success.storage_top_trie_changes,
-                    offchain_storage_changes: success.offchain_storage_changes,
-                    top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
-                })
-            }
+                    shared.logs.push_str(&success.logs);
+                    shared.stage = Stage::InherentExtrinsics;
 
-            (
-                runtime_externals::RuntimeExternalsVm::Finished(Ok(success)),
-                Stage::InherentExtrinsics,
-            ) => {
-                match parse_inherent_extrinsics_output(
-                    success.virtual_machine.value(),
-                    &mut shared.block_body,
-                ) {
-                    Ok(()) => {}
-                    Err(err) => return BlockBuild::Finished(Err(err)),
-                };
+                    return BlockBuild::InherentExtrinsics(InherentExtrinsics {
+                        shared,
+                        parent_runtime: success.virtual_machine.into_prototype(),
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                    });
+                }
 
-                shared.logs.push_str(&success.logs);
+                (
+                    Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
+                    Stage::InherentExtrinsics,
+                ) => {
+                    let extrinsics =
+                        match parse_inherent_extrinsics_output(success.virtual_machine.value()) {
+                            Ok(extrinsics) => extrinsics,
+                            Err(err) => return BlockBuild::Finished(Err(err)),
+                        };
 
-                BlockBuild::ApplyExtrinsic(ApplyExtrinsic {
-                    shared,
-                    parent_runtime: success.virtual_machine.into_prototype(),
-                    storage_top_trie_changes: success.storage_top_trie_changes,
-                    offchain_storage_changes: success.offchain_storage_changes,
-                    top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
-                })
-            }
+                    shared.block_body.reserve(extrinsics.len());
+                    shared.logs.push_str(&success.logs);
+                    shared.stage = Stage::ApplyInherentExtrinsic { extrinsics };
+                    inner = Inner::Transition(success);
+                }
 
-            (
-                runtime_externals::RuntimeExternalsVm::Finished(Ok(success)),
-                Stage::ApplyExtrinsic,
-            ) => {
-                shared.logs.push_str(&success.logs);
+                (Inner::Transition(success), Stage::ApplyInherentExtrinsic { extrinsics })
+                    if !extrinsics.is_empty() =>
+                {
+                    let extrinsic = &extrinsics[0];
 
-                // TODO: must analyze output value of function ; see https://github.com/paritytech/substrate/blob/38d5bb32c3064113f897cb8ec33eea0f8570981b/primitives/runtime/src/lib.rs#L540
-                todo!();
+                    let init_result = runtime_externals::run(runtime_externals::Config {
+                        virtual_machine: success.virtual_machine.into_prototype(),
+                        function_to_call: "BlockBuilder_apply_extrinsic",
+                        parameter: {
+                            // The `BlockBuilder_apply_extrinsic` function expects a SCALE-encoded
+                            // `Vec<u8>`.
+                            let len = util::encode_scale_compact_usize(extrinsic.len());
+                            iter::once(len)
+                                .map(either::Left)
+                                .chain(iter::once(extrinsic).map(either::Right))
+                        },
+                        top_trie_root_calculation_cache: Some(
+                            success.top_trie_root_calculation_cache,
+                        ),
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                    });
 
-                BlockBuild::ApplyExtrinsic(ApplyExtrinsic {
-                    shared,
-                    parent_runtime: success.virtual_machine.into_prototype(),
-                    storage_top_trie_changes: success.storage_top_trie_changes,
-                    offchain_storage_changes: success.offchain_storage_changes,
-                    top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
-                })
-            }
+                    inner = Inner::Runtime(match init_result {
+                        Ok(vm) => vm,
+                        Err(err) => return BlockBuild::Finished(Err(Error::VmInit(err))),
+                    });
+                }
 
-            (
-                runtime_externals::RuntimeExternalsVm::Finished(Ok(success)),
-                Stage::FinalizeBlock,
-            ) => {
-                shared.logs.push_str(&success.logs);
-                let scale_encoded_header = success.virtual_machine.value().to_owned();
-                BlockBuild::Finished(Ok(Success {
-                    scale_encoded_header,
-                    body: shared.block_body,
-                    parent_runtime: success.virtual_machine.into_prototype(),
-                    storage_top_trie_changes: success.storage_top_trie_changes,
-                    offchain_storage_changes: success.offchain_storage_changes,
-                    top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
-                    logs: shared.logs,
-                }))
+                (Inner::Transition(success), Stage::ApplyInherentExtrinsic { .. }) => {
+                    shared.stage = Stage::ApplyExtrinsic;
+                    return BlockBuild::ApplyExtrinsic(ApplyExtrinsic {
+                        shared,
+                        parent_runtime: success.virtual_machine.into_prototype(),
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                    });
+                }
+
+                (
+                    Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
+                    Stage::ApplyInherentExtrinsic { .. },
+                ) => {
+                    shared.stage = match shared.stage {
+                        Stage::ApplyInherentExtrinsic { mut extrinsics } => {
+                            extrinsics.remove(0);
+                            Stage::ApplyInherentExtrinsic { extrinsics }
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
+                        Ok(Ok(Ok(()))) => {}
+                        Err(err) => return BlockBuild::Finished(Err(err)),
+                        _ => todo!(), // TODO: proper errors
+                    }
+
+                    inner = Inner::Transition(success);
+                }
+
+                (
+                    Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
+                    Stage::ApplyExtrinsic,
+                ) => {
+                    match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
+                        Ok(Ok(Ok(()))) => {}
+                        Err(err) => return BlockBuild::Finished(Err(err)),
+                        _ => todo!(), // TODO: proper errors
+                    }
+
+                    return BlockBuild::ApplyExtrinsicResult {
+                        result: Ok(Ok(())), // TODO:
+                        resume: ApplyExtrinsic {
+                            shared,
+                            parent_runtime: success.virtual_machine.into_prototype(),
+                            storage_top_trie_changes: success.storage_top_trie_changes,
+                            offchain_storage_changes: success.offchain_storage_changes,
+                            top_trie_root_calculation_cache: success
+                                .top_trie_root_calculation_cache,
+                        },
+                    };
+                }
+
+                (
+                    Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
+                    Stage::FinalizeBlock,
+                ) => {
+                    shared.logs.push_str(&success.logs);
+                    let scale_encoded_header = success.virtual_machine.value().to_owned();
+                    return BlockBuild::Finished(Ok(Success {
+                        scale_encoded_header,
+                        body: shared.block_body,
+                        parent_runtime: success.virtual_machine.into_prototype(),
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                        logs: shared.logs,
+                    }));
+                }
+
+                (_, s) => unreachable!("{:?}", s),
             }
         }
     }
@@ -292,10 +397,15 @@ struct Shared {
 }
 
 /// The block building process is separated into multiple stages.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 enum Stage {
     InitializeBlock,
     InherentExtrinsics,
+    ApplyInherentExtrinsic {
+        /// List of inherent extrinsics being applied, including the one currently being applied.
+        /// This list should thus never be empty.
+        extrinsics: Vec<Vec<u8>>,
+    },
     ApplyExtrinsic,
     FinalizeBlock,
 }
@@ -314,11 +424,12 @@ impl InherentExtrinsics {
     /// Injects the extrinsics and resumes execution.
     ///
     /// See the module-level documentation for more information.
+    // TODO: should probably pass a struct so that the list of inherent extrinsics is hardcoded
     pub fn inject_extrinsics(
         self,
         list: impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone)> + Clone,
     ) -> BlockBuild {
-        debug_assert!(matches!(self.shared.stage, Stage::InitializeBlock));
+        debug_assert!(matches!(self.shared.stage, Stage::InherentExtrinsics));
 
         let init_result = runtime_externals::run(runtime_externals::Config {
             virtual_machine: self.parent_runtime,
@@ -351,13 +462,7 @@ impl InherentExtrinsics {
             Err(err) => return BlockBuild::Finished(Err(Error::VmInit(err))),
         };
 
-        BlockBuild::from_inner(
-            vm,
-            Shared {
-                stage: Stage::InherentExtrinsics,
-                ..self.shared
-            },
-        )
+        BlockBuild::from_inner(vm, self.shared)
     }
 }
 
@@ -376,10 +481,7 @@ impl ApplyExtrinsic {
     ///
     /// See the module-level documentation for more information.
     pub fn add_extrinsic(self, extrinsic: &[u8]) -> BlockBuild {
-        debug_assert!(
-            matches!(self.shared.stage, Stage::ApplyExtrinsic)
-                || matches!(self.shared.stage, Stage::InherentExtrinsics)
-        );
+        debug_assert!(matches!(self.shared.stage, Stage::ApplyExtrinsic));
 
         let init_result = runtime_externals::run(runtime_externals::Config {
             virtual_machine: self.parent_runtime,
@@ -401,21 +503,13 @@ impl ApplyExtrinsic {
             Err(err) => return BlockBuild::Finished(Err(Error::VmInit(err))),
         };
 
-        BlockBuild::from_inner(
-            vm,
-            Shared {
-                stage: Stage::ApplyExtrinsic,
-                ..self.shared
-            },
-        )
+        BlockBuild::from_inner(vm, self.shared)
     }
 
     /// Indicate that no more extrinsics will be added, and resume execution.
-    pub fn finish(self) -> BlockBuild {
-        debug_assert!(
-            matches!(self.shared.stage, Stage::ApplyExtrinsic)
-                || matches!(self.shared.stage, Stage::InherentExtrinsics)
-        );
+    pub fn finish(mut self) -> BlockBuild {
+        debug_assert!(matches!(self.shared.stage, Stage::ApplyExtrinsic));
+        self.shared.stage = Stage::FinalizeBlock;
 
         let init_result = runtime_externals::run(runtime_externals::Config {
             virtual_machine: self.parent_runtime,
@@ -431,13 +525,7 @@ impl ApplyExtrinsic {
             Err(err) => return BlockBuild::Finished(Err(Error::VmInit(err))),
         };
 
-        BlockBuild::from_inner(
-            vm,
-            Shared {
-                stage: Stage::FinalizeBlock,
-                ..self.shared
-            },
-        )
+        BlockBuild::from_inner(vm, self.shared)
     }
 }
 
@@ -504,28 +592,240 @@ impl NextKey {
     }
 }
 
-/// Analyzes the output of a call to `BlockBuilder_inherent_extrinsics`, and pushes the returned
-/// value into `block_body`.
-fn parse_inherent_extrinsics_output(
-    output: &[u8],
-    block_body: &mut Vec<Vec<u8>>,
-) -> Result<(), Error> {
-    let (_, parse_result) = nom::combinator::all_consuming(nom::combinator::flat_map(
+/// Analyzes the output of a call to `BlockBuilder_inherent_extrinsics`, and returns the resulting
+/// extrinsics.
+fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    nom::combinator::all_consuming(nom::combinator::flat_map(
         crate::util::nom_scale_compact_usize,
         |num_elems| {
             nom::multi::many_m_n(num_elems, num_elems, |s| {
-                nom::combinator::flat_map(
-                    crate::util::nom_scale_compact_usize,
-                    nom::bytes::complete::take,
-                )(s)
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |n| {
+                    nom::combinator::map(nom::bytes::complete::take(n), |v: &[u8]| v.to_vec())
+                })(s)
             })
         },
     ))(output)
-    .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| Error::BadInherentExtrinsicsOutput)?;
+    .map(|(_, parse_result)| parse_result)
+    .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| Error::BadInherentExtrinsicsOutput)
+}
 
-    for item in parse_result {
-        block_body.push(item.to_owned());
-    }
+/// Analyzes the output of a call to `BlockBuilder_apply_extrinsic`.
+fn parse_apply_extrinsic_output(
+    output: &[u8],
+) -> Result<Result<Result<(), DispatchError>, TransactionValidityError>, Error> {
+    nom::combinator::all_consuming(apply_extrinsic_result)(output)
+        .map(|(_, parse_result)| parse_result)
+        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::BadApplyExtrinsicOutput)
+}
 
-    Ok(())
+// TODO: some parsers below are common with the tx-pool ; figure out how/whether they should be merged
+
+/// Errors that can occur while checking the validity of a transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionValidityError {
+    /// The transaction is invalid.
+    Invalid(InvalidTransaction),
+    /// Transaction validity can't be determined.
+    Unknown(UnknownTransaction),
+}
+
+/// An invalid transaction validity.
+#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+pub enum InvalidTransaction {
+    /// The call of the transaction is not expected.
+    Call,
+    /// General error to do with the inability to pay some fees (e.g. account balance too low).
+    Payment,
+    /// General error to do with the transaction not yet being valid (e.g. nonce too high).
+    Future,
+    /// General error to do with the transaction being outdated (e.g. nonce too low).
+    Stale,
+    /// General error to do with the transaction's proofs (e.g. signature).
+    ///
+    /// # Possible causes
+    ///
+    /// When using a signed extension that provides additional data for signing, it is required
+    /// that the signing and the verifying side use the same additional data. Additional
+    /// data will only be used to generate the signature, but will not be part of the transaction
+    /// itself. As the verifying side does not know which additional data was used while signing
+    /// it will only be able to assume a bad signature and cannot express a more meaningful error.
+    BadProof,
+    /// The transaction birth block is ancient.
+    AncientBirthBlock,
+    /// The transaction would exhaust the resources of current block.
+    ///
+    /// The transaction might be valid, but there are not enough resources
+    /// left in the current block.
+    ExhaustsResources,
+    /// Any other custom invalid validity that is not covered by this enum.
+    Custom(u8),
+    /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
+    /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
+    /// overweight blocks and therefore if found, invalidates the block.
+    BadMandatory,
+    /// A transaction with a mandatory dispatch. This is invalid; only inherent extrinsics are
+    /// allowed to have mandatory dispatches.
+    MandatoryDispatch,
+}
+
+/// An unknown transaction validity.
+#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+pub enum UnknownTransaction {
+    /// Could not lookup some information that is required to validate the transaction.
+    CannotLookup,
+    /// No validator found for the given unsigned transaction.
+    NoUnsignedValidator,
+    /// Any other custom unknown validity that is not covered by this enum.
+    Custom(u8),
+}
+
+/// Reason why a dispatch call failed.
+#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+pub enum DispatchError {
+    /// Failed to lookup some data.
+    CannotLookup,
+    /// A bad origin.
+    BadOrigin,
+    /// A custom error in a module.
+    #[display(fmt = "Error in module #{}, error number #{}", index, error)]
+    Module {
+        /// Module index, matching the metadata module index.
+        index: u8,
+        /// Module specific error value.
+        error: u8,
+    },
+}
+
+fn apply_extrinsic_result(
+    bytes: &[u8],
+) -> nom::IResult<&[u8], Result<Result<(), DispatchError>, TransactionValidityError>> {
+    nom::error::context(
+        "apply extrinsic result",
+        nom::branch::alt((
+            nom::combinator::map(
+                nom::sequence::preceded(nom::bytes::complete::tag(&[0]), dispatch_outcome),
+                Ok,
+            ),
+            nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::complete::tag(&[1]),
+                    transaction_validity_error,
+                ),
+                Err,
+            ),
+        )),
+    )(bytes)
+}
+
+fn dispatch_outcome(bytes: &[u8]) -> nom::IResult<&[u8], Result<(), DispatchError>> {
+    nom::error::context(
+        "dispatch outcome",
+        nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| Ok(())),
+            nom::combinator::map(
+                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), dispatch_error),
+                Err,
+            ),
+        )),
+    )(bytes)
+}
+
+fn dispatch_error(bytes: &[u8]) -> nom::IResult<&[u8], DispatchError> {
+    nom::error::context(
+        "dispatch error",
+        nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                DispatchError::CannotLookup
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                DispatchError::BadOrigin
+            }),
+            nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::complete::tag(&[2]),
+                    nom::sequence::tuple((nom::number::complete::u8, nom::number::complete::u8)),
+                ),
+                |(index, error)| DispatchError::Module { index, error },
+            ),
+        )),
+    )(bytes)
+}
+
+fn transaction_validity_error(bytes: &[u8]) -> nom::IResult<&[u8], TransactionValidityError> {
+    nom::error::context(
+        "transaction validity error",
+        nom::branch::alt((
+            nom::combinator::map(
+                nom::sequence::preceded(nom::bytes::complete::tag(&[0]), invalid_transaction),
+                TransactionValidityError::Invalid,
+            ),
+            nom::combinator::map(
+                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), unknown_transaction),
+                TransactionValidityError::Unknown,
+            ),
+        )),
+    )(bytes)
+}
+
+fn invalid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], InvalidTransaction> {
+    nom::error::context(
+        "invalid transaction",
+        nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                InvalidTransaction::Call
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                InvalidTransaction::Payment
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+                InvalidTransaction::Future
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[3]), |_| {
+                InvalidTransaction::Stale
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[4]), |_| {
+                InvalidTransaction::BadProof
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[5]), |_| {
+                InvalidTransaction::AncientBirthBlock
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[6]), |_| {
+                InvalidTransaction::ExhaustsResources
+            }),
+            nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::complete::tag(&[7]),
+                    nom::bytes::complete::take(1u32),
+                ),
+                |n: &[u8]| InvalidTransaction::Custom(n[0]),
+            ),
+            nom::combinator::map(nom::bytes::complete::tag(&[8]), |_| {
+                InvalidTransaction::BadMandatory
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[9]), |_| {
+                InvalidTransaction::MandatoryDispatch
+            }),
+        )),
+    )(bytes)
+}
+
+fn unknown_transaction(bytes: &[u8]) -> nom::IResult<&[u8], UnknownTransaction> {
+    nom::error::context(
+        "unknown transaction",
+        nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                UnknownTransaction::CannotLookup
+            }),
+            nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                UnknownTransaction::NoUnsignedValidator
+            }),
+            nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::complete::tag(&[2]),
+                    nom::bytes::complete::take(1u32),
+                ),
+                |n: &[u8]| UnknownTransaction::Custom(n[0]),
+            ),
+        )),
+    )(bytes)
 }
