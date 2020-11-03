@@ -56,9 +56,22 @@ pub struct Config<'a> {
     /// `:code` key of the parent block storage.
     pub parent_runtime: executor::WasmVmPrototype,
 
+    /// Consensus-specific item to put in the digest of the header prototype.
+    ///
+    /// > **Note**: In the case of Aura and Babe, contains the slot being claimed.
+    pub consensus_digest_log_item: ConfigPreRuntime<'a>,
+
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+}
+
+/// Extra configuration depending on the consensus algorithm.
+pub enum ConfigPreRuntime<'a> {
+    /// Chain uses the Aura consensus algorithm.
+    Aura(header::AuraPreDigest),
+    /// Chain uses the Babe consensus algorithm.
+    Babe(header::BabePreDigestRef<'a>),
 }
 
 /// Block successfully verified.
@@ -112,8 +125,11 @@ pub fn build_block<'a>(config: Config<'a>) -> BlockBuild {
                 },
                 extrinsics_root: &[0; 32],
                 state_root: &[0; 32],
-                // TODO: is it true that the digest is empty? shouldn't it contain some preruntime consensus items?
-                digest: header::DigestRef::empty(),
+                digest: header::DigestRef::from_slice(&[match config.consensus_digest_log_item {
+                    ConfigPreRuntime::Aura(item) => header::DigestItem::AuraPreDigest(item),
+                    ConfigPreRuntime::Babe(item) => header::DigestItem::BabePreDigest(item.into()),
+                }])
+                .unwrap(),
             }
             .scale_encoding()
         },

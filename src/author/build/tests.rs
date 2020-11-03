@@ -42,6 +42,9 @@ fn block_building_works() {
         parent_runtime,
         parent_hash: &parent_hash,
         parent_number: 0,
+        consensus_digest_log_item: super::ConfigPreRuntime::Aura(crate::header::AuraPreDigest {
+            slot_number: 1234u64,
+        }),
         top_trie_root_calculation_cache: None,
     });
 
