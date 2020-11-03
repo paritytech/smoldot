@@ -127,6 +127,30 @@ pub enum Error {
     BadInherentExtrinsicsOutput,
     /// Error while parsing output of `BlockBuilder_apply_extrinsic`.
     BadApplyExtrinsicOutput,
+    /// Applying an inherent extrinsic has returned a [`DispatchError`].
+    #[display(
+        fmt = "Error while applying inherent extrinsic: {}\nExtrinsic: {:?}",
+        error,
+        extrinsic
+    )]
+    InherentExtrinsicDispatchError {
+        /// Extrinsic that triggered the problem.
+        extrinsic: Vec<u8>,
+        /// Error returned by the runtime.
+        error: DispatchError,
+    },
+    /// Applying an inherent extrinsic has returned a [`TransactionValidityError`].
+    #[display(
+        fmt = "Error while applying inherent extrinsic: {}\nExtrinsic: {:?}",
+        error,
+        extrinsic
+    )]
+    InherentExtrinsicTransactionValidityError {
+        /// Extrinsic that triggered the problem.
+        extrinsic: Vec<u8>,
+        /// Error returned by the runtime.
+        error: TransactionValidityError,
+    },
 }
 
 /// Start a block building process.
@@ -322,18 +346,32 @@ impl BlockBuild {
                     Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
                     Stage::ApplyInherentExtrinsic { .. },
                 ) => {
-                    shared.stage = match shared.stage {
+                    let (extrinsic, new_stage) = match shared.stage {
                         Stage::ApplyInherentExtrinsic { mut extrinsics } => {
-                            extrinsics.remove(0);
-                            Stage::ApplyInherentExtrinsic { extrinsics }
+                            let extrinsic = extrinsics.remove(0);
+                            (extrinsic, Stage::ApplyInherentExtrinsic { extrinsics })
                         }
                         _ => unreachable!(),
                     };
 
+                    shared.stage = new_stage;
+
                     match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
                         Ok(Ok(Ok(()))) => {}
+                        Ok(Ok(Err(error))) => {
+                            return BlockBuild::Finished(Err(
+                                Error::InherentExtrinsicDispatchError { extrinsic, error },
+                            ))
+                        }
+                        Ok(Err(error)) => {
+                            return BlockBuild::Finished(Err(
+                                Error::InherentExtrinsicTransactionValidityError {
+                                    extrinsic,
+                                    error,
+                                },
+                            ))
+                        }
                         Err(err) => return BlockBuild::Finished(Err(err)),
-                        _ => todo!(), // TODO: proper errors
                     }
 
                     inner = Inner::Transition(success);
@@ -343,16 +381,16 @@ impl BlockBuild {
                     Inner::Runtime(runtime_externals::RuntimeExternalsVm::Finished(Ok(success))),
                     Stage::ApplyExtrinsic,
                 ) => {
-                    match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
-                        Ok(Ok(Ok(()))) => {}
-                        Err(err) => return BlockBuild::Finished(Err(err)),
-                        _ => todo!(), // TODO: proper errors
-                    }
+                    let result =
+                        match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
+                            Ok(r) => r,
+                            Err(err) => return BlockBuild::Finished(Err(err)),
+                        };
 
                     // TODO: IMPORTANT /!\ must throw away storage changes in case of error
 
                     return BlockBuild::ApplyExtrinsicResult {
-                        result: Ok(Ok(())), // TODO:
+                        result,
                         resume: ApplyExtrinsic {
                             shared,
                             parent_runtime: success.virtual_machine.into_prototype(),
@@ -518,6 +556,10 @@ pub enum InherentDataConsensus {
         /// Number of the Aura slot being claimed to generate this block.
         ///
         /// Its identifier passed to the runtime is: `auraslot`.
+        ///
+        /// > **Note**: This is redundant with the value passed through
+        /// >           [`ConfigPreRuntime::Aura`]. This redundancy is considered as a wart in the
+        /// >           runtime environment and is kept for backwards compatibility.
         slot_number: u64,
     },
 
@@ -525,7 +567,11 @@ pub enum InherentDataConsensus {
     Babe {
         /// Number of the Babe slot being claimed to generate this block.
         ///
-        /// Its identifier passed to the runtime is: `auraslot`.
+        /// Its identifier passed to the runtime is: `babeslot`.
+        ///
+        /// > **Note**: This is redundant with the value passed through
+        /// >           [`ConfigPreRuntime::Babe`]. This redundancy is considered as a wart in the
+        /// >           runtime environment and is kept for backwards compatibility.
         slot_number: u64,
     },
 }
@@ -685,7 +731,7 @@ fn parse_apply_extrinsic_output(
 // TODO: some parsers below are common with the tx-pool ; figure out how/whether they should be merged
 
 /// Errors that can occur while checking the validity of a transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
     Invalid(InvalidTransaction),
