@@ -128,10 +128,11 @@ enum VirtualMachineInner {
 impl VirtualMachine {
     /// Starts or continues execution of this thread.
     ///
-    /// If this is the first call you call [`run`](Jit::run) for this thread, then you must pass
-    /// a value of `None`.
-    /// If, however, you call this function after a previous call to [`run`](Jit::run) that was
-    /// interrupted by an external function call, then you must pass back the outcome of that call.
+    /// If this is the first call you call [`run`](VirtualMachine::run) for this thread, then you
+    /// must pass a value of `None`.
+    /// If, however, you call this function after a previous call to [`run`](VirtualMachine::run)
+    /// that was interrupted by an external function call, then you must pass back the outcome of
+    /// that call.
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -419,8 +420,8 @@ impl From<wasmtime::ValType> for ValueType {
 pub enum ExecOutcome {
     /// The execution has finished.
     ///
-    /// The state machine is now in a poisoned state, and calling
-    /// [`is_poisoned`](VirtualMachine::is_poisoned) will return true.
+    /// The state machine is now in a poisoned state, and calling [`run`](VirtualMachine::run)
+    /// will return [`RunErr::Poisoned`].
     Finished {
         /// Return value of the function.
         // TODO: error type should change here
@@ -484,7 +485,7 @@ impl fmt::Display for NewErr {
 pub enum RunErr {
     /// The state machine is poisoned.
     #[display(fmt = "State machine is poisoned")]
-    Poisoned, // TODO: necessary?
+    Poisoned,
     /// Passed a wrong value back.
     #[display(
         fmt = "Expected value of type {:?} but got {:?} instead",
