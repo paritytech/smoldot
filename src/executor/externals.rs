@@ -82,7 +82,11 @@ pub struct ExternalsVmPrototype {
 impl ExternalsVmPrototype {
     /// Creates a new [`ExternalsVmPrototype`]. Parses and potentially JITs the module.
     // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
-    pub fn new(module: impl AsRef<[u8]>, heap_pages: u64) -> Result<Self, NewErr> {
+    pub fn new(
+        module: impl AsRef<[u8]>,
+        heap_pages: u64,
+        exec_hint: vm::ExecHint,
+    ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
         // when a function is invoked, the Wasm virtual machine will pass indices within that
@@ -92,6 +96,7 @@ impl ExternalsVmPrototype {
             let vm_proto = vm::VirtualMachinePrototype::new(
                 module,
                 heap_pages,
+                exec_hint,
                 // This closure is called back for each function that the runtime imports.
                 |mod_name, f_name, _signature| {
                     if mod_name != "env" {
@@ -277,6 +282,13 @@ impl ReadyToRun {
                     return_value: Ok(Some(vm::WasmValue::I64(ret))),
                 }) => {
                     // Wasm virtual machine has successfully returned.
+
+                    if self.inner.within_storage_transaction {
+                        return ExternalsVm::Error {
+                            prototype: self.inner.into_prototype(),
+                            error: Error::FinishedWithPendingTransaction,
+                        };
+                    }
 
                     // Turn the `i64` into a `u64`, not changing any bit.
                     let ret = u64::from_ne_bytes(ret.to_ne_bytes());
@@ -2013,6 +2025,10 @@ pub enum Error {
     /// `ext_storage_commit_transaction_version_1` but no transaction was in progress.
     #[display(fmt = "Attempted to end a transaction while none is in progress")]
     NoActiveTransaction,
+    /// Execution has finished while a transaction started with
+    /// `ext_storage_start_transaction_version_1` was still in progress.
+    #[display(fmt = "Execution returned with a pending storage transaction")]
+    FinishedWithPendingTransaction,
     /// Error when allocating memory for a return type.
     #[display(
         fmt = "Out of memory allocating 0x{:x} bytes during {}",
