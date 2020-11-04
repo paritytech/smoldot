@@ -260,7 +260,7 @@ pub fn verify_header<'a>(config: VerifyConfig<'a>) -> Result<VerifySuccess, Veri
     };
 
     // Verify consistency of the configuration.
-    if let Some(curr) = config.parent_block_epoch {
+    if let Some(curr) = &config.parent_block_epoch {
         assert_ne!(config.parent_block_next_epoch.epoch_index, 1);
         assert_eq!(
             curr.epoch_index.checked_add(1).unwrap(),
@@ -330,6 +330,40 @@ pub fn verify_header<'a>(config: VerifyConfig<'a>) -> Result<VerifySuccess, Veri
             schnorrkel::Signature::from_bytes(seal).map_err(|_| VerifyError::BadSignature)?
         }
         None => return Err(VerifyError::MissingSeal),
+    };
+
+    // If the block contains an epoch transition, build the information about the new epoch.
+    // This is done now, as the header is consumed below.
+    let epoch_transition_target = match config.header.digest.babe_epoch_information() {
+        None => None,
+        Some((info, None)) => Some(chain_information::BabeEpochInformation {
+            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
+            start_slot_number: Some(
+                block_epoch_info
+                    .start_slot_number
+                    .unwrap_or(slot_number)
+                    .checked_add(config.slots_per_epoch.get())
+                    .unwrap(),
+            ),
+            authorities: info.authorities.map(Into::into).collect(),
+            randomness: *info.randomness,
+            c: block_epoch_info.c,
+            allowed_slots: block_epoch_info.allowed_slots,
+        }),
+        Some((info, Some(epoch_cfg))) => Some(chain_information::BabeEpochInformation {
+            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
+            start_slot_number: Some(
+                block_epoch_info
+                    .start_slot_number
+                    .unwrap_or(slot_number)
+                    .checked_add(config.slots_per_epoch.get())
+                    .unwrap(),
+            ),
+            authorities: info.authorities.map(Into::into).collect(),
+            randomness: *info.randomness,
+            c: epoch_cfg.c,
+            allowed_slots: epoch_cfg.allowed_slots,
+        }),
     };
 
     // The signature in the seal applies to the header from where the signature isn't present.
@@ -424,39 +458,6 @@ pub fn verify_header<'a>(config: VerifyConfig<'a>) -> Result<VerifySuccess, Veri
             return Err(VerifyError::BadSecondarySlotAuthor);
         }
     }
-
-    // If the block contains an epoch transition, build the information about the new epoch.
-    let epoch_transition_target = match config.header.digest.babe_epoch_information() {
-        None => None,
-        Some((info, None)) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
-            start_slot_number: Some(
-                block_epoch_info
-                    .start_slot_number
-                    .unwrap_or(slot_number)
-                    .checked_add(config.slots_per_epoch.get())
-                    .unwrap(),
-            ),
-            authorities: info.authorities.map(Into::into).collect(),
-            randomness: *info.randomness,
-            c: block_epoch_info.c,
-            allowed_slots: block_epoch_info.allowed_slots,
-        }),
-        Some((info, Some(epoch_cfg))) => Some(chain_information::BabeEpochInformation {
-            epoch_index: block_epoch_info.epoch_index.checked_add(1).unwrap(),
-            start_slot_number: Some(
-                block_epoch_info
-                    .start_slot_number
-                    .unwrap_or(slot_number)
-                    .checked_add(config.slots_per_epoch.get())
-                    .unwrap(),
-            ),
-            authorities: info.authorities.map(Into::into).collect(),
-            randomness: *info.randomness,
-            c: epoch_cfg.c,
-            allowed_slots: epoch_cfg.allowed_slots,
-        }),
-    };
 
     // Success! 🚀
     Ok(VerifySuccess {

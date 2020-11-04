@@ -46,7 +46,7 @@ use core::num::NonZeroU64;
 pub mod aura;
 pub mod babe;
 
-// TODO: is it possible to build an inconsistent `ChainInformation` ; maybe use strong typing to provide a proof of the consistency
+// TODO: is it possible to build an inconsistent `ChainInformation` ; maybe use strong typing to provide a proof of the consistency ; see checks done at head of `blocks_tree.rs`
 
 /// Information about the latest finalized block and state found in its ancestors.
 #[derive(Debug, Clone)]
@@ -328,6 +328,7 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
                 } => ChainInformationConsensusRef::Babe {
                     slots_per_epoch: *slots_per_epoch,
                     finalized_block_epoch_information: finalized_block_epoch_information
+                        .as_ref()
                         .map(Into::into),
                     finalized_next_epoch_transition: finalized_next_epoch_transition.into(),
                 },
