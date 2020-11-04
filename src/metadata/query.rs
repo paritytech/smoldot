@@ -51,7 +51,8 @@ use alloc::vec::Vec;
 // TODO: document heap_pages
 pub fn metadata_from_runtime_code(wasm_code: &[u8], heap_pages: u64) -> Result<Vec<u8>, Error> {
     let vm =
-        executor::WasmVmPrototype::new(&wasm_code, heap_pages).map_err(Error::VmInitialization)?;
+        executor::WasmVmPrototype::new(&wasm_code, heap_pages, executor::vm::ExecHint::Oneshot)
+            .map_err(Error::VmInitialization)?;
     let (out, _vm) = metadata_from_virtual_machine_prototype(vm)?;
     Ok(out)
 }
@@ -101,7 +102,7 @@ pub enum Error {
 /// valid length prefix.
 fn remove_length_prefix(metadata: &[u8]) -> Result<&[u8], Error> {
     let (after_prefix, length) = crate::util::nom_scale_compact_usize(metadata)
-        .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| Error::BadLengthPrefix)?;
+        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::BadLengthPrefix)?;
 
     // Verify that the length prefix indeed matches the metadata's length.
     if length != after_prefix.len() {

@@ -31,7 +31,7 @@ use super::optimistic;
 use crate::{executor, header, trie::calculate_root};
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::{convert::TryFrom as _, iter, num::NonZeroU32};
+use core::{convert::TryFrom as _, iter, num::NonZeroU32, time::Duration};
 use hashbrown::{HashMap, HashSet};
 
 pub use optimistic::{
@@ -220,7 +220,10 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
     ///
     /// This method takes ownership of the [`OptimisticFullSync`] and starts a verification
     /// process. The [`OptimisticFullSync`] is yielded back at the end of this process.
-    pub fn process_one(mut self) -> ProcessOne<TRq, TSrc> {
+    ///
+    /// Must be passed the current UNIX time in order to verify that the blocks don't pretend to
+    /// come from the future.
+    pub fn process_one(mut self, now_from_unix_epoch: Duration) -> ProcessOne<TRq, TSrc> {
         let sync = self.sync.take().unwrap();
 
         let to_process = match sync.process_one() {
@@ -242,6 +245,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
                 runtime_code_cache: self.runtime_code_cache,
                 top_trie_root_calculation_cache: self.top_trie_root_calculation_cache,
                 finalized_blocks: Vec::new(),
+                now_from_unix_epoch,
             },
         )
     }
@@ -311,6 +315,7 @@ struct ProcessOneShared<TRq, TSrc> {
     top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
     // TODO: make sure we're not throwing this away in case of error
     finalized_blocks: Vec<Block>,
+    now_from_unix_epoch: Duration,
 }
 
 impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
@@ -333,6 +338,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         }
                         inner = Inner::Step1(chain.verify_body(
                             next_block.scale_encoded_header,
+                            shared.now_from_unix_epoch,
                             next_block.scale_encoded_extrinsics.into_iter(),
                         ));
                     } else {
@@ -358,6 +364,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
 
                 Inner::Step1(blocks_tree::BodyVerifyStep1::InvalidHeader(chain, error)) => {
                     // TODO: DRY
+                    println!("invalid header: {:?}", error); // TODO: remove
                     let sync = shared
                         .to_process
                         .report
@@ -436,8 +443,12 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                                         <[u8; 8]>::try_from(&heap_pages.as_ref().unwrap()[..])
                                             .unwrap(), // TODO: don't unwrap
                                     );
-                                    executor::WasmVmPrototype::new(&wasm_code, heap_pages)
-                                        .expect("invalid runtime code?!?!") // TODO: what to do?
+                                    executor::WasmVmPrototype::new(
+                                        &wasm_code,
+                                        heap_pages,
+                                        executor::vm::ExecHint::CompileAheadOfTime,
+                                    )
+                                    .expect("invalid runtime code?!?!") // TODO: what to do?
                                 }
                                 (Some(wasm_code), None) => {
                                     return ProcessOne::FinalizedStorageGet(StorageGet {
@@ -701,8 +712,12 @@ impl<TRq, TBl> StorageGet<TRq, TBl> {
             }
             StorageGetTarget::Runtime(inner, heap_pages) => {
                 let wasm_code = value.expect("no runtime code in storage?"); // TODO: ?!?!
-                let wasm_vm = executor::WasmVmPrototype::new(wasm_code, heap_pages)
-                    .expect("invalid runtime code?!?!"); // TODO: ?!?!
+                let wasm_vm = executor::WasmVmPrototype::new(
+                    wasm_code,
+                    heap_pages,
+                    executor::vm::ExecHint::CompileAheadOfTime,
+                )
+                .expect("invalid runtime code?!?!"); // TODO: ?!?!
                 let inner =
                     inner.resume(wasm_vm, self.shared.top_trie_root_calculation_cache.take());
                 ProcessOne::from(Inner::Step2(inner), self.shared)
@@ -715,8 +730,12 @@ impl<TRq, TBl> StorageGet<TRq, TBl> {
                 } else {
                     1024 // TODO: default heap pages
                 };
-                let wasm_vm = executor::WasmVmPrototype::new(&wasm_code, heap_pages)
-                    .expect("invalid runtime code?!?!"); // TODO: ?!?!
+                let wasm_vm = executor::WasmVmPrototype::new(
+                    &wasm_code,
+                    heap_pages,
+                    executor::vm::ExecHint::CompileAheadOfTime,
+                )
+                .expect("invalid runtime code?!?!"); // TODO: ?!?!
                 let inner =
                     inner.resume(wasm_vm, self.shared.top_trie_root_calculation_cache.take());
                 ProcessOne::from(Inner::Step2(inner), self.shared)

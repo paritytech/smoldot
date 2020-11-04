@@ -19,6 +19,8 @@
 
 use core::{fmt, str};
 
+mod tests;
+
 /// Decodes the given SCALE-encoded metadata.
 pub(super) fn decode(scale_encoded_metadata: &[u8]) -> Result<MetadataRef, DecodeError> {
     let (_remain, out) = nom::combinator::all_consuming(prefixed_metadata)(scale_encoded_metadata)
@@ -154,7 +156,7 @@ pub struct DecodeError<'a>(nom::Err<NomError<'a>>);
 /// a lightweight enum is used by default . When debugging decoding problems, replace this type
 /// with `nom::error::VerboseError<&'a [u8]>` and use `nom::error::convert_error` for more
 /// verbose error messages.
-type NomError<'a> = (&'a [u8], nom::error::ErrorKind);
+type NomError<'a> = nom::error::Error<&'a [u8]>;
 
 pub struct UndecodedIter<'a, T> {
     bytes: &'a [u8],

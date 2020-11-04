@@ -82,7 +82,11 @@ pub struct ExternalsVmPrototype {
 impl ExternalsVmPrototype {
     /// Creates a new [`ExternalsVmPrototype`]. Parses and potentially JITs the module.
     // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
-    pub fn new(module: impl AsRef<[u8]>, heap_pages: u64) -> Result<Self, NewErr> {
+    pub fn new(
+        module: impl AsRef<[u8]>,
+        heap_pages: u64,
+        exec_hint: vm::ExecHint,
+    ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
         // when a function is invoked, the Wasm virtual machine will pass indices within that
@@ -92,6 +96,7 @@ impl ExternalsVmPrototype {
             let vm_proto = vm::VirtualMachinePrototype::new(
                 module,
                 heap_pages,
+                exec_hint,
                 // This closure is called back for each function that the runtime imports.
                 |mod_name, f_name, _signature| {
                     if mod_name != "env" {
@@ -178,6 +183,7 @@ impl ExternalsVmPrototype {
                 vm,
                 heap_base: self.heap_base,
                 registered_functions: self.registered_functions,
+                within_storage_transaction: false,
                 allocator,
             },
         })
@@ -229,6 +235,27 @@ pub enum ExternalsVm {
     /// still SCALE-encoded), or an error if the call has failed.
     #[from]
     CallRuntimeVersion(CallRuntimeVersion),
+    /// Declares the start of a storage transaction. See [`ExternalsVm::EndStorageTransaction`].
+    ///
+    /// Guaranteed by the code in this module to never happen while already within a transaction.
+    /// If the runtime attempts to start a nested transaction, an [`ExternalsVm::Error`] is
+    /// generated instead.
+    #[from]
+    StartStorageTransaction(StartStorageTransaction),
+    /// Ends a storage transaction. All changes made to the storage (e.g. through a
+    /// [`ExternalsVm::ExternalStorageSet`]) since the previous
+    /// [`ExternalsVm::StartStorageTransaction`] must be rolled back if `rollback` is true.
+    ///
+    /// Guaranteed by the code in this module to never happen if no transaction is in progress.
+    /// If the runtime attempts to end a non-existing transaction, an [`ExternalsVm::Error`] is
+    /// generated instead.
+    EndStorageTransaction {
+        /// Object used to resume execution.
+        resume: EndStorageTransaction,
+        /// If true, changes must be rolled back.
+        #[must_use]
+        rollback: bool,
+    },
     /// Runtime has emitted a log entry.
     #[from]
     LogEmit(LogEmit),
@@ -255,6 +282,13 @@ impl ReadyToRun {
                     return_value: Ok(Some(vm::WasmValue::I64(ret))),
                 }) => {
                     // Wasm virtual machine has successfully returned.
+
+                    if self.inner.within_storage_transaction {
+                        return ExternalsVm::Error {
+                            prototype: self.inner.into_prototype(),
+                            error: Error::FinishedWithPendingTransaction,
+                        };
+                    }
 
                     // Turn the `i64` into a `u64`, not changing any bit.
                     let ret = u64::from_ne_bytes(ret.to_ne_bytes());
@@ -353,9 +387,9 @@ impl ReadyToRun {
                 Externality::ext_storage_child_clear_prefix_version_1 => todo!(),
                 Externality::ext_storage_child_root_version_1 => todo!(),
                 Externality::ext_storage_child_next_key_version_1 => todo!(),
-                Externality::ext_storage_start_transaction_version_1 => todo!(),
-                Externality::ext_storage_rollback_transaction_version_1 => todo!(),
-                Externality::ext_storage_commit_transaction_version_1 => todo!(),
+                Externality::ext_storage_start_transaction_version_1 => 0,
+                Externality::ext_storage_rollback_transaction_version_1 => 0,
+                Externality::ext_storage_commit_transaction_version_1 => 0,
                 Externality::ext_default_child_storage_get_version_1 => todo!(),
                 Externality::ext_default_child_storage_storage_kill_version_1 => todo!(),
                 Externality::ext_default_child_storage_set_version_1 => todo!(),
@@ -640,9 +674,47 @@ impl ReadyToRun {
                 Externality::ext_storage_child_clear_prefix_version_1 => todo!(),
                 Externality::ext_storage_child_root_version_1 => todo!(),
                 Externality::ext_storage_child_next_key_version_1 => todo!(),
-                Externality::ext_storage_start_transaction_version_1 => todo!(),
-                Externality::ext_storage_rollback_transaction_version_1 => todo!(),
-                Externality::ext_storage_commit_transaction_version_1 => todo!(),
+                Externality::ext_storage_start_transaction_version_1 => {
+                    if self.inner.within_storage_transaction {
+                        return ExternalsVm::Error {
+                            error: Error::NestedTransaction,
+                            prototype: self.inner.into_prototype(),
+                        };
+                    }
+
+                    self.inner.within_storage_transaction = true;
+                    return ExternalsVm::StartStorageTransaction(StartStorageTransaction {
+                        inner: self.inner,
+                    });
+                }
+                Externality::ext_storage_rollback_transaction_version_1 => {
+                    if !self.inner.within_storage_transaction {
+                        return ExternalsVm::Error {
+                            error: Error::NoActiveTransaction,
+                            prototype: self.inner.into_prototype(),
+                        };
+                    }
+
+                    self.inner.within_storage_transaction = false;
+                    return ExternalsVm::EndStorageTransaction {
+                        resume: EndStorageTransaction { inner: self.inner },
+                        rollback: true,
+                    };
+                }
+                Externality::ext_storage_commit_transaction_version_1 => {
+                    if !self.inner.within_storage_transaction {
+                        return ExternalsVm::Error {
+                            error: Error::NoActiveTransaction,
+                            prototype: self.inner.into_prototype(),
+                        };
+                    }
+
+                    self.inner.within_storage_transaction = false;
+                    return ExternalsVm::EndStorageTransaction {
+                        resume: EndStorageTransaction { inner: self.inner },
+                        rollback: false,
+                    };
+                }
                 Externality::ext_default_child_storage_get_version_1 => todo!(),
                 Externality::ext_default_child_storage_storage_kill_version_1 => todo!(),
                 Externality::ext_default_child_storage_set_version_1 => todo!(),
@@ -1666,6 +1738,36 @@ impl fmt::Debug for LogEmit {
     }
 }
 
+/// Declares the start of a transaction.
+pub struct StartStorageTransaction {
+    inner: Inner,
+}
+
+impl StartStorageTransaction {
+    /// Resumes execution after having acknowledged the event.
+    pub fn resume(self) -> ExternalsVm {
+        ExternalsVm::ReadyToRun(ReadyToRun {
+            inner: self.inner,
+            resume_value: None,
+        })
+    }
+}
+
+/// Declares the end of a transaction.
+pub struct EndStorageTransaction {
+    inner: Inner,
+}
+
+impl EndStorageTransaction {
+    /// Resumes execution after having acknowledged the event.
+    pub fn resume(self) -> ExternalsVm {
+        ExternalsVm::ReadyToRun(ReadyToRun {
+            inner: self.inner,
+            resume_value: None,
+        })
+    }
+}
+
 /// Running virtual machine. Shared between all the variants in [`ExternalsVm`].
 struct Inner {
     /// Inner lower-level virtual machine.
@@ -1674,6 +1776,10 @@ struct Inner {
     /// Initial value of the `__heap_base` global in the Wasm module. Used to initialize the memory
     /// allocator in case we need to rebuild the VM.
     heap_base: u32,
+
+    /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
+    /// No further transaction start is allowed before the current one ends.
+    within_storage_transaction: bool,
 
     /// See [`ExternalsVmPrototype::registered_functions`].
     registered_functions: Vec<Externality>,
@@ -1911,6 +2017,18 @@ pub enum Error {
         /// Decoding error that happened.
         error: core::str::Utf8Error,
     },
+    /// Called `ext_storage_start_transaction_version_1` with a transaction was already in
+    /// progress.
+    #[display(fmt = "Attempted to start a transaction while one is already in progress")]
+    NestedTransaction,
+    /// Called `ext_storage_rollback_transaction_version_1` or
+    /// `ext_storage_commit_transaction_version_1` but no transaction was in progress.
+    #[display(fmt = "Attempted to end a transaction while none is in progress")]
+    NoActiveTransaction,
+    /// Execution has finished while a transaction started with
+    /// `ext_storage_start_transaction_version_1` was still in progress.
+    #[display(fmt = "Execution returned with a pending storage transaction")]
+    FinishedWithPendingTransaction,
     /// Error when allocating memory for a return type.
     #[display(
         fmt = "Out of memory allocating 0x{:x} bytes during {}",
