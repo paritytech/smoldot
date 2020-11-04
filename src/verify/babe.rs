@@ -113,21 +113,21 @@
 //! parent block belongs to.
 //! - The [`chain_information::BabeEpochInformationRef`] struct of the epoch that follows.
 //!
-//! When verifying block number 1, [`Config::parent_block_epoch`] must be set to `None` and
-//! [`Config::parent_block_next_epoch`] must be set to the definition of epoch #0 as determined by
-//! performing runtime calls.
+//! When verifying block number 1, [`VerifyConfig::parent_block_epoch`] must be set to `None` and
+//! [`VerifyConfig::parent_block_next_epoch`] must be set to the definition of epoch #0 as
+//! determined by performing runtime calls.
 //!
 //! Any time verifying a block produces a `Some` in [`VerifySuccess::epoch_transition_target`],
 //! which is guarateed to be the case when verifying block number 1, an epoch transition occurs.
 //! When verifying a child of such block, the value formerly passed as
-//! [`Config::parent_block_next_epoch`] must now be passed as [`Config::parent_block_epoch`],
-//! and the value in [`VerifySuccess::epoch_transition_target`] becomes
-//! [`Config::parent_block_next_epoch`].
+//! [`VerifyConfig::parent_block_next_epoch`] must now be passed as
+//! [`VerifyConfig::parent_block_epoch`], and the value in
+//! [`VerifySuccess::epoch_transition_target`] becomes [`VerifyConfig::parent_block_next_epoch`].
 //!
 //! When designing around these rules, be aware of forks: there can be multiple blocks at the same
 //! height performing epoch transitions.
 //!
-//! See also the [`crate::chain_information`] module for more help.
+//! See also the [`crate::chain::chain_information`] module for more help.
 
 use crate::{chain::chain_information, header};
 
@@ -173,9 +173,9 @@ pub struct VerifySuccess {
 
     /// If `Some`, the verified block contains an epoch transition describing the new "next epoch".
     /// When verifying blocks that are children of this one, the value in this field must be
-    /// provided as [`Config::parent_block_next_epoch`], and the value previously in
-    /// [`Config::parent_block_next_epoch`] must instead be passed as
-    /// [`Config::parent_block_epoch`].
+    /// provided as [`VerifyConfig::parent_block_next_epoch`], and the value previously in
+    /// [`VerifyConfig::parent_block_next_epoch`] must instead be passed as
+    /// [`VerifyConfig::parent_block_epoch`].
     pub epoch_transition_target: Option<chain_information::BabeEpochInformation>,
 }
 
@@ -209,9 +209,6 @@ pub enum VerifyError {
 }
 
 /// Verifies whether a block header provides a correct proof of the legitimacy of the authorship.
-///
-/// Returns either a [`PendingVerify`] if more information is needed, or a [`VerifySuccess`] if
-/// the verification could be successfully performed.
 ///
 /// # Panic
 ///
