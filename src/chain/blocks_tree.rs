@@ -551,6 +551,23 @@ impl<T> NonFinalizedTree<T> {
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
+            (
+                verify::header_only::Success::Babe {
+                    epoch_transition_target: None,
+                    slot_number,
+                },
+                VerifyConsensusSpecific::Babe { .. },
+                FinalizedConsensus::Babe {
+                    block_epoch_information,
+                    next_epoch_transition,
+                    ..
+                },
+                None,
+            ) => BlockConsensus::Babe {
+                current_epoch: block_epoch_information.clone(),
+                next_epoch: next_epoch_transition.clone(),
+            },
+
             // Any mismatch between consensus algorithms should have been detected by the
             // block verification.
             _ => unreachable!(),
@@ -645,8 +662,6 @@ impl<T> NonFinalizedTree<T> {
                 },
             }
         } else {
-            // Can only happen if parent is the block #0.
-            assert_eq!(decoded_header.number, 1);
             match &self.finalized_consensus {
                 FinalizedConsensus::Aura {
                     authorities_list, ..
@@ -654,10 +669,11 @@ impl<T> NonFinalizedTree<T> {
                     authorities_list: authorities_list.clone(),
                 },
                 FinalizedConsensus::Babe {
+                    block_epoch_information,
                     next_epoch_transition,
                     ..
                 } => VerifyConsensusSpecific::Babe {
-                    current_epoch: None,
+                    current_epoch: block_epoch_information.clone(),
                     next_epoch: next_epoch_transition.clone(),
                 },
             }
@@ -1213,6 +1229,23 @@ impl<T> BodyVerifyStep2<T> {
                         ) => BlockConsensus::Babe {
                             current_epoch: Some(next_epoch_transition),
                             next_epoch: Arc::new(epoch_transition_target),
+                        },
+
+                        (
+                            verify::header_body::SuccessConsensus::Babe {
+                                epoch_transition_target: None,
+                                slot_number,
+                            },
+                            VerifyConsensusSpecific::Babe { .. },
+                            FinalizedConsensus::Babe {
+                                block_epoch_information,
+                                next_epoch_transition,
+                                ..
+                            },
+                            None,
+                        ) => BlockConsensus::Babe {
+                            current_epoch: block_epoch_information.clone(),
+                            next_epoch: next_epoch_transition.clone(),
                         },
 
                         // Any mismatch between consensus algorithms should have been detected by the

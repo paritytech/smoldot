@@ -103,7 +103,7 @@ impl SyncService {
         (config.tasks_executor)(Box::pin(
             start_sync(
                 config.chain_spec,
-                config.chain_information_config,
+                config.chain_information,
                 sync_state.clone(),
                 to_foreground,
                 from_foreground,

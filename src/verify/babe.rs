@@ -261,7 +261,6 @@ pub fn verify_header<'a>(config: VerifyConfig<'a>) -> Result<VerifySuccess, Veri
 
     // Verify consistency of the configuration.
     if let Some(curr) = &config.parent_block_epoch {
-        assert_ne!(config.parent_block_next_epoch.epoch_index, 1);
         assert_eq!(
             curr.epoch_index.checked_add(1).unwrap(),
             config.parent_block_next_epoch.epoch_index
@@ -271,7 +270,10 @@ pub fn verify_header<'a>(config: VerifyConfig<'a>) -> Result<VerifySuccess, Veri
     } else {
         assert_eq!(config.parent_block_next_epoch.epoch_index, 0);
     }
-    assert!(config.parent_block_next_epoch.start_slot_number > parent_slot_number);
+    assert!(config
+        .parent_block_next_epoch
+        .start_slot_number
+        .map_or(true, |n| n > parent_slot_number.unwrap()));
     assert_eq!(
         config.parent_block_next_epoch.epoch_index == 0,
         config.parent_block_next_epoch.start_slot_number.is_none()
