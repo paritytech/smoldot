@@ -116,6 +116,7 @@ impl ChainInformation {
                 finalized_block_epoch_information: None,
                 finalized_next_epoch_transition: BabeEpochInformation {
                     epoch_index: 0,
+                    start_slot_number: None,
                     authorities: babe_genesis_config.epoch0_information.authorities,
                     randomness: babe_genesis_config.epoch0_information.randomness,
                     c: babe_genesis_config.epoch0_configuration.c,
@@ -169,7 +170,7 @@ impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
                 } => ChainInformationConsensus::Babe {
                     slots_per_epoch,
                     finalized_block_epoch_information: finalized_block_epoch_information
-                        .map(|(s, e)| (s, e.into())),
+                        .map(Into::into),
                     finalized_next_epoch_transition: finalized_next_epoch_transition.into(),
                 },
             },
@@ -203,8 +204,7 @@ pub enum ChainInformationConsensus {
         /// Number of slots per epoch. Configured at the genesis block and never touched later.
         slots_per_epoch: NonZeroU64,
 
-        /// Babe epoch information about the epoch the finalized block belongs to, including the
-        /// slot at which it starts.
+        /// Babe epoch information about the epoch the finalized block belongs to.
         ///
         /// If the finalized block belongs to epoch #0, which starts at block #1, then this must
         /// contain the information about the epoch #0, which can be found by calling
@@ -218,7 +218,7 @@ pub enum ChainInformationConsensus {
         /// >           slots, it is often not possible to know in advance whether the children
         /// >           of a block will belong to the same epoch as their parent. This is the
         /// >           reason why the "parent" (i.e. finalized block)'s information are demanded.
-        finalized_block_epoch_information: Option<(u64, BabeEpochInformation)>,
+        finalized_block_epoch_information: Option<BabeEpochInformation>,
 
         /// Babe epoch information about the epoch right after the one the finalized block belongs
         /// to.
@@ -241,6 +241,11 @@ pub struct BabeEpochInformation {
     /// Epoch number 0 starts at the slot number of block 1. Epoch indices increase one by one.
     pub epoch_index: u64,
 
+    /// Slot at which the epoch starts.
+    ///
+    /// Must be `None` if and only if `epoch_index` is 0.
+    pub start_slot_number: Option<u64>,
+
     /// List of authorities allowed to author blocks during this epoch.
     pub authorities: Vec<header::BabeAuthority>,
 
@@ -261,6 +266,7 @@ impl<'a> From<BabeEpochInformationRef<'a>> for BabeEpochInformation {
     fn from(info: BabeEpochInformationRef<'a>) -> BabeEpochInformation {
         BabeEpochInformation {
             epoch_index: info.epoch_index,
+            start_slot_number: info.start_slot_number,
             authorities: info.authorities.map(Into::into).collect(),
             randomness: *info.randomness,
             c: info.c,
@@ -322,8 +328,7 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
                 } => ChainInformationConsensusRef::Babe {
                     slots_per_epoch: *slots_per_epoch,
                     finalized_block_epoch_information: finalized_block_epoch_information
-                        .as_ref()
-                        .map(|(s, e)| (s, e.into())),
+                        .map(Into::into),
                     finalized_next_epoch_transition: finalized_next_epoch_transition.into(),
                 },
             },
@@ -356,7 +361,7 @@ pub enum ChainInformationConsensusRef<'a> {
         slots_per_epoch: NonZeroU64,
 
         /// See equivalent field in [`ChainInformationConsensus`].
-        finalized_block_epoch_information: Option<(u64, BabeEpochInformationRef<'a>)>,
+        finalized_block_epoch_information: Option<BabeEpochInformationRef<'a>>,
 
         /// See equivalent field in [`ChainInformationConsensus`].
         finalized_next_epoch_transition: BabeEpochInformationRef<'a>,
@@ -368,6 +373,9 @@ pub enum ChainInformationConsensusRef<'a> {
 pub struct BabeEpochInformationRef<'a> {
     /// See equivalent field in [`BabeEpochInformation`].
     pub epoch_index: u64,
+
+    /// See equivalent field in [`BabeEpochInformation`].
+    pub start_slot_number: Option<u64>,
 
     /// See equivalent field in [`BabeEpochInformation`].
     pub authorities: header::BabeAuthoritiesIter<'a>,
@@ -386,6 +394,7 @@ impl<'a> From<&'a BabeEpochInformation> for BabeEpochInformationRef<'a> {
     fn from(info: &'a BabeEpochInformation) -> BabeEpochInformationRef<'a> {
         BabeEpochInformationRef {
             epoch_index: info.epoch_index,
+            start_slot_number: info.start_slot_number,
             authorities: header::BabeAuthoritiesIter::from_slice(&info.authorities),
             randomness: &info.randomness,
             c: info.c,
