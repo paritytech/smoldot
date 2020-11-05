@@ -39,6 +39,7 @@ use substrate_lite::{
 };
 use wasm_bindgen::prelude::*;
 
+pub mod ffi;
 mod network_service;
 
 // This custom allocator is used in order to reduce the size of the Wasm binary.
