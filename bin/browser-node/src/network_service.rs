@@ -55,7 +55,7 @@ pub struct NetworkService {
 
     /// Holds the state of all the known nodes of the network, and of all the connections (pending
     /// or not).
-    peerset: peerset::Peerset<(), (), ()>,
+    peerset: peerset::Peerset<(), (), (), (), ()>,
 }
 
 impl NetworkService {
