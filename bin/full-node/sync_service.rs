@@ -30,7 +30,7 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use std::{sync::Arc, time::SystemTime};
+use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 use substrate_lite::{chain::sync::full_optimistic, database::full_sled, network};
 
 /// Configuration for a [`SyncService`].
@@ -86,6 +86,7 @@ impl SyncService {
     pub async fn new(mut config: Config) -> Arc<Self> {
         let (to_foreground, from_background) = mpsc::channel(16);
         let (to_background, from_foreground) = mpsc::channel(16);
+        let (to_database, messages_rx) = mpsc::channel(1024);
 
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_hash: [0; 32],      // TODO:
@@ -96,13 +97,16 @@ impl SyncService {
 
         (config.tasks_executor)(Box::pin(
             start_sync(
-                config.database,
+                config.database.clone(),
                 sync_state.clone(),
                 to_foreground,
                 from_foreground,
+                to_database,
             )
             .await,
         ));
+
+        (config.tasks_executor)(Box::pin(start_database_write(config.database, messages_rx)));
 
         Arc::new(SyncService {
             sync_state,
@@ -113,6 +117,9 @@ impl SyncService {
     }
 
     /// Returns a summary of the state of the service.
+    ///
+    /// > **Important**: This doesn't represent the content of the database.
+    // TODO: maybe remove this in favour of the database; seems like a better idea
     pub async fn sync_state(&self) -> SyncState {
         self.sync_state.lock().await.clone()
     }
@@ -199,25 +206,18 @@ enum FromBackground {
     },
 }
 
+enum ToDatabase {
+    FinalizedBlocks(Vec<full_optimistic::Block>),
+}
+
 /// Returns the background task of the sync service.
 async fn start_sync(
     database: Arc<full_sled::SledFullDatabase>,
     sync_state: Arc<Mutex<SyncState>>,
     mut to_foreground: mpsc::Sender<FromBackground>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
+    mut to_database: mpsc::Sender<ToDatabase>,
 ) -> impl Future<Output = ()> {
-    // Extract raw information about the chain from the database.
-    // Used below in order to initialize the sync state machine.
-    let chain_information = database
-        .to_chain_information(&database.finalized_block_hash().unwrap())
-        .unwrap();
-
-    // In order to avoid any potential race conditions, we maintain a variable containing the hash
-    // of the block that this local code expects to be finalized. This hash is passed by parameter
-    // to the database every time an access to the finalized block is needed, in order to make
-    // sure that no code has updated this finalized block in parallel.
-    let mut expected_finalized_block_hash = chain_information.finalized_block_header.hash();
-
     let mut sync =
         full_optimistic::OptimisticFullSync::<_, network::PeerId>::new(full_optimistic::Config {
             chain_information: database
@@ -236,6 +236,25 @@ async fn start_sync(
                 1024
             },
         });
+
+    // Holds, in parallel of the database, the storage of the latest finalized block.
+    // At the time of writing, this state is stable around ~3MiB for Polkadot, meaning that it is
+    // completely acceptable to hold it entirely in memory.
+    // While reading the storage from the database is an option, doing so considerably slows down
+    // the verification, and also makes it impossible to insert blocks in the database in
+    // parallel of this verification.
+    let mut finalized_block_storage = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+    for key in database
+        .finalized_block_storage_top_trie_keys(&database.finalized_block_hash().unwrap(), &[])
+        .unwrap()
+    {
+        if let Some(value) = database
+            .finalized_block_storage_top_trie_get(&database.finalized_block_hash().unwrap(), &key)
+            .unwrap()
+        {
+            finalized_block_storage.insert(key.to_owned(), value.to_owned());
+        }
+    }
 
     async move {
         let mut peers_source_id_map = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
@@ -260,39 +279,29 @@ async fn start_sync(
                     } => {
                         process = s.process_one(unix_time);
 
-                        let new_finalized_hash =
-                            if let Some(last_finalized) = finalized_blocks.last() {
-                                let mut lock = sync_state.lock().await;
-                                lock.finalized_block_hash = last_finalized.header.hash();
-                                lock.finalized_block_number = last_finalized.header.number;
-                                Some(lock.finalized_block_hash)
-                            } else {
-                                None
-                            };
+                        if let Some(last_finalized) = finalized_blocks.last() {
+                            let mut lock = sync_state.lock().await;
+                            lock.finalized_block_hash = last_finalized.header.hash();
+                            lock.finalized_block_number = last_finalized.header.number;
+                        }
 
                         // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
-                        for block in finalized_blocks {
-                            // TODO: overhead for header
-                            database
-                                .insert(
-                                    &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                                        a.extend_from_slice(b.as_ref());
-                                        a
-                                    }),
-                                    true, // TODO: is_new_best?
-                                    block.body.iter(),
-                                    block
-                                        .storage_top_trie_changes
-                                        .iter()
-                                        .map(|(k, v)| (k, v.as_ref())),
-                                )
-                                .unwrap();
+                        for block in &finalized_blocks {
+                            for (key, value) in &block.storage_top_trie_changes {
+                                if let Some(value) = value {
+                                    finalized_block_storage.insert(key.clone(), value.clone());
+                                } else {
+                                    let _was_there = finalized_block_storage.remove(key);
+                                    // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
+                                    // assert!(_was_there.is_some());
+                                }
+                            }
                         }
 
-                        if let Some(new_finalized_hash) = new_finalized_hash {
-                            database.set_finalized(&new_finalized_hash).unwrap();
-                            expected_finalized_block_hash = new_finalized_hash;
-                        }
+                        to_database
+                            .send(ToDatabase::FinalizedBlocks(finalized_blocks))
+                            .await
+                            .unwrap();
                     }
 
                     full_optimistic::ProcessOne::InProgress {
@@ -312,32 +321,31 @@ async fn start_sync(
                     }
 
                     full_optimistic::ProcessOne::FinalizedStorageGet(req) => {
-                        // TODO: why is this `key_as_vec()` even here? can't `key()` return a `&[u8]`?
-                        let value = database
-                            .finalized_block_storage_top_trie_get(
-                                &expected_finalized_block_hash,
-                                &req.key_as_vec(),
-                            )
-                            .unwrap();
-                        process = req.inject_value(value.as_ref().map(|v| &v[..]));
+                        let value = finalized_block_storage
+                            .get(&req.key_as_vec())
+                            .map(|v| &v[..]);
+                        process = req.inject_value(value);
                     }
                     full_optimistic::ProcessOne::FinalizedStorageNextKey(req) => {
-                        let next_key = database
-                            .finalized_block_storage_top_trie_next_key(
-                                &expected_finalized_block_hash,
-                                req.key(),
-                            )
-                            .unwrap();
-                        process = req.inject_key(next_key.as_ref().map(|k| &k[..]));
+                        // TODO: to_vec() :-/
+                        let req_key = req.key().to_vec();
+                        // TODO: to_vec() :-/
+                        let next_key = finalized_block_storage
+                            .range(req.key().to_vec()..)
+                            .skip_while(move |(k, _)| &k[..] <= &req_key[..])
+                            .next()
+                            .map(|(k, _)| k);
+                        process = req.inject_key(next_key);
                     }
                     full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(req) => {
-                        let keys = database
-                            .finalized_block_storage_top_trie_keys(
-                                &expected_finalized_block_hash,
-                                req.prefix(),
-                            )
-                            .unwrap();
-                        process = req.inject_keys(keys.iter().map(|k| &k[..]));
+                        // TODO: to_vec() :-/
+                        let prefix = req.prefix().to_vec();
+                        // TODO: to_vec() :-/
+                        let keys = finalized_block_storage
+                            .range(req.prefix().to_vec()..)
+                            .take_while(|(k, _)| k.starts_with(&prefix))
+                            .map(|(k, _)| k);
+                        process = req.inject_keys(keys);
                     }
                 }
             }
@@ -432,6 +440,47 @@ async fn start_sync(
                         })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
+            }
+        }
+    }
+}
+
+/// Starts the task that writes blocks to the database.
+async fn start_database_write(
+    database: Arc<full_sled::SledFullDatabase>,
+    mut messages_rx: mpsc::Receiver<ToDatabase>,
+) {
+    loop {
+        match messages_rx.next().await {
+            None => break,
+            Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
+                let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
+                    Some(last_finalized.header.hash())
+                } else {
+                    None
+                };
+
+                for block in finalized_blocks {
+                    // TODO: overhead for building the SCALE encoding of the header
+                    database
+                        .insert(
+                            &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            }),
+                            true, // TODO: is_new_best?
+                            block.body.iter(),
+                            block
+                                .storage_top_trie_changes
+                                .iter()
+                                .map(|(k, v)| (k, v.as_ref())),
+                        )
+                        .unwrap();
+                }
+
+                if let Some(new_finalized_hash) = new_finalized_hash {
+                    database.set_finalized(&new_finalized_hash).unwrap();
+                }
             }
         }
     }
