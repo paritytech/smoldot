@@ -19,7 +19,7 @@
 
 use futures::{channel::oneshot, prelude::*};
 use std::{
-    borrow::Cow, convert::TryFrom as _, fs, path::PathBuf, sync::Arc, thread, time::Duration,
+    borrow::Cow, convert::TryFrom as _, fs, iter, path::PathBuf, sync::Arc, thread, time::Duration,
 };
 use structopt::StructOpt as _;
 use substrate_lite::{
@@ -59,7 +59,7 @@ async fn async_main() {
         .unwrap();
 
     // Open the database from the filesystem, or create a new database if none is found.
-    let (chain_information, database) = Arc::new({
+    let (chain_information, database) = {
         // Directory supposed to contain the database.
         let db_path = {
             const APP_INFO: app_dirs::AppInfo = app_dirs::AppInfo {
@@ -82,7 +82,7 @@ async fn async_main() {
                     database.finalized_block_hash().unwrap()
                 );
                 let chain_information = database
-                    .to_chain_information(database.finalized_block_hash().unwrap())
+                    .to_chain_information(&database.finalized_block_hash().unwrap())
                     .unwrap(); // TODO: unwrap?
                 (chain_information, Arc::new(database))
             }
@@ -103,7 +103,7 @@ async fn async_main() {
                 // no justification.
                 let database = empty
                     .initialize(
-                        chain_information,
+                        &genesis_chain_information,
                         iter::empty(),
                         None,
                         chain_spec.genesis_storage(),
@@ -113,7 +113,7 @@ async fn async_main() {
                 (genesis_chain_information, Arc::new(database))
             }
         }
-    });
+    };
 
     // TODO: remove; just for testing
     /*let metadata = substrate_lite::metadata::metadata_from_runtime_code(

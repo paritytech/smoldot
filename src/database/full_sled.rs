@@ -26,7 +26,7 @@
 
 use crate::{chain::chain_information, header, util};
 
-use core::{convert::TryFrom as _, fmt, iter, num::NonZeroU64, ops};
+use core::{convert::TryFrom, fmt, iter, num::NonZeroU64, ops};
 use sled::Transactional as _;
 
 pub use open::{open, Config, DatabaseOpen};
@@ -914,6 +914,7 @@ pub enum CorruptedError {
     BlockHashLenInHashNumberMapping,
     BlockBodyCorrupted(parity_scale_codec::Error),
     NonFinalizedChangesMissing,
+    InvalidBabeEpochInformation,
     MissingGrandpaAuthoritiesSetId,
     InvalidGrandpaAuthoritiesSetId,
     MissingGrandpaTriggeredAuthoritiesScheduledHeight,
@@ -1048,6 +1049,16 @@ fn finalized_hash(
     }
 }
 
+fn encode_grandpa_authorities_list(list: header::GrandpaAuthoritiesIter) -> Vec<u8> {
+    let mut out = Vec::with_capacity(list.len() * 40);
+    for authority in list {
+        out.extend_from_slice(authority.public_key);
+        out.extend_from_slice(&authority.weight.to_le_bytes()[..]);
+    }
+    debug_assert_eq!(out.len(), out.capacity());
+    out
+}
+
 fn decode_grandpa_authorities_list(
     value: &sled::IVec,
 ) -> Result<
@@ -1079,7 +1090,6 @@ fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRe
     } else {
         out.extend_from_slice(&[0]);
     }
-    out.extend_from_slice(&info.epoch_index.to_le_bytes());
     out.extend_from_slice(util::encode_scale_compact_usize(info.authorities.len()).as_ref());
     for authority in info.authorities {
         out.extend_from_slice(authority.public_key);
@@ -1093,7 +1103,6 @@ fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRe
         header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots => &[1],
         header::BabeAllowedSlots::PrimaryAndSecondaryVRFSlots => &[2],
     });
-    out.extend_from_slice(&info.epoch_index.to_le_bytes());
     out
 }
 
@@ -1103,5 +1112,56 @@ fn decode_babe_epoch_information(
     chain_information::BabeEpochInformation,
     sled::transaction::ConflictableTransactionError<AccessError>,
 > {
-    todo!()
+    let result = nom::combinator::all_consuming(nom::combinator::map(
+        nom::sequence::tuple((
+            nom::number::complete::le_u64,
+            |b| util::nom_option_decode(b, nom::number::complete::le_u64),
+            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+                nom::multi::many_m_n(
+                    num_elems,
+                    num_elems,
+                    nom::combinator::map(
+                        nom::sequence::tuple((
+                            nom::bytes::complete::take(32u32),
+                            nom::number::complete::le_u64,
+                        )),
+                        move |(public_key, weight)| header::BabeAuthority {
+                            public_key: TryFrom::try_from(public_key).unwrap(),
+                            weight,
+                        },
+                    ),
+                )
+            }),
+            nom::bytes::complete::take(32u32),
+            nom::sequence::tuple((nom::number::complete::le_u64, nom::number::complete::le_u64)),
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                    header::BabeAllowedSlots::PrimarySlots
+                }),
+                nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
+                }),
+                nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+                    header::BabeAllowedSlots::PrimaryAndSecondaryVRFSlots
+                }),
+            )),
+        )),
+        |(epoch_index, start_slot_number, authorities, randomness, c, allowed_slots)| {
+            chain_information::BabeEpochInformation {
+                epoch_index,
+                start_slot_number,
+                authorities,
+                randomness: TryFrom::try_from(randomness).unwrap(),
+                c,
+                allowed_slots,
+            }
+        },
+    ))(&value)
+    .map(|(_, v)| v)
+    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
+
+    result
+        .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
+        .map_err(AccessError::Corrupted)
+        .map_err(sled::transaction::ConflictableTransactionError::Abort)
 }

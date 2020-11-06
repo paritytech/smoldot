@@ -19,8 +19,11 @@
 //!
 //! Contains everything related to the opening and initialization of the database.
 
-use super::{encode_babe_epoch_information, AccessError, SledError, SledFullDatabase};
-use crate::{chain::chain_information, util};
+use super::{
+    encode_babe_epoch_information, encode_grandpa_authorities_list, AccessError, SledError,
+    SledFullDatabase,
+};
+use crate::{chain::chain_information, header, util};
 
 use sled::Transactional as _;
 use std::path::Path;
@@ -134,11 +137,13 @@ impl DatabaseEmpty {
     /// Must also pass the body, justification, and state of the storage of the finalized block.
     pub fn initialize<'a>(
         self,
-        chain_information: chain_information::ChainInformationRef<'a>,
+        chain_information: impl Into<chain_information::ChainInformationRef<'a>>,
         finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
         finalized_block_justification: Option<Vec<u8>>,
         finalized_block_storage_top_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
     ) -> Result<SledFullDatabase, AccessError> {
+        let chain_information = chain_information.into();
+
         // Because the closure below might potentially be run multiple times, we compute some
         // information ahead of time.
         let scale_encoded_finalized_block_body = {
@@ -180,8 +185,6 @@ impl DatabaseEmpty {
                             a.extend_from_slice(b.as_ref());
                             a
                         });
-                    let grandpa_authorities_set_id =
-                        chain_information.grandpa_after_finalized_block_authorities_set_id;
 
                     for (key, value) in finalized_block_storage_top_trie_entries.clone() {
                         finalized_storage_top_trie_tree.insert(key, value)?;
@@ -204,16 +207,34 @@ impl DatabaseEmpty {
                         block_justifications.insert(
                             &finalized_block_hash[..],
                             &finalized_block_justification[..],
-                        );
+                        )?;
                     }
                     meta.insert(b"best", &finalized_block_hash[..])?;
                     meta.insert(b"finalized", &finalized_block_number.to_be_bytes()[..])?;
                     meta.insert(
                         b"grandpa_authorities_set_id",
-                        &grandpa_authorities_set_id.to_be_bytes()[..],
+                        &chain_information
+                            .grandpa_after_finalized_block_authorities_set_id
+                            .to_be_bytes()[..],
+                    )?;
+                    meta.insert(
+                        b"grandpa_triggered_authorities",
+                        encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
+                            &chain_information.grandpa_finalized_triggered_authorities,
+                        )),
                     )?;
 
-                    // TODO: missing GrandPa stuff
+                    if let Some((height, list)) =
+                        &chain_information.grandpa_finalized_scheduled_change
+                    {
+                        meta.insert(b"grandpa_scheduled_target", &height.to_be_bytes()[..])?;
+                        meta.insert(
+                            b"grandpa_scheduled_authorities",
+                            encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
+                                list,
+                            )),
+                        )?;
+                    }
 
                     match &chain_information.consensus {
                         chain_information::ChainInformationConsensusRef::Aura {
@@ -224,6 +245,7 @@ impl DatabaseEmpty {
                                 b"aura_slot_duration",
                                 &slot_duration.get().to_be_bytes()[..],
                             )?;
+                            todo!()
                             // TODO: authorities list
                         }
                         chain_information::ChainInformationConsensusRef::Babe {
