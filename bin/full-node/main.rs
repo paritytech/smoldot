@@ -100,14 +100,14 @@ async fn async_main() {
     });
 
     // Load the information about the chain from the database.
-    let chain_information_config = {
+    let chain_information = {
         let genesis_chain_information =
-            chain::chain_information::ChainInformationConfig::from_genesis_storage(
+            chain::chain_information::ChainInformation::from_genesis_storage(
                 chain_spec.genesis_storage(),
             )
             .unwrap(); // TODO: don't unwrap?
 
-        chain::chain_information::ChainInformationConfig {
+        chain::chain_information::ChainInformation {
             // TODO: don't unwrap? how to handle database access errors?
             chain_information: database
                 .to_chain_information(
@@ -167,7 +167,7 @@ async fn async_main() {
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
         chain_spec: &chain_spec,
-        chain_information_config,
+        chain_information,
     })
     .await;
 
