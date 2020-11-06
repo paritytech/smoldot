@@ -59,7 +59,7 @@ async fn async_main() {
         .unwrap();
 
     // Open the database from the filesystem, or create a new database if none is found.
-    let database = Arc::new({
+    let (chain_information, database) = Arc::new({
         // Directory supposed to contain the database.
         let db_path = {
             const APP_INFO: app_dirs::AppInfo = app_dirs::AppInfo {
@@ -73,6 +73,7 @@ async fn async_main() {
 
         // The `unwrap()` here can panic for example in case of access denied.
         match open_database(db_path.clone()).await.unwrap() {
+            // Database already exists and contains data.
             full_sled::DatabaseOpen::Open(database) => {
                 // TODO: verify that the database matches the chain spec
                 // TODO: print the hash in a nicer way
@@ -80,46 +81,39 @@ async fn async_main() {
                     "Loading existing database with finalized hash {:?}",
                     database.finalized_block_hash().unwrap()
                 );
-                database
+                let chain_information = database
+                    .to_chain_information(database.finalized_block_hash().unwrap())
+                    .unwrap(); // TODO: unwrap?
+                (chain_information, Arc::new(database))
             }
+
+            // The database doesn't exist or is empty.
             full_sled::DatabaseOpen::Empty(empty) => {
-                // TODO: make nicer
-                let genesis_block_header =
-                    substrate_lite::calculate_genesis_block_header(chain_spec.genesis_storage())
-                        .scale_encoding()
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        });
+                // Build information about state of the chain at the genesis block, and fill the
+                // database with it.
+                let genesis_chain_information =
+                    chain::chain_information::ChainInformation::from_genesis_storage(
+                        chain_spec.genesis_storage(),
+                    )
+                    .unwrap(); // TODO: don't unwrap?
+
                 eprintln!("Initializing new database at {}", db_path.display());
-                empty
-                    .insert_genesis_block(&genesis_block_header, chain_spec.genesis_storage())
-                    .unwrap()
+
+                // The finalized block is the genesis block. As such, it has an empty body and
+                // no justification.
+                let database = empty
+                    .initialize(
+                        chain_information,
+                        iter::empty(),
+                        None,
+                        chain_spec.genesis_storage(),
+                    )
+                    .unwrap();
+
+                (genesis_chain_information, Arc::new(database))
             }
         }
     });
-
-    // Load the information about the chain from the database.
-    let chain_information = {
-        let genesis_chain_information =
-            chain::chain_information::ChainInformation::from_genesis_storage(
-                chain_spec.genesis_storage(),
-            )
-            .unwrap(); // TODO: don't unwrap?
-
-        chain::chain_information::ChainInformation {
-            // TODO: don't unwrap? how to handle database access errors?
-            chain_information: database
-                .to_chain_information(
-                    &database.finalized_block_hash().unwrap(),
-                    genesis_chain_information
-                        .chain_information
-                        .grandpa_finalized_triggered_authorities,
-                )
-                .unwrap(),
-            babe_genesis_config: genesis_chain_information.babe_genesis_config,
-        }
-    };
 
     // TODO: remove; just for testing
     /*let metadata = substrate_lite::metadata::metadata_from_runtime_code(

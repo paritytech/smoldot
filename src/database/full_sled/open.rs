@@ -19,7 +19,8 @@
 //!
 //! Contains everything related to the opening and initialization of the database.
 
-use super::{AccessError, SledError, SledFullDatabase};
+use super::{encode_babe_epoch_information, AccessError, SledError, SledFullDatabase};
+use crate::{chain::chain_information, util};
 
 use sled::Transactional as _;
 use std::path::Path;
@@ -41,6 +42,9 @@ pub fn open(config: Config) -> Result<DatabaseOpen, SledError> {
         .map_err(SledError)?;
     let block_headers_tree = database.open_tree(b"block_headers").map_err(SledError)?;
     let block_bodies_tree = database.open_tree(b"block_bodies").map_err(SledError)?;
+    let block_justifications_tree = database
+        .open_tree(b"block_justifications")
+        .map_err(SledError)?;
     let finalized_storage_top_trie_tree = database
         .open_tree(b"finalized_storage_top_trie")
         .map_err(SledError)?;
@@ -57,6 +61,7 @@ pub fn open(config: Config) -> Result<DatabaseOpen, SledError> {
             meta_tree,
             block_headers_tree,
             block_bodies_tree,
+            block_justifications_tree,
             finalized_storage_top_trie_tree,
             non_finalized_changes_keys_tree,
             non_finalized_changes_tree,
@@ -67,6 +72,7 @@ pub fn open(config: Config) -> Result<DatabaseOpen, SledError> {
             meta_tree,
             block_headers_tree,
             block_bodies_tree,
+            block_justifications_tree,
             finalized_storage_top_trie_tree,
             non_finalized_changes_keys_tree,
             non_finalized_changes_tree,
@@ -109,6 +115,9 @@ pub struct DatabaseEmpty {
     block_bodies_tree: sled::Tree,
 
     /// See the similar field in [`SledFullDatabase`].
+    block_justifications_tree: sled::Tree,
+
+    /// See the similar field in [`SledFullDatabase`].
     finalized_storage_top_trie_tree: sled::Tree,
 
     /// See the similar field in [`SledFullDatabase`].
@@ -119,22 +128,37 @@ pub struct DatabaseEmpty {
 }
 
 impl DatabaseEmpty {
-    /// Inserts the genesis block in the database prototype in order to turn it into an actual
-    /// database.
-    pub fn insert_genesis_block<'a>(
+    /// Inserts the given [`ChainInformation`] in the database prototype in order to turn it into
+    /// an actual database.
+    ///
+    /// Must also pass the body, justification, and state of the storage of the finalized block.
+    pub fn initialize<'a>(
         self,
-        scale_encoded_genesis_block_header: &[u8],
-        storage_top_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
+        chain_information: chain_information::ChainInformationRef<'a>,
+        finalized_block_body: impl ExactSizeIterator<Item = &'a [u8]>,
+        finalized_block_justification: Option<Vec<u8>>,
+        finalized_block_storage_top_trie_entries: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
     ) -> Result<SledFullDatabase, AccessError> {
-        // Calculate the hash of the genesis block.
-        let genesis_block_hash =
-            crate::header::hash_from_scale_encoded_header(scale_encoded_genesis_block_header);
+        // Because the closure below might potentially be run multiple times, we compute some
+        // information ahead of time.
+        let scale_encoded_finalized_block_body = {
+            let mut val = Vec::new();
+            val.extend_from_slice(
+                util::encode_scale_compact_usize(finalized_block_body.len()).as_ref(),
+            );
+            for item in finalized_block_body {
+                val.extend_from_slice(util::encode_scale_compact_usize(item.len()).as_ref());
+                val.extend_from_slice(item);
+            }
+            val
+        };
 
         // Try to apply changes. This is done atomically through a transaction.
         let result = (
             &self.block_hashes_by_number_tree,
             &self.block_headers_tree,
             &self.block_bodies_tree,
+            &self.block_justifications_tree,
             &self.finalized_storage_top_trie_tree,
             &self.meta_tree,
         )
@@ -143,43 +167,114 @@ impl DatabaseEmpty {
                     block_hashes_by_number,
                     block_headers,
                     block_bodies,
-                    storage_top_trie,
+                    block_justifications,
+                    finalized_storage_top_trie_tree,
                     meta,
                 )| {
-                    for (key, value) in storage_top_trie_entries.clone() {
-                        storage_top_trie.insert(key, value)?;
+                    let finalized_block_hash = chain_information.finalized_block_header.hash();
+                    let finalized_block_number = chain_information.finalized_block_header.number;
+                    let scale_encoded_finalized_block_header = chain_information
+                        .finalized_block_header
+                        .scale_encoding()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
+                    let grandpa_authorities_set_id =
+                        chain_information.grandpa_after_finalized_block_authorities_set_id;
+
+                    for (key, value) in finalized_block_storage_top_trie_entries.clone() {
+                        finalized_storage_top_trie_tree.insert(key, value)?;
                     }
 
-                    block_hashes_by_number
-                        .insert(&0u64.to_be_bytes()[..], &genesis_block_hash[..])?;
-
-                    block_headers
-                        .insert(&genesis_block_hash[..], scale_encoded_genesis_block_header)?;
-                    block_bodies.insert(
-                        &genesis_block_hash[..],
-                        parity_scale_codec::Encode::encode(&Vec::<Vec<u8>>::new()),
+                    block_hashes_by_number.insert(
+                        &finalized_block_number.to_be_bytes()[..],
+                        &finalized_block_hash[..],
                     )?;
-                    meta.insert(b"best", &genesis_block_hash[..])?;
-                    meta.insert(b"finalized", &0u64.to_be_bytes()[..])?;
-                    meta.insert(b"grandpa_authorities_set_id", &0u64.to_be_bytes()[..])?;
+
+                    block_headers.insert(
+                        &finalized_block_hash[..],
+                        scale_encoded_finalized_block_header,
+                    )?;
+                    block_bodies.insert(
+                        &finalized_block_hash[..],
+                        &scale_encoded_finalized_block_body[..],
+                    )?;
+                    if let Some(finalized_block_justification) = &finalized_block_justification {
+                        block_justifications.insert(
+                            &finalized_block_hash[..],
+                            &finalized_block_justification[..],
+                        );
+                    }
+                    meta.insert(b"best", &finalized_block_hash[..])?;
+                    meta.insert(b"finalized", &finalized_block_number.to_be_bytes()[..])?;
+                    meta.insert(
+                        b"grandpa_authorities_set_id",
+                        &grandpa_authorities_set_id.to_be_bytes()[..],
+                    )?;
+
+                    // TODO: missing GrandPa stuff
+
+                    match &chain_information.consensus {
+                        chain_information::ChainInformationConsensusRef::Aura {
+                            finalized_authorities_list,
+                            slot_duration,
+                        } => {
+                            meta.insert(
+                                b"aura_slot_duration",
+                                &slot_duration.get().to_be_bytes()[..],
+                            )?;
+                            // TODO: authorities list
+                        }
+                        chain_information::ChainInformationConsensusRef::Babe {
+                            slots_per_epoch,
+                            finalized_next_epoch_transition,
+                            finalized_block_epoch_information,
+                        } => {
+                            meta.insert(
+                                b"babe_slots_per_epoch",
+                                &slots_per_epoch.get().to_be_bytes()[..],
+                            )?;
+                            meta.insert(
+                                b"babe_finalized_next_epoch",
+                                encode_babe_epoch_information(
+                                    finalized_next_epoch_transition.clone(),
+                                ),
+                            )?;
+                            if let Some(finalized_block_epoch_information) =
+                                finalized_block_epoch_information
+                            {
+                                meta.insert(
+                                    b"babe_finalized_epoch",
+                                    encode_babe_epoch_information(
+                                        finalized_block_epoch_information.clone(),
+                                    ),
+                                )?;
+                            }
+                        }
+                    }
+
                     Ok(())
                 },
             );
 
         match result {
-            Ok(()) => Ok(SledFullDatabase {
-                block_hashes_by_number_tree: self.block_hashes_by_number_tree,
-                meta_tree: self.meta_tree,
-                block_headers_tree: self.block_headers_tree,
-                block_bodies_tree: self.block_bodies_tree,
-                finalized_storage_top_trie_tree: self.finalized_storage_top_trie_tree,
-                non_finalized_changes_keys_tree: self.non_finalized_changes_keys_tree,
-                non_finalized_changes_tree: self.non_finalized_changes_tree,
-            }),
+            Ok(()) => {}
             Err(sled::transaction::TransactionError::Abort(())) => unreachable!(),
             Err(sled::transaction::TransactionError::Storage(err)) => {
-                Err(AccessError::Database(SledError(err)))
+                return Err(AccessError::Database(SledError(err)))
             }
-        }
+        };
+
+        Ok(SledFullDatabase {
+            block_hashes_by_number_tree: self.block_hashes_by_number_tree,
+            meta_tree: self.meta_tree,
+            block_headers_tree: self.block_headers_tree,
+            block_bodies_tree: self.block_bodies_tree,
+            block_justifications_tree: self.block_justifications_tree,
+            finalized_storage_top_trie_tree: self.finalized_storage_top_trie_tree,
+            non_finalized_changes_keys_tree: self.non_finalized_changes_keys_tree,
+            non_finalized_changes_tree: self.non_finalized_changes_tree,
+        })
     }
 }
