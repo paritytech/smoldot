@@ -86,7 +86,7 @@ impl SyncService {
     pub async fn new(mut config: Config) -> Arc<Self> {
         let (to_foreground, from_background) = mpsc::channel(16);
         let (to_background, from_foreground) = mpsc::channel(16);
-        let (to_database, messages_rx) = mpsc::channel(1024);
+        let (to_database, messages_rx) = mpsc::channel(4);
 
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_hash: [0; 32],      // TODO:
