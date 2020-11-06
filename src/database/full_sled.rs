@@ -279,7 +279,6 @@ impl SledFullDatabase {
     /// parameter. If the finalized block in the database doesn't match the hash passed as
     /// parameter, most likely because it has been updated in a parallel thread, a
     /// [`FinalizedAccessError::Obsolete`] error is returned.
-    // TODO: consider passing the genesis chain information as a whole, rather than just grandpa
     pub fn to_chain_information(
         &self,
         finalized_block_hash: &[u8; 32],
@@ -378,7 +377,7 @@ impl SledFullDatabase {
         &self,
         scale_encoded_header: &[u8],
         is_new_best: bool,
-        body: impl Iterator<Item = impl AsRef<[u8]>>,
+        body: impl ExactSizeIterator<Item = impl AsRef<[u8]>>,
         storage_top_trie_changes: impl Iterator<Item = (impl AsRef<[u8]>, Option<impl AsRef<[u8]>>)>
             + Clone,
     ) -> Result<(), InsertError> {
@@ -390,9 +389,14 @@ impl SledFullDatabase {
 
         // Value to put in `block_bodies_tree`. See the documentation of that field.
         let encoded_body = {
-            // TODO: optimize by not building an intermediary `Vec`
-            let body = body.map(|e| e.as_ref().to_vec()).collect::<Vec<_>>();
-            parity_scale_codec::Encode::encode(&body)
+            let mut val = Vec::new();
+            val.extend_from_slice(util::encode_scale_compact_usize(body.len()).as_ref());
+            for item in body {
+                let item = item.as_ref();
+                val.extend_from_slice(util::encode_scale_compact_usize(item.len()).as_ref());
+                val.extend_from_slice(item);
+            }
+            val
         };
 
         // Value to put in `non_finalized_changes_keys_tree`. See the documentation of that field.
@@ -401,11 +405,7 @@ impl SledFullDatabase {
                 .clone()
                 .fold(Vec::new(), |mut list, (key, _)| {
                     let key = key.as_ref();
-                    // TODO: don't use parity_scale_codec
-                    parity_scale_codec::Encode::encode_to(
-                        &parity_scale_codec::Compact(u64::try_from(key.len()).unwrap()),
-                        &mut list,
-                    );
+                    list.extend_from_slice(util::encode_scale_compact_usize(key.len()).as_ref());
                     list.extend_from_slice(key);
                     list
                 });
@@ -537,7 +537,7 @@ impl SledFullDatabase {
         &self,
         new_finalized_block_hash: &[u8; 32],
     ) -> Result<(), SetFinalizedError> {
-        let result = (
+        let trees_list = (
             &self.meta_tree,
             &self.block_hashes_by_number_tree,
             &self.block_headers_tree,
@@ -545,175 +545,169 @@ impl SledFullDatabase {
             &self.finalized_storage_top_trie_tree,
             &self.non_finalized_changes_keys_tree,
             &self.non_finalized_changes_tree,
-        )
-            .transaction(
-                move |(
-                    meta,
-                    block_hashes_by_number,
-                    block_headers,
-                    block_bodies,
-                    finalized_storage_top_trie,
-                    non_finalized_changes_keys,
-                    non_finalized_changes,
-                )| {
-                    // Fetch the header of the block to finalize.
-                    let scale_encoded_header = block_headers
-                        .get(&new_finalized_block_hash)?
-                        .ok_or(SetFinalizedError::UnknownBlock)
-                        .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+        );
 
-                    // Headers are checked before being inserted. If the decoding fails, it means
-                    // that the database is somehow corrupted.
-                    let header = header::decode(&scale_encoded_header)
-                        .map_err(|err| {
+        let result = trees_list.transaction(move |trees_access| {
+            let (
+                meta,
+                block_hashes_by_number,
+                block_headers,
+                block_bodies,
+                finalized_storage_top_trie,
+                non_finalized_changes_keys,
+                non_finalized_changes,
+            ) = trees_access;
+
+            // Fetch the header of the block to finalize.
+            let scale_encoded_header = block_headers
+                .get(&new_finalized_block_hash)?
+                .ok_or(SetFinalizedError::UnknownBlock)
+                .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+
+            // Headers are checked before being inserted. If the decoding fails, it means
+            // that the database is somehow corrupted.
+            let header = header::decode(&scale_encoded_header)
+                .map_err(|err| {
+                    SetFinalizedError::Access(AccessError::Corrupted(
+                        CorruptedError::BlockHeaderCorrupted(err),
+                    ))
+                })
+                .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+
+            // Fetch the current finalized block.
+            let current_finalized = {
+                let bytes = meta
+                    .insert(b"finalized", &u64::to_be_bytes(header.number)[..])?
+                    .ok_or(AccessError::Corrupted(
+                        CorruptedError::FinalizedBlockNumberNotFound,
+                    ))
+                    .map_err(SetFinalizedError::Access)
+                    .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+                u64::from_be_bytes(<[u8; 8]>::try_from(&bytes[..]).map_err(|_| {
+                    sled::transaction::ConflictableTransactionError::Abort(
+                        SetFinalizedError::Access(AccessError::Corrupted(
+                            CorruptedError::FinalizedBlockNumberOutOfRange,
+                        )),
+                    )
+                })?)
+            };
+
+            // If the block to finalize is at the same height as the already-finalized
+            // block, considering that the database only contains one block per height on
+            // the finalized chain, and that the presence of the block to finalize in
+            // the database has already been verified, it is guaranteed that the block
+            // to finalize is already the one already finalized.
+            if header.number == current_finalized {
+                return Ok(());
+            }
+
+            // Cannot set the finalized block to a past block. The database can't support
+            // reverting finalization.
+            if header.number < current_finalized {
+                return Err(sled::transaction::ConflictableTransactionError::Abort(
+                    SetFinalizedError::RevertForbidden,
+                ));
+            }
+
+            // Take each block height between `header.number` and `current_finalized + 1`
+            // and remove blocks that aren't an ancestor of the new finalized block.
+            {
+                // For each block height between the old finalized and new finalized,
+                // remove all blocks except the one whose hash is `expected_hash`.
+                // `expected_hash` always designates a block in the finalized chain.
+                let mut expected_hash = *new_finalized_block_hash;
+
+                for height in (current_finalized + 1..header.number).rev() {
+                    let blocks_list = block_hashes_by_number
+                        .insert(&u64::to_be_bytes(height)[..], &expected_hash[..])?
+                        .ok_or(sled::transaction::ConflictableTransactionError::Abort(
                             SetFinalizedError::Access(AccessError::Corrupted(
-                                CorruptedError::BlockHeaderCorrupted(err),
-                            ))
-                        })
-                        .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+                                CorruptedError::BrokenChain,
+                            )),
+                        ))?;
+                    let mut expected_block_found = false;
+                    for hash_at_height in blocks_list.chunks(32) {
+                        if hash_at_height == expected_hash {
+                            expected_block_found = true;
+                            continue;
+                        }
 
-                    // Fetch the current finalized block.
-                    let current_finalized = {
-                        let bytes = meta
-                            .insert(b"finalized", &u64::to_be_bytes(header.number)[..])?
-                            .ok_or(AccessError::Corrupted(
-                                CorruptedError::FinalizedBlockNumberNotFound,
-                            ))
-                            .map_err(SetFinalizedError::Access)
-                            .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
-                        u64::from_be_bytes(<[u8; 8]>::try_from(&bytes[..]).map_err(|_| {
-                            sled::transaction::ConflictableTransactionError::Abort(
-                                SetFinalizedError::Access(AccessError::Corrupted(
-                                    CorruptedError::FinalizedBlockNumberOutOfRange,
-                                )),
-                            )
-                        })?)
-                    };
-
-                    // If the block to finalize is at the same height as the already-finalized
-                    // block, considering that the database only contains one block per height on
-                    // the finalized chain, and that the presence of the block to finalize in
-                    // the database has already been verified, it is guaranteed that the block
-                    // to finalize is already the one already finalized.
-                    if header.number == current_finalized {
-                        return Ok(());
+                        // Remove the block from the database.
+                        block_bodies.remove(hash_at_height)?;
+                        block_headers.remove(hash_at_height)?;
+                        // TODO: remove the changes list for that block
                     }
 
-                    // Cannot set the finalized block to a past block. The database can't support
-                    // reverting finalization.
-                    if header.number < current_finalized {
+                    // `expected_hash` not found in the list of blocks with this number.
+                    if !expected_block_found {
                         return Err(sled::transaction::ConflictableTransactionError::Abort(
-                            SetFinalizedError::RevertForbidden,
+                            SetFinalizedError::Access(AccessError::Corrupted(
+                                CorruptedError::BrokenChain,
+                            )),
                         ));
                     }
 
-                    // Take each block height between `header.number` and `current_finalized + 1`
-                    // and remove blocks that aren't an ancestor of the new finalized block.
-                    {
-                        // For each block height between the old finalized and new finalized,
-                        // remove all blocks except the one whose hash is `expected_hash`.
-                        // `expected_hash` always designates a block in the finalized chain.
-                        let mut expected_hash = *new_finalized_block_hash;
+                    // Update `expected_hash` to point to the parent of the current
+                    // `expected_hash`.
+                    expected_hash = {
+                        let scale_encoded_header = block_headers
+                            .get(&expected_hash)?
+                            .ok_or(SetFinalizedError::Access(AccessError::Corrupted(
+                                CorruptedError::BrokenChain,
+                            )))
+                            .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+                        let header = header::decode(&scale_encoded_header)
+                            .map_err(|err| {
+                                SetFinalizedError::Access(AccessError::Corrupted(
+                                    CorruptedError::BlockHeaderCorrupted(err),
+                                ))
+                            })
+                            .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+                        *header.parent_hash
+                    };
+                }
+            }
 
-                        for height in (current_finalized + 1..header.number).rev() {
-                            let blocks_list = block_hashes_by_number
-                                .insert(&u64::to_be_bytes(height)[..], &expected_hash[..])?
-                                .ok_or(sled::transaction::ConflictableTransactionError::Abort(
-                                    SetFinalizedError::Access(AccessError::Corrupted(
-                                        CorruptedError::BrokenChain,
-                                    )),
-                                ))?;
-                            let mut expected_block_found = false;
-                            for hash_at_height in blocks_list.chunks(32) {
-                                if hash_at_height == expected_hash {
-                                    expected_block_found = true;
-                                    continue;
-                                }
+            // Take each block height starting from `header.number + 1` and remove blocks
+            // that aren't a descendant of the new finalized block.
+            for height in header.number + 1.. {
+                let blocks_list = match block_hashes_by_number.get(&u64::to_be_bytes(height)[..])? {
+                    Some(l) => l,
+                    None => break,
+                };
 
-                                // Remove the block from the database.
-                                block_bodies.remove(hash_at_height)?;
-                                block_headers.remove(hash_at_height)?;
-                                // TODO: remove the changes list for that block
-                            }
+                todo!()
+            }
 
-                            // `expected_hash` not found in the list of blocks with this number.
-                            if !expected_block_found {
-                                return Err(
-                                    sled::transaction::ConflictableTransactionError::Abort(
-                                        SetFinalizedError::Access(AccessError::Corrupted(
-                                            CorruptedError::BrokenChain,
-                                        )),
-                                    ),
-                                );
-                            }
+            // Now update the finalized block storage.
+            for height in current_finalized + 1..=header.number {
+                let changed_keys = {
+                    let block_hash = block_hashes_by_number
+                        .get(&u64::to_be_bytes(height)[..])?
+                        .ok_or(sled::transaction::ConflictableTransactionError::Abort(
+                            SetFinalizedError::Access(AccessError::Corrupted(
+                                CorruptedError::BrokenChain,
+                            )),
+                        ))?;
+                    non_finalized_changes_keys.remove(block_hash)?.ok_or(
+                        sled::transaction::ConflictableTransactionError::Abort(
+                            SetFinalizedError::Access(AccessError::Corrupted(
+                                CorruptedError::BrokenChain,
+                            )),
+                        ),
+                    )?
+                };
 
-                            // Update `expected_hash` to point to the parent of the current
-                            // `expected_hash`.
-                            expected_hash = {
-                                let scale_encoded_header = block_headers
-                                    .get(&expected_hash)?
-                                    .ok_or(SetFinalizedError::Access(AccessError::Corrupted(
-                                        CorruptedError::BrokenChain,
-                                    )))
-                                    .map_err(
-                                        sled::transaction::ConflictableTransactionError::Abort,
-                                    )?;
-                                let header = header::decode(&scale_encoded_header)
-                                    .map_err(|err| {
-                                        SetFinalizedError::Access(AccessError::Corrupted(
-                                            CorruptedError::BlockHeaderCorrupted(err),
-                                        ))
-                                    })
-                                    .map_err(
-                                        sled::transaction::ConflictableTransactionError::Abort,
-                                    )?;
-                                *header.parent_hash
-                            };
-                        }
-                    }
+                // TODO: update the grandpa stuff in meta
 
-                    // Take each block height starting from `header.number + 1` and remove blocks
-                    // that aren't a descendant of the new finalized block.
-                    for height in header.number + 1.. {
-                        let blocks_list =
-                            match block_hashes_by_number.get(&u64::to_be_bytes(height)[..])? {
-                                Some(l) => l,
-                                None => break,
-                            };
+                todo!()
+            }
 
-                        todo!()
-                    }
+            // It is possible that the best block has been pruned.
+            // TODO: ^ yeah, how do we handle that exactly ^ ?
 
-                    // Now update the finalized block storage.
-                    for height in current_finalized + 1..=header.number {
-                        let changed_keys = {
-                            let block_hash = block_hashes_by_number
-                                .get(&u64::to_be_bytes(height)[..])?
-                                .ok_or(sled::transaction::ConflictableTransactionError::Abort(
-                                    SetFinalizedError::Access(AccessError::Corrupted(
-                                        CorruptedError::BrokenChain,
-                                    )),
-                                ))?;
-                            non_finalized_changes_keys.remove(block_hash)?.ok_or(
-                                sled::transaction::ConflictableTransactionError::Abort(
-                                    SetFinalizedError::Access(AccessError::Corrupted(
-                                        CorruptedError::BrokenChain,
-                                    )),
-                                ),
-                            )?
-                        };
-
-                        // TODO: update the grandpa stuff in meta
-
-                        todo!()
-                    }
-
-                    // It is possible that the best block has been pruned.
-                    // TODO: ^ yeah, how do we handle that exactly ^ ?
-
-                    Ok(())
-                },
-            );
+            Ok(())
+        });
 
         match result {
             Ok(()) => Ok(()),
