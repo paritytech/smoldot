@@ -284,66 +284,15 @@ impl SledFullDatabase {
         &self,
         finalized_block_hash: &[u8; 32],
     ) -> Result<chain_information::ChainInformation, FinalizedAccessError> {
-        // Try to apply changes. This is done atomically through a transaction.
         let result = (
             &self.meta_tree,
             &self.block_hashes_by_number_tree,
             &self.block_headers_tree,
         )
             .transaction(move |(meta, block_hashes_by_number, block_headers)| {
-                // Short-cut for unwrapping an `Option`, returning a `CorruptedError` if it is `None`.
-                // TODO: remove
-                macro_rules! unwrap_or_corrupted {
-                    ($expr:expr, $err:expr) => {
-                        match $expr {
-                            Some(v) => v,
-                            None => {
-                                return Err(sled::transaction::ConflictableTransactionError::Abort(
-                                    FinalizedAccessError::Access(AccessError::Corrupted($err)),
-                                ))
-                            }
-                        }
-                    };
-                }
-
-                // Unwraps a `Result<_, CorruptedError>`.
-                // TODO: remove
-                macro_rules! try_corrupted {
-                    ($expr:expr) => {
-                        match $expr {
-                            Ok(v) => v,
-                            Err(err) => {
-                                return Err(sled::transaction::ConflictableTransactionError::Abort(
-                                    FinalizedAccessError::Access(AccessError::Corrupted(err)),
-                                ))
-                            }
-                        }
-                    };
-                }
-
-                // Hash of the finalized block.
-                let finalized_hash =
-                    finalized_hash(&meta, &block_hashes_by_number).map_err(fin_err_conv)?;
-                if finalized_hash != *finalized_block_hash {
-                    return Err(sled::transaction::ConflictableTransactionError::Abort(
-                        FinalizedAccessError::Obsolete,
-                    ));
-                }
-
-                // Header of the finalized block.
-                let finalized_block_header: header::Header = {
-                    let encoded = unwrap_or_corrupted!(
-                        block_headers.get(finalized_hash)?,
-                        CorruptedError::BlockHeaderNotInDatabase
-                    );
-                    try_corrupted!(
-                        header::decode(&encoded).map_err(CorruptedError::BlockHeaderCorrupted)
-                    )
-                    .into()
-                };
-
-                // Values to put in the field of the corresponding name in `ChainInformation`.
-
+                let finalized_block_header =
+                    finalized_block_header(&meta, &block_hashes_by_number, &block_headers)
+                        .map_err(fin_err_conv)?;
                 let grandpa_after_finalized_block_authorities_set_id =
                     grandpa_authorities_set_id(&meta).map_err(fin_err_conv)?;
                 let grandpa_finalized_triggered_authorities =
@@ -377,7 +326,13 @@ impl SledFullDatabase {
                     (Some(finalized_authorities), Some(slot_duration), None, None) => {
                         let slot_duration =
                             expect_be_nz_u64(&slot_duration).map_err(fin_err_conv)?;
-                        todo!()
+                        let finalized_authorities_list =
+                            decode_aura_authorities_list(&finalized_authorities)
+                                .map_err(fin_err_conv)?;
+                        chain_information::ChainInformationConsensus::Aura {
+                            finalized_authorities_list,
+                            slot_duration,
+                        }
                     }
                     _ => {
                         return Err(sled::transaction::ConflictableTransactionError::Abort(
@@ -763,38 +718,6 @@ impl SledFullDatabase {
         }
     }
 
-    /// Returns the list of keys of the storage of the finalized block.
-    ///
-    /// In order to avoid race conditions, the known finalized block hash must be passed as
-    /// parameter. If the finalized block in the database doesn't match the hash passed as
-    /// parameter, most likely because it has been updated in a parallel thread, a
-    /// [`FinalizedAccessError::Obsolete`] error is returned.
-    pub fn finalized_block_storage_top_trie_keys(
-        &self,
-        finalized_block_hash: &[u8; 32],
-    ) -> Result<Vec<VarLenBytes>, FinalizedAccessError> {
-        // TODO: use a transaction rather than checking once before and once after?
-        if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedAccessError::Obsolete);
-        }
-
-        let ret = self
-            .finalized_storage_top_trie_tree
-            .iter()
-            .keys()
-            .map(|v| v.map(VarLenBytes))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SledError)
-            .map_err(AccessError::Database)
-            .map_err(FinalizedAccessError::Access)?;
-
-        if self.finalized_block_hash()? != *finalized_block_hash {
-            return Err(FinalizedAccessError::Obsolete);
-        }
-
-        Ok(ret)
-    }
-
     /// Returns the value associated to a key in the storage of the finalized block.
     ///
     /// In order to avoid race conditions, the known finalized block hash must be passed as
@@ -818,6 +741,75 @@ impl SledFullDatabase {
             .map_err(AccessError::Database)
             .map_err(FinalizedAccessError::Access)?
             .map(VarLenBytes);
+
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedAccessError::Obsolete);
+        }
+
+        Ok(ret)
+    }
+
+    /// Returns the key in the storage of the finalized block that immediately follows the key
+    /// passed as parameter.
+    ///
+    /// In order to avoid race conditions, the known finalized block hash must be passed as
+    /// parameter. If the finalized block in the database doesn't match the hash passed as
+    /// parameter, most likely because it has been updated in a parallel thread, a
+    /// [`FinalizedAccessError::Obsolete`] error is returned.
+    pub fn finalized_block_storage_top_trie_next_key(
+        &self,
+        finalized_block_hash: &[u8; 32],
+        key: &[u8],
+    ) -> Result<Option<VarLenBytes>, FinalizedAccessError> {
+        // TODO: use a transaction rather than checking once before and once after?
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedAccessError::Obsolete);
+        }
+
+        let ret = self
+            .finalized_storage_top_trie_tree
+            .get_gt(key)
+            .map_err(SledError)
+            .map_err(AccessError::Database)
+            .map_err(FinalizedAccessError::Access)?
+            .map(|(k, _)| VarLenBytes(k));
+
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedAccessError::Obsolete);
+        }
+
+        Ok(ret)
+    }
+
+    /// Returns the list of keys of the storage of the finalized block that start with the given
+    /// prefix. Pass `&[]` for the prefix to get the list of all keys.
+    ///
+    /// In order to avoid race conditions, the known finalized block hash must be passed as
+    /// parameter. If the finalized block in the database doesn't match the hash passed as
+    /// parameter, most likely because it has been updated in a parallel thread, a
+    /// [`FinalizedAccessError::Obsolete`] error is returned.
+    pub fn finalized_block_storage_top_trie_keys(
+        &self,
+        finalized_block_hash: &[u8; 32],
+        prefix: &[u8],
+    ) -> Result<Vec<VarLenBytes>, FinalizedAccessError> {
+        // TODO: use a transaction rather than checking once before and once after?
+        if self.finalized_block_hash()? != *finalized_block_hash {
+            return Err(FinalizedAccessError::Obsolete);
+        }
+
+        // TODO: implement better?
+        let mut prefix_after = prefix.to_vec();
+        prefix_after.push(0xff);
+
+        let ret = self
+            .finalized_storage_top_trie_tree
+            .range(prefix..=(&prefix_after[..]))
+            .map(|v| v.map(|(k, _)| VarLenBytes(k)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SledError)
+            .map_err(AccessError::Database)
+            .map_err(FinalizedAccessError::Access)?;
 
         if self.finalized_block_hash()? != *finalized_block_hash {
             return Err(FinalizedAccessError::Obsolete);
@@ -956,6 +948,49 @@ fn finalized_num(
     expect_be_u64(&value)
 }
 
+fn finalized_hash(
+    meta: &sled::transaction::TransactionalTree,
+    block_hashes_by_number: &sled::transaction::TransactionalTree,
+) -> Result<[u8; 32], sled::transaction::ConflictableTransactionError<AccessError>> {
+    let num = finalized_num(meta)?;
+    let hash = block_hashes_by_number
+        .get(num.to_be_bytes())?
+        .ok_or(AccessError::Corrupted(
+            CorruptedError::FinalizedBlockNumberOutOfRange,
+        ))
+        .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+    if hash.len() == 32 {
+        let mut out = [0; 32];
+        out.copy_from_slice(&hash);
+        Ok(out)
+    } else {
+        Err(sled::transaction::ConflictableTransactionError::Abort(
+            AccessError::Corrupted(CorruptedError::BlockHashLenInHashNumberMapping),
+        ))
+    }
+}
+
+fn finalized_block_header(
+    meta: &sled::transaction::TransactionalTree,
+    block_hashes_by_number: &sled::transaction::TransactionalTree,
+    block_headers: &sled::transaction::TransactionalTree,
+) -> Result<header::Header, sled::transaction::ConflictableTransactionError<AccessError>> {
+    let hash = finalized_hash(meta, block_hashes_by_number)?;
+
+    let encoded = block_headers
+        .get(&hash)?
+        .ok_or(CorruptedError::BlockHeaderNotInDatabase)
+        .map_err(AccessError::Corrupted)
+        .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
+
+    match header::decode(&encoded) {
+        Ok(h) => Ok(h.into()),
+        Err(err) => Err(sled::transaction::ConflictableTransactionError::Abort(
+            AccessError::Corrupted(CorruptedError::BlockHeaderCorrupted(err)),
+        )),
+    }
+}
+
 fn grandpa_authorities_set_id(
     meta: &sled::transaction::TransactionalTree,
 ) -> Result<u64, sled::transaction::ConflictableTransactionError<AccessError>> {
@@ -1027,26 +1062,32 @@ fn expect_be_nz_u64(
         .map_err(sled::transaction::ConflictableTransactionError::Abort)
 }
 
-fn finalized_hash(
-    meta: &sled::transaction::TransactionalTree,
-    block_hashes_by_number: &sled::transaction::TransactionalTree,
-) -> Result<[u8; 32], sled::transaction::ConflictableTransactionError<AccessError>> {
-    let num = finalized_num(meta)?;
-    let hash = block_hashes_by_number
-        .get(num.to_be_bytes())?
-        .ok_or(AccessError::Corrupted(
-            CorruptedError::FinalizedBlockNumberOutOfRange,
-        ))
-        .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
-    if hash.len() == 32 {
-        let mut out = [0; 32];
-        out.copy_from_slice(&hash);
-        Ok(out)
-    } else {
-        Err(sled::transaction::ConflictableTransactionError::Abort(
-            AccessError::Corrupted(CorruptedError::BlockHashLenInHashNumberMapping),
-        ))
+fn encode_aura_authorities_list(list: header::AuraAuthoritiesIter) -> Vec<u8> {
+    let mut out = Vec::with_capacity(list.len() * 32);
+    for authority in list {
+        out.extend_from_slice(authority.public_key);
     }
+    debug_assert_eq!(out.len(), out.capacity());
+    out
+}
+
+fn decode_aura_authorities_list(
+    value: &sled::IVec,
+) -> Result<Vec<header::AuraAuthority>, sled::transaction::ConflictableTransactionError<AccessError>>
+{
+    if value.len() % 32 != 0 {
+        return Err(sled::transaction::ConflictableTransactionError::Abort(
+            AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList),
+        ));
+    }
+
+    Ok(value
+        .chunks(32)
+        .map(|chunk| {
+            let public_key = <[u8; 32]>::try_from(chunk).unwrap();
+            header::AuraAuthority { public_key }
+        })
+        .collect())
 }
 
 fn encode_grandpa_authorities_list(list: header::GrandpaAuthoritiesIter) -> Vec<u8> {

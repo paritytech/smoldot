@@ -59,15 +59,12 @@ async fn async_main() {
         .unwrap();
 
     // Open the database from the filesystem, or create a new database if none is found.
-    let (chain_information, database) = {
+    let database = Arc::new({
         // Directory supposed to contain the database.
         let db_path = {
-            const APP_INFO: app_dirs::AppInfo = app_dirs::AppInfo {
-                name: "substrate-lite",
-                author: "paritytech",
-            };
             let base_path =
-                app_dirs::app_dir(app_dirs::AppDataType::UserData, &APP_INFO, "database").unwrap();
+                app_dirs::app_dir(app_dirs::AppDataType::UserData, &cli::APP_INFO, "database")
+                    .unwrap();
             base_path.join(chain_spec.id())
         };
 
@@ -81,10 +78,7 @@ async fn async_main() {
                     "Loading existing database with finalized hash {:?}",
                     database.finalized_block_hash().unwrap()
                 );
-                let chain_information = database
-                    .to_chain_information(&database.finalized_block_hash().unwrap())
-                    .unwrap(); // TODO: unwrap?
-                (chain_information, Arc::new(database))
+                database
             }
 
             // The database doesn't exist or is empty.
@@ -101,19 +95,17 @@ async fn async_main() {
 
                 // The finalized block is the genesis block. As such, it has an empty body and
                 // no justification.
-                let database = empty
+                empty
                     .initialize(
                         &genesis_chain_information,
                         iter::empty(),
                         None,
                         chain_spec.genesis_storage(),
                     )
-                    .unwrap();
-
-                (genesis_chain_information, Arc::new(database))
+                    .unwrap()
             }
         }
-    };
+    });
 
     // TODO: remove; just for testing
     /*let metadata = substrate_lite::metadata::metadata_from_runtime_code(
@@ -160,8 +152,7 @@ async fn async_main() {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
-        chain_spec: &chain_spec,
-        chain_information,
+        database,
     })
     .await;
 

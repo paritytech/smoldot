@@ -20,8 +20,8 @@
 //! Contains everything related to the opening and initialization of the database.
 
 use super::{
-    encode_babe_epoch_information, encode_grandpa_authorities_list, AccessError, SledError,
-    SledFullDatabase,
+    encode_aura_authorities_list, encode_babe_epoch_information, encode_grandpa_authorities_list,
+    AccessError, SledError, SledFullDatabase,
 };
 use crate::{chain::chain_information, header, util};
 
@@ -158,6 +158,16 @@ impl DatabaseEmpty {
             val
         };
 
+        let finalized_block_hash = chain_information.finalized_block_header.hash();
+
+        let scale_encoded_finalized_block_header = chain_information
+            .finalized_block_header
+            .scale_encoding()
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+
         // Try to apply changes. This is done atomically through a transaction.
         let result = (
             &self.block_hashes_by_number_tree,
@@ -176,28 +186,21 @@ impl DatabaseEmpty {
                     finalized_storage_top_trie_tree,
                     meta,
                 )| {
-                    let finalized_block_hash = chain_information.finalized_block_header.hash();
-                    let finalized_block_number = chain_information.finalized_block_header.number;
-                    let scale_encoded_finalized_block_header = chain_information
-                        .finalized_block_header
-                        .scale_encoding()
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        });
-
                     for (key, value) in finalized_block_storage_top_trie_entries.clone() {
                         finalized_storage_top_trie_tree.insert(key, value)?;
                     }
 
                     block_hashes_by_number.insert(
-                        &finalized_block_number.to_be_bytes()[..],
+                        &chain_information
+                            .finalized_block_header
+                            .number
+                            .to_be_bytes()[..],
                         &finalized_block_hash[..],
                     )?;
 
                     block_headers.insert(
                         &finalized_block_hash[..],
-                        scale_encoded_finalized_block_header,
+                        &scale_encoded_finalized_block_header[..],
                     )?;
                     block_bodies.insert(
                         &finalized_block_hash[..],
@@ -210,7 +213,13 @@ impl DatabaseEmpty {
                         )?;
                     }
                     meta.insert(b"best", &finalized_block_hash[..])?;
-                    meta.insert(b"finalized", &finalized_block_number.to_be_bytes()[..])?;
+                    meta.insert(
+                        b"finalized",
+                        &chain_information
+                            .finalized_block_header
+                            .number
+                            .to_be_bytes()[..],
+                    )?;
                     meta.insert(
                         b"grandpa_authorities_set_id",
                         &chain_information
@@ -245,8 +254,10 @@ impl DatabaseEmpty {
                                 b"aura_slot_duration",
                                 &slot_duration.get().to_be_bytes()[..],
                             )?;
-                            todo!()
-                            // TODO: authorities list
+                            meta.insert(
+                                b"aura_finalized_authorities",
+                                encode_aura_authorities_list(finalized_authorities_list.clone()),
+                            )?;
                         }
                         chain_information::ChainInformationConsensusRef::Babe {
                             slots_per_epoch,
