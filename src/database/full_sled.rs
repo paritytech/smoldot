@@ -116,9 +116,11 @@ pub struct SledFullDatabase {
     /// Tree named "block_justifications" in the database.
     ///
     /// Entries are a subset of the ones of [`SledFullDatabase::block_headers_tree`].
-    /// Not all blocks has a justification.
+    /// Not all blocks have a justification.
+    /// Only finalized blocks have a justification.
     ///
     /// Keys are block hashes, and values are SCALE-encoded `Vec`s containing the justification.
+    // TODO: never inserted
     block_justifications_tree: sled::Tree,
 
     /// Tree named "storage_top_trie" in the database.
@@ -131,7 +133,7 @@ pub struct SledFullDatabase {
     /// Tree named "non_finalized_changes_keys" in the database.
     ///
     /// For each hash of non-finalized block, contains the list of keys in the storage that this
-    /// bloc modifies.
+    /// block modifies.
     ///
     /// Keys are a 32 bytes block hash. Values are a list of SCALE-encoded `Vec<u8>` concatenated
     /// together. In other words, each value is a length (SCALE-compact-encoded), a key of that
@@ -141,10 +143,10 @@ pub struct SledFullDatabase {
     /// Tree named "non_finalized_changes" in the database.
     ///
     /// For each element in `non_finalized_changes_keys_tree`, contains the new value for this
-    /// storage modification.
+    /// storage modification. If an entry is found in `non_finalized_changes_keys_tree` and not in
+    /// `non_finalized_changes_tree`, that means that the storage entry must be removed.
     ///
-    /// Keys are a 32 bytes block hash followed with a storage key. Values are either `0` if the
-    /// storage value is to be removed, or `1` followed with the storage value to set.
+    /// Keys are a 32 bytes block hash followed with a storage key.
     non_finalized_changes_tree: sled::Tree,
 }
 
@@ -291,7 +293,7 @@ impl SledFullDatabase {
             .transaction(move |(meta, block_hashes_by_number, block_headers)| {
                 let finalized_block_header =
                     finalized_block_header(&meta, &block_hashes_by_number, &block_headers)
-                        .map_err(fin_err_conv)?;
+                        .map_err(err_conv)?;
                 if finalized_block_header.hash() != *finalized_block_hash {
                     return Err(sled::transaction::ConflictableTransactionError::Abort(
                         FinalizedAccessError::Obsolete,
@@ -299,11 +301,11 @@ impl SledFullDatabase {
                 }
 
                 let grandpa_after_finalized_block_authorities_set_id =
-                    grandpa_authorities_set_id(&meta).map_err(fin_err_conv)?;
+                    grandpa_authorities_set_id(&meta).map_err(err_conv)?;
                 let grandpa_finalized_triggered_authorities =
-                    grandpa_finalized_triggered_authorities(&meta).map_err(fin_err_conv)?;
+                    grandpa_finalized_triggered_authorities(&meta).map_err(err_conv)?;
                 let grandpa_finalized_scheduled_change =
-                    grandpa_finalized_scheduled_change(&meta).map_err(fin_err_conv)?;
+                    grandpa_finalized_scheduled_change(&meta).map_err(err_conv)?;
 
                 let consensus = match (
                     meta.get(b"aura_finalized_authorities")?,
@@ -313,15 +315,15 @@ impl SledFullDatabase {
                 ) {
                     (None, None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
                         let slots_per_epoch =
-                            expect_be_nz_u64(&slots_per_epoch).map_err(fin_err_conv)?;
+                            expect_be_nz_u64(&slots_per_epoch).map_err(err_conv)?;
                         let finalized_next_epoch_transition =
                             decode_babe_epoch_information(&finalized_next_epoch)
-                                .map_err(fin_err_conv)?;
+                                .map_err(err_conv)?;
                         let finalized_block_epoch_information = meta
                             .get(b"babe_finalized_epoch")?
                             .map(|v| decode_babe_epoch_information(&v))
                             .transpose()
-                            .map_err(fin_err_conv)?;
+                            .map_err(err_conv)?;
                         chain_information::ChainInformationConsensus::Babe {
                             finalized_block_epoch_information,
                             finalized_next_epoch_transition,
@@ -329,11 +331,10 @@ impl SledFullDatabase {
                         }
                     }
                     (Some(finalized_authorities), Some(slot_duration), None, None) => {
-                        let slot_duration =
-                            expect_be_nz_u64(&slot_duration).map_err(fin_err_conv)?;
+                        let slot_duration = expect_be_nz_u64(&slot_duration).map_err(err_conv)?;
                         let finalized_authorities_list =
                             decode_aura_authorities_list(&finalized_authorities)
-                                .map_err(fin_err_conv)?;
+                                .map_err(err_conv)?;
                         chain_information::ChainInformationConsensus::Aura {
                             finalized_authorities_list,
                             slot_duration,
@@ -444,23 +445,8 @@ impl SledFullDatabase {
 
                     // If the height of the block to insert is <= the latest finalized, it doesn't
                     // belong to the finalized chain and would be pruned.
-                    let current_finalized = {
-                        let bytes = meta
-                            .insert(b"finalized", &u64::to_be_bytes(header.number)[..])?
-                            .ok_or(AccessError::Corrupted(
-                                CorruptedError::FinalizedBlockNumberNotFound,
-                            ))
-                            .map_err(InsertError::Access)
-                            .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
-                        u64::from_be_bytes(<[u8; 8]>::try_from(&bytes[..]).map_err(|_| {
-                            sled::transaction::ConflictableTransactionError::Abort(
-                                InsertError::Access(AccessError::Corrupted(
-                                    CorruptedError::FinalizedBlockNumberOutOfRange,
-                                )),
-                            )
-                        })?)
-                    };
-                    if header.number <= current_finalized {
+                    // TODO: what if we don't immediately insert the entire finalized chain, but populate it later? should that not be a use case?
+                    if header.number <= finalized_num(&meta).map_err(err_conv)? {
                         return Err(sled::transaction::ConflictableTransactionError::Abort(
                             InsertError::FinalizedNephew,
                         ));
@@ -494,13 +480,7 @@ impl SledFullDatabase {
                         };
 
                         if let Some(value) = value {
-                            let value = value.as_ref();
-                            let mut v = Vec::with_capacity(value.len() + 1);
-                            v.extend_from_slice(&[1]);
-                            v.extend_from_slice(value);
-                            non_finalized_changes.insert(&insert_key[..], &v[..])?;
-                        } else {
-                            non_finalized_changes.insert(&insert_key[..], &[0])?;
+                            non_finalized_changes.insert(&insert_key[..], value.as_ref())?;
                         }
                     }
 
@@ -617,7 +597,7 @@ impl SledFullDatabase {
                 // `expected_hash` always designates a block in the finalized chain.
                 let mut expected_hash = *new_finalized_block_hash;
 
-                for height in (current_finalized + 1..header.number).rev() {
+                for height in (current_finalized + 1..=header.number).rev() {
                     let blocks_list = block_hashes_by_number
                         .insert(&u64::to_be_bytes(height)[..], &expected_hash[..])?
                         .ok_or(sled::transaction::ConflictableTransactionError::Abort(
@@ -633,9 +613,14 @@ impl SledFullDatabase {
                         }
 
                         // Remove the block from the database.
-                        block_bodies.remove(hash_at_height)?;
-                        block_headers.remove(hash_at_height)?;
-                        // TODO: remove the changes list for that block
+                        purge_block(
+                            TryFrom::try_from(hash_at_height).unwrap(),
+                            block_headers,
+                            block_bodies,
+                            non_finalized_changes_keys,
+                            non_finalized_changes,
+                        )
+                        .map_err(err_conv)?;
                     }
 
                     // `expected_hash` not found in the list of blocks with this number.
@@ -681,15 +666,16 @@ impl SledFullDatabase {
 
             // Now update the finalized block storage.
             for height in current_finalized + 1..=header.number {
+                let block_hash = block_hashes_by_number
+                    .get(&u64::to_be_bytes(height)[..])?
+                    .ok_or(sled::transaction::ConflictableTransactionError::Abort(
+                        SetFinalizedError::Access(AccessError::Corrupted(
+                            CorruptedError::BrokenChain,
+                        )),
+                    ))?;
+
                 let changed_keys = {
-                    let block_hash = block_hashes_by_number
-                        .get(&u64::to_be_bytes(height)[..])?
-                        .ok_or(sled::transaction::ConflictableTransactionError::Abort(
-                            SetFinalizedError::Access(AccessError::Corrupted(
-                                CorruptedError::BrokenChain,
-                            )),
-                        ))?;
-                    non_finalized_changes_keys.remove(block_hash)?.ok_or(
+                    non_finalized_changes_keys.remove(&block_hash)?.ok_or(
                         sled::transaction::ConflictableTransactionError::Abort(
                             SetFinalizedError::Access(AccessError::Corrupted(
                                 CorruptedError::BrokenChain,
@@ -698,9 +684,19 @@ impl SledFullDatabase {
                     )?
                 };
 
-                // TODO: update the grandpa stuff in meta
+                for key in decode_non_finalized_changes_keys(&changed_keys).map_err(err_conv)? {
+                    let mut entry_key = Vec::with_capacity(block_hash.len() + key.len());
+                    entry_key.extend_from_slice(&block_hash);
+                    entry_key.extend_from_slice(&key);
 
-                todo!()
+                    if let Some(value) = non_finalized_changes.remove(entry_key)? {
+                        finalized_storage_top_trie.insert(key, value)?;
+                    } else {
+                        finalized_storage_top_trie.remove(key)?;
+                    }
+                }
+
+                // TODO: update the grandpa and consensus stuff in meta
             }
 
             // It is possible that the best block has been pruned.
@@ -918,14 +914,13 @@ pub enum CorruptedError {
     ConsensusAlgorithm,
 }
 
-fn fin_err_conv(
+// TODO: remove in favour of adding an `E` to all the methods below
+fn err_conv<E: From<AccessError>>(
     err: sled::transaction::ConflictableTransactionError<AccessError>,
-) -> sled::transaction::ConflictableTransactionError<FinalizedAccessError> {
+) -> sled::transaction::ConflictableTransactionError<E> {
     match err {
         sled::transaction::ConflictableTransactionError::Abort(err) => {
-            sled::transaction::ConflictableTransactionError::Abort(FinalizedAccessError::Access(
-                err,
-            ))
+            sled::transaction::ConflictableTransactionError::Abort(err.into())
         }
         sled::transaction::ConflictableTransactionError::Conflict => {
             sled::transaction::ConflictableTransactionError::Conflict
@@ -1040,6 +1035,62 @@ fn grandpa_finalized_scheduled_change(
             ))
         }
     }
+}
+
+/// Removes all traces of the block with the given hash from the database.
+///
+/// It is assumed that the block exists and that it is not finalized, otherwise a
+/// [`CorruptedError`] is returned.
+// TODO: what if `hash` == best block?
+fn purge_block(
+    hash: &[u8; 32],
+    block_headers: &sled::transaction::TransactionalTree,
+    block_bodies: &sled::transaction::TransactionalTree,
+    non_finalized_changes_keys: &sled::transaction::TransactionalTree,
+    non_finalized_changes: &sled::transaction::TransactionalTree,
+) -> Result<(), sled::transaction::ConflictableTransactionError<AccessError>> {
+    // TODO: check that the block was indeed in there
+    block_bodies.remove(hash)?;
+    block_headers.remove(hash)?;
+
+    // TODO: block_hashes_by_number?
+
+    let changes_keys = match non_finalized_changes_keys.remove(hash)? {
+        Some(k) => decode_non_finalized_changes_keys(&k)?,
+        None => {
+            return Err(sled::transaction::ConflictableTransactionError::Abort(
+                AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList), // TODO: bad error
+            ));
+        }
+    };
+
+    for key in changes_keys {
+        let mut entry_key = Vec::with_capacity(hash.len() + key.len());
+        entry_key.extend_from_slice(hash);
+        entry_key.extend_from_slice(&key);
+
+        // Entries can legitimately be missing from `non_finalized_changes`.
+        non_finalized_changes.remove(entry_key)?;
+    }
+
+    Ok(())
+}
+
+/// Decodes a value found in [`SledFullDatabase::non_finalized_changes_keys_tree`].
+fn decode_non_finalized_changes_keys(
+    value: &sled::IVec,
+) -> Result<Vec<Vec<u8>>, sled::transaction::ConflictableTransactionError<AccessError>> {
+    let result = nom::combinator::all_consuming(nom::multi::many0(nom::combinator::map(
+        nom::multi::length_data(util::nom_scale_compact_usize),
+        |data| data.to_vec(),
+    )))(&value[..])
+    .map(|(_, v)| v)
+    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
+
+    result
+        .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
+        .map_err(AccessError::Corrupted)
+        .map_err(sled::transaction::ConflictableTransactionError::Abort)
 }
 
 fn expect_be_u64(
