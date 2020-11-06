@@ -293,6 +293,12 @@ impl SledFullDatabase {
                 let finalized_block_header =
                     finalized_block_header(&meta, &block_hashes_by_number, &block_headers)
                         .map_err(fin_err_conv)?;
+                if finalized_block_header.hash() != *finalized_block_hash {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        FinalizedAccessError::Obsolete,
+                    ));
+                }
+
                 let grandpa_after_finalized_block_authorities_set_id =
                     grandpa_authorities_set_id(&meta).map_err(fin_err_conv)?;
                 let grandpa_finalized_triggered_authorities =
