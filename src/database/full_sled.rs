@@ -19,6 +19,36 @@
 //!
 //! This module handles the persistent storage of the chain on disk.
 //!
+//! # Usage
+//!
+//! Use the [`open`] function to create a new database or open an existing one. [`open`] returns a
+//! [`DatabaseOpen`] enum. This enum will contain either a [`SledFullDatabase`] object,
+//! representing an access to the database, or a [`DatabaseEmpty`] if the database didn't exist or
+//! is empty. If that is the case, use [`DatabaseEmpty::initialize`] in order to populate it and
+//! obtain a [`SledFullDatabase`].
+//!
+//! Use [`SledFullDatabase::insert`] to insert a new block in the database. The block is assumed
+//! to have been successfully verified prior to insertion. An error is returned if this block is
+//! already in the database or isn't a descendant or ancestor of the latest finalized block.
+//!
+//! Use [`SledFullDatabase::set_finalized`] to mark a block already in the database as finalized.
+//! Any block that isn't an ancestor or descendant will be removed.
+//!
+//! Due to the database's schema, it is not possible to efficiently retrieve the storage items of
+//! blocks that are ancestors of the finalized block. When a block is finalized, the storage of
+//! its ancestors is lost, and the only way to reconstruct it is to execute all blocks starting
+//! from the genesis to the desired one.
+//!
+//! # About errors handling
+//!
+//! Most of the functions and methods in this module return a `Result` containing notably an
+//! [`AccessError`]. This kind of errors can happen if the operating system returns an error when
+//! accessing the file system, or if the database has been corrupted, for example by the user
+//! manually modifying it.
+//!
+//! There isn't much that can be done to properly handle an [`AccessError`]. The only reasonable
+//! solutions are either to stop the program, or to delete the entire database and recreate it.
+//!
 //! # Schema
 //!
 //! Each section below corresponds to a "tree" in the sled database.
@@ -138,7 +168,7 @@ use crate::{chain::chain_information, header, util};
 use core::{convert::TryFrom, fmt, iter, num::NonZeroU64, ops};
 use sled::Transactional as _;
 
-pub use open::{open, Config, DatabaseOpen};
+pub use open::{open, Config, DatabaseEmpty, DatabaseOpen};
 
 mod open;
 
