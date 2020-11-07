@@ -274,8 +274,10 @@ impl SledFullDatabase {
         Ok(either::Right(Iter { hash, cursor: 0 }))
     }
 
-    /// Returns a [`ChainInformation`] struct containing the information about the current
-    /// finalized state of the chain.
+    /// Returns a [`chain_information::ChainInformation`] struct containing the information about
+    /// the current finalized state of the chain.
+    ///
+    /// This method is relatively expensive and should preferably not be called repeatedly.
     ///
     /// In order to avoid race conditions, the known finalized block hash must be passed as
     /// parameter. If the finalized block in the database doesn't match the hash passed as

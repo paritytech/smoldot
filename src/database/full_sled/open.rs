@@ -131,8 +131,8 @@ pub struct DatabaseEmpty {
 }
 
 impl DatabaseEmpty {
-    /// Inserts the given [`ChainInformation`] in the database prototype in order to turn it into
-    /// an actual database.
+    /// Inserts the given [`chain_information::ChainInformationRef`] in the database prototype in
+    /// order to turn it into an actual database.
     ///
     /// Must also pass the body, justification, and state of the storage of the finalized block.
     pub fn initialize<'a>(
