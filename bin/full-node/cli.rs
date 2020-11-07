@@ -91,7 +91,7 @@ impl core::str::FromStr for ColorChoice {
         if s == "always" {
             Ok(ColorChoice::Always)
         } else if s == "auto" {
-            if atty::is(atty::Stream::Stderr) {
+            if atty::is(atty::Stream::Stdout) {
                 Ok(ColorChoice::Always)
             } else {
                 Ok(ColorChoice::Never)
@@ -121,7 +121,7 @@ impl core::str::FromStr for Output {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "auto" {
-            if atty::is(atty::Stream::Stderr) {
+            if atty::is(atty::Stream::Stdout) {
                 Ok(Output::Informant)
             } else {
                 Ok(Output::Logs)

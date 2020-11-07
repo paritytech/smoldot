@@ -50,7 +50,7 @@ async fn async_main() {
             .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
             .with_target(false)
             .with_max_level(tracing::Level::DEBUG) // TODO:
-            .with_writer(io::stderr);
+            .with_writer(io::stdout);
 
         // Because calling `builder.json()` changes the type of `builder`, we do it at the end
         // and call `init()` at the same time.
@@ -106,7 +106,7 @@ async fn async_main() {
             full_sled::DatabaseOpen::Open(database) => {
                 // TODO: verify that the database matches the chain spec
                 // TODO: print the hash in a nicer way
-                eprintln!(
+                println!(
                     "Loading existing database with finalized hash {:?}",
                     database.finalized_block_hash().unwrap()
                 );
@@ -123,7 +123,7 @@ async fn async_main() {
                     )
                     .unwrap(); // TODO: don't unwrap?
 
-                eprintln!("Initializing new database at {}", db_path.display());
+                println!("Initializing new database at {}", db_path.display());
 
                 // The finalized block is the genesis block. As such, it has an empty body and
                 // no justification.
@@ -224,7 +224,7 @@ async fn async_main() {
                     // If any other line gets printed, it will overwrite the informant, and the
                     // informant will then print itself below, which is a fine behaviour.
                     let sync_state = sync_service.sync_state().await;
-                    eprint!("{}\r", substrate_lite::informant::InformantLine {
+                    print!("{}\r", substrate_lite::informant::InformantLine {
                         enable_colors: match cli_options.color {
                             cli::ColorChoice::Always => true,
                             cli::ColorChoice::Never => false,
@@ -344,7 +344,7 @@ async fn open_database(path: PathBuf) -> Result<full_sled::DatabaseOpen, full_sl
         futures::select! {
             res = rx => return res.unwrap(),
             _ = progress_timer.next() => {
-                eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
+                print!("    Opening database... {}\r", next_progress_icon.next().unwrap());
             }
         }
     }
