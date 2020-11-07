@@ -171,12 +171,12 @@ impl SyncService {
         id: BlocksRequestId,
         response: Result<Vec<network::protocol::BlockData>, ()>,
     ) {
-        let (span, send_back) = self.blocks_requests.lock().await.remove(id.0);
-        let _span_guard = span.enter();
-        tracing::event!(tracing::Level::TRACE, event = "response-to-background-send");
-        if send_back.send(response).is_err() {
-            tracing::event!(tracing::Level::WARN, event = "to-background-channel-closed");
-        }
+        let (request_span, send_back) = self.blocks_requests.lock().await.remove(id.0);
+        async {
+            if send_back.send(response).is_err() {
+                tracing::event!(tracing::Level::WARN, event = "to-background-channel-closed");
+            }
+        }.instrument(tracing::debug_span!(parent: request_span, "response-to-background-send")).await;
     }
 
     /// Returns the next event that happened in the sync service.
@@ -192,27 +192,27 @@ impl SyncService {
                     request,
                     send_back,
                 } => {
-                    return async move {
+                    return async {
                         let id = BlocksRequestId(
                             self.blocks_requests
                                 .lock()
                                 .await
-                                .insert((tracing::Span::current(), send_back)),
+                                .insert((request_span.clone(), send_back)),
                         );
 
-                        tracing::event!(
+                        /*tracing::event!(
                             tracing::Level::DEBUG,
                             event = "out-sync-service-propagation"
-                        );
+                        );*/
 
                         Event::BlocksRequest {
                             id,
-                            request_span: tracing::Span::current(),
+                            request_span: request_span.clone(),
                             target,
                             request,
                         }
                     }
-                    .instrument(tracing::debug_span!("out-sync-service-propagation"))
+                    .instrument(tracing::debug_span!(parent: &request_span, "out-sync-service-propagation"))
                     .await;
                 }
             }
@@ -402,74 +402,66 @@ async fn start_sync(
                         num_blocks,
                         ..
                     } => {
-                        let (send_back, rx) = oneshot::channel();
+                        // Generate a new span for the request that will be used as the parent
+                        // for everything that processes it.
                         let request_span = tracing::debug_span!(
-                            "blocks-request-start",
+                            parent: None,
+                            "blocks-request",
                             target = %source,
                             height = block_height,
                             count = num_blocks
                         );
 
-                        request_span.in_scope(|| {
-                            tracing::event!(tracing::Level::INFO, event = "start");
-                        });
+                        async {
+                            tracing::event!(tracing::Level::INFO, event = "sending-to-foreground");
 
-                        let send_result = to_foreground
-                            .send(FromBackground::RequestStart {
-                                target: source.clone(),
-                                request_span: request_span.clone(),
-                                request: network::protocol::BlocksRequestConfig {
-                                    start: network::protocol::BlocksRequestConfigStart::Number(
-                                        block_height,
-                                    ),
-                                    desired_count: num_blocks,
-                                    direction: network::protocol::BlocksRequestDirection::Ascending,
-                                    fields: network::protocol::BlocksRequestFields {
-                                        header: true,
-                                        body: true,
-                                        justification: true,
+                            let (send_back, rx) = oneshot::channel();
+
+                            let send_result = to_foreground
+                                .send(FromBackground::RequestStart {
+                                    target: source.clone(),
+                                    request_span: request_span.clone(),
+                                    request: network::protocol::BlocksRequestConfig {
+                                        start: network::protocol::BlocksRequestConfigStart::Number(
+                                            block_height,
+                                        ),
+                                        desired_count: num_blocks,
+                                        direction: network::protocol::BlocksRequestDirection::Ascending,
+                                        fields: network::protocol::BlocksRequestFields {
+                                            header: true,
+                                            body: true,
+                                            justification: true,
+                                        },
                                     },
-                                },
-                                send_back,
-                            })
-                            .await;
+                                    send_back,
+                                })
+                                .await;
 
-                        // If the channel is closed, the sync service has been closed too.
-                        if send_result.is_err() {
-                            tracing::warn_span!("foreground-channel-closed")
-                                //.follows_from(request_span)
-                                .in_scope(|| {
-                                    tracing::event!(
-                                        tracing::Level::INFO,
-                                        event = "foreground-channel-closed"
-                                    );
-                                });
-                            return;
-                        }
-
-                        tracing::debug_span!("foreground-sent")
-                            //.follows_from(request_span)
-                            .in_scope(|| {
-                                tracing::event!(tracing::Level::INFO, event = "foreground-sent");
-
+                            if send_result.is_ok() {
+                                tracing::event!(tracing::Level::INFO, event = "send-success");
                                 let (rx, abort) = future::abortable(rx);
-                                let request_id = start.start((tracing::Span::current(), abort));
+                                let request_id = start.start((request_span.clone(), abort));
                                 block_requests_finished.push(rx.map({
-                                    let request_span = tracing::Span::current();
+                                    let request_span = request_span.clone();
                                     move |r| (request_span, request_id, r)
                                 }));
-                            });
+                            } else {
+                                // If the channel is closed, the sync service has been closed too.
+                                tracing::event!(
+                                    tracing::Level::WARN,
+                                    event = "foreground-channel-closed"
+                                );
+                            }
+                        }.instrument(tracing::debug_span!(parent: &request_span, "foreground-send")).await
                     }
                     full_optimistic::RequestAction::Cancel {
                         user_data: (request_span, abort),
                         ..
                     } => {
-                        tracing::warn_span!("abort")
-                            //.follows_from(request_span)
-                            .in_scope(|| {
-                                abort.abort();
-                                tracing::event!(tracing::Level::INFO, event = "aborted");
-                            });
+                        async {
+                            abort.abort();
+                            tracing::event!(tracing::Level::INFO, event = "aborted");
+                        }.instrument(tracing::warn_span!(parent: request_span, "abort")).await;
                     }
                 }
             }
@@ -493,32 +485,29 @@ async fn start_sync(
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, rq_list) = sync.remove_source(id);
                             for (_, (request_span, abort)) in rq_list {
-                                tracing::warn_span!("abort")
-                                    //.follows_from(request_span)
-                                    .in_scope(|| {
-                                        abort.abort();
-                                        tracing::event!(tracing::Level::INFO, event = "aborted");
-                                    });
+                                async {
+                                    abort.abort();
+                                    tracing::event!(tracing::Level::INFO, event = "aborted");
+                                }.instrument(tracing::warn_span!(parent: request_span, "abort")).await;
                             }
                         },
                     }
                 },
 
                 (request_span, request_id, result) = block_requests_finished.select_next_some() => {
-                    let _span_guard = request_span.enter();
-
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
-                    // TODO: clarify this piece of code
-                    if let Ok(result) = result {
-                        let result = result.map_err(|_| ()).and_then(|v| v);
-                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
-                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                            scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justification: block.justification,
-                        })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
-                        tracing::event!(parent: &request_span, tracing::Level::INFO, event = "injected-result");
-                    }
+                    async {
+                        // `result` is an error if the block request got cancelled by the sync state
+                        // machine.
+                        // TODO: clarify this piece of code
+                        if let Ok(result) = result {
+                            let result = result.map_err(|_| ()).and_then(|v| v);
+                            let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
+                                scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                                scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
+                                scale_encoded_justification: block.justification,
+                            })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
+                        }
+                    }.instrument(tracing::debug_span!(parent: request_span, "result-inject")).await;
                 },
             }
         }

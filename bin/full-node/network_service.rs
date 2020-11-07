@@ -234,74 +234,68 @@ impl NetworkService {
         config: protocol::BlocksRequestConfig,
         request_span: tracing::Span,
     ) -> Result<Vec<protocol::BlockData>, ()> {
-        let mut guarded = self.guarded.lock().await;
+        async {
+            let mut guarded = self.guarded.lock().await;
 
-        let connection = match guarded.peerset.node_mut(target) {
-            peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
-            peerset::NodeMut::Unknown(n) => {
-                request_span.in_scope(|| {
+            let connection = match guarded.peerset.node_mut(target) {
+                peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
+                peerset::NodeMut::Unknown(n) => {
                     tracing::event!(
-                        tracing::Level::INFO,
+                        tracing::Level::WARN,
                         event = "reject",
                         reason = "unknown-target",
                         target = %n.peer_id(),
                     );
-                });
-                return Err(());
-            }
-        };
+                    return Err(());
+                }
+            };
 
-        let (send_back, receive_result) = oneshot::channel();
+            let (send_back, receive_result) = oneshot::channel();
 
-        let protocol = format!("/{}/sync/2", self.protocol_id);
+            let protocol = format!("/{}/sync/2", self.protocol_id);
 
-        // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
-        // It is possible for the channel to be closed, if the background task has ended but the
-        // frontend hasn't processed this yet.
-        let send_result = guarded
-            .peerset
-            .connection_mut(connection)
-            .unwrap()
-            .into_user_data()
-            .send(ToConnection::BlocksRequest {
-                request_span: request_span.clone(),
-                config,
-                protocol,
-                send_back,
-            })
-            .await;
+            // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
+            // It is possible for the channel to be closed, if the background task has ended but the
+            // frontend hasn't processed this yet.
+            let send_result = guarded
+                .peerset
+                .connection_mut(connection)
+                .unwrap()
+                .into_user_data()
+                .send(ToConnection::BlocksRequest {
+                    request_span: request_span.clone(),
+                    config,
+                    protocol,
+                    send_back,
+                })
+                .await;
 
-        match send_result {
-            Ok(()) => {
-                request_span.in_scope(|| {
+            match send_result {
+                Ok(()) => {
                     tracing::event!(tracing::Level::DEBUG, event = "background-task-sent");
-                });
-            }
-            Err(_) => {
-                request_span.in_scope(|| {
+                }
+                Err(_) => {
                     tracing::event!(
                         tracing::Level::WARN,
                         event = "network-connection-channel-closed"
-                    );
-                });
-                return Err(());
+                    );;
+                    return Err(());
+                }
             }
-        }
 
-        // Everything must be unlocked at this point.
-        drop(guarded);
+            // Everything must be unlocked at this point.
+            drop(guarded);
 
-        // Wait for the result of the request. Can take a long time (i.e. several seconds).
-        let result = receive_result.await;
+            // Wait for the result of the request. Can take a long time (i.e. several seconds).
+            let result = receive_result.await;
 
-        request_span.in_scope(|| {
-            tracing::event!(tracing::Level::DEBUG, "channel response received");
-        });
+            tracing::event!(tracing::Level::DEBUG, event = "channel-response-received");
 
-        match result {
-            Ok(r) => r,
-            Err(_) => Err(()),
-        }
+            match result {
+                Ok(r) => r,
+                Err(_) => Err(()),
+            }
+        }.instrument(tracing::info_span!(parent: &request_span, "network-start-request")).await
     }
 
     /// Returns the next event that happens in the network service.
@@ -682,15 +676,15 @@ async fn connection_task(
                 ..
             }) => {
                 tracing::event!(tracing::Level::DEBUG, event = "blocks-response");
-
-                let _span_guard = request_span.enter();
-                if let Ok(response) = response {
-                    let decoded = protocol::decode_block_response(&response).unwrap(); // TODO: don't unwrap
-                    tracing::event!(tracing::Level::DEBUG, event = "network-response");
-                    let _ = send_back.send(Ok(decoded));
-                } else {
-                    let _ = send_back.send(Err(()));
-                }
+                async {
+                    if let Ok(response) = response {
+                        let decoded = protocol::decode_block_response(&response).unwrap(); // TODO: don't unwrap
+                        tracing::event!(tracing::Level::DEBUG, event = "network-response");
+                        let _ = send_back.send(Ok(decoded));
+                    } else {
+                        let _ = send_back.send(Err(()));
+                    }
+                }.instrument(tracing::debug_span!(parent: request_span, "network-response")).await;
                 continue;
             }
             _ => {}
@@ -711,15 +705,14 @@ async fn connection_task(
             message = to_connection.select_next_some().fuse() => {
                 match message {
                     ToConnection::BlocksRequest { request_span, config, protocol, send_back } => {
-                        let request = protocol::build_block_request(config)
-                            .fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            });
-                        connection.add_request(Instant::now(), protocol, request, (request_span.clone(), send_back));
-                        request_span.in_scope(|| {
-                            tracing::event!(tracing::Level::DEBUG, event = "substream-open");
-                        });
+                        async {
+                            let request = protocol::build_block_request(config)
+                                .fold(Vec::new(), |mut a, b| {
+                                    a.extend_from_slice(b.as_ref());
+                                    a
+                                });
+                            connection.add_request(Instant::now(), protocol, request, (request_span.clone(), send_back));
+                        }.instrument(tracing::debug_span!(parent: &request_span, "substream-open")).await;
                         tracing::event!(tracing::Level::DEBUG, event = "substream-open");
                     }
                     ToConnection::OpenNotifications => {
