@@ -32,7 +32,8 @@
 //! already in the database or isn't a descendant or ancestor of the latest finalized block.
 //!
 //! Use [`SledFullDatabase::set_finalized`] to mark a block already in the database as finalized.
-//! Any block that isn't an ancestor or descendant will be removed.
+//! Any block that isn't an ancestor or descendant will be removed. Reverting finalization is
+//! not possible.
 //!
 //! Due to the database's schema, it is not possible to efficiently retrieve the storage items of
 //! blocks that are ancestors of the finalized block. When a block is finalized, the storage of
@@ -572,6 +573,9 @@ impl SledFullDatabase {
     ///
     /// The block must have been previously inserted using [`SledFullDatabase::insert`], otherwise
     /// an error is returned.
+    ///
+    /// Blocks are expected to be valid in context of the chain. Inserting an invalid block can
+    /// result in the database being corrupted.
     ///
     /// The block must be a descendant of the current finalized block. Reverting finalization is
     /// forbidden, as the database intentionally discards some information when finality is
