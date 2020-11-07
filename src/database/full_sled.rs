@@ -433,11 +433,9 @@ impl SledFullDatabase {
                 )| {
                     // Make sure that the block to insert isn't already in the database.
                     if block_headers.get(&block_hash)?.is_some() {
-                        // TODO: ?
-                        return Ok(());
-                        /*return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        return Err(sled::transaction::ConflictableTransactionError::Abort(
                             InsertError::Duplicate,
-                        ));*/
+                        ));
                     }
 
                     // Make sure that the parent of the block to insert is in the database.

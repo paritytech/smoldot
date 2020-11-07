@@ -462,20 +462,24 @@ async fn start_database_write(
 
                 for block in finalized_blocks {
                     // TODO: overhead for building the SCALE encoding of the header
-                    database
-                        .insert(
-                            &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            }),
-                            true, // TODO: is_new_best?
-                            block.body.iter(),
-                            block
-                                .storage_top_trie_changes
-                                .iter()
-                                .map(|(k, v)| (k, v.as_ref())),
-                        )
-                        .unwrap();
+                    let result = database.insert(
+                        &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        }),
+                        true, // TODO: is_new_best?
+                        block.body.iter(),
+                        block
+                            .storage_top_trie_changes
+                            .iter()
+                            .map(|(k, v)| (k, v.as_ref())),
+                    );
+
+                    match result {
+                        Ok(()) => {}
+                        Err(full_sled::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                        Err(err) => panic!("{}", err),
+                    }
                 }
 
                 if let Some(new_finalized_hash) = new_finalized_hash {
