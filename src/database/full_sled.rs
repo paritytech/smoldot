@@ -356,8 +356,7 @@ impl SledFullDatabase {
         )
             .transaction(move |(meta, block_hashes_by_number, block_headers)| {
                 let finalized_block_header =
-                    finalized_block_header(&meta, &block_hashes_by_number, &block_headers)
-                        .map_err(err_conv)?;
+                    finalized_block_header(&meta, &block_hashes_by_number, &block_headers)?;
                 if finalized_block_header.hash() != *finalized_block_hash {
                     return Err(sled::transaction::ConflictableTransactionError::Abort(
                         FinalizedAccessError::Obsolete,
@@ -365,11 +364,10 @@ impl SledFullDatabase {
                 }
 
                 let grandpa_after_finalized_block_authorities_set_id =
-                    grandpa_authorities_set_id(&meta).map_err(err_conv)?;
+                    grandpa_authorities_set_id(&meta)?;
                 let grandpa_finalized_triggered_authorities =
-                    grandpa_finalized_triggered_authorities(&meta).map_err(err_conv)?;
-                let grandpa_finalized_scheduled_change =
-                    grandpa_finalized_scheduled_change(&meta).map_err(err_conv)?;
+                    grandpa_finalized_triggered_authorities(&meta)?;
+                let grandpa_finalized_scheduled_change = grandpa_finalized_scheduled_change(&meta)?;
 
                 let consensus = match (
                     meta.get(b"aura_finalized_authorities")?,
@@ -378,16 +376,13 @@ impl SledFullDatabase {
                     meta.get(b"babe_finalized_next_epoch")?,
                 ) {
                     (None, None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
-                        let slots_per_epoch =
-                            expect_be_nz_u64(&slots_per_epoch).map_err(err_conv)?;
+                        let slots_per_epoch = expect_be_nz_u64(&slots_per_epoch)?;
                         let finalized_next_epoch_transition =
-                            decode_babe_epoch_information(&finalized_next_epoch)
-                                .map_err(err_conv)?;
+                            decode_babe_epoch_information(&finalized_next_epoch)?;
                         let finalized_block_epoch_information = meta
                             .get(b"babe_finalized_epoch")?
                             .map(|v| decode_babe_epoch_information(&v))
-                            .transpose()
-                            .map_err(err_conv)?;
+                            .transpose()?;
                         chain_information::ChainInformationConsensus::Babe {
                             finalized_block_epoch_information,
                             finalized_next_epoch_transition,
@@ -395,10 +390,9 @@ impl SledFullDatabase {
                         }
                     }
                     (Some(finalized_authorities), Some(slot_duration), None, None) => {
-                        let slot_duration = expect_be_nz_u64(&slot_duration).map_err(err_conv)?;
+                        let slot_duration = expect_be_nz_u64(&slot_duration)?;
                         let finalized_authorities_list =
-                            decode_aura_authorities_list(&finalized_authorities)
-                                .map_err(err_conv)?;
+                            decode_aura_authorities_list(&finalized_authorities)?;
                         chain_information::ChainInformationConsensus::Aura {
                             finalized_authorities_list,
                             slot_duration,
@@ -510,7 +504,7 @@ impl SledFullDatabase {
                     // If the height of the block to insert is <= the latest finalized, it doesn't
                     // belong to the finalized chain and would be pruned.
                     // TODO: what if we don't immediately insert the entire finalized chain, but populate it later? should that not be a use case?
-                    if header.number <= finalized_num(&meta).map_err(err_conv)? {
+                    if header.number <= finalized_num(&meta)? {
                         return Err(sled::transaction::ConflictableTransactionError::Abort(
                             InsertError::FinalizedNephew,
                         ));
@@ -686,8 +680,7 @@ impl SledFullDatabase {
                             block_bodies,
                             non_finalized_changes_keys,
                             non_finalized_changes,
-                        )
-                        .map_err(err_conv)?;
+                        )?;
                     }
 
                     // `expected_hash` not found in the list of blocks with this number.
@@ -766,7 +759,7 @@ impl SledFullDatabase {
                     )?
                 };
 
-                for key in decode_non_finalized_changes_keys(&changed_keys).map_err(err_conv)? {
+                for key in decode_non_finalized_changes_keys(&changed_keys)? {
                     let mut entry_key = Vec::with_capacity(block_hash.len() + key.len());
                     entry_key.extend_from_slice(&block_hash);
                     entry_key.extend_from_slice(&key);
@@ -783,7 +776,7 @@ impl SledFullDatabase {
                 if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information()
                 {
                     let epoch = meta.get(b"babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
-                    let decoded_epoch = decode_babe_epoch_information(&epoch).map_err(err_conv)?;
+                    let decoded_epoch = decode_babe_epoch_information(&epoch)?;
                     meta.insert(b"babe_finalized_epoch", epoch)?;
 
                     let slot_number = block_header
@@ -792,8 +785,7 @@ impl SledFullDatabase {
                         .unwrap()
                         .slot_number();
                     let slots_per_epoch =
-                        expect_be_nz_u64(&meta.get(b"babe_slots_per_epoch")?.unwrap())
-                            .map_err(err_conv)?; // TODO: don't unwrap
+                        expect_be_nz_u64(&meta.get(b"babe_slots_per_epoch")?.unwrap())?; // TODO: don't unwrap
 
                     let new_epoch = if let Some(next_config) = next_config {
                         chain_information::BabeEpochInformation {
@@ -848,8 +840,7 @@ impl SledFullDatabase {
                             )?;
 
                             let curr_set_id =
-                                expect_be_u64(&meta.get(b"grandpa_authorities_set_id")?.unwrap())
-                                    .map_err(err_conv)?; // TODO: don't unwrap
+                                expect_be_u64(&meta.get(b"grandpa_authorities_set_id")?.unwrap())?; // TODO: don't unwrap
                             meta.insert(
                                 b"grandpa_authorities_set_id",
                                 &(curr_set_id + 1).to_be_bytes()[..],
@@ -1075,45 +1066,30 @@ pub enum CorruptedError {
     ConsensusAlgorithm,
 }
 
-// TODO: remove in favour of adding an `E` to all the methods below
-fn err_conv<E: From<AccessError>>(
-    err: sled::transaction::ConflictableTransactionError<AccessError>,
-) -> sled::transaction::ConflictableTransactionError<E> {
-    match err {
-        sled::transaction::ConflictableTransactionError::Abort(err) => {
-            sled::transaction::ConflictableTransactionError::Abort(err.into())
-        }
-        sled::transaction::ConflictableTransactionError::Conflict => {
-            sled::transaction::ConflictableTransactionError::Conflict
-        }
-        sled::transaction::ConflictableTransactionError::Storage(err) => {
-            sled::transaction::ConflictableTransactionError::Storage(err)
-        }
-    }
-}
-
-fn finalized_num(
+fn finalized_num<E: From<AccessError>>(
     meta: &sled::transaction::TransactionalTree,
-) -> Result<u64, sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<u64, sled::transaction::ConflictableTransactionError<E>> {
     let value = meta
         .get(b"finalized")?
         .ok_or(AccessError::Corrupted(
             CorruptedError::FinalizedBlockNumberNotFound,
         ))
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
     expect_be_u64(&value)
 }
 
-fn finalized_hash(
+fn finalized_hash<E: From<AccessError>>(
     meta: &sled::transaction::TransactionalTree,
     block_hashes_by_number: &sled::transaction::TransactionalTree,
-) -> Result<[u8; 32], sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<[u8; 32], sled::transaction::ConflictableTransactionError<E>> {
     let num = finalized_num(meta)?;
     let hash = block_hashes_by_number
         .get(num.to_be_bytes())?
         .ok_or(AccessError::Corrupted(
             CorruptedError::FinalizedBlockNumberOutOfRange,
         ))
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
     if hash.len() == 32 {
         let mut out = [0; 32];
@@ -1121,64 +1097,64 @@ fn finalized_hash(
         Ok(out)
     } else {
         Err(sled::transaction::ConflictableTransactionError::Abort(
-            AccessError::Corrupted(CorruptedError::BlockHashLenInHashNumberMapping),
+            AccessError::Corrupted(CorruptedError::BlockHashLenInHashNumberMapping).into(),
         ))
     }
 }
 
-fn finalized_block_header(
+fn finalized_block_header<E: From<AccessError>>(
     meta: &sled::transaction::TransactionalTree,
     block_hashes_by_number: &sled::transaction::TransactionalTree,
     block_headers: &sled::transaction::TransactionalTree,
-) -> Result<header::Header, sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<header::Header, sled::transaction::ConflictableTransactionError<E>> {
     let hash = finalized_hash(meta, block_hashes_by_number)?;
 
     let encoded = block_headers
         .get(&hash)?
         .ok_or(CorruptedError::BlockHeaderNotInDatabase)
         .map_err(AccessError::Corrupted)
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
 
     match header::decode(&encoded) {
         Ok(h) => Ok(h.into()),
         Err(err) => Err(sled::transaction::ConflictableTransactionError::Abort(
-            AccessError::Corrupted(CorruptedError::BlockHeaderCorrupted(err)),
+            AccessError::Corrupted(CorruptedError::BlockHeaderCorrupted(err)).into(),
         )),
     }
 }
 
-fn grandpa_authorities_set_id(
+fn grandpa_authorities_set_id<E: From<AccessError>>(
     meta: &sled::transaction::TransactionalTree,
-) -> Result<u64, sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<u64, sled::transaction::ConflictableTransactionError<E>> {
     let value = meta
         .get(b"grandpa_authorities_set_id")?
         .ok_or(AccessError::Corrupted(
             CorruptedError::MissingGrandpaAuthoritiesSetId,
         ))
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
     expect_be_u64(&value)
 }
 
-fn grandpa_finalized_triggered_authorities(
+fn grandpa_finalized_triggered_authorities<E: From<AccessError>>(
     meta: &sled::transaction::TransactionalTree,
-) -> Result<
-    Vec<header::GrandpaAuthority>,
-    sled::transaction::ConflictableTransactionError<AccessError>,
-> {
+) -> Result<Vec<header::GrandpaAuthority>, sled::transaction::ConflictableTransactionError<E>> {
     let value = meta
         .get(b"grandpa_triggered_authorities")?
         .ok_or(AccessError::Corrupted(
             CorruptedError::MissingGrandpaAuthoritiesSetId,
         ))
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)?;
     decode_grandpa_authorities_list(&value)
 }
 
-fn grandpa_finalized_scheduled_change(
+fn grandpa_finalized_scheduled_change<E: From<AccessError>>(
     meta: &sled::transaction::TransactionalTree,
 ) -> Result<
     Option<(u64, Vec<header::GrandpaAuthority>)>,
-    sled::transaction::ConflictableTransactionError<AccessError>,
+    sled::transaction::ConflictableTransactionError<E>,
 > {
     match (
         meta.get(b"grandpa_scheduled_authorities")?,
@@ -1192,7 +1168,7 @@ fn grandpa_finalized_scheduled_change(
         (None, None) => Ok(None),
         _ => {
             return Err(sled::transaction::ConflictableTransactionError::Abort(
-                AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList),
+                AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList).into(),
             ))
         }
     }
@@ -1203,13 +1179,13 @@ fn grandpa_finalized_scheduled_change(
 /// It is assumed that the block exists and that it is not finalized, otherwise a
 /// [`CorruptedError`] is returned.
 // TODO: what if `hash` == best block?
-fn purge_block(
+fn purge_block<E: From<AccessError>>(
     hash: &[u8; 32],
     block_headers: &sled::transaction::TransactionalTree,
     block_bodies: &sled::transaction::TransactionalTree,
     non_finalized_changes_keys: &sled::transaction::TransactionalTree,
     non_finalized_changes: &sled::transaction::TransactionalTree,
-) -> Result<(), sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<(), sled::transaction::ConflictableTransactionError<E>> {
     // TODO: check that the block was indeed in there
     block_bodies.remove(hash)?;
     block_headers.remove(hash)?;
@@ -1220,7 +1196,7 @@ fn purge_block(
         Some(k) => decode_non_finalized_changes_keys(&k)?,
         None => {
             return Err(sled::transaction::ConflictableTransactionError::Abort(
-                AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList), // TODO: bad error
+                AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList).into(), // TODO: bad error
             ));
         }
     };
@@ -1238,9 +1214,9 @@ fn purge_block(
 }
 
 /// Decodes a value found in [`SledFullDatabase::non_finalized_changes_keys_tree`].
-fn decode_non_finalized_changes_keys(
+fn decode_non_finalized_changes_keys<E: From<AccessError>>(
     value: &sled::IVec,
-) -> Result<Vec<Vec<u8>>, sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<Vec<Vec<u8>>, sled::transaction::ConflictableTransactionError<E>> {
     let result = nom::combinator::all_consuming(nom::multi::many0(nom::combinator::map(
         nom::multi::length_data(util::nom_scale_compact_usize),
         |data| data.to_vec(),
@@ -1251,26 +1227,29 @@ fn decode_non_finalized_changes_keys(
     result
         .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
         .map_err(AccessError::Corrupted)
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)
 }
 
-fn expect_be_u64(
+fn expect_be_u64<E: From<AccessError>>(
     value: &sled::IVec,
-) -> Result<u64, sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<u64, sled::transaction::ConflictableTransactionError<E>> {
     <[u8; 8]>::try_from(&**value)
         .map(u64::from_be_bytes)
         .map_err(|_| CorruptedError::InvalidNumber)
         .map_err(AccessError::Corrupted)
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)
 }
 
-fn expect_be_nz_u64(
+fn expect_be_nz_u64<E: From<AccessError>>(
     value: &sled::IVec,
-) -> Result<NonZeroU64, sled::transaction::ConflictableTransactionError<AccessError>> {
+) -> Result<NonZeroU64, sled::transaction::ConflictableTransactionError<E>> {
     let num = expect_be_u64(value)?;
     NonZeroU64::new(num)
         .ok_or(CorruptedError::InvalidNumber)
         .map_err(AccessError::Corrupted)
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)
 }
 
@@ -1283,13 +1262,12 @@ fn encode_aura_authorities_list(list: header::AuraAuthoritiesIter) -> Vec<u8> {
     out
 }
 
-fn decode_aura_authorities_list(
+fn decode_aura_authorities_list<E: From<AccessError>>(
     value: &sled::IVec,
-) -> Result<Vec<header::AuraAuthority>, sled::transaction::ConflictableTransactionError<AccessError>>
-{
+) -> Result<Vec<header::AuraAuthority>, sled::transaction::ConflictableTransactionError<E>> {
     if value.len() % 32 != 0 {
         return Err(sled::transaction::ConflictableTransactionError::Abort(
-            AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList),
+            AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList).into(),
         ));
     }
 
@@ -1312,15 +1290,12 @@ fn encode_grandpa_authorities_list(list: header::GrandpaAuthoritiesIter) -> Vec<
     out
 }
 
-fn decode_grandpa_authorities_list(
+fn decode_grandpa_authorities_list<E: From<AccessError>>(
     value: &sled::IVec,
-) -> Result<
-    Vec<header::GrandpaAuthority>,
-    sled::transaction::ConflictableTransactionError<AccessError>,
-> {
+) -> Result<Vec<header::GrandpaAuthority>, sled::transaction::ConflictableTransactionError<E>> {
     if value.len() % 40 != 0 {
         return Err(sled::transaction::ConflictableTransactionError::Abort(
-            AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList),
+            AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList).into(),
         ));
     }
 
@@ -1359,11 +1334,11 @@ fn encode_babe_epoch_information(info: chain_information::BabeEpochInformationRe
     out
 }
 
-fn decode_babe_epoch_information(
+fn decode_babe_epoch_information<E: From<AccessError>>(
     value: &sled::IVec,
 ) -> Result<
     chain_information::BabeEpochInformation,
-    sled::transaction::ConflictableTransactionError<AccessError>,
+    sled::transaction::ConflictableTransactionError<E>,
 > {
     let result = nom::combinator::all_consuming(nom::combinator::map(
         nom::sequence::tuple((
@@ -1416,5 +1391,6 @@ fn decode_babe_epoch_information(
     result
         .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
         .map_err(AccessError::Corrupted)
+        .map_err(From::from)
         .map_err(sled::transaction::ConflictableTransactionError::Abort)
 }
