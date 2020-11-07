@@ -278,7 +278,7 @@ impl NetworkService {
                     tracing::event!(
                         tracing::Level::WARN,
                         event = "network-connection-channel-closed"
-                    );;
+                    );
                     return Err(());
                 }
             }
@@ -295,7 +295,13 @@ impl NetworkService {
                 Ok(r) => r,
                 Err(_) => Err(()),
             }
-        }.instrument(tracing::info_span!(parent: &request_span, "network-start-request")).await
+        }
+        .instrument(tracing::info_span!(
+            parent: &request_span,
+            "network-request"
+        ))
+        .instrument(request_span.clone())
+        .await
     }
 
     /// Returns the next event that happens in the network service.
@@ -684,7 +690,13 @@ async fn connection_task(
                     } else {
                         let _ = send_back.send(Err(()));
                     }
-                }.instrument(tracing::debug_span!(parent: request_span, "network-response")).await;
+                }
+                .instrument(tracing::debug_span!(
+                    parent: &request_span,
+                    "network-response"
+                ))
+                .instrument(request_span.clone())
+                .await;
                 continue;
             }
             _ => {}
@@ -712,7 +724,7 @@ async fn connection_task(
                                     a
                                 });
                             connection.add_request(Instant::now(), protocol, request, (request_span.clone(), send_back));
-                        }.instrument(tracing::debug_span!(parent: &request_span, "substream-open")).await;
+                        }.instrument(tracing::debug_span!(parent: &request_span, "substream-open")).instrument(request_span.clone()).await;
                         tracing::event!(tracing::Level::DEBUG, event = "substream-open");
                     }
                     ToConnection::OpenNotifications => {

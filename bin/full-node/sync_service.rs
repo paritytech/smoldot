@@ -176,7 +176,13 @@ impl SyncService {
             if send_back.send(response).is_err() {
                 tracing::event!(tracing::Level::WARN, event = "to-background-channel-closed");
             }
-        }.instrument(tracing::debug_span!(parent: request_span, "response-to-background-send")).await;
+        }
+        .instrument(tracing::debug_span!(
+            parent: &request_span,
+            "response-to-background-send"
+        ))
+        .instrument(request_span.clone())
+        .await;
     }
 
     /// Returns the next event that happened in the sync service.
@@ -212,7 +218,11 @@ impl SyncService {
                             request,
                         }
                     }
-                    .instrument(tracing::debug_span!(parent: &request_span, "out-sync-service-propagation"))
+                    .instrument(tracing::debug_span!(
+                        parent: &request_span,
+                        "out-sync-service-propagation"
+                    ))
+                    .instrument(request_span.clone())
                     .await;
                 }
             }
@@ -426,7 +436,8 @@ async fn start_sync(
                                             block_height,
                                         ),
                                         desired_count: num_blocks,
-                                        direction: network::protocol::BlocksRequestDirection::Ascending,
+                                        direction:
+                                            network::protocol::BlocksRequestDirection::Ascending,
                                         fields: network::protocol::BlocksRequestFields {
                                             header: true,
                                             body: true,
@@ -452,7 +463,13 @@ async fn start_sync(
                                     event = "foreground-channel-closed"
                                 );
                             }
-                        }.instrument(tracing::debug_span!(parent: &request_span, "foreground-send")).await
+                        }
+                        .instrument(tracing::debug_span!(
+                            parent: &request_span,
+                            "foreground-send"
+                        ))
+                        .instrument(request_span.clone())
+                        .await
                     }
                     full_optimistic::RequestAction::Cancel {
                         user_data: (request_span, abort),
@@ -461,7 +478,10 @@ async fn start_sync(
                         async {
                             abort.abort();
                             tracing::event!(tracing::Level::INFO, event = "aborted");
-                        }.instrument(tracing::warn_span!(parent: request_span, "abort")).await;
+                        }
+                        .instrument(tracing::warn_span!(parent: &request_span, "abort"))
+                        .instrument(request_span.clone())
+                        .await;
                     }
                 }
             }
@@ -488,7 +508,7 @@ async fn start_sync(
                                 async {
                                     abort.abort();
                                     tracing::event!(tracing::Level::INFO, event = "aborted");
-                                }.instrument(tracing::warn_span!(parent: request_span, "abort")).await;
+                                }.instrument(tracing::warn_span!(parent: &request_span, "abort")).instrument(request_span.clone()).await;
                             }
                         },
                     }
@@ -507,7 +527,7 @@ async fn start_sync(
                                 scale_encoded_justification: block.justification,
                             })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
                         }
-                    }.instrument(tracing::debug_span!(parent: request_span, "result-inject")).await;
+                    }.instrument(tracing::debug_span!(parent: &request_span, "result-inject")).instrument(request_span.clone()).await;
                 },
             }
         }
