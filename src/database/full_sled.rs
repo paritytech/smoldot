@@ -106,6 +106,9 @@
 //!
 //! For each possible block number, stores a list of block hashes having that number.
 //!
+//! If the key is inferior or equal to the value in `finalized`, guaranteed to only contain on
+//! block.
+//!
 //! Keys in that tree are 64-bits-big-endian block numbers, and values are a concatenation of
 //! 32-bytes block hashes (without any encoding). If the value is for example 96 bytes long,
 //! that means there are 3 blocks in the database with that block number.
@@ -114,22 +117,23 @@
 //!
 //! ## block_headers
 //!
-//! Contains an entry for every known block that is a descendant of the finalized block.
-//! When the finalized block is updated, entries that aren't descendants of the new finalized
-//! block are automatically purged.
+//! Contains an entry for every known block that is an ancestor or descendant of the finalized
+//! block.
+//! When the finalized block is updated, entries that aren't ancestors or descendants of the new
+//! finalized block are automatically purged.
 //!
 //! Keys are block hashes, and values are SCALE-encoded block headers.
 //!
 //! ## block_bodies
 //!
-//! Entries are the same as for [`SledFullDatabase::block_headers_tree`].
+//! Entries are the same as for `block_headers_tree`.
 //!
 //! Keys are block hashes, and values are SCALE-encoded `Vec`s containing the extrinsics. Each
 //! extrinsic is itself a SCALE-encoded `Vec<u8>`.
 //!
 //! ## block_justifications
 //!
-//! Entries are a subset of the ones of [`SledFullDatabase::block_headers_tree`].
+//! Entries are a subset of the ones of `block_headers_tree`.
 //! Not all blocks have a justification.
 //! Only finalized blocks have a justification.
 //!
