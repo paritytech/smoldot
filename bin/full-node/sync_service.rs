@@ -36,8 +36,6 @@ use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
-    pub logging_span: tracing::Span,
-
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
@@ -50,6 +48,8 @@ pub struct Config {
 pub enum Event {
     BlocksRequest {
         id: BlocksRequestId,
+        /// Span to use to record events specific to that request.
+        request_span: tracing::Span,
         target: network::PeerId,
         request: network::protocol::BlocksRequestConfig,
     },
@@ -106,15 +106,16 @@ impl SyncService {
                 from_foreground,
                 to_database,
             )
-            .instrument(tracing::debug_span!("sync task initialization"))
+            .instrument(tracing::debug_span!("sync-task-init"))
             .await
-            .instrument(tracing::info_span!(parent: &config.logging_span, "sync-task")),
+            .instrument(tracing::info_span!(parent: None, "sync-task")),
         ));
 
         (config.tasks_executor)(Box::pin(
-            start_database_write(config.database, messages_rx).instrument(
-                tracing::info_span!(parent: &config.logging_span, "sync-database-write"),
-            ),
+            start_database_write(config.database, messages_rx).instrument(tracing::info_span!(
+                parent: None,
+                "sync-database-write-task"
+            )),
         ));
 
         Arc::new(SyncService {
@@ -182,13 +183,20 @@ impl SyncService {
         loop {
             match self.from_background.lock().await.next().await.unwrap() {
                 FromBackground::RequestStart {
+                    request_span,
                     target,
                     request,
                     send_back,
                 } => {
                     let id = BlocksRequestId(self.blocks_requests.lock().await.insert(send_back));
+                    tracing::event!(
+                        parent: &request_span,
+                        tracing::Level::DEBUG,
+                        "out sync service propagation"
+                    );
                     return Event::BlocksRequest {
                         id,
+                        request_span,
                         target,
                         request,
                     };
@@ -209,6 +217,8 @@ enum ToBackground {
 enum FromBackground {
     /// A blocks request must be started.
     RequestStart {
+        /// [`tracing::Span`] that records all events happening w.r.t this request.
+        request_span: tracing::Span,
         target: network::PeerId,
         request: network::protocol::BlocksRequestConfig,
         send_back: oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>, // TODO: proper error
@@ -383,6 +393,13 @@ async fn start_sync(
                         let send_result = to_foreground
                             .send(FromBackground::RequestStart {
                                 target: source.clone(),
+                                request_span: tracing::debug_span!(
+                                    parent: None,
+                                    "blocks-request",
+                                    target = %source,
+                                    height = block_height,
+                                    count = num_blocks
+                                ),
                                 request: network::protocol::BlocksRequestConfig {
                                     start: network::protocol::BlocksRequestConfigStart::Number(
                                         block_height,
@@ -418,7 +435,10 @@ async fn start_sync(
                 message = from_foreground.next() => {
                     let message = match message {
                         Some(m) => m,
-                        None => return,
+                        None => {
+                            tracing::event!(tracing::Level::DEBUG, event = "messages-stream-end");
+                            return
+                        },
                     };
 
                     match message {
@@ -496,7 +516,7 @@ async fn start_database_write(
                     // TODO: print hash as well
                     tracing::event!(
                         tracing::Level::DEBUG,
-                        event = "database-block-inserted",
+                        event = "block-inserted",
                         block_number = block.header.number
                     );
 
@@ -510,7 +530,7 @@ async fn start_database_write(
                 if let Some(new_finalized_hash) = new_finalized_hash {
                     database.set_finalized(&new_finalized_hash).unwrap();
                     // TODO: nicer printing of the hash
-                    tracing::event!(tracing::Level::DEBUG, event = "database-finalized-update", hash = ?new_finalized_hash);
+                    tracing::event!(tracing::Level::DEBUG, event = "finalized-update", hash = ?new_finalized_hash);
                 }
             }
         }

@@ -656,6 +656,10 @@ pub struct NodeMutUnknown<'a, TPeer, TConn, TPending> {
 }
 
 impl<'a, TPeer, TConn, TPending> NodeMutUnknown<'a, TPeer, TConn, TPending> {
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
+
     /// Inserts the node into the data structure. Returns a [`NodeMutKnown`] for that node.
     pub fn insert(self, user_data: TPeer) -> NodeMutKnown<'a, TPeer, TConn, TPending> {
         let peer_index = self.peerset.peers.insert(Peer {

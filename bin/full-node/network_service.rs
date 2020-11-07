@@ -40,6 +40,7 @@ use substrate_lite::network::{
     peer_id::PeerId,
     peerset, protocol, with_buffers,
 };
+use tracing::Instrument as _;
 
 /// Configuration for a [`NetworkService`].
 pub struct Config {
@@ -152,34 +153,39 @@ impl NetworkService {
 
             // Spawn a background task dedicated to this listener.
             let mut to_foreground = to_foreground.clone();
-            (config.tasks_executor)(Box::pin(async move {
-                loop {
-                    // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
+            (config.tasks_executor)(Box::pin(
+                async move {
+                    loop {
+                        // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
 
-                    let (socket, _addr) = match tcp_listener.accept().await {
-                        Ok(v) => v,
-                        Err(_) => {
-                            // Errors here can happen if the accept failed, for example if no file
-                            // descriptor is available.
-                            // A wait is added in order to avoid having a busy-loop failing to
-                            // accept connections.
-                            futures_timer::Delay::new(Duration::from_secs(2)).await;
-                            continue;
+                        let (socket, _addr) = match tcp_listener.accept().await {
+                            Ok(v) => v,
+                            Err(_) => {
+                                // Errors here can happen if the accept failed, for example if no file
+                                // descriptor is available.
+                                // A wait is added in order to avoid having a busy-loop failing to
+                                // accept connections.
+                                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                                continue;
+                            }
+                        };
+
+                        if to_foreground
+                            .send(FromBackground::NewConnection {
+                                socket,
+                                is_initiator: false,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
-                    };
-
-                    if to_foreground
-                        .send(FromBackground::NewConnection {
-                            socket,
-                            is_initiator: false,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
                     }
                 }
-            }))
+                .instrument(
+                    tracing::debug_span!(parent: None, "tcp-listener-task", address = %listen_address),
+                ),
+            ))
         }
 
         // The peerset, created below, is a data structure that helps keep track of the state of
@@ -225,12 +231,22 @@ impl NetworkService {
         self: Arc<Self>,
         target: PeerId,
         config: protocol::BlocksRequestConfig,
+        request_span: tracing::Span,
     ) -> Result<Vec<protocol::BlockData>, ()> {
         let mut guarded = self.guarded.lock().await;
 
         let connection = match guarded.peerset.node_mut(target) {
             peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
-            peerset::NodeMut::Unknown(n) => return Err(()),
+            peerset::NodeMut::Unknown(n) => {
+                tracing::event!(
+                    parent: &request_span,
+                    tracing::Level::INFO,
+                    event = "reject",
+                    reason = "unknown target",
+                    target = %n.peer_id(),
+                );
+                return Err(());
+            }
         };
 
         let (send_back, receive_result) = oneshot::channel();
@@ -246,6 +262,7 @@ impl NetworkService {
             .unwrap()
             .into_user_data()
             .send(ToConnection::BlocksRequest {
+                request_span: request_span.clone(),
                 config,
                 protocol,
                 send_back,
@@ -253,11 +270,23 @@ impl NetworkService {
             .await
             .map_err(|_| ())?;
 
+        tracing::event!(
+            parent: &request_span,
+            tracing::Level::DEBUG,
+            "sent request to background task"
+        );
+
         // Everything must be unlocked at this point.
         drop(guarded);
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
-        match receive_result.await {
+        let result = receive_result.await;
+        tracing::event!(
+            parent: &request_span,
+            tracing::Level::DEBUG,
+            "channel response received"
+        );
+        match result {
             Ok(r) => r,
             Err(_) => Err(()),
         }
@@ -288,7 +317,7 @@ impl NetworkService {
                         connection_id,
                         self.to_foreground.clone(),
                         rx,
-                    )));*/
+                    ).instrument(...)));*/
                     // TODO: there's nothing in place for pending incoming at the moment
                     todo!()
                 }
@@ -354,14 +383,19 @@ impl NetworkService {
 
                 let (tx, rx) = mpsc::channel(8);
                 let connection_id = node.add_outbound_attempt(address.clone(), tx);
-                (guarded.tasks_executor)(Box::pin(connection_task(
-                    tcp_socket,
-                    true,
-                    self.noise_key.clone(),
-                    connection_id,
-                    self.to_foreground.clone(),
-                    rx,
-                )));
+                (guarded.tasks_executor)(Box::pin(
+                    connection_task(
+                        tcp_socket,
+                        true,
+                        self.noise_key.clone(),
+                        connection_id,
+                        self.to_foreground.clone(),
+                        rx,
+                    )
+                    .instrument(
+                        tracing::debug_span!(parent: None, "tcp-connection-task", address = %address),
+                    ),
+                ));
             }
 
             break;
@@ -383,6 +417,8 @@ pub enum InitError {
 enum ToConnection {
     /// Start a block request. See [`NetworkService::blocks_request`].
     BlocksRequest {
+        /// Span to use to record event related to this blocks request.
+        request_span: tracing::Span,
         config: protocol::BlocksRequestConfig,
         protocol: String,
         send_back: oneshot::Sender<Result<Vec<protocol::BlockData>, ()>>,
@@ -504,17 +540,18 @@ async fn connection_task(
 
     // Configure the `connection_prototype` to turn it into an actual connection.
     // The protocol names are hardcoded here.
-    let mut connection = connection_prototype.into_connection::<_, oneshot::Sender<_>, ()>(
-        connection::established::Config {
-            in_request_protocols: vec![],
-            in_notifications_protocols: vec![connection::established::ConfigNotifications {
-                name: "/dot/block-announces/1".to_string(), // TODO: correct protocolId
-                max_handshake_size: 1024 * 1024,
-            }],
-            ping_protocol: "/ipfs/ping/1.0.0".to_string(),
-            randomness_seed: rand::random(),
-        },
-    );
+    let mut connection = connection_prototype
+        .into_connection::<_, (tracing::Span, oneshot::Sender<_>), ()>(
+            connection::established::Config {
+                in_request_protocols: vec![],
+                in_notifications_protocols: vec![connection::established::ConfigNotifications {
+                    name: "/dot/block-announces/1".to_string(), // TODO: correct protocolId
+                    max_handshake_size: 1024 * 1024,
+                }],
+                ping_protocol: "/ipfs/ping/1.0.0".to_string(),
+                randomness_seed: rand::random(),
+            },
+        );
 
     // Notify the outside of the transition from handshake to actual connection, and obtain an
     // updated `connection_id` in return.
@@ -583,14 +620,16 @@ async fn connection_task(
         match read_write.event {
             Some(connection::established::Event::Response {
                 response,
-                user_data,
+                user_data: (request_span, send_back),
                 ..
             }) => {
+                let _span_guard = request_span.enter();
                 if let Ok(response) = response {
-                    let decoded = protocol::decode_block_response(&response).unwrap();
-                    let _ = user_data.send(Ok(decoded));
+                    let decoded = protocol::decode_block_response(&response).unwrap(); // TODO: don't unwrap
+                    tracing::event!(parent: &request_span, tracing::Level::DEBUG, "sending back");
+                    let _ = send_back.send(Ok(decoded));
                 } else {
-                    let _ = user_data.send(Err(()));
+                    let _ = send_back.send(Err(()));
                 }
                 continue;
             }
@@ -610,13 +649,16 @@ async fn connection_task(
             },
             message = to_connection.select_next_some().fuse() => {
                 match message {
-                    ToConnection::BlocksRequest { config, protocol, send_back } => {
+                    ToConnection::BlocksRequest { request_span, config, protocol, send_back } => {
+                        request_span.follows_from(tracing::Span::current());
+                        let _span_guard = request_span.enter();
                         let request = protocol::build_block_request(config)
                             .fold(Vec::new(), |mut a, b| {
                                 a.extend_from_slice(b.as_ref());
                                 a
                             });
-                        connection.add_request(Instant::now(), protocol, request, send_back);
+                        connection.add_request(Instant::now(), protocol, request, (request_span.clone(), send_back));
+                        tracing::event!(tracing::Level::DEBUG, "substream open");
                     }
                     ToConnection::OpenNotifications => {
                         // TODO: finish

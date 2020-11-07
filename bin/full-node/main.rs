@@ -54,6 +54,11 @@ async fn async_main() {
 
         // Because calling `builder.json()` changes the type of `builder`, we do it at the end
         // and call `init()` at the same time.
+        //
+        // This registers a global process-wide subscriber.
+        // While this is poor programming practices and we would prefer using a crate that doesn't
+        // rely on global variables, the `tracing` crate is currently one of the best logging
+        // crates in the Rust ecosystem at the time of writing of this comment.
         if matches!(cli_options.output, cli::Output::LogsJson) {
             builder.json().init();
         } else {
@@ -171,19 +176,18 @@ async fn async_main() {
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
     })
-    .instrument(tracing::debug_span!("network service initialization"))
+    .instrument(tracing::debug_span!("network-service-init"))
     .await
     .unwrap();
 
     let sync_service = sync_service::SyncService::new(sync_service::Config {
-        logging_span: tracing::debug_span!("test"),
         tasks_executor: {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
         database,
     })
-    .instrument(tracing::debug_span!("sync service initialization"))
+    .instrument(tracing::debug_span!("sync-service-init"))
     .await;
 
     /*let mut telemetry = {
@@ -251,10 +255,11 @@ async fn async_main() {
 
             sync_message = sync_service.next_event().fuse() => {
                 match sync_message {
-                    sync_service::Event::BlocksRequest { id, target, request } => {
+                    sync_service::Event::BlocksRequest { id, request_span, target, request } => {
                         let block_request = network_service.clone().blocks_request(
                             target,
-                            request
+                            request,
+                            request_span,
                         );
 
                         threads_pool.spawn_ok({
