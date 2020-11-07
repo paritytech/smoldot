@@ -28,12 +28,15 @@ std = [
     "futures/std",
     "futures/thread-pool",
     "futures-timer",
+    "opentelemetry",
+    "opentelemetry-jaeger",
     "rand/std",
     "rand_chacha/std",
     "soketto",
     "structopt",
     "terminal_size",
     "tracing",
+    "tracing-opentelemetry",
     "tracing-subscriber",
     "url",
     "wasmtime",
@@ -109,11 +112,14 @@ async-std = { version = "1.7.0", optional = true }
 atty = { version = "0.2.14", optional = true }
 futures = { version = "0.3.6", default-features = false, optional = true }
 futures-timer = { version = "3.0", optional = true }
+opentelemetry = { version = "0.8.0", optional = true, default-features = false }
+opentelemetry-jaeger = { version = "0.7.0", optional = true, default-features = false }
 soketto = { version = "0.4.2", optional = true }
 structopt = { version = "0.3.20", optional = true, default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = { version = "0.1.12", optional = true }
 tracing = { version = "0.1.21", optional = true }  # While `tracing` can work in `no_std` contexts, the coding rules of this repository forbid this library in the library code.
-tracing-subscriber = { version = "0.2.15", optional = true, default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "smallvec"] }
+tracing-opentelemetry = { version = "0.8.0", optional = true, default-features = false }
+tracing-subscriber = { version = "0.2.15", optional = true, default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "registry", "smallvec"] }
 url = { version = "2.1.1", optional = true }
 
 # `wasm-bindings` feature

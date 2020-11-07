@@ -18,6 +18,7 @@
 #![recursion_limit = "1024"]
 
 use futures::{channel::oneshot, prelude::*};
+use opentelemetry::api::Provider as _;
 use std::{
     borrow::Cow, convert::TryFrom as _, fs, io, iter, path::PathBuf, sync::Arc, thread,
     time::Duration,
@@ -29,6 +30,7 @@ use substrate_lite::{
     network::{connection, multiaddr, peer_id::PeerId},
 };
 use tracing::Instrument as _;
+use tracing_subscriber::prelude::*;
 
 mod cli;
 mod network_service;
@@ -41,35 +43,68 @@ fn main() {
 async fn async_main() {
     let cli_options = cli::CliOptions::from_args();
 
-    // Setup the logging system of the binary.
-    if matches!(
+    let logs_layer = if matches!(
         cli_options.output,
-        cli::Output::Logs | cli::Output::LogsJson
+        cli::Output::Logs
     ) {
-        let builder = tracing_subscriber::fmt()
+        Some(tracing_subscriber::fmt::layer()
             .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
             .with_target(false)
-            .with_max_level(tracing::Level::DEBUG) // TODO:
-            .with_writer(io::stdout);
+            .with_writer(io::stdout)
+            .with_ansi(match cli_options.color {
+                cli::ColorChoice::Always => true,
+                cli::ColorChoice::Never => false,
+            }))
+    } else {
+        None
+    };
 
-        // Because calling `builder.json()` changes the type of `builder`, we do it at the end
-        // and call `init()` at the same time.
-        //
-        // This registers a global process-wide subscriber.
-        // While this is poor programming practices and we would prefer using a crate that doesn't
-        // rely on global variables, the `tracing` crate is currently one of the best logging
-        // crates in the Rust ecosystem at the time of writing of this comment.
-        if matches!(cli_options.output, cli::Output::LogsJson) {
-            builder.json().init();
-        } else {
-            builder
-                .with_ansi(match cli_options.color {
-                    cli::ColorChoice::Always => true,
-                    cli::ColorChoice::Never => false,
-                })
-                .init();
-        }
-    }
+    let json_layer = if matches!(
+        cli_options.output,
+        cli::Output::LogsJson
+    ) {
+        Some(tracing_subscriber::fmt::layer()
+            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
+            .with_target(false)
+            .with_writer(io::stdout).json())
+    } else {
+        None
+    };
+
+    let jaeger_layer = if let Some(jaeger_server) = cli_options.jaeger {
+        let exporter = opentelemetry_jaeger::Exporter::builder()
+            .with_agent_endpoint(jaeger_server.to_string())
+            .with_process(opentelemetry_jaeger::Process {
+                service_name: "substrate-lite".to_string(),
+                tags: Vec::new(),
+            })
+            .init().unwrap();
+
+        let provider = opentelemetry::sdk::Provider::builder()
+            .with_simple_exporter(exporter)
+            .with_config(opentelemetry::sdk::Config {
+                default_sampler: Box::new(opentelemetry::sdk::Sampler::AlwaysOn),
+                ..Default::default()
+            })
+            .build();
+
+        Some(tracing_opentelemetry::OpenTelemetryLayer::new(provider.get_tracer("jaeger")))
+    
+    } else {
+        None
+    };
+
+    // Groups all the layers together.
+    //
+    // This registers a global process-wide subscriber.
+    // While this is poor programming practices and we would prefer using a crate that doesn't
+    // rely on global variables, the `tracing` crate is currently one of the best logging
+    // crates in the Rust ecosystem at the time of writing of this comment.
+    tracing_subscriber::registry()
+        .with(logs_layer)
+        .with(json_layer)
+        .with(jaeger_layer)
+        .init();
 
     let chain_spec = {
         let json: Cow<[u8]> = match cli_options.chain {
