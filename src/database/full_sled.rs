@@ -21,8 +21,8 @@
 //!
 //! # Usage
 //!
-//! Use the [`open`] function to create a new database or open an existing one. [`open`] returns a
-//! [`DatabaseOpen`] enum. This enum will contain either a [`SledFullDatabase`] object,
+//! Use the [`open()`] function to create a new database or open an existing one. [`open()`]
+//! returns a [`DatabaseOpen`] enum. This enum will contain either a [`SledFullDatabase`] object,
 //! representing an access to the database, or a [`DatabaseEmpty`] if the database didn't exist or
 //! is empty. If that is the case, use [`DatabaseEmpty::initialize`] in order to populate it and
 //! obtain a [`SledFullDatabase`].
