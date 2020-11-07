@@ -80,8 +80,12 @@ pub struct SyncService {
     from_background: Mutex<mpsc::Receiver<FromBackground>>,
 
     /// For each emitted blocks request, an element is stored here.
-    blocks_requests:
-        Mutex<slab::Slab<oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>>>,
+    blocks_requests: Mutex<
+        slab::Slab<(
+            tracing::Span,
+            oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>,
+        )>,
+    >,
 }
 
 impl SyncService {
@@ -167,12 +171,12 @@ impl SyncService {
         id: BlocksRequestId,
         response: Result<Vec<network::protocol::BlockData>, ()>,
     ) {
-        let _ = self
-            .blocks_requests
-            .lock()
-            .await
-            .remove(id.0)
-            .send(response);
+        let (span, send_back) = self.blocks_requests.lock().await.remove(id.0);
+        let _span_guard = span.enter();
+        tracing::event!(tracing::Level::TRACE, event = "response-to-background-send");
+        if send_back.send(response).is_err() {
+            tracing::event!(tracing::Level::WARN, event = "to-background-channel-closed");
+        }
     }
 
     /// Returns the next event that happened in the sync service.
@@ -188,15 +192,20 @@ impl SyncService {
                     request,
                     send_back,
                 } => {
-                    let id = BlocksRequestId(self.blocks_requests.lock().await.insert(send_back));
+                    let _span_guard = request_span.enter();
+                    let id = BlocksRequestId(
+                        self.blocks_requests
+                            .lock()
+                            .await
+                            .insert((request_span.clone(), send_back)),
+                    );
                     tracing::event!(
-                        parent: &request_span,
                         tracing::Level::DEBUG,
-                        "out sync service propagation"
+                        event = "out-sync-service-propagation"
                     );
                     return Event::BlocksRequest {
                         id,
-                        request_span,
+                        request_span: request_span.clone(),
                         target,
                         request,
                     };
@@ -390,14 +399,15 @@ async fn start_sync(
                     } => {
                         let (send_back, rx) = oneshot::channel();
                         let request_span = tracing::debug_span!(
-                            parent: None,
                             "blocks-request",
                             target = %source,
                             height = block_height,
                             count = num_blocks
                         );
 
-                        let _span_guard = request_span.enter();
+                        request_span.in_scope(|| {
+                            tracing::event!(tracing::Level::INFO, event = "start");
+                        });
 
                         let send_result = to_foreground
                             .send(FromBackground::RequestStart {
@@ -421,19 +431,34 @@ async fn start_sync(
 
                         // If the channel is closed, the sync service has been closed too.
                         if send_result.is_err() {
-                            tracing::event!(tracing::Level::INFO, event = "foreground-channel-closed");
+                            request_span.in_scope(|| {
+                                tracing::event!(
+                                    tracing::Level::INFO,
+                                    event = "foreground-channel-closed"
+                                );
+                            });
                             return;
                         }
 
-                        let (rx, abort) = future::abortable(rx);
-                        let request_id = start.start(abort);
-                        block_requests_finished.push(rx.map({
-                            let request_span = request_span.clone();
-                            move |r| (request_span, request_id, r)
-                        }));
+                        request_span.in_scope(|| {
+                            tracing::event!(tracing::Level::INFO, event = "foreground-sent");
+
+                            let (rx, abort) = future::abortable(rx);
+                            let request_id = start.start((request_span.clone(), abort));
+                            block_requests_finished.push(rx.map({
+                                let request_span = request_span.clone();
+                                move |r| (request_span, request_id, r)
+                            }));
+                        });
                     }
-                    full_optimistic::RequestAction::Cancel { user_data, .. } => {
-                        user_data.abort();
+                    full_optimistic::RequestAction::Cancel {
+                        user_data: (request_span, abort),
+                        ..
+                    } => {
+                        request_span.in_scope(|| {
+                            abort.abort();
+                            tracing::event!(tracing::Level::INFO, event = "aborted");
+                        });
                     }
                 }
             }
@@ -456,8 +481,11 @@ async fn start_sync(
                         ToBackground::PeerDisconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, rq_list) = sync.remove_source(id);
-                            for (_, rq) in rq_list {
-                                rq.abort();
+                            for (_, (request_span, abort)) in rq_list {
+                                request_span.in_scope(|| {
+                                    abort.abort();
+                                    tracing::event!(tracing::Level::INFO, event = "aborted");
+                                });
                             }
                         },
                     }

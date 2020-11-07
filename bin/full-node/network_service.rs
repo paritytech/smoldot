@@ -239,13 +239,14 @@ impl NetworkService {
         let connection = match guarded.peerset.node_mut(target) {
             peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
             peerset::NodeMut::Unknown(n) => {
-                tracing::event!(
-                    parent: &request_span,
-                    tracing::Level::INFO,
-                    event = "reject",
-                    reason = "unknown target",
-                    target = %n.peer_id(),
-                );
+                request_span.in_scope(|| {
+                    tracing::event!(
+                        tracing::Level::INFO,
+                        event = "reject",
+                        reason = "unknown-target",
+                        target = %n.peer_id(),
+                    );
+                });
                 return Err(());
             }
         };
@@ -272,19 +273,18 @@ impl NetworkService {
 
         match send_result {
             Ok(()) => {
-                tracing::event!(
-                    parent: &request_span,
-                    tracing::Level::DEBUG,
-                    event = "background-task-sent"
-                );
+                request_span.in_scope(|| {
+                    tracing::event!(tracing::Level::DEBUG, event = "background-task-sent");
+                });
             }
             Err(_) => {
-                tracing::event!(
-                    parent: &request_span,
-                    tracing::Level::WARN,
-                    event = "network-connection-channel-closed"
-                );
-                return Err(())
+                request_span.in_scope(|| {
+                    tracing::event!(
+                        tracing::Level::WARN,
+                        event = "network-connection-channel-closed"
+                    );
+                });
+                return Err(());
             }
         }
 
@@ -293,11 +293,11 @@ impl NetworkService {
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
         let result = receive_result.await;
-        tracing::event!(
-            parent: &request_span,
-            tracing::Level::DEBUG,
-            "channel response received"
-        );
+
+        request_span.in_scope(|| {
+            tracing::event!(tracing::Level::DEBUG, "channel response received");
+        });
+
         match result {
             Ok(r) => r,
             Err(_) => Err(()),
@@ -394,6 +394,14 @@ impl NetworkService {
 
                 let (tx, rx) = mpsc::channel(8);
                 let connection_id = node.add_outbound_attempt(address.clone(), tx);
+                let connection_span =
+                    tracing::info_span!(parent: None, "tcp-connection", address = %address);
+                let _span_guard = connection_span.enter();
+                tracing::event!(
+                    parent: &connection_span,
+                    tracing::Level::INFO,
+                    event = "start"
+                );
                 (guarded.tasks_executor)(Box::pin(
                     connection_task(
                         tcp_socket,
@@ -403,9 +411,7 @@ impl NetworkService {
                         self.to_foreground.clone(),
                         rx,
                     )
-                    .instrument(
-                        tracing::debug_span!(parent: None, "tcp-connection-task", address = %address),
-                    ),
+                    .instrument(connection_span.clone()),
                 ));
             }
 
@@ -511,14 +517,24 @@ async fn connection_task(
 ) {
     // Finishing any ongoing connection process.
     let tcp_socket = match tcp_socket.await {
-        Ok(s) => s,
-        Err(_) => {
+        Ok(tcp_stream) => {
+            tracing::event!(tracing::Level::INFO, event = "reached");
+            tcp_stream
+        }
+        Err(err) => {
+            tracing::event!(
+                tracing::Level::ERROR,
+                event = "reach-error",
+                error = %err
+            );
+
             let _ = to_foreground
                 .send(FromBackground::HandshakeError {
                     connection_id,
                     error: HandshakeError::Io,
                 })
                 .await;
+            tracing::event!(tracing::Level::INFO, event = "task-end");
             return;
         }
     };
@@ -543,15 +559,19 @@ async fn connection_task(
         match perform_handshake(&mut tcp_socket, &noise_key, is_initiator).await {
             Ok(v) => v,
             Err(error) => {
+                tracing::event!(tracing::Level::WARN, event = "handshake-error", error = %error);
                 let _ = to_foreground
                     .send(FromBackground::HandshakeError {
                         connection_id,
                         error,
                     })
                     .await;
+                tracing::event!(tracing::Level::INFO, event = "task-end");
                 return;
             }
         };
+
+    tracing::event!(tracing::Level::INFO, event = "handshake-success");
 
     // Configure the `connection_prototype` to turn it into an actual connection.
     // The protocol names are hardcoded here.
@@ -599,10 +619,16 @@ async fn connection_task(
     loop {
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
             Ok(b) => b,
-            Err(_) => {
+            Err(err) => {
+                tracing::event!(
+                    tracing::Level::WARN,
+                    event = "socket-error",
+                    error = %err
+                );
                 let _ = to_foreground
                     .send(FromBackground::Disconnected { connection_id })
                     .await;
+                tracing::event!(tracing::Level::INFO, event = "task-end");
                 return;
             }
         };
@@ -612,14 +638,27 @@ async fn connection_task(
         let read_write =
             match connection.read_write(now, read_buffer.map(|b| b.0), write_buffer.unwrap()) {
                 Ok(rw) => rw,
-                Err(_) => {
+                Err(err) => {
+                    tracing::event!(
+                        tracing::Level::WARN,
+                        event = "protocol-error",
+                        error = %err
+                    );
                     let _ = to_foreground
                         .send(FromBackground::Disconnected { connection_id })
                         .await;
+                    tracing::event!(tracing::Level::INFO, event = "task-end");
                     return;
                 }
             };
         connection = read_write.connection;
+
+        tracing::event!(
+            tracing::Level::TRACE,
+            event = "read-write",
+            read_bytes = read_write.read_bytes,
+            written_bytes = read_write.written_bytes
+        );
 
         if let Some(wake_up) = read_write.wake_up_after {
             if wake_up > now {
@@ -642,10 +681,12 @@ async fn connection_task(
                 user_data: (request_span, send_back),
                 ..
             }) => {
+                tracing::event!(tracing::Level::DEBUG, event = "blocks-response");
+
                 let _span_guard = request_span.enter();
                 if let Ok(response) = response {
                     let decoded = protocol::decode_block_response(&response).unwrap(); // TODO: don't unwrap
-                    tracing::event!(parent: &request_span, tracing::Level::DEBUG, "sending back");
+                    tracing::event!(tracing::Level::DEBUG, event = "network-response");
                     let _ = send_back.send(Ok(decoded));
                 } else {
                     let _ = send_back.send(Err(()));
@@ -665,19 +706,22 @@ async fn connection_task(
             _ = tcp_socket.as_mut().process().fuse() => {},
             timeout = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
                 // Nothing to do, but guarantees that we loop again.
+                tracing::event!(tracing::Level::TRACE, event = "after-timer-wakeup");
             },
             message = to_connection.select_next_some().fuse() => {
                 match message {
                     ToConnection::BlocksRequest { request_span, config, protocol, send_back } => {
                         request_span.follows_from(tracing::Span::current());
-                        let _span_guard = request_span.enter();
                         let request = protocol::build_block_request(config)
                             .fold(Vec::new(), |mut a, b| {
                                 a.extend_from_slice(b.as_ref());
                                 a
                             });
                         connection.add_request(Instant::now(), protocol, request, (request_span.clone(), send_back));
-                        tracing::event!(tracing::Level::DEBUG, "substream open");
+                        request_span.in_scope(|| {
+                            tracing::event!(tracing::Level::DEBUG, event = "substream-open");
+                        });
+                        tracing::event!(tracing::Level::DEBUG, event = "substream-open");
                     }
                     ToConnection::OpenNotifications => {
                         // TODO: finish
@@ -768,9 +812,11 @@ async fn perform_handshake(
                 remote_peer_id,
                 connection,
             } => {
+                tracing::event!(tracing::Level::INFO, event = "handshake-success");
                 break Ok((connection, remote_peer_id));
             }
             connection::handshake::Handshake::NoiseKeyRequired(key) => {
+                tracing::event!(tracing::Level::INFO, event = "noise-key-inject");
                 handshake = key.resume(noise_key).into()
             }
             connection::handshake::Handshake::Healthy(healthy) => {
@@ -788,6 +834,14 @@ async fn perform_handshake(
                     let write_buffer = write_buffer.unwrap();
                     healthy.read_write(read_buffer, write_buffer)?
                 };
+
+                tracing::event!(
+                    tracing::Level::TRACE,
+                    event = "read-write",
+                    read_bytes = num_read,
+                    written_bytes = num_written
+                );
+
                 handshake = new_state;
                 tcp_socket.advance(num_read, num_written);
 
@@ -802,7 +856,10 @@ async fn perform_handshake(
                     futures::pin_mut!(process_future);
                     match future::select(process_future, &mut timeout).await {
                         future::Either::Left(_) => {}
-                        future::Either::Right(_) => return Err(HandshakeError::Timeout),
+                        future::Either::Right(_) => {
+                            tracing::event!(tracing::Level::ERROR, event = "timeout");
+                            return Err(HandshakeError::Timeout);
+                        }
                     }
                 }
             }

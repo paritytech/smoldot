@@ -43,30 +43,29 @@ fn main() {
 async fn async_main() {
     let cli_options = cli::CliOptions::from_args();
 
-    let logs_layer = if matches!(
-        cli_options.output,
-        cli::Output::Logs
-    ) {
-        Some(tracing_subscriber::fmt::layer()
-            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
-            .with_target(false)
-            .with_writer(io::stdout)
-            .with_ansi(match cli_options.color {
-                cli::ColorChoice::Always => true,
-                cli::ColorChoice::Never => false,
-            }))
+    let logs_layer = if matches!(cli_options.output, cli::Output::Logs) {
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
+                .with_target(false)
+                .with_writer(io::stdout)
+                .with_ansi(match cli_options.color {
+                    cli::ColorChoice::Always => true,
+                    cli::ColorChoice::Never => false,
+                }),
+        )
     } else {
         None
     };
 
-    let json_layer = if matches!(
-        cli_options.output,
-        cli::Output::LogsJson
-    ) {
-        Some(tracing_subscriber::fmt::layer()
-            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
-            .with_target(false)
-            .with_writer(io::stdout).json())
+    let json_layer = if matches!(cli_options.output, cli::Output::LogsJson) {
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
+                .with_target(false)
+                .with_writer(io::stdout)
+                .json(),
+        )
     } else {
         None
     };
@@ -78,7 +77,8 @@ async fn async_main() {
                 service_name: "substrate-lite".to_string(),
                 tags: Vec::new(),
             })
-            .init().unwrap();
+            .init()
+            .unwrap();
 
         let provider = opentelemetry::sdk::Provider::builder()
             .with_simple_exporter(exporter)
@@ -88,8 +88,9 @@ async fn async_main() {
             })
             .build();
 
-        Some(tracing_opentelemetry::OpenTelemetryLayer::new(provider.get_tracer("jaeger")))
-    
+        Some(tracing_opentelemetry::OpenTelemetryLayer::new(
+            provider.get_tracer("jaeger"),
+        ))
     } else {
         None
     };
