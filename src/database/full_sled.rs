@@ -18,6 +18,115 @@
 //! Filesystem-backed database containing all the information about a chain.
 //!
 //! This module handles the persistent storage of the chain on disk.
+//!
+//! # Schema
+//!
+//! Each section below corresponds to a "tree" in the sled database.
+//!
+//! ## meta
+//!
+//! Contains all the meta-information about the content.
+//!
+//! Keys in that tree are:
+//!
+//! - `best`: Hash of the best block.
+//!
+//! - `finalized`: Height of the finalized block, as a 64bits big endian number.
+//!
+//! - `grandpa_authorities_set_id`: A 64bits big endian number representing the id of the
+//! authorities set that must finalize the block right after the finalized block. The value is
+//! 0 at the genesis block, and increased by 1 at every authorities change.
+//!
+//! - `grandpa_triggered_authorities`: List of public keys and weights of the GrandPa
+//! authorities that must finalize the children of the finalized block. Consists in 40bytes
+//! values concatenated together, each value being a 32bytes ed25519 public key and a 8bytes
+//! little endian weight.
+//!
+//! - `grandpa_scheduled_target`: A 64bits big endian number representing the block where the
+//! authorities found in `grandpa_scheduled_authorities` will be triggered. Blocks whose height
+//! is strictly higher than this value must be finalized using the new set of authorities. This
+//! authority change must have been scheduled in or before the finalized block. Missing if no
+//! change is scheduled.
+//!
+//! - `grandpa_scheduled_authorities`: List of public keys and weights of the GrandPa
+//! authorities that will be triggered at the block found in `grandpa_scheduled_target`.
+//! Consists in 40bytes values concatenated together, each value being a 32bytes ed25519
+//! public key and a 8bytes little endian weight. Missing if no change is scheduled.
+//!
+//! - `aura_slot_duration`: A 64bits big endian number indicating the duration of an Aura
+//! slot. Missing if and only if the chain doesn't use Aura.
+//!
+//! - `aura_finalized_authorities`: List of public keys of the Aura authorities that must
+//! author the children of the finalized block. Consists in 32bytes values concatenated
+//! together. Missing if and only if the chain doesn't use Aura.
+//!
+//! - `babe_slots_per_epoch`: A 64bits big endian number indicating the number of slots per
+//! Babe epoch. Missing if and only if the chain doesn't use Babe.
+//!
+//! - `babe_finalized_epoch`: SCALE encoding of a structure that contains the information
+//! about the Babe epoch used for the finalized block. Missing if and only if the finalized
+//! block is block #0 or the chain doesn't use Babe.
+//!
+//! - `babe_finalized_next_epoch`: SCALE encoding of a structure that contains the information
+//! about the Babe epoch that follows the one described by `babe_finalized_epoch`. If the
+//! finalized block is block #0, then this contains information about epoch #0. Missing if and
+//! only if the chain doesn't use Babe.
+//!
+//! ## block_hashes_by_number
+//!
+//! For each possible block number, stores a list of block hashes having that number.
+//!
+//! Keys in that tree are 64-bits-big-endian block numbers, and values are a concatenation of
+//! 32-bytes block hashes (without any encoding). If the value is for example 96 bytes long,
+//! that means there are 3 blocks in the database with that block number.
+//!
+//! Never contains any empty value.
+//!
+//! ## block_headers
+//!
+//! Contains an entry for every known block that is a descendant of the finalized block.
+//! When the finalized block is updated, entries that aren't descendants of the new finalized
+//! block are automatically purged.
+//!
+//! Keys are block hashes, and values are SCALE-encoded block headers.
+//!
+//! ## block_bodies
+//!
+//! Entries are the same as for [`SledFullDatabase::block_headers_tree`].
+//!
+//! Keys are block hashes, and values are SCALE-encoded `Vec`s containing the extrinsics. Each
+//! extrinsic is itself a SCALE-encoded `Vec<u8>`.
+//!
+//! ## block_justifications
+//!
+//! Entries are a subset of the ones of [`SledFullDatabase::block_headers_tree`].
+//! Not all blocks have a justification.
+//! Only finalized blocks have a justification.
+//!
+//! Keys are block hashes, and values are SCALE-encoded `Vec`s containing the justification.
+//!
+//! ## storage_top_trie
+//!
+//! Contains the key-value storage at the finalized block.
+//!
+//! Keys are storage keys, and values are storage values.
+//!
+//! ## non_finalized_changes_keys
+//!
+//! For each hash of non-finalized block, contains the list of keys in the storage that this
+//! block modifies.
+//!
+//! Keys are a 32 bytes block hash. Values are a list of SCALE-encoded `Vec<u8>` concatenated
+//! together. In other words, each value is a length (SCALE-compact-encoded), a key of that
+//! length, a length, a key of that length, and so on.
+//!
+//! ## non_finalized_changes
+//!
+//! For each element in `non_finalized_changes_keys_tree`, contains the new value for this
+//! storage modification. If an entry is found in `non_finalized_changes_keys_tree` and not in
+//! `non_finalized_changes_tree`, that means that the storage entry must be removed.
+//!
+//! Keys are a 32 bytes block hash followed with a storage key.
 
 // TODO: better docs
 
@@ -35,118 +144,36 @@ mod open;
 
 /// An open database. Holds file descriptors.
 pub struct SledFullDatabase {
-    /// Tree named "meta" in the database.
-    /// Contains all the meta-information about the content.
-    ///
-    /// Keys in that tree are:
-    ///
-    /// - `best`: Hash of the best block.
-    ///
-    /// - `finalized`: Height of the finalized block, as a 64bits big endian number.
-    ///
-    /// - `grandpa_authorities_set_id`: A 64bits big endian number representing the id of the
-    /// authorities set that must finalize the block right after the finalized block. The value is
-    /// 0 at the genesis block, and increased by 1 at every authorities change.
-    ///
-    /// - `grandpa_triggered_authorities`: List of public keys and weights of the GrandPa
-    /// authorities that must finalize the children of the finalized block. Consists in 40bytes
-    /// values concatenated together, each value being a 32bytes ed25519 public key and a 8bytes
-    /// little endian weight.
-    ///
-    /// - `grandpa_scheduled_target`: A 64bits big endian number representing the block where the
-    /// authorities found in `grandpa_scheduled_authorities` will be triggered. Blocks whose height
-    /// is strictly higher than this value must be finalized using the new set of authorities. This
-    /// authority change must have been scheduled in or before the finalized block. Missing if no
-    /// change is scheduled.
-    ///
-    /// - `grandpa_scheduled_authorities`: List of public keys and weights of the GrandPa
-    /// authorities that will be triggered at the block found in `grandpa_scheduled_target`.
-    /// Consists in 40bytes values concatenated together, each value being a 32bytes ed25519
-    /// public key and a 8bytes little endian weight. Missing if no change is scheduled.
-    ///
-    /// - `aura_slot_duration`: A 64bits big endian number indicating the duration of an Aura
-    /// slot. Missing if and only if the chain doesn't use Aura.
-    ///
-    /// - `aura_finalized_authorities`: List of public keys of the Aura authorities that must
-    /// author the children of the finalized block. Consists in 32bytes values concatenated
-    /// together. Missing if and only if the chain doesn't use Aura.
-    ///
-    /// - `babe_slots_per_epoch`: A 64bits big endian number indicating the number of slots per
-    /// Babe epoch. Missing if and only if the chain doesn't use Babe.
-    ///
-    /// - `babe_finalized_epoch`: SCALE encoding of a structure that contains the information
-    /// about the Babe epoch used for the finalized block. Missing if and only if the finalized
-    /// block is block #0 or the chain doesn't use Babe.
-    ///
-    /// - `babe_finalized_next_epoch`: SCALE encoding of a structure that contains the information
-    /// about the Babe epoch that follows the one described by `babe_finalized_epoch`. If the
-    /// finalized block is block #0, then this contains information about epoch #0. Missing if and
-    /// only if the chain doesn't use Babe.
-    ///
+    /// Tree named "meta" in the database. See the module-level documentation for more info.
     meta_tree: sled::Tree,
 
-    /// Tree named "block_hashes_by_number" in the database.
-    ///
-    /// For each possible block number, stores a list of block hashes having that number.
-    ///
-    /// Keys in that tree are 64-bits-big-endian block numbers, and values are a concatenation of
-    /// 32-bytes block hashes (without any encoding). If the value is for example 96 bytes long,
-    /// that means there are 3 blocks in the database with that block number.
-    ///
-    /// Never contains any empty value.
+    /// Tree named "block_hashes_by_number" in the database. See the module-level documentation
+    /// for more info.
     block_hashes_by_number_tree: sled::Tree,
 
-    /// Tree named "block_headers" in the database.
-    ///
-    /// Contains an entry for every known block that is a descendant of the finalized block.
-    /// When the finalized block is updated, entries that aren't descendants of the new finalized
-    /// block are automatically purged.
-    ///
-    /// Keys are block hashes, and values are SCALE-encoded block headers.
+    /// Tree named "block_headers" in the database. See the module-level documentation for more
+    /// info.
     block_headers_tree: sled::Tree,
 
-    /// Tree named "block_bodies" in the database.
-    ///
-    /// Entries are the same as for [`SledFullDatabase::block_headers_tree`].
-    ///
-    /// Keys are block hashes, and values are SCALE-encoded `Vec`s containing the extrinsics. Each
-    /// extrinsic is itself a SCALE-encoded `Vec<u8>`.
+    /// Tree named "block_bodies" in the database. See the module-level documentation for more
+    /// info.
     block_bodies_tree: sled::Tree,
 
-    /// Tree named "block_justifications" in the database.
-    ///
-    /// Entries are a subset of the ones of [`SledFullDatabase::block_headers_tree`].
-    /// Not all blocks have a justification.
-    /// Only finalized blocks have a justification.
-    ///
-    /// Keys are block hashes, and values are SCALE-encoded `Vec`s containing the justification.
+    /// Tree named "block_justifications" in the database. See the module-level documentation for
+    /// more info.
     // TODO: never inserted
     block_justifications_tree: sled::Tree,
 
-    /// Tree named "storage_top_trie" in the database.
-    ///
-    /// Contains the key-value storage at the finalized block.
-    ///
-    /// Keys are storage keys, and values are storage values.
+    /// Tree named "storage_top_trie" in the database. See the module-level documentation for more
+    /// info.
     finalized_storage_top_trie_tree: sled::Tree,
 
-    /// Tree named "non_finalized_changes_keys" in the database.
-    ///
-    /// For each hash of non-finalized block, contains the list of keys in the storage that this
-    /// block modifies.
-    ///
-    /// Keys are a 32 bytes block hash. Values are a list of SCALE-encoded `Vec<u8>` concatenated
-    /// together. In other words, each value is a length (SCALE-compact-encoded), a key of that
-    /// length, a length, a key of that length, and so on.
+    /// Tree named "non_finalized_changes_keys" in the database. See the module-level documentation
+    /// for more info.
     non_finalized_changes_keys_tree: sled::Tree,
 
-    /// Tree named "non_finalized_changes" in the database.
-    ///
-    /// For each element in `non_finalized_changes_keys_tree`, contains the new value for this
-    /// storage modification. If an entry is found in `non_finalized_changes_keys_tree` and not in
-    /// `non_finalized_changes_tree`, that means that the storage entry must be removed.
-    ///
-    /// Keys are a 32 bytes block hash followed with a storage key.
+    /// Tree named "non_finalized_changes" in the database. See the module-level documentation for
+    /// more info.
     non_finalized_changes_tree: sled::Tree,
 }
 
