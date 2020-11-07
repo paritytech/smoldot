@@ -433,9 +433,11 @@ impl SledFullDatabase {
                 )| {
                     // Make sure that the block to insert isn't already in the database.
                     if block_headers.get(&block_hash)?.is_some() {
-                        return Err(sled::transaction::ConflictableTransactionError::Abort(
+                        // TODO: ?
+                        return Ok(());
+                        /*return Err(sled::transaction::ConflictableTransactionError::Abort(
                             InsertError::Duplicate,
-                        ));
+                        ));*/
                     }
 
                     // Make sure that the parent of the block to insert is in the database.
@@ -713,14 +715,22 @@ impl SledFullDatabase {
                     }
                 }
 
-                if let Some((new_epoch, next_config)) = header.digest.babe_epoch_information() {
+                // TODO: the code below is very verbose and redundant with other similar code in substrate-lite ; could be improved
+
+                if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information()
+                {
                     let epoch = meta.get(b"babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
                     let decoded_epoch = decode_babe_epoch_information(&epoch).map_err(err_conv)?;
                     meta.insert(b"babe_finalized_epoch", epoch)?;
 
-                    let slot_number = header.digest.babe_pre_runtime().unwrap().slot_number();
+                    let slot_number = block_header
+                        .digest
+                        .babe_pre_runtime()
+                        .unwrap()
+                        .slot_number();
                     let slots_per_epoch =
-                        expect_be_nz_u64(&meta.get(b"babe_slots_per_epoch")?.unwrap()).map_err(err_conv)?; // TODO: don't unwrap
+                        expect_be_nz_u64(&meta.get(b"babe_slots_per_epoch")?.unwrap())
+                            .map_err(err_conv)?; // TODO: don't unwrap
 
                     let new_epoch = if let Some(next_config) = next_config {
                         chain_information::BabeEpochInformation {
@@ -762,49 +772,29 @@ impl SledFullDatabase {
 
                 // TODO: implement Aura
 
-                // TODO: update the grandpa and consensus stuff in meta
+                for grandpa_digest_item in block_header.digest.logs().filter_map(|d| match d {
+                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
+                    _ => None,
+                }) {
+                    match grandpa_digest_item {
+                        header::GrandpaConsensusLogRef::ScheduledChange(change) => {
+                            assert_eq!(change.delay, 0); // TODO: not implemented if != 0
+                            meta.insert(
+                                b"grandpa_triggered_authorities",
+                                encode_grandpa_authorities_list(change.next_authorities),
+                            )?;
 
-                /*
-                /// - `grandpa_authorities_set_id`: A 64bits big endian number representing the id of the
-                /// authorities set that must finalize the block right after the finalized block. The value is
-                /// 0 at the genesis block, and increased by 1 at every authorities change.
-                ///
-                /// - `grandpa_triggered_authorities`: List of public keys and weights of the GrandPa
-                /// authorities that must finalize the children of the finalized block. Consists in 40bytes
-                /// values concatenated together, each value being a 32bytes ed25519 public key and a 8bytes
-                /// little endian weight.
-                ///
-                /// - `grandpa_scheduled_target`: A 64bits big endian number representing the block where the
-                /// authorities found in `grandpa_scheduled_authorities` will be triggered. Blocks whose height
-                /// is strictly higher than this value must be finalized using the new set of authorities. This
-                /// authority change must have been scheduled in or before the finalized block. Missing if no
-                /// change is scheduled.
-                ///
-                /// - `grandpa_scheduled_authorities`: List of public keys and weights of the GrandPa
-                /// authorities that will be triggered at the block found in `grandpa_scheduled_target`.
-                /// Consists in 40bytes values concatenated together, each value being a 32bytes ed25519
-                /// public key and a 8bytes little endian weight. Missing if no change is scheduled.
-                ///
-                /// - `aura_slot_duration`: A 64bits big endian number indicating the duration of an Aura
-                /// slot. Missing if and only if the chain doesn't use Aura.
-                ///
-                /// - `aura_finalized_authorities`: List of public keys of the Aura authorities that must
-                /// author the children of the finalized block. Consists in 32bytes values concatenated
-                /// together. Missing if and only if the chain doesn't use Aura.
-                ///
-                /// - `babe_slots_per_epoch`: A 64bits big endian number indicating the number of slots per
-                /// Babe epoch. Missing if and only if the chain doesn't use Babe.
-                ///
-                /// - `babe_finalized_epoch`: SCALE encoding of a structure that contains the information
-                /// about the Babe epoch used for the finalized block. Missing if and only if the finalized
-                /// block is block #0 or the chain doesn't use Babe.
-                ///
-                /// - `babe_finalized_next_epoch`: SCALE encoding of a structure that contains the information
-                /// about the Babe epoch that follows the one described by `babe_finalized_epoch`. If the
-                /// finalized block is block #0, then this contains information about epoch #0. Missing if and
-                /// only if the chain doesn't use Babe.
-                ///
-                 */
+                            let curr_set_id =
+                                expect_be_u64(&meta.get(b"grandpa_authorities_set_id")?.unwrap())
+                                    .map_err(err_conv)?; // TODO: don't unwrap
+                            meta.insert(
+                                b"grandpa_authorities_set_id",
+                                &(curr_set_id + 1).to_be_bytes()[..],
+                            )?;
+                        }
+                        _ => {} // TODO: unimplemented
+                    }
+                }
             }
 
             // It is possible that the best block has been pruned.
