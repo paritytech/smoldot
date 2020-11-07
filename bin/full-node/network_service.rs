@@ -711,7 +711,6 @@ async fn connection_task(
             message = to_connection.select_next_some().fuse() => {
                 match message {
                     ToConnection::BlocksRequest { request_span, config, protocol, send_back } => {
-                        request_span.follows_from(tracing::Span::current());
                         let request = protocol::build_block_request(config)
                             .fold(Vec::new(), |mut a, b| {
                                 a.extend_from_slice(b.as_ref());

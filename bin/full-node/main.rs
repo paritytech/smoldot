@@ -107,6 +107,9 @@ async fn async_main() {
         .with(jaeger_layer)
         .init();
 
+    let span = tracing::info_span!("app_start");
+    let _span_guard = span.enter();
+
     let chain_spec = {
         let json: Cow<[u8]> = match cli_options.chain {
             cli::CliChain::Polkadot => (&include_bytes!("../polkadot.json")[..]).into(),

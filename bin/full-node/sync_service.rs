@@ -192,23 +192,28 @@ impl SyncService {
                     request,
                     send_back,
                 } => {
-                    let _span_guard = request_span.enter();
-                    let id = BlocksRequestId(
-                        self.blocks_requests
-                            .lock()
-                            .await
-                            .insert((request_span.clone(), send_back)),
-                    );
-                    tracing::event!(
-                        tracing::Level::DEBUG,
-                        event = "out-sync-service-propagation"
-                    );
-                    return Event::BlocksRequest {
-                        id,
-                        request_span: request_span.clone(),
-                        target,
-                        request,
-                    };
+                    return async move {
+                        let id = BlocksRequestId(
+                            self.blocks_requests
+                                .lock()
+                                .await
+                                .insert((tracing::Span::current(), send_back)),
+                        );
+
+                        tracing::event!(
+                            tracing::Level::DEBUG,
+                            event = "out-sync-service-propagation"
+                        );
+
+                        Event::BlocksRequest {
+                            id,
+                            request_span: tracing::Span::current(),
+                            target,
+                            request,
+                        }
+                    }
+                    .instrument(tracing::debug_span!("out-sync-service-propagation"))
+                    .await;
                 }
             }
         }
@@ -399,7 +404,7 @@ async fn start_sync(
                     } => {
                         let (send_back, rx) = oneshot::channel();
                         let request_span = tracing::debug_span!(
-                            "blocks-request",
+                            "blocks-request-start",
                             target = %source,
                             height = block_height,
                             count = num_blocks
@@ -431,34 +436,40 @@ async fn start_sync(
 
                         // If the channel is closed, the sync service has been closed too.
                         if send_result.is_err() {
-                            request_span.in_scope(|| {
-                                tracing::event!(
-                                    tracing::Level::INFO,
-                                    event = "foreground-channel-closed"
-                                );
-                            });
+                            tracing::warn_span!("foreground-channel-closed")
+                                //.follows_from(request_span)
+                                .in_scope(|| {
+                                    tracing::event!(
+                                        tracing::Level::INFO,
+                                        event = "foreground-channel-closed"
+                                    );
+                                });
                             return;
                         }
 
-                        request_span.in_scope(|| {
-                            tracing::event!(tracing::Level::INFO, event = "foreground-sent");
+                        tracing::debug_span!("foreground-sent")
+                            //.follows_from(request_span)
+                            .in_scope(|| {
+                                tracing::event!(tracing::Level::INFO, event = "foreground-sent");
 
-                            let (rx, abort) = future::abortable(rx);
-                            let request_id = start.start((request_span.clone(), abort));
-                            block_requests_finished.push(rx.map({
-                                let request_span = request_span.clone();
-                                move |r| (request_span, request_id, r)
-                            }));
-                        });
+                                let (rx, abort) = future::abortable(rx);
+                                let request_id = start.start((tracing::Span::current(), abort));
+                                block_requests_finished.push(rx.map({
+                                    let request_span = tracing::Span::current();
+                                    move |r| (request_span, request_id, r)
+                                }));
+                            });
                     }
                     full_optimistic::RequestAction::Cancel {
                         user_data: (request_span, abort),
                         ..
                     } => {
-                        request_span.in_scope(|| {
-                            abort.abort();
-                            tracing::event!(tracing::Level::INFO, event = "aborted");
-                        });
+                        tracing::warn_span!("abort")
+                            //.follows_from(request_span)
+                            .in_scope(|| {
+                                abort.abort();
+                                tracing::event!(tracing::Level::INFO, event = "aborted");
+                            });
                     }
                 }
             }
@@ -482,10 +493,12 @@ async fn start_sync(
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, rq_list) = sync.remove_source(id);
                             for (_, (request_span, abort)) in rq_list {
-                                request_span.in_scope(|| {
-                                    abort.abort();
-                                    tracing::event!(tracing::Level::INFO, event = "aborted");
-                                });
+                                tracing::warn_span!("abort")
+                                    //.follows_from(request_span)
+                                    .in_scope(|| {
+                                        abort.abort();
+                                        tracing::event!(tracing::Level::INFO, event = "aborted");
+                                    });
                             }
                         },
                     }
