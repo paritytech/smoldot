@@ -19,7 +19,7 @@
 
 // TODO: explain reasons ^
 
-use core::{convert::TryFrom as _, slice};
+use core::{convert::TryFrom as _, future::Future, slice, time::Duration};
 
 #[link_section = "substrate-lite"]
 extern "C" {
@@ -119,10 +119,32 @@ pub extern "C" fn init(
     } else {
         None
     };
+
+    // TODO:
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
-pub extern "C" fn timer_finished(timer_id: u32) {}
+pub extern "C" fn timer_finished(timer_id: u32) {
+    let callback = {
+        let ptr = timer_id as *mut Box<dyn FnOnce()>;
+        unsafe { Box::from_raw(ptr) }
+    };
+
+    callback();
+}
+
+pub(super) fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
+    let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
+    let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
+    let milliseconds = u64::try_from(duration.as_millis())
+        .unwrap_or(u64::max_value())
+        .saturating_add(1);
+    unsafe { start_timer(timer_id, milliseconds) }
+}
+
+pub(super) fn spawn_task(future: impl Future<Output = ()> + 'static) {
+    //future.poll();
+}
 
 pub extern "C" fn websocket_open_result(id: u64) {}
