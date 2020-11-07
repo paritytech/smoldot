@@ -46,9 +46,9 @@ pub struct CliOptions {
     /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
     pub chain: CliChain,
-    /// No output printed to stderr.
-    #[structopt(short, long)]
-    pub quiet: bool,
+    /// Output to stdout: auto, none, informant, logs, logs-json.
+    #[structopt(long, default_value = "auto")]
+    pub output: Output,
     /// Coloring: auto, always, never
     #[structopt(long, default_value = "auto")]
     pub color: ColorChoice,
@@ -81,7 +81,6 @@ impl core::str::FromStr for CliChain {
 #[derive(Debug)]
 pub enum ColorChoice {
     Always,
-    Auto,
     Never,
 }
 
@@ -92,7 +91,11 @@ impl core::str::FromStr for ColorChoice {
         if s == "always" {
             Ok(ColorChoice::Always)
         } else if s == "auto" {
-            Ok(ColorChoice::Auto)
+            if atty::is(atty::Stream::Stderr) {
+                Ok(ColorChoice::Always)
+            } else {
+                Ok(ColorChoice::Never)
+            }
         } else if s == "never" {
             Ok(ColorChoice::Never)
         } else {
@@ -104,3 +107,39 @@ impl core::str::FromStr for ColorChoice {
 #[derive(Debug, derive_more::Display)]
 #[display(fmt = "Color must be one of: always, auto, never")]
 pub struct ColorChoiceParseError;
+
+#[derive(Debug)]
+pub enum Output {
+    None,
+    Informant,
+    Logs,
+    LogsJson,
+}
+
+impl core::str::FromStr for Output {
+    type Err = OutputParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "auto" {
+            if atty::is(atty::Stream::Stderr) {
+                Ok(Output::Informant)
+            } else {
+                Ok(Output::Logs)
+            }
+        } else if s == "none" {
+            Ok(Output::None)
+        } else if s == "informant" {
+            Ok(Output::Informant)
+        } else if s == "logs" {
+            Ok(Output::Logs)
+        } else if s == "logs-json" {
+            Ok(Output::LogsJson)
+        } else {
+            Err(OutputParseError)
+        }
+    }
+}
+
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "Output must be one of: auto, none, informant, logs, logs-json")]
+pub struct OutputParseError;

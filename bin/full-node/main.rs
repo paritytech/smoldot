@@ -19,7 +19,8 @@
 
 use futures::{channel::oneshot, prelude::*};
 use std::{
-    borrow::Cow, convert::TryFrom as _, fs, iter, path::PathBuf, sync::Arc, thread, time::Duration,
+    borrow::Cow, convert::TryFrom as _, fs, io, iter, path::PathBuf, sync::Arc, thread,
+    time::Duration,
 };
 use structopt::StructOpt as _;
 use substrate_lite::{
@@ -27,6 +28,7 @@ use substrate_lite::{
     database::full_sled,
     network::{connection, multiaddr, peer_id::PeerId},
 };
+use tracing::Instrument as _;
 
 mod cli;
 mod network_service;
@@ -38,6 +40,31 @@ fn main() {
 
 async fn async_main() {
     let cli_options = cli::CliOptions::from_args();
+
+    // Setup the logging system of the binary.
+    if matches!(
+        cli_options.output,
+        cli::Output::Logs | cli::Output::LogsJson
+    ) {
+        let builder = tracing_subscriber::fmt()
+            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG) // TODO:
+            .with_writer(io::stderr);
+
+        // Because calling `builder.json()` changes the type of `builder`, we do it at the end
+        // and call `init()` at the same time.
+        if matches!(cli_options.output, cli::Output::LogsJson) {
+            builder.json().init();
+        } else {
+            builder
+                .with_ansi(match cli_options.color {
+                    cli::ColorChoice::Always => true,
+                    cli::ColorChoice::Never => false,
+                })
+                .init();
+        }
+    }
 
     let chain_spec = {
         let json: Cow<[u8]> = match cli_options.chain {
@@ -144,16 +171,19 @@ async fn async_main() {
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
     })
+    .instrument(tracing::debug_span!("network service initialization"))
     .await
     .unwrap();
 
     let sync_service = sync_service::SyncService::new(sync_service::Config {
+        logging_span: tracing::debug_span!("test"),
         tasks_executor: {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
         database,
     })
+    .instrument(tracing::debug_span!("sync service initialization"))
     .await;
 
     /*let mut telemetry = {
@@ -185,7 +215,7 @@ async fn async_main() {
     loop {
         futures::select! {
             _ = informant_timer.next() => {
-                if !cli_options.quiet {
+                if matches!(cli_options.output, cli::Output::Informant) {
                     // We end the informant line with a `\r` so that it overwrites itself every time.
                     // If any other line gets printed, it will overwrite the informant, and the
                     // informant will then print itself below, which is a fine behaviour.
@@ -193,7 +223,6 @@ async fn async_main() {
                     eprint!("{}\r", substrate_lite::informant::InformantLine {
                         enable_colors: match cli_options.color {
                             cli::ColorChoice::Always => true,
-                            cli::ColorChoice::Auto => atty::is(atty::Stream::Stderr),
                             cli::ColorChoice::Never => false,
                         },
                         chain_name: chain_spec.name(),

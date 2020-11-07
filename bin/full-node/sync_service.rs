@@ -32,9 +32,12 @@ use futures::{
 };
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 use substrate_lite::{chain::sync::full_optimistic, database::full_sled, network};
+use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
+    pub logging_span: tracing::Span,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
@@ -103,10 +106,16 @@ impl SyncService {
                 from_foreground,
                 to_database,
             )
-            .await,
+            .instrument(tracing::debug_span!("sync task initialization"))
+            .await
+            .instrument(tracing::info_span!(parent: &config.logging_span, "sync-task")),
         ));
 
-        (config.tasks_executor)(Box::pin(start_database_write(config.database, messages_rx)));
+        (config.tasks_executor)(Box::pin(
+            start_database_write(config.database, messages_rx).instrument(
+                tracing::info_span!(parent: &config.logging_span, "sync-database-write"),
+            ),
+        ));
 
         Arc::new(SyncService {
             sync_state,
@@ -452,8 +461,17 @@ async fn start_database_write(
 ) {
     loop {
         match messages_rx.next().await {
-            None => break,
+            None => {
+                tracing::event!(tracing::Level::DEBUG, event = "messages-stream-end");
+                break;
+            }
             Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
+                tracing::event!(
+                    tracing::Level::DEBUG,
+                    event = "blocks-received",
+                    num = finalized_blocks.len()
+                );
+
                 let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
                     Some(last_finalized.header.hash())
                 } else {
@@ -475,6 +493,13 @@ async fn start_database_write(
                             .map(|(k, v)| (k, v.as_ref())),
                     );
 
+                    // TODO: print hash as well
+                    tracing::event!(
+                        tracing::Level::DEBUG,
+                        event = "database-block-inserted",
+                        block_number = block.header.number
+                    );
+
                     match result {
                         Ok(()) => {}
                         Err(full_sled::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
@@ -484,6 +509,8 @@ async fn start_database_write(
 
                 if let Some(new_finalized_hash) = new_finalized_hash {
                     database.set_finalized(&new_finalized_hash).unwrap();
+                    // TODO: nicer printing of the hash
+                    tracing::event!(tracing::Level::DEBUG, event = "database-finalized-update", hash = ?new_finalized_hash);
                 }
             }
         }
