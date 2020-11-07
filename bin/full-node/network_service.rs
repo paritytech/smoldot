@@ -256,7 +256,7 @@ impl NetworkService {
         // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
         // It is possible for the channel to be closed, if the background task has ended but the
         // frontend hasn't processed this yet.
-        guarded
+        let send_result = guarded
             .peerset
             .connection_mut(connection)
             .unwrap()
@@ -267,14 +267,25 @@ impl NetworkService {
                 protocol,
                 send_back,
             })
-            .await
-            .map_err(|_| ())?;
+            .await;
 
-        tracing::event!(
-            parent: &request_span,
-            tracing::Level::DEBUG,
-            "sent request to background task"
-        );
+        match send_result {
+            Ok(()) => {
+                tracing::event!(
+                    parent: &request_span,
+                    tracing::Level::DEBUG,
+                    event = "background-task-sent"
+                );
+            }
+            Err(_) => {
+                tracing::event!(
+                    parent: &request_span,
+                    tracing::Level::WARN,
+                    event = "network-connection-channel-closed"
+                );
+                return Err(())
+            }
+        }
 
         // Everything must be unlocked at this point.
         drop(guarded);
