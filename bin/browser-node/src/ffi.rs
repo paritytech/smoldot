@@ -19,8 +19,10 @@
 
 // TODO: explain reasons ^
 
+use core::{convert::TryFrom as _, slice};
+
 #[link_section = "substrate-lite"]
-extern {
+extern "C" {
     /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
     /// leap seconds.
     ///
@@ -64,17 +66,63 @@ extern {
     fn websocket_open(url_ptr: u32, url_len: u32) -> u64;
 }
 
+/// Allocates a buffer of the given length, with an alignment of 1.
+///
+/// This must be used in the context of [`init`].
 #[no_mangle]
-pub extern fn init(chain_specs_ptr: u32, chain_specs_len: u32, database_content_ptr: u32, database_content_len: u32) {
+pub extern "C" fn alloc(len: u32) -> u32 {
+    let len = usize::try_from(len).unwrap();
+    let mut vec = Vec::<u8>::with_capacity(len);
+    unsafe {
+        vec.set_len(len);
+    }
+    let ptr = Box::into_raw(vec.into_boxed_slice());
+    u32::try_from(ptr as *mut u8 as usize).unwrap()
+}
 
+/// Initializes the client.
+///
+/// Use [`alloc`] to allocate either one or two buffers: one for the chain specs, and an optional
+/// one for the database content.
+/// The buffers **must** have been allocaed with [`alloc`].
+///
+/// Write the chain specs and the database content in these two buffers.
+///
+/// Then, pass the pointer and length of these two buffers to this function.
+/// Pass `0` for `database_content_ptr` and `database_content_len` if the database is empty.
+#[no_mangle]
+pub extern "C" fn init(
+    chain_specs_ptr: u32,
+    chain_specs_len: u32,
+    database_content_ptr: u32,
+    database_content_len: u32,
+) {
+    let chain_specs_ptr = usize::try_from(chain_specs_ptr).unwrap();
+    let chain_specs_len = usize::try_from(chain_specs_len).unwrap();
+    let database_content_ptr = usize::try_from(database_content_ptr).unwrap();
+    let database_content_len = usize::try_from(database_content_len).unwrap();
+
+    let chain_specs = unsafe {
+        Box::from_raw(slice::from_raw_parts_mut(
+            chain_specs_ptr as *mut u8,
+            chain_specs_len,
+        ))
+    };
+
+    let chain_specs = if database_content_ptr != 0 {
+        Some(unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                database_content_ptr as *mut u8,
+                database_content_len,
+            ))
+        })
+    } else {
+        None
+    };
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
-pub extern fn timer_finished(timer_id: u32) {
+pub extern "C" fn timer_finished(timer_id: u32) {}
 
-}
-
-pub extern fn websocket_open_result(id: u64) {
-    
-}
+pub extern "C" fn websocket_open_result(id: u64) {}
