@@ -381,7 +381,8 @@ impl NetworkService {
                         a.extend_from_slice(b.as_ref());
                         a
                     }),
-                });
+                })
+                .await;
             connection.add_pending_substream(0, ());
         }
 
@@ -662,8 +663,15 @@ async fn connection_task(
                 }
                 continue;
             }
-            Some(connection::established::Event::NotificationsOutAccept { id, remote_handshake }) => {
-                println!("test");
+            Some(connection::established::Event::NotificationsOutAccept {
+                id,
+                remote_handshake,
+            }) => {
+                let hs = protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
+                println!("accepted! {:?}", hs);
+            }
+            Some(connection::established::Event::NotificationsOutReject { id, user_data }) => {
+                println!("rejected!");
             }
             _ => {}
         }
@@ -697,7 +705,6 @@ async fn connection_task(
                             handshake,
                             ()
                         );
-                        println!("opening");
                     },
                     ToConnection::CloseOutNotifications { protocol } => {
                         todo!()

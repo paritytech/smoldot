@@ -317,6 +317,20 @@ where
                             // TODO: report to user
                             //todo!()
                         }
+                        Substream::NotificationsOutNegotiating { user_data, .. }
+                        | Substream::NotificationsOutHandshakeRecv { user_data, .. } => {
+                            let wake_up_after = self.next_timeout.clone();
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                wake_up_after,
+                                event: Some(Event::NotificationsOutReject {
+                                    id: SubstreamId(substream_id),
+                                    user_data,
+                                }),
+                            });
+                        }
                         Substream::PingIn(_) => {}
                         _ => todo!("other substream kind"),
                     }
@@ -505,7 +519,10 @@ where
                     } => {
                         match handshake.update(&data) {
                             Ok((num_read, leb128::Framed::Finished(remote_handshake))) => {
-                                data = &data[num_read..];
+                                if num_read != data.len() {
+                                    // TODO:
+                                }
+
                                 let substream_id = substream.id();
                                 let wake_up_after = self.next_timeout.clone();
                                 *substream.user_data() = Substream::NotificationsOut { user_data };
@@ -531,6 +548,18 @@ where
                                 todo!() // TODO: report to user and all
                             }
                         }
+                    }
+                    Substream::NotificationsOut { user_data } => {
+                        // TODO: remove
+                        println!("received data on notifications substream?!?! {:?}", data);
+                        data = &[];
+                        *substream.user_data() = Substream::NotificationsOut { user_data };
+                    }
+                    Substream::NotificationsOutClosed => {
+                        // TODO: remove
+                        println!("received data on closed notifications substream?!?!");
+                        data = &[];
+                        *substream.user_data() = Substream::NotificationsOutClosed;
                     }
                     Substream::RequestOutNegotiating {
                         negotiation,
