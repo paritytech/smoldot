@@ -298,7 +298,11 @@ impl<TPeer, TConn, TPending, TSub, TPendingSub> Peerset<TPeer, TConn, TPending, 
         &mut self,
         id: ConnectionId,
     ) -> Option<ConnectionMut<TPeer, TConn, TPending, TSub, TPendingSub>> {
-        if self.connections.contains(id.0) {
+        if self
+            .connections
+            .get(id.0)
+            .map_or(false, |c| matches!(c.ty, ConnectionTy::Connected { .. }))
+        {
             Some(ConnectionMut { peerset: self, id })
         } else {
             None
@@ -464,16 +468,39 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
 
     /// Removes the pending connection from the data structure.
     pub fn remove(self) -> TPending {
+        self.remove_inner(false)
+    }
+
+    /// Same as [`PendingMut::remove`], but additionally removes the target address from the list
+    /// of known addresses of this node.
+    pub fn remove_and_purge_address(self) -> TPending {
+        self.remove_inner(true)
+    }
+
+    fn remove_inner(self, purge_addr: bool) -> TPending {
         let connection = self.peerset.connections.remove(self.id.0);
         let _was_in = self
             .peerset
             .peer_connections
             .remove(&(connection.peer_index, self.id.0));
         debug_assert!(_was_in);
-        match connection.ty {
-            ConnectionTy::Pending { user_data, .. } => user_data,
+        let (user_data, address) = match connection.ty {
+            ConnectionTy::Pending { user_data, target } => (user_data, target),
             _ => unreachable!(),
+        };
+
+        if purge_addr {
+            let addrs = &mut self
+                .peerset
+                .peers
+                .get_mut(connection.peer_index)
+                .unwrap()
+                .addresses;
+            let pos = addrs.iter().position(|a| *a == address).unwrap();
+            addrs.remove(pos);
         }
+
+        user_data
     }
 }
 
@@ -599,6 +626,7 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
     ///
     /// Returns `Ok` if this address was in the list and was removed. Returns `Err` if the address
     /// wasn't in the list.
+    // TODO: must not remove if pending connection to this address
     pub fn remove_known_address(&mut self, address: &Multiaddr) -> Result<(), ()> {
         let addresses = &mut self.peerset.peers[self.peer_index].addresses;
         if let Some(pos) = addresses.iter().position(|a| a == address) {

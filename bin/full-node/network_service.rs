@@ -310,8 +310,11 @@ impl NetworkService {
                 }
                 FromBackground::HandshakeError { connection_id, .. } => {
                     let mut guarded = self.guarded.lock().await;
-                    guarded.peerset.pending_mut(connection_id).unwrap().remove();
-                    // TODO: remove faulty address
+                    guarded
+                        .peerset
+                        .pending_mut(connection_id)
+                        .unwrap()
+                        .remove_and_purge_address();
                 }
                 FromBackground::HandshakeSuccess {
                     connection_id,
