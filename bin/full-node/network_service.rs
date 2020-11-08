@@ -27,6 +27,8 @@
 // TODO: doc
 // TODO: re-review this once finished
 
+use crate::jaeger_service;
+
 use core::{iter, pin::Pin, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
@@ -45,6 +47,9 @@ use substrate_lite::network::{
 pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+
+    /// Service to use to report traces.
+    pub jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Addresses to listen for incoming connections.
     pub listen_addresses: Vec<Multiaddr>,
@@ -82,6 +87,9 @@ pub enum Event {
 pub struct NetworkService {
     /// Fields behind a mutex.
     guarded: Mutex<Guarded>,
+
+    /// See [`Config::jaeger_service`].
+    jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// See [`Config::protocol_id`].
     protocol_id: String,
@@ -218,6 +226,7 @@ impl NetworkService {
             }),
             genesis_block_hash: config.genesis_block_hash,
             best_block: config.best_block,
+            jaeger_service: config.jaeger_service,
             protocol_id: config.protocol_id,
             noise_key: Arc::new(config.noise_key),
             from_background: Mutex::new(from_background),
@@ -404,6 +413,7 @@ impl NetworkService {
                 let (tx, rx) = mpsc::channel(8);
                 let connection_id = node.add_outbound_attempt(address.clone(), tx);
                 (guarded.tasks_executor)(Box::pin(connection_task(
+                    self.jaeger_service.clone(),
                     tcp_socket,
                     true,
                     self.noise_key.clone(),
@@ -519,6 +529,7 @@ enum FromBackground {
 
 /// Asynchronous task managing a specific TCP connection.
 async fn connection_task(
+    jaeger_service: Arc<jaeger_service::JaegerService>,
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
     is_initiator: bool,
     noise_key: Arc<connection::NoiseKey>,
@@ -570,6 +581,8 @@ async fn connection_task(
             }
         };
 
+    let mut _connection_init_span = jaeger_service.net_connection_span(&peer_id, &peer_id, "connection-init");
+
     // Configure the `connection_prototype` to turn it into an actual connection.
     // The protocol names are hardcoded here.
     let mut connection = connection_prototype.into_connection::<_, oneshot::Sender<_>, ()>(
@@ -594,25 +607,33 @@ async fn connection_task(
         if to_foreground
             .send(FromBackground::HandshakeSuccess {
                 connection_id,
-                peer_id,
+                peer_id: peer_id.clone(),
                 accept_tx,
             })
             .await
             .is_err()
         {
+            _connection_init_span.log().with_string("event", "closed-channel");
             return;
         }
 
         match accept_rx.await {
             Ok(id) => id,
-            Err(_) => return,
+            Err(_) => {
+                _connection_init_span.log().with_string("event", "peer-rejected");
+                return
+            },
         }
     };
+
+    drop(_connection_init_span);
 
     // Set to a timer after which the state machine of the connection needs an update.
     let mut poll_after: futures_timer::Delay;
 
     loop {
+        let mut _process_data_span = jaeger_service.net_connection_span(&peer_id, &peer_id, "read-write");
+    
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
             Ok(b) => b,
             Err(_) => {
@@ -680,6 +701,8 @@ async fn connection_task(
             continue;
         }
 
+        drop(_process_data_span);
+
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {
@@ -690,6 +713,7 @@ async fn connection_task(
             message = to_connection.select_next_some().fuse() => {
                 match message {
                     ToConnection::BlocksRequest { config, protocol, send_back } => {
+                        let mut _process_data_span = jaeger_service.net_connection_span(&peer_id, &peer_id, "send-blocks-request");
                         let request = protocol::build_block_request(config)
                             .fold(Vec::new(), |mut a, b| {
                                 a.extend_from_slice(b.as_ref());

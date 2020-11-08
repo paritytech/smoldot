@@ -31,6 +31,7 @@ use substrate_lite::{
 };
 
 mod cli;
+mod jaeger_service;
 mod network_service;
 mod sync_service;
 
@@ -124,8 +125,19 @@ async fn async_main() {
         substrate_lite::metadata::decode(&metadata).unwrap()
     );*/
 
+    let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
+        tasks_executor: {
+            let threads_pool = threads_pool.clone();
+            Box::new(move |task| threads_pool.spawn_ok(task))
+        },
+        jaeger_server: cli_options.jaeger,
+    })
+    .await
+    .unwrap();
+
     let network_service = network_service::NetworkService::new(network_service::Config {
         listen_addresses: Vec::new(),
+        jaeger_service: jaeger_service.clone(),
         protocol_id: chain_spec.protocol_id().to_owned(),
         genesis_block_hash: database.finalized_block_hash().unwrap(),
         best_block: (0, database.finalized_block_hash().unwrap()),
@@ -157,6 +169,7 @@ async fn async_main() {
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
         database,
+        jaeger_service: jaeger_service.clone(),
     })
     .await;
 

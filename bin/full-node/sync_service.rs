@@ -24,7 +24,9 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use core::{num::NonZeroU32, pin::Pin};
+use crate::jaeger_service;
+
+use core::{convert::TryFrom as _, num::NonZeroU32, pin::Pin};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -37,6 +39,9 @@ use substrate_lite::{chain::sync::full_optimistic, database::full_sled, network}
 pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+
+    /// Service to use to report traces.
+    pub jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<full_sled::SledFullDatabase>,
@@ -97,6 +102,7 @@ impl SyncService {
 
         (config.tasks_executor)(Box::pin(
             start_sync(
+                config.jaeger_service.background_task_span("sync-task"),
                 config.database.clone(),
                 sync_state.clone(),
                 to_foreground,
@@ -106,7 +112,13 @@ impl SyncService {
             .await,
         ));
 
-        (config.tasks_executor)(Box::pin(start_database_write(config.database, messages_rx)));
+        (config.tasks_executor)(Box::pin(start_database_write(
+            config
+                .jaeger_service
+                .background_task_span("sync-database-write-task"),
+            config.database,
+            messages_rx,
+        )));
 
         Arc::new(SyncService {
             sync_state,
@@ -212,6 +224,7 @@ enum ToDatabase {
 
 /// Returns the background task of the sync service.
 async fn start_sync(
+    mut task_span: mick_jaeger::Span,
     database: Arc<full_sled::SledFullDatabase>,
     sync_state: Arc<Mutex<SyncState>>,
     mut to_foreground: mpsc::Sender<FromBackground>,
@@ -243,18 +256,48 @@ async fn start_sync(
     // While reading the storage from the database is an option, doing so considerably slows down
     // the verification, and also makes it impossible to insert blocks in the database in
     // parallel of this verification.
-    let mut finalized_block_storage = BTreeMap::<Vec<u8>, Vec<u8>>::new();
-    for key in database
-        .finalized_block_storage_top_trie_keys(&database.finalized_block_hash().unwrap(), &[])
-        .unwrap()
-    {
-        if let Some(value) = database
-            .finalized_block_storage_top_trie_get(&database.finalized_block_hash().unwrap(), &key)
+    let mut finalized_block_storage = {
+        let mut _span = task_span.child("initialize-finalized-block-storage");
+
+        let mut storage = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+        for key in database
+            .finalized_block_storage_top_trie_keys(&database.finalized_block_hash().unwrap(), &[])
             .unwrap()
         {
-            finalized_block_storage.insert(key.to_owned(), value.to_owned());
+            if let Some(value) = database
+                .finalized_block_storage_top_trie_get(
+                    &database.finalized_block_hash().unwrap(),
+                    &key,
+                )
+                .unwrap()
+            {
+                storage.insert(key.to_owned(), value.to_owned());
+            }
         }
-    }
+
+        _span
+            .log()
+            .with_string("event", "loaded")
+            .with_int(
+                "num_keys",
+                i64::try_from(storage.len()).unwrap_or(i64::max_value()),
+            )
+            .with_int(
+                "total_size_bytes",
+                i64::try_from(
+                    storage
+                        .iter()
+                        .fold(0, |s, (k, v)| s + k.capacity() + v.capacity()),
+                )
+                .unwrap_or(i64::max_value()),
+            );
+
+        storage
+    };
+
+    task_span
+        .log()
+        .with_string("event", "initialization-finished");
 
     async move {
         let mut peers_source_id_map = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
@@ -409,7 +452,10 @@ async fn start_sync(
                 message = from_foreground.next() => {
                     let message = match message {
                         Some(m) => m,
-                        None => return,
+                        None => {
+                            task_span.log().with_string("event", "foreground-channel-closed");
+                            return
+                        },
                     };
 
                     match message {
@@ -447,6 +493,7 @@ async fn start_sync(
 
 /// Starts the task that writes blocks to the database.
 async fn start_database_write(
+    task_span: mick_jaeger::Span,
     database: Arc<full_sled::SledFullDatabase>,
     mut messages_rx: mpsc::Receiver<ToDatabase>,
 ) {
@@ -461,6 +508,13 @@ async fn start_database_write(
                 };
 
                 for block in finalized_blocks {
+                    let mut _block_write_span = task_span.child("block-write");
+                    _block_write_span.add_int_tag(
+                        "block.height",
+                        i64::from_ne_bytes(block.header.number.to_ne_bytes()),
+                    );
+                    // TODO: _block_write_span.add_string_tag("block-hash", );
+
                     // TODO: overhead for building the SCALE encoding of the header
                     let result = database.insert(
                         &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {

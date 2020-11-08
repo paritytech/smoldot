@@ -28,6 +28,7 @@ std = [
     "futures/std",
     "futures/thread-pool",
     "futures-timer",
+    "mick-jaeger",
     "rand/std",
     "rand_chacha/std",
     "soketto",
@@ -98,6 +99,7 @@ async-std = { version = "1.7.0", optional = true }
 atty = { version = "0.2.14", optional = true }
 futures = { version = "0.3.8", default-features = false, optional = true }
 futures-timer = { version = "3.0", optional = true }
+mick-jaeger = { version = "0.1.0", optional = true }
 soketto = { version = "0.4.2", optional = true }
 structopt = { version = "0.3.20", optional = true, default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = { version = "0.1.12", optional = true }
