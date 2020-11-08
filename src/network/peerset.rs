@@ -246,12 +246,14 @@ impl<TPeer, TConn, TPending, TSub, TPendingSub> Peerset<TPeer, TConn, TPending, 
     ///
     /// - Peerset has no connection nor pending connection towards this node.
     /// - Node belongs to the given overlay network.
+    /// - Node has at least one known address.
     ///
     /// Returns `None` if no such node is available.
     pub fn random_not_connected(
         &mut self,
         overlay_network_index: usize,
     ) -> Option<NodeMutKnown<TPeer, TConn, TPending, TSub, TPendingSub>> {
+        let peers = &self.peers;
         let peer_connections = &self.peer_connections;
 
         let peer_index = self
@@ -266,6 +268,11 @@ impl<TPeer, TConn, TPending, TSub, TPendingSub> Peerset<TPeer, TConn, TPending, 
                 {
                     return false;
                 }
+
+                if peers.get(*peer_index).unwrap().addresses.is_empty() {
+                    return false;
+                }
+
                 // TODO: check pending too
                 true
             })
@@ -498,6 +505,7 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
                 .addresses;
             let pos = addrs.iter().position(|a| *a == address).unwrap();
             addrs.remove(pos);
+            // TODO: remove peer if addrs is empty?
         }
 
         user_data
