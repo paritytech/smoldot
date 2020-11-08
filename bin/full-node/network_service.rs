@@ -311,6 +311,7 @@ impl NetworkService {
                 FromBackground::HandshakeError { connection_id, .. } => {
                     let mut guarded = self.guarded.lock().await;
                     guarded.peerset.pending_mut(connection_id).unwrap().remove();
+                    // TODO: remove faulty address
                 }
                 FromBackground::HandshakeSuccess {
                     connection_id,
@@ -661,6 +662,9 @@ async fn connection_task(
                 }
                 continue;
             }
+            Some(connection::established::Event::NotificationsOutAccept { id, remote_handshake }) => {
+                println!("test");
+            }
             _ => {}
         }
 
@@ -693,6 +697,7 @@ async fn connection_task(
                             handshake,
                             ()
                         );
+                        println!("opening");
                     },
                     ToConnection::CloseOutNotifications { protocol } => {
                         todo!()
