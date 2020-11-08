@@ -729,7 +729,9 @@ impl ReadyToRun {
                     let pubkey = expect_pointer_constant_size!(2, 32);
 
                     // TODO: copy overhead?
-                    let success = if let Ok(public_key) = ed25519_dalek::PublicKey::from_bytes(&pubkey) {
+                    let success = if let Ok(public_key) =
+                        ed25519_dalek::PublicKey::from_bytes(&pubkey)
+                    {
                         // TODO: copy overhead?
                         let signature =
                             ed25519_dalek::Signature::new(<[u8; 64]>::try_from(&sig[..]).unwrap());
