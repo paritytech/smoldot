@@ -121,6 +121,9 @@ impl JitPrototype {
             imports
         };
 
+        // TODO: don't unwrap
+        let instance = wasmtime::Instance::new(&store, &module, &imports).unwrap();
+
         // We now build the coroutine of the main thread.
         let mut coroutine = {
             let interrupter = builder.interrupter();
@@ -129,8 +132,7 @@ impl JitPrototype {
                 let mut request = interrupter.interrupt(FromCoroutine::Init(Ok(())));
 
                 loop {
-                    // TODO: don't unwrap
-                    let instance = wasmtime::Instance::new(&store, &module, &imports).unwrap();
+                    // TODO: memory and table fetch could be moved outside of the coroutine
 
                     // TODO: review interaction with imported memory
                     let memory = if let Some(mem) = instance.get_export("memory") {
