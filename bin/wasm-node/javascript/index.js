@@ -20,22 +20,14 @@ var source = fs.readFileSync('../../../target/wasm32-unknown-unknown/release/sub
 
 var typedArray = new Uint8Array(source);
 
+var module;
 WebAssembly.instantiate(typedArray, {
-  env: {
-    memoryBase: 0,
-    tableBase: 0,
-    memory: new WebAssembly.Memory({
-      initial: 256
-    }),
-    table: new WebAssembly.Table({
-      initial: 0,
-      element: 'anyfunc'
-    })
+  "substrate-lite": {
+    unix_time_ms: () => Math.round(Date.now()),
+    monotonic_clock_ms: () => performance.now(),
+    start_timer: (id, ms) => setTimeout(module.exports.timer_finished(id), ms),  // TODO:
+    fill_random: (ptr, len) => crypto.randomFillSync(new Uint8Array()),
   }
 }).then(result => {
-  console.log(util.inspect(result, true, 0));
-  console.log(result.instance.exports._add(9, 9));
-}).catch(e => {
-  // error caught
-  console.log(e);
+    module = result.instance;
 });
