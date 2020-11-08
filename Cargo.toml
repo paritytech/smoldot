@@ -12,7 +12,7 @@ default-run = "full-node"
 
 [workspace]
 members = [
-    "bin/browser-node",
+    "bin/wasm-node/rust",
 ]
 
 [features]

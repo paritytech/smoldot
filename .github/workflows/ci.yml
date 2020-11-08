@@ -38,7 +38,7 @@ jobs:
     - name: Run tests, with all features
       run: cargo test --locked --workspace --all-features
 
-  browser-node-check:
+  wasm-node-check:
     name: Check browser node compilation
     runs-on: ubuntu-latest
     container:

@@ -1,0 +1,19 @@
+{
+  "name": "substrate-lite",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "cargo build --package substrate-lite-js --target wasm32-unknown-unknown --no-default-features --release && node index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paritytech/substrate-lite.git"
+  },
+  "author": "",
+  "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
+  "bugs": {
+    "url": "https://github.com/paritytech/substrate-lite/issues"
+  },
+  "homepage": "https://github.com/paritytech/substrate-lite#readme"
+}
