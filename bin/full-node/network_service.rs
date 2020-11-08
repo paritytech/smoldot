@@ -76,6 +76,7 @@ pub struct Config {
 #[derive(Debug)]
 pub enum Event {
     Connected(PeerId),
+    Disconnected(PeerId),
 }
 
 pub struct NetworkService {
@@ -328,11 +329,10 @@ impl NetworkService {
                 }
                 FromBackground::Disconnected { connection_id } => {
                     let mut guarded = self.guarded.lock().await;
-                    guarded
-                        .peerset
-                        .connection_mut(connection_id)
-                        .unwrap()
-                        .remove();
+                    let connection = guarded.peerset.connection_mut(connection_id).unwrap();
+                    let peer_id = connection.peer_id().clone(); // TODO: clone :(
+                    connection.remove();
+                    return Event::Disconnected(peer_id);
                 }
                 FromBackground::NotificationsOpenResult {
                     connection_id,
@@ -525,10 +525,12 @@ async fn connection_task(
     let tcp_socket = match tcp_socket.await {
         Ok(s) => s,
         Err(_) => {
-            let _ = to_foreground.send(FromBackground::HandshakeError {
-                connection_id,
-                error: HandshakeError::Io,
-            });
+            let _ = to_foreground
+                .send(FromBackground::HandshakeError {
+                    connection_id,
+                    error: HandshakeError::Io,
+                })
+                .await;
             return;
         }
     };
@@ -553,10 +555,12 @@ async fn connection_task(
         match perform_handshake(&mut tcp_socket, &noise_key, is_initiator).await {
             Ok(v) => v,
             Err(error) => {
-                let _ = to_foreground.send(FromBackground::HandshakeError {
-                    connection_id,
-                    error,
-                });
+                let _ = to_foreground
+                    .send(FromBackground::HandshakeError {
+                        connection_id,
+                        error,
+                    })
+                    .await;
                 return;
             }
         };
@@ -607,7 +611,9 @@ async fn connection_task(
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
             Ok(b) => b,
             Err(_) => {
-                let _ = to_foreground.send(FromBackground::Disconnected { connection_id });
+                let _ = to_foreground
+                    .send(FromBackground::Disconnected { connection_id })
+                    .await;
                 return;
             }
         };
@@ -618,7 +624,9 @@ async fn connection_task(
             match connection.read_write(now, read_buffer.map(|b| b.0), write_buffer.unwrap()) {
                 Ok(rw) => rw,
                 Err(_) => {
-                    let _ = to_foreground.send(FromBackground::Disconnected { connection_id });
+                    let _ = to_foreground
+                        .send(FromBackground::Disconnected { connection_id })
+                        .await;
                     return;
                 }
             };
