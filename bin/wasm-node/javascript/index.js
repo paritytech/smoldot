@@ -15,19 +15,26 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-const fs = require('fs');
-var source = fs.readFileSync('../../../target/wasm32-unknown-unknown/release/substrate_lite_js.wasm');
+const Buffer = require('buffer/').Buffer;  // Note: the trailing slash is important in order to use the NodeJS core module named "buffer".
+const W3CWebSocket = require('websocket').w3cwebsocket;
 
-var typedArray = new Uint8Array(source);
+// TODO: this should all be tested
+
+// TODO: see https://www.npmjs.com/package/websocket#client-example-using-the-w3c-websocket-api
 
 var module;
-WebAssembly.instantiate(typedArray, {
+WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'), 'base64')), {
+  // The Rust code defines a list of imports that must be fulfilled by the environment.
+  // This object provides their implementations.
   "substrate-lite": {
     unix_time_ms: () => Math.round(Date.now()),
     monotonic_clock_ms: () => performance.now(),
     start_timer: (id, ms) => setTimeout(module.exports.timer_finished(id), ms),  // TODO:
-    fill_random: (ptr, len) => crypto.randomFillSync(new Uint8Array()),
+    fill_random: (ptr, len) => crypto.randomFillSync(new Uint8Array()),  // TODO: browserify
   }
 }).then(result => {
     module = result.instance;
+    console.log(module.exports.test());
 });
+
+console.log('test');

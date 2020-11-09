@@ -21,7 +21,7 @@
 
 use core::{convert::TryFrom as _, future::Future, slice, time::Duration};
 
-#[link_section = "substrate-lite"]
+#[link(wasm_import_module = "substrate-lite")]
 extern "C" {
     /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
     /// leap seconds.
@@ -30,7 +30,7 @@ extern "C" {
     /// integer.
     ///
     /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now
-    fn unix_time_ms() -> u64;
+    fn unix_time_ms() -> f64;
 
     /// Must return the number of milliseconds that have passed since an arbitrary point in time.
     ///
@@ -40,7 +40,7 @@ extern "C" {
     /// `Performance.now()` or similar.
     ///
     /// See https://developer.mozilla.org/fr/docs/Web/API/Performance/now
-    fn monotonic_clock_ms() -> u64;
+    fn monotonic_clock_ms() -> f64;
 
     /// After `milliseconds` milliseconds have passed, must call [`timer_finished`] with the `id`
     /// passed as parameter.
