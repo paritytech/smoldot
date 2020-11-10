@@ -152,9 +152,7 @@ pub enum InitError {
     // TODO: add variants or remove error altogether
 }
 
-async fn connection_task(url: String, is_initiator: bool, noise_key: Arc<connection::NoiseKey>) {
-
-}
+async fn connection_task(url: String, is_initiator: bool, noise_key: Arc<connection::NoiseKey>) {}
 
 /// Returns the URL that corresponds to the given multiaddress. Returns an error if the
 /// multiaddress protocols aren't supported.

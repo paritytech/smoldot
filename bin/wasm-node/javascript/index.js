@@ -85,6 +85,12 @@ async function initialize(chain_specs) {
           websocket.onclose = () => {
             module.exports.websocket_closed(id);
           };
+          websocket.onmessage = (msg) => {
+            let message = Buffer.from(msg);
+            let ptr = module.exports.alloc(message.length);
+            message.copy(Buffer.from(module.exports.memory.buffer), ptr);
+            module.exports.websocket_message(id, ptr, message.length);
+          };
 
           websockets[id] = websocket;
           return 0;

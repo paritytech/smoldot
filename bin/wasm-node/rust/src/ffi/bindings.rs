@@ -76,6 +76,24 @@ extern "C" {
     ///
     /// > **Note**: If you implement this function using `new WebSocket()`, please keep in mind
     /// >           that exceptions should be caught and turned into an error code.
+    ///
+    /// At any time, a WebSocket can be in one of the three following states:
+    ///
+    /// - `Opening` (initial state)
+    /// - `Open`
+    /// - `Closed`
+    ///
+    /// When in the `Opening` or `Open` state, the WebSocket can transition to the `Closed` state
+    /// if the remote closes the connection or refuses the connection altogether. When that
+    /// happens, [`websocket_closed`] must be called. Once in the `Closed` state, the WebSocket
+    /// cannot transition back to another state.
+    ///
+    /// Initially in the `Opening` state, the WebSocket can transition to the `Open` state if the
+    /// remote accepts the connection. When that happens, [`websocket_open`] must be called.
+    ///
+    /// When in the `Open` state, the WebSocket can receive messages. When a message is received,
+    /// [`alloc`] must be called in order to allocate memory for this message, then
+    /// [`websocket_message`] must be called with the pointer returned by [`alloc`].
     pub(crate) fn websocket_new(id: u32, url_ptr: u32, url_len: u32) -> u32;
 
     /// Close a WebSocket previously initialized with [`websocket_new`].
@@ -91,10 +109,11 @@ extern "C" {
     /// >           handlers before calling `WebSocket.close()`.
     pub(crate) fn websocket_close(id: u32);
 
-    /// Queues data on the given WebSocket.
+    /// Queues data on the given WebSocket. The data is found in the memory of the WebAssembly
+    /// virtual machine, at the given pointer. The data must be sent as a binary frame.
     ///
-    /// The WebSocket must have been opened before.
-    // TODO: expand docs
+    /// The WebSocket must currently be in the `Open` state. See the documentation of
+    /// [`websocket_new`] for details.
     pub(crate) fn websocket_send(id: u32, ptr: u32, len: u32);
 }
 
@@ -138,18 +157,34 @@ pub extern "C" fn timer_finished(timer_id: u32) {
     super::timer_finished(timer_id);
 }
 
+/// Called by the JavaScript code if the WebSocket switches to the `Open` state. The WebSocket
+/// must be in the `Opening` state.
+///
+/// Must only be called once per WebSocket object.
+///
+/// See also [`websocket_open`].
 #[no_mangle]
 pub extern "C" fn websocket_open(id: u32) {
     super::websocket_open(id);
 }
 
+/// Notify of a message being received on the WebSocket. The WebSocket must be in the `Open` state.
+///
+/// See also [`websocket_open`].
+///
+/// The buffer **must** have been allocated with [`alloc`]. It is freed when this function is
+/// called.
 #[no_mangle]
 pub extern "C" fn websocket_message(id: u32, ptr: u32, len: u32) {
     super::websocket_message(id, ptr, len)
 }
 
-/// Can be called at any point by the JavaScript code if the WebSocket switches to the closed
+/// Can be called at any point by the JavaScript code if the WebSocket switches to the `Closed`
 /// state.
+///
+/// Must only be called once per WebSocket object.
+///
+/// See also [`websocket_open`].
 #[no_mangle]
 pub extern "C" fn websocket_closed(id: u32) {
     super::websocket_closed(id)
