@@ -92,6 +92,12 @@ impl NetworkService {
     ) -> Result<Vec<protocol::BlockData>, ()> {
         todo!()
     }
+
+    /*/// Returns the next event that happens in the network service.
+    ///
+    /// If this method is called multiple times simultaneously, the events will be distributed
+    /// amongst the different calls in an unpredictable way.
+    pub async fn next_event(&self) -> Event {}*/
 }
 
 /// Error when initializing the network service.

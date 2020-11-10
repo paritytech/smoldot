@@ -15,68 +15,116 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Imports and exports of the WebAssembly module.
+use core::{
+    convert::TryFrom as _,
+    future::Future,
+    pin::Pin,
+    slice,
+    task::{Context, Poll},
+    time::Duration,
+};
+use std::sync::{atomic, Arc, Mutex};
 
-// TODO: explain reasons ^
+pub mod bindings;
 
-use core::{convert::TryFrom as _, future::Future, slice, time::Duration};
+/// Stops execution, throwing a string exception with the given content.
+pub(crate) fn throw(message: String) -> ! {
+    unsafe {
+        bindings::throw(
+            u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+            u32::try_from(message.as_bytes().len()).unwrap(),
+        );
 
-#[link(wasm_import_module = "substrate-lite")]
-extern "C" {
-    /// Must throw an exception. The message is a UTF-8 string found in the memory of the
-    /// WebAssembly at offset `message_ptr` and with length `message_len`.
-    pub(crate) fn throw(message_ptr: u32, message_len: u32);
-
-    /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
-    /// leap seconds.
-    ///
-    /// This is typically implemented by calling `Date.now()`.
-    ///
-    /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now
-    ///
-    /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
-    /// >           browsers don't support u64s, using it causes an unbypassable exception. See
-    /// >           also https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370.
-    pub(crate) fn unix_time_ms() -> f64;
-
-    /// Must return the number of milliseconds that have passed since an arbitrary point in time.
-    ///
-    /// Contrary to [`unix_time_ms`], the returned value must never be inferior to a value
-    /// previously returned. Consequently, this must not be implemented using `Date.now()`, whose
-    /// value can decrease if the user adjusts their machine's clock, but rather with
-    /// `Performance.now()` or similar.
-    ///
-    /// See https://developer.mozilla.org/fr/docs/Web/API/Performance/now
-    ///
-    /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
-    /// >           browsers don't support u64s, using it causes an unbypassable exception. See
-    /// >           also https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370.
-    pub(crate) fn monotonic_clock_ms() -> f64;
-
-    /// After `milliseconds` milliseconds have passed, must call [`timer_finished`] with the `id`
-    /// passed as parameter.
-    ///
-    /// When [`timer_finished`] is called, the value of [`monotonic_clock_ms`] must have increased
-    /// by the given number of `milliseconds`.
-    pub(crate) fn start_timer(id: u32, milliseconds: f64);
-
-    /// Must initialize a new WebSocket connection that tries to connect to the given URL.
-    ///
-    /// The URL is a UTF-8 string found in the WebAssembly memory at offset `url_ptr` and with
-    /// `url_len` bytes. The string is in a format suitable for
-    /// [`new WebSocket()`](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/WebSocket).
-    ///
-    /// Returns a unique identifier for this connection.
-    pub(crate) fn websocket_open(url_ptr: u32, url_len: u32) -> u64;
+        // Note: we could theoretically use `unreachable_unchecked` here, but this relies on the
+        // fact that `ffi::throw` is correctly implemented, which isn't 100% guaranteed.
+        unreachable!();
+    }
 }
 
-/// Allocates a buffer of the given length, with an alignment of 1.
-///
-/// This must be used in the context of [`init`].
-#[no_mangle]
-pub extern "C" fn alloc(len: u32) -> u32 {
+pub(crate) fn unix_time() -> Duration {
+    Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
+}
+
+/// Spawn a background task that runs forever.
+pub(crate) fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
+    struct Waker {
+        done: atomic::AtomicBool,
+        wake_up_registered: atomic::AtomicBool,
+        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    }
+
+    impl futures::task::ArcWake for Waker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            if arc_self
+                .wake_up_registered
+                .swap(true, atomic::Ordering::Relaxed)
+            {
+                return;
+            }
+
+            let arc_self = arc_self.clone();
+            start_timer_wrap(Duration::from_millis(1), move || {
+                if arc_self.done.load(atomic::Ordering::SeqCst) {
+                    return;
+                }
+
+                let mut future = arc_self.future.try_lock().unwrap();
+                arc_self
+                    .wake_up_registered
+                    .store(false, atomic::Ordering::SeqCst);
+                match Future::poll(
+                    future.as_mut(),
+                    &mut Context::from_waker(&futures::task::waker_ref(&arc_self)),
+                ) {
+                    Poll::Ready(()) => {
+                        arc_self.done.store(true, atomic::Ordering::SeqCst);
+                    }
+                    Poll::Pending => {}
+                }
+            })
+        }
+    }
+
+    let waker = Arc::new(Waker {
+        done: false.into(),
+        wake_up_registered: false.into(),
+        future: Mutex::new(Box::pin(future)),
+    });
+
+    futures::task::ArcWake::wake(waker);
+}
+
+fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
+    let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
+    let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
+    let milliseconds = u64::try_from(duration.as_millis())
+        .unwrap_or(u64::max_value())
+        .saturating_add(1);
+    unsafe { bindings::start_timer(timer_id, milliseconds as f64) }
+}
+
+pub struct WebSocket {}
+
+impl WebSocket {
+    pub fn new(url: &str) -> Result<Pin<Box<Self>>, ()> {
+        let mut pointer = Box::pin(WebSocket {});
+        let id = u32::try_from(&*pointer as *const WebSocket as usize).unwrap();
+        let ret_code = unsafe {
+            bindings::websocket_new(
+                id,
+                u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
+                u32::try_from(url.as_bytes().len()).unwrap(),
+            )
+        };
+        if ret_code == 0 {
+            Ok(pointer)
+        } else {
+            Err(())
+        }
+    }
+}
+
+pub(crate) fn alloc(len: u32) -> u32 {
     let len = usize::try_from(len).unwrap();
     let mut vec = Vec::<u8>::with_capacity(len);
     unsafe {
@@ -86,19 +134,7 @@ pub extern "C" fn alloc(len: u32) -> u32 {
     u32::try_from(ptr as *mut u8 as usize).unwrap()
 }
 
-/// Initializes the client.
-///
-/// Use [`alloc`] to allocate either one or two buffers: one for the chain specs, and an optional
-/// one for the database content.
-/// The buffers **must** have been allocated with [`alloc`]. They are freed when this function is
-/// called.
-///
-/// Write the chain specs and the database content in these two buffers.
-///
-/// Then, pass the pointer and length of these two buffers to this function.
-/// Pass `0` for `database_content_ptr` and `database_content_len` if the database is empty.
-#[no_mangle]
-pub extern "C" fn init(
+pub(crate) fn init(
     chain_specs_ptr: u32,
     chain_specs_len: u32,
     database_content_ptr: u32,
@@ -130,12 +166,10 @@ pub extern "C" fn init(
         None
     };
 
-    super::spawn_task(super::start_client(chain_specs));
+    spawn_task(super::start_client(chain_specs));
 }
 
-/// Must be called in response to [`start_timer`] after the given duration has passed.
-#[no_mangle]
-pub extern "C" fn timer_finished(timer_id: u32) {
+pub(crate) fn timer_finished(timer_id: u32) {
     let callback = {
         let ptr = timer_id as *mut Box<dyn FnOnce()>;
         unsafe { Box::from_raw(ptr) }
@@ -144,13 +178,20 @@ pub extern "C" fn timer_finished(timer_id: u32) {
     callback();
 }
 
-pub(super) fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
-    let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
-    let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
-    let milliseconds = u64::try_from(duration.as_millis())
-        .unwrap_or(u64::max_value())
-        .saturating_add(1);
-    unsafe { start_timer(timer_id, milliseconds as f64) }
+pub(crate) fn websocket_open(id: u32) {
+    let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
 }
 
-pub extern "C" fn websocket_open_result(id: u64) {}
+pub(crate) fn websocket_message(id: u32, ptr: u32, len: u32) {
+    let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
+
+    let ptr = usize::try_from(ptr).unwrap();
+    let len = usize::try_from(len).unwrap();
+
+    let message: Box<[u8]> =
+        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+}
+
+pub(crate) fn websocket_closed(id: u32) {
+    let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
+}

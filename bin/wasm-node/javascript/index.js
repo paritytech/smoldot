@@ -27,11 +27,14 @@ const W3CWebSocket = require('websocket').w3cwebsocket;
 
 async function initialize(chain_specs) {
   var module;
-  var memory;
 
   // List of environment variables to feed to the Rust program. An array of strings.
   // Example usage: `let env_vars = ["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
   let env_vars = [];
+
+  // Used below to store the list of all WebSockets.
+  // The indices within this array are chosen by the Rust code.
+  let websockets = {};
 
   // The actual Wasm bytecode is base64-decoded from a constant found in a different file.
   // This is suboptimal compared to using `instantiateStreaming`, but it is the most
@@ -47,8 +50,7 @@ async function initialize(chain_specs) {
       // Must throw an error. A human-readable message can be found in the WebAssembly memory in the
       // given buffer.
       throw: (ptr, len) => {
-        let message = Buffer.from(module.exports.memory.buffer)
-          .toString('utf8', ptr, ptr + len);
+        let message = Buffer.from(module.exports.memory.buffer).toString('utf8', ptr, ptr + len);
         console.error("Throwed: " + message);  // TODO: keep or not?
         throw message;
       },
@@ -65,6 +67,53 @@ async function initialize(chain_specs) {
           module.exports.timer_finished(id);
         }, ms)
       },
+
+      // Must create a new WebSocket object and return an opaque identifier, which for this
+      // implementation is the index in `websockets`.
+      websocket_new: (id, url_ptr, url_len) => {
+        try {
+          let url = Buffer.from(module.exports.memory.buffer)
+            .toString('utf8', url_ptr, url_ptr + url_len);
+
+          if (!!websockets[id]) {
+            throw "internal error: WebSocket already allocated";
+          }
+
+          let websocket = new WebSocket(url);
+          websocket.binaryType = 'arraybuffer';
+
+          websocket.onopen = () => {
+            module.exports.websocket_open(id);
+          };
+          websocket.onclose = () => {
+            module.exports.websocket_closed(id);
+          };
+
+          websockets[id] = websocket;
+          return 0;
+
+        } catch(error) {
+          return 1;
+        }
+      },
+
+      // Must close and destroy the WebSocket object.
+      websocket_close: (id) => {
+        let websocket = websockets[id];
+        websocket.onopen = null;
+        websocket.onclose = null;
+        websocket.onmessage = null;
+        websocket.onerror = null;
+        websocket.close();
+        websockets[id] = undefined;
+      },
+
+      // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
+      // that this function is called only when the WebSocket is in an open state.
+      websocket_send: (id, ptr, len) => {
+        let data = Buffer.from(module.exports.memory.buffer).slice(ptr, ptr + len);
+        websockets[id].send(data);
+      }
     },
 
     // As the Rust code is compiled for wasi, some more wasi-specific imports exist.

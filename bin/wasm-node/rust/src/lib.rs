@@ -41,6 +41,7 @@ use substrate_lite::{
 };
 
 pub mod ffi;
+
 mod network_service;
 
 // This custom allocator is used in order to reduce the size of the Wasm binary.
@@ -56,7 +57,7 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 /// >           is thrown.
 pub async fn start_client(chain_spec: String) {
     std::panic::set_hook(Box::new(|info| {
-        throw(info.to_string());
+        ffi::throw(info.to_string());
     }));
 
     // Fool-proof check to make sure that randomness is properly implemented.
@@ -65,7 +66,7 @@ pub async fn start_client(chain_spec: String) {
 
     let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&chain_spec) {
         Ok(cs) => cs,
-        Err(err) => throw(format!("Error while opening chain specs: {}", err)),
+        Err(err) => ffi::throw(format!("Error while opening chain specs: {}", err)),
     };
 
     // Load the information about the chain from the local storage, or build the information of
@@ -79,13 +80,13 @@ pub async fn start_client(chain_spec: String) {
     let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
 
     let network_service = network_service::NetworkService::new(network_service::Config {
-        tasks_executor: Box::new(|fut| spawn_task(fut)),
+        tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
         bootstrap_nodes: Vec::new(), // TODO:
     })
     .await
     .unwrap();
 
-    spawn_task(
+    ffi::spawn_task(
         start_sync(
             &chain_spec,
             chain_information,
@@ -98,7 +99,7 @@ pub async fn start_client(chain_spec: String) {
 
     std::mem::forget(to_sync_tx);
 
-    /*spawn_task(async move {
+    /*ffi::spawn_task(async move {
         while let Some(info) = to_db_save_rx.next().await {
             // TODO: how to handle errors?
             //local_storage.set_chain_information((&info).into()).unwrap();
@@ -227,8 +228,7 @@ async fn start_sync(
 
             // Verify blocks that have been fetched from queries.
             loop {
-                let unix_time = Duration::from_secs_f64(unsafe { ffi::unix_time_ms() } / 1000.0);
-                match sync.process_one(unix_time) {
+                match sync.process_one(ffi::unix_time()) {
                     headers_optimistic::ProcessOneOutcome::Idle => break,
                     headers_optimistic::ProcessOneOutcome::Updated {
                         best_block_hash,
@@ -312,65 +312,4 @@ async fn yield_once() {
         }
     })
     .await
-}
-
-fn throw(message: String) -> ! {
-    unsafe {
-        ffi::throw(
-            u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
-            u32::try_from(message.as_bytes().len()).unwrap(),
-        );
-
-        // Note: we could theoretically use `unreachable_unchecked` here, but this relies on the
-        // fact that `ffi::throw` is correctly implemented, which isn't 100% guaranteed.
-        unreachable!();
-    }
-}
-
-fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
-    struct Waker {
-        done: atomic::AtomicBool,
-        wake_up_registered: atomic::AtomicBool,
-        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
-    }
-
-    impl futures::task::ArcWake for Waker {
-        fn wake_by_ref(arc_self: &Arc<Self>) {
-            if arc_self
-                .wake_up_registered
-                .swap(true, atomic::Ordering::Relaxed)
-            {
-                return;
-            }
-
-            let arc_self = arc_self.clone();
-            ffi::start_timer_wrap(Duration::from_millis(1), move || {
-                if arc_self.done.load(atomic::Ordering::SeqCst) {
-                    return;
-                }
-
-                let mut future = arc_self.future.try_lock().unwrap();
-                arc_self
-                    .wake_up_registered
-                    .store(false, atomic::Ordering::SeqCst);
-                match Future::poll(
-                    future.as_mut(),
-                    &mut Context::from_waker(&futures::task::waker_ref(&arc_self)),
-                ) {
-                    Poll::Ready(()) => {
-                        arc_self.done.store(true, atomic::Ordering::SeqCst);
-                    }
-                    Poll::Pending => {}
-                }
-            })
-        }
-    }
-
-    let waker = Arc::new(Waker {
-        done: false.into(),
-        wake_up_registered: false.into(),
-        future: Mutex::new(Box::pin(future)),
-    });
-
-    futures::task::ArcWake::wake(waker);
 }

@@ -16,8 +16,7 @@
   "scripts": {
     "prepublishOnly": "./prepare.sh",
     "prestart": "./prepare.sh",
-    "start": "node index.js",
-    "test": "node test.js"
+    "start": "node test.js"
   },
   "dependencies": {
     "buffer": "^6.0.1",
