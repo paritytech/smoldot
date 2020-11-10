@@ -75,7 +75,9 @@ impl LightSyncState {
             .babe_epoch_changes
             .epochs
             .iter()
-            .filter(((_, block_num), _)| block_num <= self.inner.finalized_block_header.number)
+            .filter(|((_, block_num), _)| {
+                *block_num as u64 <= self.inner.finalized_block_header.number
+            })
             .filter_map(|((_, block_num), epoch)| match epoch {
                 light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),
                 _ => None,
@@ -91,9 +93,9 @@ impl LightSyncState {
         ChainInformation {
             finalized_block_header: self.inner.finalized_block_header.clone(),
             consensus: ChainInformationConsensus::Babe {
-                slots_per_epoch: NonZeroU64::new(prev_epoch.duration).unwrap(),
-                finalized_block_epoch_information: Some(convert_epoch(prev_epoch)),
-                finalized_next_epoch_transition: convert_epoch(current_epoch),
+                slots_per_epoch: NonZeroU64::new(current_epoch.duration).unwrap(),
+                finalized_block_epoch_information: Some(convert_epoch(current_epoch)),
+                finalized_next_epoch_transition: convert_epoch(next_epoch),
             },
             grandpa_after_finalized_block_authorities_set_id: self
                 .inner
@@ -110,7 +112,7 @@ impl LightSyncState {
                     })
                     .collect()
             },
-            grandpa_finalized_scheduled_change: None,  // TODO: unimplemented
+            grandpa_finalized_scheduled_change: None, // TODO: unimplemented
         }
     }
 }
