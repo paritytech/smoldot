@@ -82,6 +82,7 @@ pub async fn start_client(chain_spec: String) {
     let network_service = network_service::NetworkService::new(network_service::Config {
         tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
         bootstrap_nodes: Vec::new(), // TODO:
+        protocol: chain_spec.protocol_id(),
     })
     .await
     .unwrap();
@@ -208,7 +209,7 @@ async fn start_sync(
                         num_blocks,
                         ..
                     } => {
-                        let block_request = network_service.blocks_request(
+                        let block_request = network_service.clone().blocks_request(
                             source.clone(),
                             protocol::BlocksRequestConfig {
                                 start: protocol::BlocksRequestConfigStart::Number(block_height),

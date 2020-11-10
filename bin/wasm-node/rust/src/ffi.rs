@@ -25,7 +25,7 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures::prelude::*;
+use futures::{channel::oneshot, prelude::*};
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
@@ -111,6 +111,28 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     unsafe { bindings::start_timer(timer_id, milliseconds as f64) }
 }
 
+pub struct Delay {
+    rx: oneshot::Receiver<()>,
+}
+
+impl Delay {
+    pub fn new(when: Duration) -> Self {
+        let (tx, rx) = oneshot::channel();
+        start_timer_wrap(when, move || {
+            let _ = tx.send(());
+        });
+        Delay { rx }
+    }
+}
+
+impl Future for Delay {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        Future::poll(Pin::new(&mut self.rx), cx).map(|v| v.unwrap())
+    }
+}
+
 /// WebSocket connected to a target.
 pub struct WebSocket {
     /// If `Some`, [`bindings::websocket_close`] must be called. Set to a value after
@@ -191,7 +213,7 @@ impl WebSocket {
     /// Returns `None` if the WebSocket has been closed.
     pub async fn read_buffer(&mut self) -> Option<&[u8]> {
         future::poll_fn(move |cx| {
-            if let Some(buffer) = self.messages_queue.first() {
+            if let Some(buffer) = self.messages_queue.front() {
                 debug_assert!(!buffer.is_empty());
                 debug_assert!(self.messages_queue_first_offset < buffer.len());
                 return Poll::Ready(&buffer[self.messages_queue_first_offset..]);
@@ -224,7 +246,7 @@ impl WebSocket {
     pub fn advance_read_cursor(&mut self, bytes: usize) {
         self.messages_queue_first_offset += bytes;
 
-        if let Some(buffer) = self.messages_queue.first() {
+        if let Some(buffer) = self.messages_queue.front() {
             assert!(self.messages_queue_first_offset <= buffer.len());
             if self.messages_queue_first_offset == buffer.len() {
                 self.messages_queue.pop_front();
@@ -239,7 +261,7 @@ impl WebSocket {
     pub fn send(&mut self, data: &[u8]) {
         unsafe {
             bindings::websocket_send(
-                self.id.as_ref().unwrap(),
+                self.id.unwrap(),
                 u32::try_from(data.as_ptr() as usize).unwrap(),
                 u32::try_from(data.len()).unwrap(),
             );
