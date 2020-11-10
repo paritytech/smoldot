@@ -110,7 +110,7 @@ impl LightSyncState {
                     })
                     .collect()
             },
-            grandpa_finalized_scheduled_change: None,
+            grandpa_finalized_scheduled_change: None,  // TODO: unimplemented
         }
     }
 }
