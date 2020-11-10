@@ -76,7 +76,7 @@ pub async fn start_client(chain_spec: String) {
     )
     .unwrap();
 
-    let (to_sync_tx, to_sync_rx) = mpsc::channel(64);
+    let (mut to_sync_tx, to_sync_rx) = mpsc::channel(64);
     let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
 
     let network_service = network_service::NetworkService::new(network_service::Config {
@@ -97,14 +97,20 @@ pub async fn start_client(chain_spec: String) {
         .await,
     );
 
-    std::mem::forget(to_sync_tx);
-
-    /*ffi::spawn_task(async move {
-        while let Some(info) = to_db_save_rx.next().await {
-            // TODO: how to handle errors?
-            //local_storage.set_chain_information((&info).into()).unwrap();
+    loop {
+        futures::select! {
+            network_message = network_service.next_event().fuse() => {
+                match network_message {
+                    network_service::Event::Connected(peer_id) => {
+                        to_sync_tx.send(ToSync::NewPeer(peer_id));
+                    }
+                    network_service::Event::Disconnected(peer_id) => {
+                        to_sync_tx.send(ToSync::PeerDisconnected(peer_id));
+                    }
+                }
+            }
         }
-    });*/
+    }
 }
 
 /*impl BrowserLightClient {

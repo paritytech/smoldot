@@ -51,7 +51,7 @@ pub struct NetworkService {
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specifications.
     /// Signed using the actual libp2p key.
-    noise_key: connection::NoiseKey,
+    noise_key: Arc<connection::NoiseKey>,
 
     /// Holds the state of all the known nodes of the network, and of all the connections (pending
     /// or not).
@@ -77,7 +77,7 @@ impl NetworkService {
         }
 
         Ok(Arc::new(NetworkService {
-            noise_key: connection::NoiseKey::new(&rand::random()),
+            noise_key: Arc::new(connection::NoiseKey::new(&rand::random())),
             peerset,
         }))
     }
@@ -93,17 +93,67 @@ impl NetworkService {
         todo!()
     }
 
-    /*/// Returns the next event that happens in the network service.
+    /// Returns the next event that happens in the network service.
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
-    pub async fn next_event(&self) -> Event {}*/
+    pub async fn next_event(&self) -> Event {
+        self.fill_out_slots().await;
+
+        todo!()
+    }
+
+    /// Spawns new outgoing connections in order to fill empty outgoing slots.
+    ///
+    /// Must be passed as parameter an existing lock to a [`Guarded`].
+    async fn fill_out_slots<'a>(&self, guarded: &mut MutexGuard<'a, Guarded>) {
+        // Solves borrow checking errors regarding the borrow of multiple different fields at the
+        // same time.
+        let guarded = &mut **guarded;
+
+        // TODO: very wip
+        while let Some(mut node) = guarded.peerset.random_not_connected(0) {
+            // TODO: collecting into a Vec, annoying
+            for address in node.known_addresses().cloned().collect::<Vec<_>>() {
+                let url = match multiaddr_to_url(&address) {
+                    Ok(url) => url,
+                    Err(()) => {
+                        node.remove_known_address(&address).unwrap();
+                        continue;
+                    }
+                };
+
+                let (tx, rx) = mpsc::channel(8);
+                let connection_id = node.add_outbound_attempt(address.clone(), tx);
+                (guarded.tasks_executor)(Box::pin(connection_task(
+                    url,
+                    true,
+                    self.noise_key.clone(),
+                    connection_id,
+                    self.to_foreground.clone(),
+                    rx,
+                )));
+            }
+
+            break;
+        }
+    }
+}
+
+/// Event that can happen on the network service.
+pub enum Event {
+    Connected(PeerId),
+    Disconnected(PeerId),
 }
 
 /// Error when initializing the network service.
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
     // TODO: add variants or remove error altogether
+}
+
+async fn connection_task(url: String, is_initiator: bool, noise_key: Arc<connection::NoiseKey>) {
+
 }
 
 /// Returns the URL that corresponds to the given multiaddress. Returns an error if the

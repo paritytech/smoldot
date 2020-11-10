@@ -23,8 +23,6 @@ const Buffer = require('buffer/').Buffer;  // Note: the trailing slash is import
 const randombytes = require('randombytes');
 const W3CWebSocket = require('websocket').w3cwebsocket;
 
-// TODO: see https://www.npmjs.com/package/websocket#client-example-using-the-w3c-websocket-api
-
 async function initialize(chain_specs) {
   var module;
 
@@ -51,7 +49,6 @@ async function initialize(chain_specs) {
       // given buffer.
       throw: (ptr, len) => {
         let message = Buffer.from(module.exports.memory.buffer).toString('utf8', ptr, ptr + len);
-        console.error("Throwed: " + message);  // TODO: keep or not?
         throw message;
       },
 
@@ -79,7 +76,7 @@ async function initialize(chain_specs) {
             throw "internal error: WebSocket already allocated";
           }
 
-          let websocket = new WebSocket(url);
+          let websocket = new W3CWebSocket(url);
           websocket.binaryType = 'arraybuffer';
 
           websocket.onopen = () => {
@@ -146,7 +143,11 @@ async function initialize(chain_specs) {
           total_length += buf_len;
         }
 
-        // TODO: keep this line?
+        // Note that it is questionnable to use `console.log` from within a library. However this
+        // simply reflects the usage of `println!` in the Rust code. In other words, it is
+        // `println!` that shouldn't be used in the first place. The harm of not showing text
+        // printed with `println!` at all is greater than the harm possibly caused by accidentally
+        // leaving a `println!` in the code.
         console.log(to_write);
 
         // Need to write in `out_ptr` how much data was "written".

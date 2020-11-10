@@ -94,6 +94,7 @@ pub(crate) fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
     futures::task::ArcWake::wake(waker);
 }
 
+/// Uses the environment to invoke `closure` after `duration` has elapsed.
 fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
     let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
@@ -124,7 +125,7 @@ impl WebSocket {
     }
 }
 
-pub(crate) fn alloc(len: u32) -> u32 {
+fn alloc(len: u32) -> u32 {
     let len = usize::try_from(len).unwrap();
     let mut vec = Vec::<u8>::with_capacity(len);
     unsafe {
@@ -134,7 +135,7 @@ pub(crate) fn alloc(len: u32) -> u32 {
     u32::try_from(ptr as *mut u8 as usize).unwrap()
 }
 
-pub(crate) fn init(
+fn init(
     chain_specs_ptr: u32,
     chain_specs_len: u32,
     database_content_ptr: u32,
@@ -169,7 +170,7 @@ pub(crate) fn init(
     spawn_task(super::start_client(chain_specs));
 }
 
-pub(crate) fn timer_finished(timer_id: u32) {
+fn timer_finished(timer_id: u32) {
     let callback = {
         let ptr = timer_id as *mut Box<dyn FnOnce()>;
         unsafe { Box::from_raw(ptr) }
@@ -178,11 +179,11 @@ pub(crate) fn timer_finished(timer_id: u32) {
     callback();
 }
 
-pub(crate) fn websocket_open(id: u32) {
+fn websocket_open(id: u32) {
     let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
 }
 
-pub(crate) fn websocket_message(id: u32, ptr: u32, len: u32) {
+fn websocket_message(id: u32, ptr: u32, len: u32) {
     let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
 
     let ptr = usize::try_from(ptr).unwrap();
@@ -192,6 +193,6 @@ pub(crate) fn websocket_message(id: u32, ptr: u32, len: u32) {
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
 }
 
-pub(crate) fn websocket_closed(id: u32) {
+fn websocket_closed(id: u32) {
     let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
 }
