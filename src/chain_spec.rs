@@ -39,22 +39,24 @@ use alloc::string::String;
 mod light_sync_state;
 mod structs;
 
-use crate::chain::chain_information::{ChainInformation, ChainInformationConsensus, BabeEpochInformation};
+use crate::chain::chain_information::{
+    BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+};
 
 pub struct LightSyncState {
     inner: light_sync_state::DecodedLightSyncState,
 }
 
 fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
-    let epoch_authorities: Vec<_> = epoch.authorities.iter()
-        .map(|authority| {
-            crate::header::BabeAuthority {
-                public_key: authority.public_key,
-                weight: authority.weight,
-            }
+    let epoch_authorities: Vec<_> = epoch
+        .authorities
+        .iter()
+        .map(|authority| crate::header::BabeAuthority {
+            public_key: authority.public_key,
+            weight: authority.weight,
         })
         .collect();
-    
+
     BabeEpochInformation {
         epoch_index: epoch.epoch_index,
         start_slot_number: Some(epoch.slot_number),
@@ -68,12 +70,14 @@ fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
 impl LightSyncState {
     pub fn as_chain_information(&self) -> ChainInformation {
         // Create a sorted list of all regular epochs that haven't been pruned from the sync state.
-        let mut epochs: Vec<_> = self.inner.babe_epoch_changes.epochs.iter()
-            .filter_map(|((_, block_num), epoch)| {
-                match epoch {
-                    light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),
-                    _ => None
-                }
+        let mut epochs: Vec<_> = self
+            .inner
+            .babe_epoch_changes
+            .epochs
+            .iter()
+            .filter_map(|((_, block_num), epoch)| match epoch {
+                light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),
+                _ => None,
             })
             .collect();
 
@@ -90,9 +94,14 @@ impl LightSyncState {
                 finalized_block_epoch_information: Some(convert_epoch(prev_epoch)),
                 finalized_next_epoch_transition: convert_epoch(current_epoch),
             },
-            grandpa_after_finalized_block_authorities_set_id: self.inner.grandpa_authority_set.set_id,
+            grandpa_after_finalized_block_authorities_set_id: self
+                .inner
+                .grandpa_authority_set
+                .set_id,
             grandpa_finalized_triggered_authorities: {
-                self.inner.grandpa_authority_set.current_authorities
+                self.inner
+                    .grandpa_authority_set
+                    .current_authorities
                     .iter()
                     .map(|authority| crate::header::GrandpaAuthority {
                         public_key: authority.public_key,
@@ -113,9 +122,12 @@ pub struct ChainSpec {
 
 impl ChainSpec {
     pub fn light_sync_state(&self) -> Option<LightSyncState> {
-        self.client_spec.light_sync_state.as_ref().map(|state| {
-            LightSyncState { inner: state.decode() }
-        })
+        self.client_spec
+            .light_sync_state
+            .as_ref()
+            .map(|state| LightSyncState {
+                inner: state.decode(),
+            })
     }
 
     /// Parse JSON content into a [`ChainSpec`].
