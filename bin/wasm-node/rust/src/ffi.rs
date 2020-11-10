@@ -137,14 +137,12 @@ pub extern "C" fn init(
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
 pub extern "C" fn timer_finished(timer_id: u32) {
-    println!("timer_finished");
     let callback = {
         let ptr = timer_id as *mut Box<dyn FnOnce()>;
         unsafe { Box::from_raw(ptr) }
     };
 
     callback();
-    println!("timer_finished return");
 }
 
 pub(super) fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
@@ -153,7 +151,6 @@ pub(super) fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     let milliseconds = u64::try_from(duration.as_millis())
         .unwrap_or(u64::max_value())
         .saturating_add(1);
-    println!("start_timer");
     unsafe { start_timer(timer_id, milliseconds as f64) }
 }
 

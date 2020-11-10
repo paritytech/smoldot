@@ -312,7 +312,10 @@ async fn yield_once() {
 
 fn throw(message: String) -> ! {
     unsafe {
-        ffi::throw(u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(), u32::try_from(message.as_bytes().len()).unwrap());
+        ffi::throw(
+            u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
+            u32::try_from(message.as_bytes().len()).unwrap(),
+        );
 
         // Note: we could theoretically use `unreachable_unchecked` here, but this relies on the
         // fact that `ffi::throw` is correctly implemented, which isn't 100% guaranteed.
@@ -322,6 +325,7 @@ fn throw(message: String) -> ! {
 
 fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
     struct Waker {
+        done: atomic::AtomicBool,
         wake_up_registered: atomic::AtomicBool,
         future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
     }
@@ -337,21 +341,27 @@ fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
 
             let arc_self = arc_self.clone();
             ffi::start_timer_wrap(Duration::from_millis(1), move || {
-                println!("enter");
+                if arc_self.done.load(atomic::Ordering::SeqCst) {
+                    return;
+                }
+
                 let mut future = arc_self.future.try_lock().unwrap();
                 arc_self
                     .wake_up_registered
                     .store(false, atomic::Ordering::SeqCst);
-                let _ = Future::poll(
+                match Future::poll(
                     future.as_mut(),
                     &mut Context::from_waker(&futures::task::waker_ref(&arc_self)),
-                );
-                println!("leave");
+                ) {
+                    Poll::Ready(()) => arc_self.done.store(true, atomic::Ordering::SeqCst),
+                    Poll::Pending => {}
+                }
             })
         }
     }
 
     let waker = Arc::new(Waker {
+        done: false.into(),
         wake_up_registered: false.into(),
         future: Mutex::new(Box::pin(future)),
     });

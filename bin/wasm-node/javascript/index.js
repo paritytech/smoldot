@@ -42,7 +42,11 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
     },
     unix_time_ms: () => Math.round(Date.now()),
     monotonic_clock_ms: () => performance.now(),
-    start_timer: (id, ms) => setImmediate(module.exports.timer_finished(id)),
+    start_timer: (id, ms) => {
+      setImmediate(() => {
+        module.exports.timer_finished(id);
+      })
+    },
   },
 
   // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
