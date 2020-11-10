@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-const Buffer = require('buffer/').Buffer;  // Note: the trailing slash is important in order to use the NodeJS core module named "buffer".
+const Buffer = require('buffer/').Buffer;  // Note: the trailing slash is important in order to not use the NodeJS core module named "buffer".
 const randombytes = require('randombytes');
 const W3CWebSocket = require('websocket').w3cwebsocket;
 
@@ -26,8 +26,8 @@ const W3CWebSocket = require('websocket').w3cwebsocket;
 var module;
 var memory;
 
-// List of environment variables. An array of strings.
-// Example usage: `let env_vars = ["RUST_BACKTRACE=1"];`
+// List of environment variables to feed to the Rust program. An array of strings.
+// Example usage: `let env_vars = ["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
 let env_vars = [];
 
 WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'), 'base64')), {
@@ -73,8 +73,8 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
       let to_write = new String("");
       let total_length = 0;
       for (let i = 0; i < num; i++) {
-        let buf = mem.readInt32LE(addr + 4 * i * 2);
-        let buf_len = mem.readInt32LE(addr + 4 * (i * 2 + 1));
+        let buf = mem.readUInt32LE(addr + 4 * i * 2);
+        let buf_len = mem.readUInt32LE(addr + 4 * (i * 2 + 1));
         to_write += mem.toString('utf8', buf, buf + buf_len);
         total_length += buf_len;
       }
@@ -83,7 +83,7 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
       console.log(to_write);
 
       // Need to write in `out_ptr` how much data was "written".
-      mem.writeInt32LE(total_length, out_ptr);
+      mem.writeUInt32LE(total_length, out_ptr);
       return 0;
     },
   
@@ -106,14 +106,16 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
       env_vars.forEach(e => total_len += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
 
       let mem = Buffer.from(module.exports.memory.buffer);
-      mem.writeInt32LE(env_vars.length, argc_out);
-      mem.writeInt32LE(total_len, argv_buf_size_out);
+      mem.writeUInt32LE(env_vars.length, argc_out);
+      mem.writeUInt32LE(total_len, argv_buf_size_out);
       return 0;
     },
 
     // Write the environment variables to the given pointers.
-    // `argv` must be written with a list of pointers to environment variables, and `argv_buf` is
-    // a buffer where to actually write the environment variables.
+    // `argv` is a pointer to a buffer that must be overwritten with a list of pointers to
+    // environment variables, and `argv_buf` is a pointer to a buffer where to actually store the
+    // environment variables.
+    // The sizes of the buffers were determined by calling `environ_sizes_get`.
     environ_get: (argv, argv_buf) => {
       let mem = Buffer.from(module.exports.memory.buffer);
 
@@ -123,7 +125,7 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
       env_vars.forEach(env_var => {
         let env_var_len = Buffer.byteLength(e, 'utf8');
 
-        mem.writeInt32LE(argv_buf + argv_buf_pos, argv + argv_pos);
+        mem.writeUInt32LE(argv_buf + argv_buf_pos, argv + argv_pos);
         argv_pos += 4;
 
         mem.write(env_var, argv_buf + argv_buf_pos, env_var_len, 'utf8');
