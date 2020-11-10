@@ -25,7 +25,7 @@ use core::{convert::TryFrom as _, future::Future, slice, time::Duration};
 extern "C" {
     /// Must throw an exception. The message is a UTF-8 string found in the memory of the
     /// WebAssembly at offset `message_ptr` and with length `message_len`.
-    pub(crate) fn throw(message_ptr: u32, message_len: u32);
+    pub fn throw(message_ptr: u32, message_len: u32);
 
     /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
     /// leap seconds.
@@ -38,7 +38,7 @@ extern "C" {
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
     /// >           browsers don't support u64s, using it causes an unbypassable exception. See
     /// >           also https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370.
-    pub(crate) fn unix_time_ms() -> f64;
+    pub fn unix_time_ms() -> f64;
 
     /// Must return the number of milliseconds that have passed since an arbitrary point in time.
     ///
@@ -53,14 +53,14 @@ extern "C" {
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
     /// >           browsers don't support u64s, using it causes an unbypassable exception. See
     /// >           also https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370.
-    pub(crate) fn monotonic_clock_ms() -> f64;
+    pub fn monotonic_clock_ms() -> f64;
 
     /// After `milliseconds` milliseconds have passed, must call [`timer_finished`] with the `id`
     /// passed as parameter.
     ///
     /// When [`timer_finished`] is called, the value of [`monotonic_clock_ms`] must have increased
     /// by the given number of `milliseconds`.
-    pub(crate) fn start_timer(id: u32, milliseconds: f64);
+    pub fn start_timer(id: u32, milliseconds: f64);
 
     /// Must initialize a new WebSocket connection that tries to connect to the given URL.
     ///
@@ -94,7 +94,7 @@ extern "C" {
     /// When in the `Open` state, the WebSocket can receive messages. When a message is received,
     /// [`alloc`] must be called in order to allocate memory for this message, then
     /// [`websocket_message`] must be called with the pointer returned by [`alloc`].
-    pub(crate) fn websocket_new(id: u32, url_ptr: u32, url_len: u32) -> u32;
+    pub fn websocket_new(id: u32, url_ptr: u32, url_len: u32) -> u32;
 
     /// Close a WebSocket previously initialized with [`websocket_new`].
     ///
@@ -107,14 +107,14 @@ extern "C" {
     ///
     /// > **Note**: If implemented using the `WebSocket` API, remember to unregister event
     /// >           handlers before calling `WebSocket.close()`.
-    pub(crate) fn websocket_close(id: u32);
+    pub fn websocket_close(id: u32);
 
     /// Queues data on the given WebSocket. The data is found in the memory of the WebAssembly
     /// virtual machine, at the given pointer. The data must be sent as a binary frame.
     ///
     /// The WebSocket must currently be in the `Open` state. See the documentation of
     /// [`websocket_new`] for details.
-    pub(crate) fn websocket_send(id: u32, ptr: u32, len: u32);
+    pub fn websocket_send(id: u32, ptr: u32, len: u32);
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.

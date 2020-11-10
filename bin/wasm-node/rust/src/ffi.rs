@@ -19,6 +19,7 @@ use core::{
     convert::TryFrom as _,
     fmt,
     future::Future,
+    marker,
     pin::Pin,
     slice,
     task::{Context, Poll, Waker},
@@ -119,18 +120,29 @@ pub struct WebSocket {
     open: bool,
     /// True if [`bindings::websocket_closed`] has been called.
     closed: bool,
-    /// List of messages received through [`bindings::websocket_message`].
+    /// List of messages received through [`bindings::websocket_message`]. Must never contain
+    /// empty messages.
     messages_queue: VecDeque<Box<[u8]>>,
     /// Position of the read cursor within the first element of [`WebSocket::messages_queue`].
     messages_queue_first_offset: usize,
     /// Waker to wake up whenever one of the fields above is modified.
     waker: Option<Waker>,
+    /// Prevents the [`WebSocket`] from being unpinned.
+    pinned: marker::PhantomPinned,
 }
 
 impl WebSocket {
     /// Connects to the given URL. Returns a [`WebSocket`] on success.
     pub async fn connect(url: &str) -> Result<Pin<Box<Self>>, ()> {
-        let mut pointer = Box::pin(WebSocket { id: None });
+        let mut pointer = Box::pin(WebSocket {
+            id: None,
+            open: false,
+            closed: false,
+            messages_queue: VecDeque::with_capacity(32),
+            messages_queue_first_offset: 0,
+            waker: None,
+            pinned: marker::PhantomPinned,
+        });
 
         let id = u32::try_from(&*pointer as *const WebSocket as usize).unwrap();
 
@@ -180,6 +192,7 @@ impl WebSocket {
     pub async fn read_buffer(&mut self) -> Option<&[u8]> {
         future::poll_fn(move |cx| {
             if let Some(buffer) = self.messages_queue.first() {
+                debug_assert!(!buffer.is_empty());
                 debug_assert!(self.messages_queue_first_offset < buffer.len());
                 return Poll::Ready(&buffer[self.messages_queue_first_offset..]);
             }
@@ -215,10 +228,22 @@ impl WebSocket {
             assert!(self.messages_queue_first_offset <= buffer.len());
             if self.messages_queue_first_offset == buffer.len() {
                 self.messages_queue.pop_front();
+                self.messages_queue_first_offset = 0;
             }
         } else {
             assert_eq!(bytes, 0);
         };
+    }
+
+    /// Queue of the given buffer as a WebSocket binary frame.
+    pub fn send(&mut self, data: &[u8]) {
+        unsafe {
+            bindings::websocket_send(
+                self.id.as_ref().unwrap(),
+                u32::try_from(data.as_ptr() as usize).unwrap(),
+                u32::try_from(data.len()).unwrap(),
+            );
+        }
     }
 }
 
@@ -309,6 +334,11 @@ fn websocket_message(id: u32, ptr: u32, len: u32) {
 
     let message: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+
+    // Ignore empty message to avoid all sorts of problems.
+    if message.is_empty() {
+        return;
+    }
 
     if websocket.messages_queue.is_empty() {
         websocket.messages_queue_first_offset = 0;
