@@ -75,6 +75,7 @@ impl LightSyncState {
             .babe_epoch_changes
             .epochs
             .iter()
+            .filter(((_, block_num), _)| block_num <= self.inner.finalized_block_header.number)
             .filter_map(|((_, block_num), epoch)| match epoch {
                 light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),
                 _ => None,
@@ -84,8 +85,8 @@ impl LightSyncState {
         epochs.sort_unstable_by_key(|(&block_num, _)| block_num);
 
         // Get the latest two epochs.
-        let prev_epoch = &epochs[epochs.len() - 2].1;
-        let current_epoch = &epochs[epochs.len() - 1].1;
+        let current_epoch = &epochs[epochs.len() - 2].1;
+        let next_epoch = &epochs[epochs.len() - 1].1;
 
         ChainInformation {
             finalized_block_header: self.inner.finalized_block_header.clone(),
