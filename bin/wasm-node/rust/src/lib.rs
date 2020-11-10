@@ -37,7 +37,7 @@ use substrate_lite::{
     chain,
     chain::sync::headers_optimistic,
     chain_spec,
-    network::{self, protocol},
+    network::{self, connection, multiaddr, peer_id::PeerId, protocol},
 };
 
 pub mod ffi;
@@ -81,8 +81,20 @@ pub async fn start_client(chain_spec: String) {
 
     let network_service = network_service::NetworkService::new(network_service::Config {
         tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
-        bootstrap_nodes: Vec::new(), // TODO:
-        protocol: chain_spec.protocol_id(),
+        bootstrap_nodes: {
+            let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
+            for node in chain_spec.boot_nodes() {
+                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                    list.push((peer_id, address));
+                } else {
+                    panic!() // TODO:
+                }
+            }
+            list
+        },
+        protocol_id: chain_spec.protocol_id().to_string(),
     })
     .await
     .unwrap();

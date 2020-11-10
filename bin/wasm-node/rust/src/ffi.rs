@@ -16,10 +16,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use core::{
+    cmp::Ordering,
     convert::TryFrom as _,
     fmt,
     future::Future,
     marker,
+    ops::{Add, Sub},
     pin::Pin,
     slice,
     task::{Context, Poll, Waker},
@@ -133,6 +135,80 @@ impl Future for Delay {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct Instant {
+    /// Milliseconds.
+    inner: f64,
+}
+
+impl PartialEq for Instant {
+    fn eq(&self, other: &Instant) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl Eq for Instant {}
+
+impl PartialOrd for Instant {
+    fn partial_cmp(&self, other: &Instant) -> Option<Ordering> {
+        self.inner.partial_cmp(&other.inner)
+    }
+}
+
+impl Ord for Instant {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.inner.partial_cmp(&other.inner).unwrap()
+    }
+}
+
+impl Instant {
+    pub fn now() -> Instant {
+        Instant {
+            inner: unsafe { bindings::monotonic_clock_ms() },
+        }
+    }
+
+    pub fn duration_since(&self, earlier: Instant) -> Duration {
+        *self - earlier
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        Instant::now() - *self
+    }
+}
+
+impl Add<Duration> for Instant {
+    type Output = Instant;
+
+    fn add(self, other: Duration) -> Instant {
+        let new_val = self.inner + other.as_millis() as f64;
+        Instant {
+            inner: new_val as f64,
+        }
+    }
+}
+
+impl Sub<Duration> for Instant {
+    type Output = Instant;
+
+    fn sub(self, other: Duration) -> Instant {
+        let new_val = self.inner - other.as_millis() as f64;
+        Instant {
+            inner: new_val as f64,
+        }
+    }
+}
+
+impl Sub<Instant> for Instant {
+    type Output = Duration;
+
+    fn sub(self, other: Instant) -> Duration {
+        let ms = self.inner - other.inner;
+        assert!(ms >= 0.0);
+        Duration::from_millis(ms as u64)
+    }
+}
+
 /// WebSocket connected to a target.
 pub struct WebSocket {
     /// If `Some`, [`bindings::websocket_close`] must be called. Set to a value after
@@ -211,16 +287,10 @@ impl WebSocket {
     /// data arrives.
     ///
     /// Returns `None` if the WebSocket has been closed.
-    pub async fn read_buffer(&mut self) -> Option<&[u8]> {
-        future::poll_fn(move |cx| {
-            if let Some(buffer) = self.messages_queue.front() {
-                debug_assert!(!buffer.is_empty());
-                debug_assert!(self.messages_queue_first_offset < buffer.len());
-                return Poll::Ready(&buffer[self.messages_queue_first_offset..]);
-            }
-
-            if self.closed {
-                return Poll::Ready(None);
+    pub async fn read_buffer<'a>(&'a mut self) -> Option<&'a [u8]> {
+        future::poll_fn(|cx| {
+            if !self.messages_queue.is_empty() || self.closed {
+                return Poll::Ready(());
             }
 
             if self
@@ -232,7 +302,17 @@ impl WebSocket {
             }
             Poll::Pending
         })
-        .await
+        .await;
+
+        if let Some(buffer) = self.messages_queue.front() {
+            debug_assert!(!buffer.is_empty());
+            debug_assert!(self.messages_queue_first_offset < buffer.len());
+            Some(&buffer[self.messages_queue_first_offset..])
+        } else if self.closed {
+            None
+        } else {
+            unreachable!()
+        }
     }
 
     /// Advances the read cursor by the given amount of bytes. The first `bytes` will no longer

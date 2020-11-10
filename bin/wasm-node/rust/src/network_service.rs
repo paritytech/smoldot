@@ -238,7 +238,7 @@ impl NetworkService {
             // TODO: collecting into a Vec, annoying
             for address in node.known_addresses().cloned().collect::<Vec<_>>() {
                 let websocket = match multiaddr_to_url(&address) {
-                    Ok(s) => ffi::WebSocket::connect(s),
+                    Ok(s) => ffi::WebSocket::connect(&s),
                     Err(()) => {
                         node.remove_known_address(&address).unwrap();
                         continue;
@@ -434,7 +434,7 @@ async fn connection_task(
             }
         };
 
-        let now = Instant::now();
+        let now = ffi::Instant::now();
 
         let read_write =
             match connection.read_write(now, read_buffer.map(|b| b.0), write_buffer.unwrap()) {
@@ -499,12 +499,12 @@ async fn connection_task(
                                 a.extend_from_slice(b.as_ref());
                                 a
                             });
-                        connection.add_request(Instant::now(), protocol, request, send_back);
+                        connection.add_request(ffi::Instant::now(), protocol, request, send_back);
                     }
                     ToConnection::OpenNotifications => {
                         // TODO: finish
                         let id = connection.open_notifications_substream(
-                            Instant::now(),
+                            ffi::Instant::now(),
                             "/dot/block-announces/1".to_string(),  // TODO: should contain correct ProtocolId
                             Vec::new(), // TODO:
                             ()
@@ -577,6 +577,8 @@ async fn perform_handshake(
     let timeout = ffi::Delay::new(Duration::from_secs(20));
     futures::pin_mut!(timeout);
 
+    let mut write_buffer = vec![0; 4096];
+
     loop {
         match handshake {
             connection::handshake::Handshake::Success {
@@ -589,22 +591,18 @@ async fn perform_handshake(
                 handshake = key.resume(noise_key).into()
             }
             connection::handshake::Handshake::Healthy(healthy) => {
-                let (read_buffer, write_buffer) = match websocket.buffers() {
-                    Ok(v) => v,
-                    Err(_) => return Err(HandshakeError::Io),
-                };
-
                 // Update the handshake state machine with the received data, and writes in the
-                // write buffer..
+                // write buffer.
                 let (new_state, num_read, num_written) = {
-                    let read_buffer = read_buffer.ok_or(HandshakeError::UnexpectedEof)?.0;
-                    // `write_buffer` can only be `None` if `close` has been manually called,
-                    // which never happens.
-                    let write_buffer = write_buffer.unwrap();
-                    healthy.read_write(read_buffer, write_buffer)?
+                    let read_buffer = websocket
+                        .read_buffer()
+                        .await
+                        .ok_or(HandshakeError::UnexpectedEof)?;
+                    healthy.read_write(read_buffer, (&mut write_buffer, &mut []))?
                 };
                 handshake = new_state;
-                websocket.advance(num_read, num_written);
+                websocket.send(&write_buffer[..num_written]);
+                websocket.advance_read_cursor(num_read);
 
                 if num_read != 0 || num_written != 0 {
                     continue;
@@ -613,7 +611,7 @@ async fn perform_handshake(
                 // Wait either for something to happen on the socket, or for the timeout to
                 // trigger.
                 {
-                    let process_future = websocket.as_mut().process();
+                    let process_future = websocket.as_mut().read_buffer();
                     futures::pin_mut!(process_future);
                     match future::select(process_future, &mut timeout).await {
                         future::Either::Left(_) => {}
