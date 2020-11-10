@@ -233,8 +233,15 @@ impl NetworkService {
         // same time.
         let guarded = &mut **guarded;
 
+        let mut num = 0;
+
         // TODO: very wip
         while let Some(mut node) = guarded.peerset.random_not_connected(0) {
+            num += 1;
+            if num >= 15 {
+                break;
+            }
+
             // TODO: collecting into a Vec, annoying
             for address in node.known_addresses().cloned().collect::<Vec<_>>() {
                 let websocket = match multiaddr_to_url(&address) {

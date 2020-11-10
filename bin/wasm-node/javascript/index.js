@@ -56,7 +56,7 @@ async function initialize(chain_specs) {
       unix_time_ms: () => Date.now(),
 
       // Must return the value of a monotonic clock in milliseconds.
-      monotonic_clock_ms: () => performance.now(),
+      monotonic_clock_ms: () => require('performance-now')(),
 
       // Must call `timer_finished` after the given number of milliseconds has elapsed.
       start_timer: (id, ms) => {
@@ -86,7 +86,7 @@ async function initialize(chain_specs) {
             module.exports.websocket_closed(id);
           };
           websocket.onmessage = (msg) => {
-            let message = Buffer.from(msg);
+            let message = Buffer.from(msg.data);
             let ptr = module.exports.alloc(message.length);
             message.copy(Buffer.from(module.exports.memory.buffer), ptr);
             module.exports.websocket_message(id, ptr, message.length);
