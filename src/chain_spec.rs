@@ -34,15 +34,14 @@
 //! - Multiple other miscellaneous information.
 //!
 
-use alloc::string::String;
-use core::num::NonZeroU64;
 use crate::chain::chain_information::{
     BabeEpochInformation, ChainInformation, ChainInformationConsensus,
 };
+use alloc::string::String;
+use core::num::NonZeroU64;
 
 mod light_sync_state;
 mod structs;
-
 
 pub struct LightSyncState {
     inner: light_sync_state::DecodedLightSyncState,
