@@ -16,10 +16,10 @@
   "scripts": {
     "prepublishOnly": "./prepare.sh",
     "prestart": "./prepare.sh",
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node test.js"
   },
   "dependencies": {
-    "atob": "^2.1.2",
     "buffer": "^6.0.1",
     "randombytes": "^2.1.0",
     "websocket": "^1.0.32"
