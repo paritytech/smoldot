@@ -344,7 +344,7 @@ enum FromBackground {
 
 /// Asynchronous task managing a specific WebSocket connection.
 async fn connection_task(
-    websocket: impl Future<Output = Result<ffi::WebSocket, ()>>,
+    websocket: impl Future<Output = Result<Pin<Box<ffi::WebSocket>>, ()>>,
     is_initiator: bool,
     noise_key: Arc<connection::NoiseKey>,
     connection_id: peerset::PendingId,
@@ -352,7 +352,7 @@ async fn connection_task(
     mut to_connection: mpsc::Receiver<ToConnection>,
 ) {
     // Finishing any ongoing connection process.
-    let websocket = match websocket.await {
+    let mut websocket = match websocket.await {
         Ok(s) => s,
         Err(_) => {
             let _ = to_foreground
@@ -423,9 +423,16 @@ async fn connection_task(
     // Set to a timer after which the state machine of the connection needs an update.
     let mut poll_after: ffi::Delay;
 
+    let mut write_buffer = vec![0; 4096];
+
     loop {
-        let (read_buffer, write_buffer) = match websocket.buffers() {
-            Ok(b) => b,
+        let read_buffer = websocket.read_buffer().now_or_never().unwrap_or(Some(&[]));
+
+        let now = ffi::Instant::now();
+
+        let read_write = match connection.read_write(now, read_buffer, (&mut write_buffer, &mut []))
+        {
+            Ok(rw) => rw,
             Err(_) => {
                 let _ = to_foreground
                     .send(FromBackground::Disconnected { connection_id })
@@ -433,19 +440,6 @@ async fn connection_task(
                 return;
             }
         };
-
-        let now = ffi::Instant::now();
-
-        let read_write =
-            match connection.read_write(now, read_buffer.map(|b| b.0), write_buffer.unwrap()) {
-                Ok(rw) => rw,
-                Err(_) => {
-                    let _ = to_foreground
-                        .send(FromBackground::Disconnected { connection_id })
-                        .await;
-                    return;
-                }
-            };
         connection = read_write.connection;
 
         if let Some(wake_up) = read_write.wake_up_after {
@@ -459,7 +453,9 @@ async fn connection_task(
             poll_after = ffi::Delay::new(Duration::from_secs(3600));
         }
 
-        websocket.advance(read_write.read_bytes, read_write.written_bytes);
+        websocket.send(&write_buffer[..read_write.written_bytes]);
+
+        websocket.advance_read_cursor(read_write.read_bytes);
 
         let has_event = read_write.event.is_some();
 
@@ -487,7 +483,7 @@ async fn connection_task(
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {
-            _ = websocket.as_mut().process().fuse() => {},
+            _ = websocket.read_buffer().fuse() => {},
             timeout = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
                 // Nothing to do, but guarantees that we loop again.
             },
@@ -566,7 +562,7 @@ fn multiaddr_to_url(addr: &Multiaddr) -> Result<String, ()> {
 /// Panics if the `websocket` is closed in the writing direction.
 ///
 async fn perform_handshake(
-    websocket: &mut ffi::WebSocket,
+    mut websocket: &mut Pin<Box<ffi::WebSocket>>,
     noise_key: &connection::NoiseKey,
     is_initiator: bool,
 ) -> Result<(connection::established::ConnectionPrototype, PeerId), HandshakeError> {
@@ -596,7 +592,8 @@ async fn perform_handshake(
                 let (new_state, num_read, num_written) = {
                     let read_buffer = websocket
                         .read_buffer()
-                        .await
+                        .now_or_never()
+                        .unwrap_or(Some(&[]))
                         .ok_or(HandshakeError::UnexpectedEof)?;
                     healthy.read_write(read_buffer, (&mut write_buffer, &mut []))?
                 };
@@ -611,7 +608,7 @@ async fn perform_handshake(
                 // Wait either for something to happen on the socket, or for the timeout to
                 // trigger.
                 {
-                    let process_future = websocket.as_mut().read_buffer();
+                    let process_future = websocket.read_buffer();
                     futures::pin_mut!(process_future);
                     match future::select(process_future, &mut timeout).await {
                         future::Either::Left(_) => {}

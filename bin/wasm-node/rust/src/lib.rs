@@ -115,10 +115,10 @@ pub async fn start_client(chain_spec: String) {
             network_message = network_service.next_event().fuse() => {
                 match network_message {
                     network_service::Event::Connected(peer_id) => {
-                        to_sync_tx.send(ToSync::NewPeer(peer_id));
+                        to_sync_tx.send(ToSync::NewPeer(peer_id)).await;
                     }
                     network_service::Event::Disconnected(peer_id) => {
-                        to_sync_tx.send(ToSync::PeerDisconnected(peer_id));
+                        to_sync_tx.send(ToSync::PeerDisconnected(peer_id)).await;
                     }
                 }
             }

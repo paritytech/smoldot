@@ -130,7 +130,7 @@ impl Delay {
 impl Future for Delay {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         Future::poll(Pin::new(&mut self.rx), cx).map(|v| v.unwrap())
     }
 }
@@ -231,7 +231,7 @@ pub struct WebSocket {
 
 impl WebSocket {
     /// Connects to the given URL. Returns a [`WebSocket`] on success.
-    pub async fn connect(url: &str) -> Result<Pin<Box<Self>>, ()> {
+    pub fn connect(url: &str) -> impl Future<Output = Result<Pin<Box<Self>>, ()>> {
         let mut pointer = Box::pin(WebSocket {
             id: None,
             open: false,
@@ -252,32 +252,38 @@ impl WebSocket {
             )
         };
 
-        if ret_code != 0 {
-            return Err(());
-        }
-
-        pointer.id = Some(id);
-
-        future::poll_fn(|cx| {
-            if pointer.closed || pointer.open {
-                return Poll::Ready(());
+        async move {
+            if ret_code != 0 {
+                return Err(());
             }
-            if pointer
-                .waker
-                .as_ref()
-                .map_or(true, |w| !cx.waker().will_wake(w))
-            {
-                pointer.waker = Some(cx.waker().clone());
-            }
-            Poll::Pending
-        })
-        .await;
 
-        if pointer.open {
-            Ok(pointer)
-        } else {
-            debug_assert!(pointer.closed);
-            Err(())
+            unsafe {
+                Pin::get_unchecked_mut(pointer.as_mut()).id = Some(id);
+            }
+
+            future::poll_fn(|cx| {
+                if pointer.closed || pointer.open {
+                    return Poll::Ready(());
+                }
+                if pointer
+                    .waker
+                    .as_ref()
+                    .map_or(true, |w| !cx.waker().will_wake(w))
+                {
+                    unsafe {
+                        Pin::get_unchecked_mut(pointer.as_mut()).waker = Some(cx.waker().clone());
+                    }
+                }
+                Poll::Pending
+            })
+            .await;
+
+            if pointer.open {
+                Ok(pointer)
+            } else {
+                debug_assert!(pointer.closed);
+                Err(())
+            }
         }
     }
 
@@ -287,7 +293,7 @@ impl WebSocket {
     /// data arrives.
     ///
     /// Returns `None` if the WebSocket has been closed.
-    pub async fn read_buffer<'a>(&'a mut self) -> Option<&'a [u8]> {
+    pub async fn read_buffer<'a>(self: &'a mut Pin<Box<Self>>) -> Option<&'a [u8]> {
         future::poll_fn(|cx| {
             if !self.messages_queue.is_empty() || self.closed {
                 return Poll::Ready(());
@@ -298,7 +304,9 @@ impl WebSocket {
                 .as_ref()
                 .map_or(true, |w| !cx.waker().will_wake(w))
             {
-                self.waker = Some(cx.waker().clone());
+                unsafe {
+                    Pin::get_unchecked_mut(self.as_mut()).waker = Some(cx.waker().clone());
+                }
             }
             Poll::Pending
         })
@@ -323,14 +331,16 @@ impl WebSocket {
     /// Panics if `bytes` is larger than the size of the buffer returned by
     /// [`WebSocket::read_buffer`].
     ///
-    pub fn advance_read_cursor(&mut self, bytes: usize) {
-        self.messages_queue_first_offset += bytes;
+    pub fn advance_read_cursor(self: &mut Pin<Box<Self>>, bytes: usize) {
+        let this = unsafe { Pin::get_unchecked_mut(self.as_mut()) };
 
-        if let Some(buffer) = self.messages_queue.front() {
-            assert!(self.messages_queue_first_offset <= buffer.len());
-            if self.messages_queue_first_offset == buffer.len() {
-                self.messages_queue.pop_front();
-                self.messages_queue_first_offset = 0;
+        this.messages_queue_first_offset += bytes;
+
+        if let Some(buffer) = this.messages_queue.front() {
+            assert!(this.messages_queue_first_offset <= buffer.len());
+            if this.messages_queue_first_offset == buffer.len() {
+                this.messages_queue.pop_front();
+                this.messages_queue_first_offset = 0;
             }
         } else {
             assert_eq!(bytes, 0);
@@ -338,10 +348,12 @@ impl WebSocket {
     }
 
     /// Queue of the given buffer as a WebSocket binary frame.
-    pub fn send(&mut self, data: &[u8]) {
+    pub fn send(self: &mut Pin<Box<Self>>, data: &[u8]) {
         unsafe {
+            let this = unsafe { Pin::get_unchecked_mut(self.as_mut()) };
+
             bindings::websocket_send(
-                self.id.unwrap(),
+                this.id.unwrap(),
                 u32::try_from(data.as_ptr() as usize).unwrap(),
                 u32::try_from(data.len()).unwrap(),
             );
