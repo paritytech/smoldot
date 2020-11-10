@@ -35,13 +35,14 @@
 //!
 
 use alloc::string::String;
+use core::num::NonZeroU64;
+use crate::chain::chain_information::{
+    BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+};
 
 mod light_sync_state;
 mod structs;
 
-use crate::chain::chain_information::{
-    BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-};
 
 pub struct LightSyncState {
     inner: light_sync_state::DecodedLightSyncState,
@@ -90,7 +91,7 @@ impl LightSyncState {
         ChainInformation {
             finalized_block_header: self.inner.finalized_block_header.clone(),
             consensus: ChainInformationConsensus::Babe {
-                slots_per_epoch: std::num::NonZeroU64::new(prev_epoch.duration).unwrap(),
+                slots_per_epoch: NonZeroU64::new(prev_epoch.duration).unwrap(),
                 finalized_block_epoch_information: Some(convert_epoch(prev_epoch)),
                 finalized_next_epoch_transition: convert_epoch(current_epoch),
             },
