@@ -27,6 +27,8 @@
 // TODO: doc
 // TODO: re-review this once finished
 
+use crate::ffi;
+
 use core::pin::Pin;
 use futures::prelude::*;
 use std::{io, sync::Arc};
@@ -191,4 +193,78 @@ fn multiaddr_to_url(addr: &Multiaddr) -> Result<String, ()> {
         }
         _ => Err(()),
     }
+}
+
+/// Drives the handshake of the given connection.
+///
+/// # Panic
+///
+/// Panics if the `tcp_socket` is closed in the writing direction.
+///
+async fn perform_handshake(
+    tcp_socket: &mut ffi::WebSocket,
+    noise_key: &connection::NoiseKey,
+    is_initiator: bool,
+) -> Result<(connection::established::ConnectionPrototype, PeerId), HandshakeError> {
+    let mut handshake = connection::handshake::Handshake::new(is_initiator);
+
+    // Delay that triggers after we consider the remote is considered unresponsive.
+    // The constant here has been chosen arbitrary.
+    let timeout = futures_timer::Delay::new(Duration::from_secs(20));
+    futures::pin_mut!(timeout);
+
+    loop {
+        match handshake {
+            connection::handshake::Handshake::Success {
+                remote_peer_id,
+                connection,
+            } => {
+                break Ok((connection, remote_peer_id));
+            }
+            connection::handshake::Handshake::NoiseKeyRequired(key) => {
+                handshake = key.resume(noise_key).into()
+            }
+            connection::handshake::Handshake::Healthy(healthy) => {
+                let (read_buffer, write_buffer) = match tcp_socket.buffers() {
+                    Ok(v) => v,
+                    Err(_) => return Err(HandshakeError::Io),
+                };
+
+                // Update the handshake state machine with the received data, and writes in the
+                // write buffer..
+                let (new_state, num_read, num_written) = {
+                    let read_buffer = read_buffer.ok_or(HandshakeError::UnexpectedEof)?.0;
+                    // `write_buffer` can only be `None` if `close` has been manually called,
+                    // which never happens.
+                    let write_buffer = write_buffer.unwrap();
+                    healthy.read_write(read_buffer, write_buffer)?
+                };
+                handshake = new_state;
+                tcp_socket.advance(num_read, num_written);
+
+                if num_read != 0 || num_written != 0 {
+                    continue;
+                }
+
+                // Wait either for something to happen on the socket, or for the timeout to
+                // trigger.
+                {
+                    let process_future = tcp_socket.as_mut().process();
+                    futures::pin_mut!(process_future);
+                    match future::select(process_future, &mut timeout).await {
+                        future::Either::Left(_) => {}
+                        future::Either::Right(_) => return Err(HandshakeError::Timeout),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, derive_more::Display, derive_more::From)]
+enum HandshakeError {
+    Io,
+    Timeout,
+    UnexpectedEof,
+    Protocol(connection::handshake::HandshakeError),
 }

@@ -17,13 +17,18 @@
 
 use core::{
     convert::TryFrom as _,
+    fmt,
     future::Future,
     pin::Pin,
     slice,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
-use std::sync::{atomic, Arc, Mutex};
+use futures::prelude::*;
+use std::{
+    collections::VecDeque,
+    sync::{atomic, Arc, Mutex},
+};
 
 pub mod bindings;
 
@@ -41,6 +46,7 @@ pub(crate) fn throw(message: String) -> ! {
     }
 }
 
+/// Returns the duration elapsed since the UNIX epoch, ignoring leap seconds.
 pub(crate) fn unix_time() -> Duration {
     Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
 }
@@ -104,12 +110,30 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     unsafe { bindings::start_timer(timer_id, milliseconds as f64) }
 }
 
-pub struct WebSocket {}
+/// WebSocket connected to a target.
+pub struct WebSocket {
+    /// If `Some`, [`bindings::websocket_close`] must be called. Set to a value after
+    /// [`bindings::websocket_new`] returns success.
+    id: Option<u32>,
+    /// True if [`bindings::websocket_open`] has been called.
+    open: bool,
+    /// True if [`bindings::websocket_closed`] has been called.
+    closed: bool,
+    /// List of messages received through [`bindings::websocket_message`].
+    messages_queue: VecDeque<Box<[u8]>>,
+    /// Position of the read cursor within the first element of [`WebSocket::messages_queue`].
+    messages_queue_first_offset: usize,
+    /// Waker to wake up whenever one of the fields above is modified.
+    waker: Option<Waker>,
+}
 
 impl WebSocket {
-    pub fn new(url: &str) -> Result<Pin<Box<Self>>, ()> {
-        let mut pointer = Box::pin(WebSocket {});
+    /// Connects to the given URL. Returns a [`WebSocket`] on success.
+    pub async fn connect(url: &str) -> Result<Pin<Box<Self>>, ()> {
+        let mut pointer = Box::pin(WebSocket { id: None });
+
         let id = u32::try_from(&*pointer as *const WebSocket as usize).unwrap();
+
         let ret_code = unsafe {
             bindings::websocket_new(
                 id,
@@ -117,10 +141,101 @@ impl WebSocket {
                 u32::try_from(url.as_bytes().len()).unwrap(),
             )
         };
-        if ret_code == 0 {
+
+        if ret_code != 0 {
+            return Err(());
+        }
+
+        pointer.id = Some(id);
+
+        future::poll_fn(|cx| {
+            if pointer.closed || pointer.open {
+                return Poll::Ready(());
+            }
+            if pointer
+                .waker
+                .as_ref()
+                .map_or(true, |w| !cx.waker().will_wake(w))
+            {
+                pointer.waker = Some(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await;
+
+        if pointer.open {
             Ok(pointer)
         } else {
+            debug_assert!(pointer.closed);
             Err(())
+        }
+    }
+
+    /// Returns a buffer containing data received on the WebSocket.
+    ///
+    /// Never returns an empty buffer. If no data is available, this function waits until more
+    /// data arrives.
+    ///
+    /// Returns `None` if the WebSocket has been closed.
+    pub async fn read_buffer(&mut self) -> Option<&[u8]> {
+        future::poll_fn(move |cx| {
+            if let Some(buffer) = self.messages_queue.first() {
+                debug_assert!(self.messages_queue_first_offset < buffer.len());
+                return Poll::Ready(&buffer[self.messages_queue_first_offset..]);
+            }
+
+            if self.closed {
+                return Poll::Ready(None);
+            }
+
+            if self
+                .waker
+                .as_ref()
+                .map_or(true, |w| !cx.waker().will_wake(w))
+            {
+                self.waker = Some(cx.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    /// Advances the read cursor by the given amount of bytes. The first `bytes` will no longer
+    /// be returned by [`WebSocket::read_buffer`] the next time it is called.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `bytes` is larger than the size of the buffer returned by
+    /// [`WebSocket::read_buffer`].
+    ///
+    pub fn advance_read_cursor(&mut self, bytes: usize) {
+        self.messages_queue_first_offset += bytes;
+
+        if let Some(buffer) = self.messages_queue.first() {
+            assert!(self.messages_queue_first_offset <= buffer.len());
+            if self.messages_queue_first_offset == buffer.len() {
+                self.messages_queue.pop_front();
+            }
+        } else {
+            assert_eq!(bytes, 0);
+        };
+    }
+}
+
+impl fmt::Debug for WebSocket {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("WebSocket")
+            .field(self.id.as_ref().unwrap())
+            .finish()
+    }
+}
+
+impl Drop for WebSocket {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            unsafe {
+                bindings::websocket_close(id);
+            }
         }
     }
 }
@@ -153,8 +268,7 @@ fn init(
         ))
     };
 
-    // TODO: don't unwrap
-    let chain_specs = String::from_utf8(Vec::from(chain_specs)).unwrap();
+    let chain_specs = String::from_utf8(Vec::from(chain_specs)).expect("non-utf8 chain specs");
 
     let database_content = if database_content_ptr != 0 {
         Some(unsafe {
@@ -181,6 +295,10 @@ fn timer_finished(timer_id: u32) {
 
 fn websocket_open(id: u32) {
     let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
+    websocket.open = true;
+    if let Some(waker) = websocket.waker.take() {
+        waker.wake();
+    }
 }
 
 fn websocket_message(id: u32, ptr: u32, len: u32) {
@@ -191,8 +309,24 @@ fn websocket_message(id: u32, ptr: u32, len: u32) {
 
     let message: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+
+    if websocket.messages_queue.is_empty() {
+        websocket.messages_queue_first_offset = 0;
+    }
+
+    // TODO: add some limit to `messages_queue`, to avoid DoS attacks?
+
+    websocket.messages_queue.push_back(message);
+
+    if let Some(waker) = websocket.waker.take() {
+        waker.wake();
+    }
 }
 
 fn websocket_closed(id: u32) {
     let websocket = unsafe { &mut *(usize::try_from(id).unwrap() as *mut WebSocket) };
+    websocket.closed = true;
+    if let Some(waker) = websocket.waker.take() {
+        waker.wake();
+    }
 }

@@ -54,7 +54,7 @@ async function initialize(chain_specs) {
 
       // Must return the UNIX time in milliseconds.
       unix_time_ms: () => Date.now(),
-    
+
       // Must return the value of a monotonic clock in milliseconds.
       monotonic_clock_ms: () => performance.now(),
 
@@ -65,8 +65,8 @@ async function initialize(chain_specs) {
         }, ms)
       },
 
-      // Must create a new WebSocket object and return an opaque identifier, which for this
-      // implementation is the index in `websockets`.
+      // Must create a new WebSocket object. This implementation stores the created object in
+      // `websockets`.
       websocket_new: (id, url_ptr, url_len) => {
         try {
           let url = Buffer.from(module.exports.memory.buffer)
@@ -95,7 +95,7 @@ async function initialize(chain_specs) {
           websockets[id] = websocket;
           return 0;
 
-        } catch(error) {
+        } catch (error) {
           return 1;
         }
       },
@@ -160,7 +160,7 @@ async function initialize(chain_specs) {
         mem.writeUInt32LE(total_length, out_ptr);
         return 0;
       },
-    
+
       // It's unclear how to properly implement yielding, but a no-op works fine as well.
       sched_yield: () => {
         return 0;
