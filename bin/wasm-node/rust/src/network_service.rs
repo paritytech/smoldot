@@ -256,8 +256,6 @@ impl NetworkService {
                     rx,
                 )));
             }
-
-            break;
         }
     }
 }
@@ -530,26 +528,26 @@ fn multiaddr_to_url(addr: &Multiaddr) -> Result<String, ()> {
 
     match (proto1, proto2, proto3) {
         (Protocol::Ip4(ip), Protocol::Tcp(port), Protocol::Ws(url)) => {
-            Ok(format!("ws://{}:{}/{}", ip, port, url))
+            Ok(format!("ws://{}:{}{}", ip, port, url))
         }
         (Protocol::Ip6(ip), Protocol::Tcp(port), Protocol::Ws(url)) => {
-            Ok(format!("ws://[{}]:{}/{}", ip, port, url))
+            Ok(format!("ws://[{}]:{}{}", ip, port, url))
         }
         (Protocol::Ip4(ip), Protocol::Tcp(port), Protocol::Wss(url)) => {
-            Ok(format!("wss://{}:{}/{}", ip, port, url))
+            Ok(format!("wss://{}:{}{}", ip, port, url))
         }
         (Protocol::Ip6(ip), Protocol::Tcp(port), Protocol::Wss(url)) => {
-            Ok(format!("wss://[{}]:{}/{}", ip, port, url))
+            Ok(format!("wss://[{}]:{}{}", ip, port, url))
         }
         (Protocol::Dns(domain), Protocol::Tcp(port), Protocol::Ws(url))
         | (Protocol::Dns4(domain), Protocol::Tcp(port), Protocol::Ws(url))
         | (Protocol::Dns6(domain), Protocol::Tcp(port), Protocol::Ws(url)) => {
-            Ok(format!("ws://{}:{}/{}", domain, port, url))
+            Ok(format!("ws://{}:{}{}", domain, port, url))
         }
         (Protocol::Dns(domain), Protocol::Tcp(port), Protocol::Wss(url))
         | (Protocol::Dns4(domain), Protocol::Tcp(port), Protocol::Wss(url))
         | (Protocol::Dns6(domain), Protocol::Tcp(port), Protocol::Wss(url)) => {
-            Ok(format!("wss://{}:{}/{}", domain, port, url))
+            Ok(format!("wss://{}:{}{}", domain, port, url))
         }
         _ => Err(()),
     }
