@@ -30,8 +30,7 @@ extern "C" {
     /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
     /// leap seconds.
     ///
-    /// This is typically implemented by calling `Date.now()` and converting the result to an
-    /// integer.
+    /// This is typically implemented by calling `Date.now()`.
     ///
     /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now
     ///

@@ -1,6 +1,6 @@
 {
   "name": "substrate-lite",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Light client that connects to Polkadot and Substrate-based blockchains",
   "author": "Parity Technologies <admin@parity.io>",
   "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
@@ -21,7 +21,7 @@
   "dependencies": {
     "atob": "^2.1.2",
     "buffer": "^6.0.1",
-    "crypto-browserify": "^3.12.0",
+    "randombytes": "^2.1.0",
     "websocket": "^1.0.32"
   }
 }

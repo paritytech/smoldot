@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 const Buffer = require('buffer/').Buffer;  // Note: the trailing slash is important in order to use the NodeJS core module named "buffer".
-const crypto = require('crypto-browserify');
+const randombytes = require('randombytes');
 const W3CWebSocket = require('websocket').w3cwebsocket;
 
 // TODO: this should all be tested
@@ -54,7 +54,8 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
     // Need to fill the buffer described by `ptr` and `len` with random data.
     // This data will be used in order to generate secrets. Do not use a dummy implementation!
     random_get: (ptr, len) => {
-      crypto.randomFillSync(new Uint8Array(module.exports.memory.buffer), ptr, len);
+      let bytes = randombytes(len);
+      bytes.copy(Buffer.from(module.exports.memory.buffer), ptr);
       return 0;
     },
 

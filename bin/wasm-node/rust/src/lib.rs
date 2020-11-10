@@ -96,6 +96,8 @@ pub async fn start_client(chain_spec: String) {
         .await,
     );
 
+    std::mem::forget(to_sync_tx);
+
     /*spawn_task(async move {
         while let Some(info) = to_db_save_rx.next().await {
             // TODO: how to handle errors?
@@ -186,7 +188,6 @@ async fn start_sync(
     );
 
     async move {
-        println!("started");
         let mut peers_source_id_map = HashMap::new();
         let mut block_requests_finished = stream::FuturesUnordered::new();
 
@@ -255,7 +256,9 @@ async fn start_sync(
                 message = to_sync.next() => {
                     let message = match message {
                         Some(m) => m,
-                        None => return,
+                        None => {
+                            return
+                        },
                     };
 
                     match message {
