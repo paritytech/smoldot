@@ -96,12 +96,12 @@ pub async fn start_client(chain_spec: String) {
         .await,
     );
 
-    spawn_task(async move {
+    /*spawn_task(async move {
         while let Some(info) = to_db_save_rx.next().await {
             // TODO: how to handle errors?
             //local_storage.set_chain_information((&info).into()).unwrap();
         }
-    });
+    });*/
 }
 
 /*impl BrowserLightClient {
@@ -186,6 +186,7 @@ async fn start_sync(
     );
 
     async move {
+        println!("started");
         let mut peers_source_id_map = HashMap::new();
         let mut block_requests_finished = stream::FuturesUnordered::new();
 
@@ -353,7 +354,9 @@ fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
                     future.as_mut(),
                     &mut Context::from_waker(&futures::task::waker_ref(&arc_self)),
                 ) {
-                    Poll::Ready(()) => arc_self.done.store(true, atomic::Ordering::SeqCst),
+                    Poll::Ready(()) => {
+                        arc_self.done.store(true, atomic::Ordering::SeqCst);
+                    }
                     Poll::Pending => {}
                 }
             })
@@ -366,5 +369,5 @@ fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
         future: Mutex::new(Box::pin(future)),
     });
 
-    futures::task::ArcWake::wake_by_ref(&waker);
+    futures::task::ArcWake::wake(waker);
 }

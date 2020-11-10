@@ -43,9 +43,9 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
     unix_time_ms: () => Math.round(Date.now()),
     monotonic_clock_ms: () => performance.now(),
     start_timer: (id, ms) => {
-      setImmediate(() => {
+      setTimeout(() => {
         module.exports.timer_finished(id);
-      })
+      }, ms)
     },
   },
 
@@ -78,7 +78,7 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
         total_length += buf_len;
       }
 
-      // TODO: ?
+      // TODO: keep this line?
       console.log(to_write);
 
       // Need to write in `out_ptr` how much data was "written".
@@ -91,9 +91,18 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
       return 0;
     },
 
+    // Used by Rust in catastrophic situations, such as a double panic.
+    proc_exit: (ret_code) => {
+      // This should ideally also clean up all resources (such as WebSockets and active timers),
+      // but it is assumed that this function isn't going to be called anyway.
+      throw "proc_exit called: " + ret_code;
+    },
+
+    // Return the number of environment variables and the total size of all environment variables.
+    // This is called in order to initialize buffers before `environ_get`.
     environ_sizes_get: (argc_out, argv_buf_size_out) => {
       let total_len = 0;
-      env_vars.forEach(e => total_len += Buffer.byteLength(e, 'utf8'));
+      env_vars.forEach(e => total_len += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
 
       let mem = Buffer.from(module.exports.memory.buffer);
       mem.writeInt32LE(env_vars.length, argc_out);
@@ -101,6 +110,9 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
       return 0;
     },
 
+    // Write the environment variables to the given pointers.
+    // `argv` must be written with a list of pointers to environment variables, and `argv_buf` is
+    // a buffer where to actually write the environment variables.
     environ_get: (argv, argv_buf) => {
       let mem = Buffer.from(module.exports.memory.buffer);
 
@@ -112,18 +124,15 @@ WebAssembly.instantiate(new Uint8Array(Buffer.from(require('./autogen/wasm.js'),
 
         mem.writeInt32LE(argv_buf + argv_buf_pos, argv + argv_pos);
         argv_pos += 4;
+
         mem.write(env_var, argv_buf + argv_buf_pos, env_var_len, 'utf8');
         argv_buf_pos += env_var_len;
-        mem.writeInt32LE(0, argv_buf + argv_buf_pos);
+        mem.writeUInt8(0, argv_buf + argv_buf_pos);
         argv_buf_pos += 1;
       });
 
       return 0;
     },
-
-    proc_exit: (ret_code) => {
-      throw "proc_exit called: " + ret_code;
-    }
   },
 }).then(result => {
   module = result.instance;
