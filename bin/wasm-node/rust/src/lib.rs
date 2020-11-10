@@ -26,18 +26,19 @@ use futures::{
 };
 use std::{
     collections::HashMap,
-    num::{NonZeroU32, NonZeroU64},
-    sync::Arc,
+    convert::TryFrom as _,
+    num::NonZeroU32,
+    pin::Pin,
+    sync::{atomic, Arc, Mutex},
+    task::{Context, Poll},
     time::Duration,
 };
 use substrate_lite::{
     chain,
-    chain::chain_information::babe,
     chain::sync::headers_optimistic,
-    chain_spec, database, header, json_rpc,
+    chain_spec,
     network::{self, protocol},
 };
-use wasm_bindgen::prelude::*;
 
 pub mod ffi;
 mod network_service;
@@ -46,11 +47,6 @@ mod network_service;
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
-#[wasm_bindgen]
-pub struct BrowserLightClient {
-    chain_spec: chain_spec::ChainSpec,
-}
-
 // TODO: several places in this module where we unwrap when we shouldn't
 
 /// Starts a client running the given chain specifications.
@@ -58,59 +54,38 @@ pub struct BrowserLightClient {
 /// > **Note**: This function returns a `Result`. The return value according to the JavaScript
 /// >           function is what is in the `Ok`. If an `Err` is returned, a JavaScript exception
 /// >           is thrown.
-#[wasm_bindgen]
-pub async fn start_client(chain_spec: String) -> Result<BrowserLightClient, JsValue> {
-    #[cfg(debug_assertions)]
-    console_error_panic_hook::set_once();
+pub async fn start_client(chain_spec: String) {
+    std::panic::set_hook(Box::new(|info| {
+        throw(info.to_string());
+    }));
+
+    // Fool-proof check to make sure that randomness is properly implemented.
+    assert_ne!(rand::random::<u64>(), 0);
+    assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
     let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&chain_spec) {
         Ok(cs) => cs,
-        Err(err) => {
-            let msg = format!("Error while opening chain specs: {}", err);
-            return Err(JsValue::from_str(&msg));
-        }
-    };
-
-    // Open the browser's local storage.
-    // See https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API
-    // Used to store information about the chain.
-    let local_storage = match database::local_storage_light::LocalStorage::open().await {
-        Ok(ls) => ls,
-        Err(database::local_storage_light::OpenError::LocalStorageNotSupported(err)) => {
-            return Err(err)
-        }
-        Err(database::local_storage_light::OpenError::NoWindow) => {
-            return Err(JsValue::from_str("No window object available"))
-        }
+        Err(err) => throw(format!("Error while opening chain specs: {}", err)),
     };
 
     // Load the information about the chain from the local storage, or build the information of
     // the genesis block.
-    let chain_information = match local_storage.chain_information() {
-        Ok(Some(i)) => i,
-        Err(database::local_storage_light::AccessError::StorageAccess(err)) => {
-            return Err(err.into())
-        }
-        // TODO: log why storage access failed?
-        Err(database::local_storage_light::AccessError::Corrupted(_)) | Ok(None) => {
-            chain::chain_information::ChainInformation::from_genesis_storage(
-                chain_spec.genesis_storage(),
-            )
-            .unwrap()
-        }
-    };
+    let chain_information = chain::chain_information::ChainInformation::from_genesis_storage(
+        chain_spec.genesis_storage(),
+    )
+    .unwrap();
 
     let (to_sync_tx, to_sync_rx) = mpsc::channel(64);
     let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
 
     let network_service = network_service::NetworkService::new(network_service::Config {
-        tasks_executor: Box::new(|fut| wasm_bindgen_futures::spawn_local(fut)),
+        tasks_executor: Box::new(|fut| spawn_task(fut)),
         bootstrap_nodes: Vec::new(), // TODO:
     })
     .await
     .unwrap();
 
-    wasm_bindgen_futures::spawn_local(
+    spawn_task(
         start_sync(
             &chain_spec,
             chain_information,
@@ -121,18 +96,15 @@ pub async fn start_client(chain_spec: String) -> Result<BrowserLightClient, JsVa
         .await,
     );
 
-    wasm_bindgen_futures::spawn_local(async move {
+    spawn_task(async move {
         while let Some(info) = to_db_save_rx.next().await {
             // TODO: how to handle errors?
-            local_storage.set_chain_information((&info).into()).unwrap();
+            //local_storage.set_chain_information((&info).into()).unwrap();
         }
     });
-
-    Ok(BrowserLightClient { chain_spec })
 }
 
-#[wasm_bindgen]
-impl BrowserLightClient {
+/*impl BrowserLightClient {
     /// Starts an RPC request. Returns a `Promise` containing the result of that request.
     ///
     /// > **Note**: This function returns a `Result`. The return value according to the JavaScript
@@ -190,7 +162,7 @@ impl BrowserLightClient {
 
         Ok(())
     }
-}
+}*/
 
 async fn start_sync(
     chain_spec: &chain_spec::ChainSpec,
@@ -253,33 +225,19 @@ async fn start_sync(
 
             // Verify blocks that have been fetched from queries.
             loop {
-                let unix_time = Duration::from_secs_f64(js_sys::Date::now() / 1000.0);
+                let unix_time = Duration::from_secs_f64(unsafe { ffi::unix_time_ms() } / 1000.0);
                 match sync.process_one(unix_time) {
                     headers_optimistic::ProcessOneOutcome::Idle => break,
                     headers_optimistic::ProcessOneOutcome::Updated {
                         best_block_hash,
                         best_block_number,
                         ..
-                    } => {
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "Chain state update: #{} {:?}",
-                            best_block_number, best_block_hash
-                        )));
-                    }
+                    } => {}
                     headers_optimistic::ProcessOneOutcome::Reset {
                         reason,
                         new_best_block_hash,
                         new_best_block_number,
-                    } => {
-                        web_sys::console::warn_1(&JsValue::from_str(&format!(
-                            "⚠️ Sync error ⚠️ {}",
-                            reason
-                        )));
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "Chain state update: #{} {:?}",
-                            new_best_block_number, new_best_block_hash
-                        )));
-                    }
+                    } => {}
                 }
 
                 // Since `process_one` is a CPU-heavy operation, looping until it is done can
@@ -350,4 +308,53 @@ async fn yield_once() {
         }
     })
     .await
+}
+
+fn throw(message: String) -> ! {
+    unsafe {
+        ffi::throw(u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(), u32::try_from(message.as_bytes().len()).unwrap());
+
+        // Note: we could theoretically use `unreachable_unchecked` here, but this relies on the
+        // fact that `ffi::throw` is correctly implemented, which isn't 100% guaranteed.
+        unreachable!();
+    }
+}
+
+fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
+    struct Waker {
+        wake_up_registered: atomic::AtomicBool,
+        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    }
+
+    impl futures::task::ArcWake for Waker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            if arc_self
+                .wake_up_registered
+                .swap(true, atomic::Ordering::Relaxed)
+            {
+                return;
+            }
+
+            let arc_self = arc_self.clone();
+            ffi::start_timer_wrap(Duration::from_millis(1), move || {
+                println!("enter");
+                let mut future = arc_self.future.try_lock().unwrap();
+                arc_self
+                    .wake_up_registered
+                    .store(false, atomic::Ordering::SeqCst);
+                let _ = Future::poll(
+                    future.as_mut(),
+                    &mut Context::from_waker(&futures::task::waker_ref(&arc_self)),
+                );
+                println!("leave");
+            })
+        }
+    }
+
+    let waker = Arc::new(Waker {
+        wake_up_registered: false.into(),
+        future: Mutex::new(Box::pin(future)),
+    });
+
+    futures::task::ArcWake::wake_by_ref(&waker);
 }
