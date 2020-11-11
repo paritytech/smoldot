@@ -20,15 +20,8 @@
 
 #![recursion_limit = "512"]
 
-use futures::{
-    channel::mpsc,
-    prelude::*,
-};
-use std::{
-    collections::HashMap,
-    num::NonZeroU32,
-    sync::Arc,
-};
+use futures::{channel::mpsc, prelude::*};
+use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
 use substrate_lite::{
     chain,
     chain::sync::headers_optimistic,
