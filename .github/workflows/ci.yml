@@ -39,7 +39,7 @@ jobs:
       run: cargo test --locked --workspace --all-features
 
   wasm-node-check:
-    name: Check browser node compilation
+    name: Check wasm node compilation
     runs-on: ubuntu-latest
     container:
       image: rust
@@ -52,9 +52,13 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - run: rustup target add wasm32-unknown-unknown
-    # TODO: figure why `--no-default-features` is needed
-    - run: cargo build --locked --package substrate-lite-js --release --target wasm32-unknown-unknown --no-default-features
+    - uses: actions/setup-node@v1
+      with:
+        node-version: '12'
+      # The Rust version used for compiling the Wasm node is pinned.
+    - run: rustup install --profile=minimal 1.47.0
+    - run: rustup target add --toolchain=1.47.0 wasm32-wasi
+    - run: cd bin/wasm-node/javascript && npm start
 
   check-features:
     name: Check that combination of features compiles

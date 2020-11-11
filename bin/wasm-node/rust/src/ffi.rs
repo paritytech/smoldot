@@ -445,12 +445,14 @@ fn json_rpc_send(ptr: u32, len: u32) {
 }
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
+// TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
 pub(crate) async fn next_json_rpc() -> Box<[u8]> {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
     lock.next().await.unwrap()
 }
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
+// TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
 pub(crate) fn emit_json_rpc_response(rpc: &str) {
     unsafe {
         bindings::json_rpc_respond(
