@@ -66,7 +66,9 @@ pub struct NetworkService {
     /// See [`Config::protocol_id`].
     protocol_id: String,
 
-    /// See [`Config::noise_key`].
+    /// Key used for the encryption layer.
+    /// This is a Noise static key, according to the Noise specifications.
+    /// Signed using the actual libp2p key.
     noise_key: Arc<connection::NoiseKey>,
 
     /// Receiver of events sent by background tasks.

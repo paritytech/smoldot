@@ -42,7 +42,7 @@ extern "C" {
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
     /// >           browsers don't support u64s, using it causes an unbypassable exception. See
-    /// >           also https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370.
+    /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
     pub fn unix_time_ms() -> f64;
 
     /// Must return the number of milliseconds that have passed since an arbitrary point in time.
@@ -57,7 +57,7 @@ extern "C" {
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
     /// >           browsers don't support u64s, using it causes an unbypassable exception. See
-    /// >           also https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370.
+    /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
     pub fn monotonic_clock_ms() -> f64;
 
     /// After `milliseconds` milliseconds have passed, must call [`timer_finished`] with the `id`
