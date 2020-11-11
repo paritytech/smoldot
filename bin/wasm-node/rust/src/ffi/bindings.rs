@@ -16,8 +16,28 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Imports and exports of the WebAssembly module.
-
-// TODO: explain reasons ^
+//!
+//! This module contains all the functions that tie together the Rust code and its host (i.e.
+//! the JavaScript code, normally).
+//!
+//! The functions found in the `extern` block and the functions that the Rust code *imports*, and
+//! need to be implemented on the host side and provided to the WebAssembly virtual machine. The
+//! other functions are functions that the Rust code *exports*, and can be called by the host.
+//!
+//! # About wasi
+//!
+//! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just
+//! `wasm32-unknown-unknown`. The `wasi` platform is used in order for example to obtain a source
+//! of randomness.
+//!
+//! > **Note**: While wasi could normally also be used in order to obtain the current time, but
+//! >           the Wasi syscall for that cannot be implemented in pure JavaScript code due to
+//! >           using `u64`s. As such, alternatives are present in the `extern` block below.
+//!
+//! Consequently, the exports found in the `extern` block below are not the only functions that
+//! must be implemented. Several functions required by the Wasi ABI are also used. The best place
+//! to find documentation at the moment is <https://docs.rs/wasi>.
+//!
 
 #[link(wasm_import_module = "substrate-lite")]
 extern "C" {

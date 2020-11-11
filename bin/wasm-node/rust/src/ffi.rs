@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// TODO: the quality of this module is sub-par
+
 use core::{
     cmp::Ordering,
     convert::TryFrom as _,
