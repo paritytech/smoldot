@@ -168,10 +168,7 @@ pub extern "C" fn init(
 ///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
-pub extern "C" fn json_rpc_send(
-    text_ptr: u32,
-    text_len: u32,
-) {
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32) {
     super::json_rpc_send(text_ptr, text_len)
 }
 

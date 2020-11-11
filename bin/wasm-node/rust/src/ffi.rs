@@ -27,7 +27,10 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures::{channel::{mpsc, oneshot}, prelude::*};
+use futures::{
+    channel::{mpsc, oneshot},
+    prelude::*,
+};
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},

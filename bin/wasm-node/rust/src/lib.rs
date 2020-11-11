@@ -36,8 +36,7 @@ use std::{
 use substrate_lite::{
     chain,
     chain::sync::headers_optimistic,
-    chain_spec,
-    json_rpc,
+    chain_spec, json_rpc,
     network::{self, connection, multiaddr, peer_id::PeerId, protocol},
 };
 
@@ -133,7 +132,7 @@ pub async fn start_client(chain_spec: String) {
 }
 
 async fn handle_rpc(rpc: &str, chain_spec: &chain_spec::ChainSpec) {
-    let (request_id, call) = json_rpc::methods::parse_json_call(rpc).unwrap();  // TODO: don't unwrap
+    let (request_id, call) = json_rpc::methods::parse_json_call(rpc).unwrap(); // TODO: don't unwrap
 
     let response = match call {
         json_rpc::methods::MethodCall::system_chain {} => {
@@ -142,9 +141,8 @@ async fn handle_rpc(rpc: &str, chain_spec: &chain_spec::ChainSpec) {
             async move { value }.boxed()
         }
         json_rpc::methods::MethodCall::system_chainType {} => {
-            let value =
-                json_rpc::methods::Response::system_chainType(chain_spec.chain_type())
-                    .to_json_response(request_id);
+            let value = json_rpc::methods::Response::system_chainType(chain_spec.chain_type())
+                .to_json_response(request_id);
             async move { value }.boxed()
         }
         json_rpc::methods::MethodCall::system_name {} => {
@@ -158,9 +156,7 @@ async fn handle_rpc(rpc: &str, chain_spec: &chain_spec::ChainSpec) {
             async move { value }.boxed()
         }
         // TODO: implement the rest
-        _ => {
-            todo!("not implemented: {:?}", call)
-        }
+        _ => todo!("not implemented: {:?}", call),
     };
 
     ffi::emit_json_rpc_response(&response.await);
