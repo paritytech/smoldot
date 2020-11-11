@@ -27,7 +27,7 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures::{channel::oneshot, prelude::*};
+use futures::{channel::{mpsc, oneshot}, prelude::*};
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
@@ -72,6 +72,7 @@ pub(crate) fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
             }
 
             let arc_self = arc_self.clone();
+            // TODO: this extra 1ms is quite bad/annoying
             start_timer_wrap(Duration::from_millis(1), move || {
                 if arc_self.done.load(atomic::Ordering::SeqCst) {
                     return;
@@ -113,6 +114,7 @@ fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     unsafe { bindings::start_timer(timer_id, milliseconds as f64) }
 }
 
+// TODO: cancel the timer if the `Delay` is destroyed? we create and destroy a lot of `Delay`s
 pub struct Delay {
     rx: oneshot::Receiver<()>,
 }
@@ -226,7 +228,7 @@ pub struct WebSocket {
     /// Waker to wake up whenever one of the fields above is modified.
     waker: Option<Waker>,
     /// Prevents the [`WebSocket`] from being unpinned.
-    pinned: marker::PhantomPinned,
+    _pinned: marker::PhantomPinned,
 }
 
 impl WebSocket {
@@ -239,7 +241,7 @@ impl WebSocket {
             messages_queue: VecDeque::with_capacity(32),
             messages_queue_first_offset: 0,
             waker: None,
-            pinned: marker::PhantomPinned,
+            _pinned: marker::PhantomPinned,
         });
 
         let id = u32::try_from(&*pointer as *const WebSocket as usize).unwrap();
@@ -350,7 +352,7 @@ impl WebSocket {
     /// Queue of the given buffer as a WebSocket binary frame.
     pub fn send(self: &mut Pin<Box<Self>>, data: &[u8]) {
         unsafe {
-            let this = unsafe { Pin::get_unchecked_mut(self.as_mut()) };
+            let this = Pin::get_unchecked_mut(self.as_mut());
 
             bindings::websocket_send(
                 this.id.unwrap(),
@@ -421,6 +423,38 @@ fn init(
     };
 
     spawn_task(super::start_client(chain_specs));
+}
+
+lazy_static::lazy_static! {
+    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<Box<[u8]>>, futures::lock::Mutex<mpsc::UnboundedReceiver<Box<[u8]>>>) = {
+        let (tx, rx) = mpsc::unbounded();
+        (tx, futures::lock::Mutex::new(rx))
+    };
+}
+
+fn json_rpc_send(ptr: u32, len: u32) {
+    let ptr = usize::try_from(ptr).unwrap();
+    let len = usize::try_from(len).unwrap();
+
+    let request: Box<[u8]> =
+        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+    JSON_RPC_CHANNEL.0.unbounded_send(request).unwrap();
+}
+
+/// Waits for the next JSON-RPC request coming from the JavaScript side.
+pub(crate) async fn next_json_rpc() -> Box<[u8]> {
+    let mut lock = JSON_RPC_CHANNEL.1.lock().await;
+    lock.next().await.unwrap()
+}
+
+/// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
+pub(crate) fn emit_json_rpc_response(rpc: &str) {
+    unsafe {
+        bindings::json_rpc_respond(
+            u32::try_from(rpc.as_ptr() as usize).unwrap(),
+            u32::try_from(rpc.len()).unwrap(),
+        );
+    }
 }
 
 fn timer_finished(timer_id: u32) {

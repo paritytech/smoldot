@@ -19,13 +19,18 @@
 
 // TODO: explain reasons ^
 
-use core::{convert::TryFrom as _, future::Future, slice, time::Duration};
-
 #[link(wasm_import_module = "substrate-lite")]
 extern "C" {
     /// Must throw an exception. The message is a UTF-8 string found in the memory of the
     /// WebAssembly at offset `message_ptr` and with length `message_len`.
     pub fn throw(message_ptr: u32, message_len: u32);
+
+    /// Client is emitting a response to a previous JSON-RPC request sent using [`json_rpc_send`].
+    /// Also used to send subscriptions notifications.
+    ///
+    /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
+    /// virtual machine at offset `ptr` and with length `len`.
+    pub fn json_rpc_respond(ptr: u32, len: u32);
 
     /// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring
     /// leap seconds.
@@ -133,7 +138,6 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// called.
 ///
 /// Write the chain specs and the database content in these two buffers.
-///
 /// Then, pass the pointer and length of these two buffers to this function.
 /// Pass `0` for `database_content_ptr` and `database_content_len` if the database is empty.
 #[no_mangle]
@@ -148,7 +152,27 @@ pub extern "C" fn init(
         chain_specs_len,
         database_content_ptr,
         database_content_len,
-    );
+    )
+}
+
+/// Emit a JSON-RPC request. If the initialization (see [`init`]) hasn't been started or hasn't
+/// finished yet, the request will still be queued.
+///
+/// A buffer containing a UTF-8 JSON-RPC request must be passed as parameter. The format of the
+/// JSON-RPC requests is described in
+/// [the standard JSON-RPC 2.0 specifications](https://www.jsonrpc.org/specification). A pub-sub
+/// extension is supported.
+///
+/// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
+/// this function is called.
+///
+/// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
+#[no_mangle]
+pub extern "C" fn json_rpc_send(
+    text_ptr: u32,
+    text_len: u32,
+) {
+    super::json_rpc_send(text_ptr, text_len)
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.

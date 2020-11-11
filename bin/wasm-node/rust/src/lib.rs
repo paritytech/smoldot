@@ -37,6 +37,7 @@ use substrate_lite::{
     chain,
     chain::sync::headers_optimistic,
     chain_spec,
+    json_rpc,
     network::{self, connection, multiaddr, peer_id::PeerId, protocol},
 };
 
@@ -115,76 +116,55 @@ pub async fn start_client(chain_spec: String) {
             network_message = network_service.next_event().fuse() => {
                 match network_message {
                     network_service::Event::Connected(peer_id) => {
-                        to_sync_tx.send(ToSync::NewPeer(peer_id)).await;
+                        to_sync_tx.send(ToSync::NewPeer(peer_id)).await.unwrap();
                     }
                     network_service::Event::Disconnected(peer_id) => {
-                        to_sync_tx.send(ToSync::PeerDisconnected(peer_id)).await;
+                        to_sync_tx.send(ToSync::PeerDisconnected(peer_id)).await.unwrap();
                     }
                 }
+            },
+
+            json_rpc_request = ffi::next_json_rpc().fuse() => {
+                // TODO: don't unwrap
+                handle_rpc(&String::from_utf8(Vec::from(json_rpc_request)).unwrap(), &chain_spec).await;
             }
         }
     }
 }
 
-/*impl BrowserLightClient {
-    /// Starts an RPC request. Returns a `Promise` containing the result of that request.
-    ///
-    /// > **Note**: This function returns a `Result`. The return value according to the JavaScript
-    /// >           function is what is in the `Ok`. If an `Err` is returned, a JavaScript
-    /// >           exception is thrown.
-    #[wasm_bindgen(js_name = "rpcSend")]
-    pub fn rpc_send(&mut self, rpc: &str) -> Result<js_sys::Promise, JsValue> {
-        let (request_id, call) = json_rpc::methods::parse_json_call(rpc)
-            .map_err(|err| JsValue::from_str(&err.to_string()))?;
+async fn handle_rpc(rpc: &str, chain_spec: &chain_spec::ChainSpec) {
+    let (request_id, call) = json_rpc::methods::parse_json_call(rpc).unwrap();  // TODO: don't unwrap
 
-        let response = match call {
-            json_rpc::methods::MethodCall::system_chain {} => {
-                let value = json_rpc::methods::Response::system_chain(self.chain_spec.name())
+    let response = match call {
+        json_rpc::methods::MethodCall::system_chain {} => {
+            let value = json_rpc::methods::Response::system_chain(chain_spec.name())
+                .to_json_response(request_id);
+            async move { value }.boxed()
+        }
+        json_rpc::methods::MethodCall::system_chainType {} => {
+            let value =
+                json_rpc::methods::Response::system_chainType(chain_spec.chain_type())
                     .to_json_response(request_id);
-                async move { value }.boxed()
-            }
-            json_rpc::methods::MethodCall::system_chainType {} => {
-                let value =
-                    json_rpc::methods::Response::system_chainType(self.chain_spec.chain_type())
-                        .to_json_response(request_id);
-                async move { value }.boxed()
-            }
-            json_rpc::methods::MethodCall::system_name {} => {
-                let value = json_rpc::methods::Response::system_name("Polkadot ✨ lite ✨")
-                    .to_json_response(request_id);
-                async move { value }.boxed()
-            }
-            json_rpc::methods::MethodCall::system_version {} => {
-                let value =
-                    json_rpc::methods::Response::system_version("??").to_json_response(request_id);
-                async move { value }.boxed()
-            }
-            // TODO: implement the rest
-            _ => {
-                return Err(JsValue::from_str(&format!(
-                    "call not implemented: {:?}",
-                    call
-                )))
-            }
-        };
+            async move { value }.boxed()
+        }
+        json_rpc::methods::MethodCall::system_name {} => {
+            let value = json_rpc::methods::Response::system_name("Polkadot ✨ lite ✨")
+                .to_json_response(request_id);
+            async move { value }.boxed()
+        }
+        json_rpc::methods::MethodCall::system_version {} => {
+            let value =
+                json_rpc::methods::Response::system_version("??").to_json_response(request_id);
+            async move { value }.boxed()
+        }
+        // TODO: implement the rest
+        _ => {
+            todo!("not implemented: {:?}", call)
+        }
+    };
 
-        Ok(wasm_bindgen_futures::future_to_promise(async move {
-            Ok(JsValue::from_str(&response.await))
-        }))
-    }
-
-    /// Subscribes to an RPC pubsub endpoint.
-    ///
-    /// > **Note**: This function returns a `Result`. The return value according to the JavaScript
-    /// >           function is what is in the `Ok`. If an `Err` is returned, a JavaScript
-    /// >           exception is thrown.
-    #[wasm_bindgen(js_name = "rpcSubscribe")]
-    pub fn rpc_subscribe(&mut self, rpc: &str, callback: js_sys::Function) -> Result<(), JsValue> {
-        // TODO:
-
-        Ok(())
-    }
-}*/
+    ffi::emit_json_rpc_response(&response.await);
+}
 
 async fn start_sync(
     chain_spec: &chain_spec::ChainSpec,

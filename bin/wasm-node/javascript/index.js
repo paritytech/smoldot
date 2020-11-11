@@ -16,14 +16,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 module.exports = {
-  start: (chain_specs) => initialize(chain_specs),
+  start: (chain_specs, json_rpc_callback) => initialize(chain_specs, json_rpc_callback),
 };
 
 const Buffer = require('buffer/').Buffer;  // Note: the trailing slash is important in order to not use the NodeJS core module named "buffer".
 const randombytes = require('randombytes');
 const W3CWebSocket = require('websocket').w3cwebsocket;
 
-async function initialize(chain_specs) {
+async function initialize(chain_specs, json_rpc_callback) {
   var module;
 
   // List of environment variables to feed to the Rust program. An array of strings.
@@ -50,6 +50,14 @@ async function initialize(chain_specs) {
       throw: (ptr, len) => {
         let message = Buffer.from(module.exports.memory.buffer).toString('utf8', ptr, ptr + len);
         throw message;
+      },
+
+      // Used by the Rust side to emit a JSON-RPC response or subscription notification.
+      json_rpc_respond: (ptr, len) => {
+        let message = Buffer.from(module.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+        if (json_rpc_callback) {
+          json_rpc_callback(message);
+        }
       },
 
       // Must return the UNIX time in milliseconds.
@@ -221,4 +229,13 @@ async function initialize(chain_specs) {
     .write(chain_specs, chain_specs_ptr);
 
   module.exports.init(chain_specs_ptr, chain_specs_len, 0, 0);
+
+  return {
+    send_json_rpc: (request) => {
+      let len = Buffer.byteLength(request, 'utf8');
+      let ptr = module.exports.alloc(len);
+      Buffer.from(module.exports.memory.buffer).write(request, ptr);
+      module.exports.json_rpc_send(ptr, len);
+    }
+  }
 }
