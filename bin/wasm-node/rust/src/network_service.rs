@@ -29,13 +29,13 @@
 
 use crate::ffi;
 
-use core::{iter, pin::Pin, time::Duration};
+use core::{pin::Pin, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
-use std::{io, sync::Arc};
+use std::sync::Arc;
 use substrate_lite::network::{
     connection,
     multiaddr::{Multiaddr, Protocol},
@@ -146,7 +146,7 @@ impl NetworkService {
 
         let connection = match guarded.peerset.node_mut(target) {
             peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
-            peerset::NodeMut::Unknown(n) => return Err(()),
+            peerset::NodeMut::Unknown(_) => return Err(()),
         };
 
         let (send_back, receive_result) = oneshot::channel();
@@ -214,15 +214,12 @@ impl NetworkService {
                     connection.remove();
                     return Event::Disconnected(peer_id);
                 }
-                FromBackground::NotificationsOpenResult {
-                    connection_id,
-                    result,
-                } => todo!(),
-                FromBackground::NotificationsCloseResult { connection_id } => todo!(),
+                FromBackground::NotificationsOpenResult { .. } => todo!(),
+                FromBackground::NotificationsCloseResult { .. } => todo!(),
 
-                FromBackground::NotificationsOpenDesired { connection_id } => todo!(),
+                FromBackground::NotificationsOpenDesired { .. } => todo!(),
 
-                FromBackground::NotificationsCloseDesired { connection_id } => todo!(),
+                FromBackground::NotificationsCloseDesired { .. } => todo!(),
             }
         }
     }
@@ -569,7 +566,7 @@ fn multiaddr_to_url(addr: &Multiaddr) -> Result<String, ()> {
 /// Panics if the `websocket` is closed in the writing direction.
 ///
 async fn perform_handshake(
-    mut websocket: &mut Pin<Box<ffi::WebSocket>>,
+    websocket: &mut Pin<Box<ffi::WebSocket>>,
     noise_key: &connection::NoiseKey,
     is_initiator: bool,
 ) -> Result<(connection::established::ConnectionPrototype, PeerId), HandshakeError> {

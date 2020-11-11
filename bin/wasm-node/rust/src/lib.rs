@@ -21,23 +21,19 @@
 #![recursion_limit = "512"]
 
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::mpsc,
     prelude::*,
 };
 use std::{
     collections::HashMap,
-    convert::TryFrom as _,
     num::NonZeroU32,
-    pin::Pin,
-    sync::{atomic, Arc, Mutex},
-    task::{Context, Poll},
-    time::Duration,
+    sync::Arc,
 };
 use substrate_lite::{
     chain,
     chain::sync::headers_optimistic,
     chain_spec, json_rpc,
-    network::{self, connection, multiaddr, peer_id::PeerId, protocol},
+    network::{self, multiaddr, peer_id::PeerId, protocol},
 };
 
 pub mod ffi;
@@ -77,7 +73,7 @@ pub async fn start_client(chain_spec: String) {
     .unwrap();
 
     let (mut to_sync_tx, to_sync_rx) = mpsc::channel(64);
-    let (to_db_save_tx, mut to_db_save_rx) = mpsc::channel(16);
+    let (to_db_save_tx, _to_db_save_rx) = mpsc::channel(16);
 
     let network_service = network_service::NetworkService::new(network_service::Config {
         tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
@@ -101,7 +97,6 @@ pub async fn start_client(chain_spec: String) {
 
     ffi::spawn_task(
         start_sync(
-            &chain_spec,
             chain_information,
             network_service.clone(),
             to_sync_rx,
@@ -163,7 +158,6 @@ async fn handle_rpc(rpc: &str, chain_spec: &chain_spec::ChainSpec) {
 }
 
 async fn start_sync(
-    chain_spec: &chain_spec::ChainSpec,
     chain_information: chain::chain_information::ChainInformation,
     network_service: Arc<network_service::NetworkService>,
     mut to_sync: mpsc::Receiver<ToSync>,
