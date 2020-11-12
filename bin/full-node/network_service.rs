@@ -484,7 +484,7 @@ enum FromBackground {
         connection_id: peerset::ConnectionId,
     },
 
-    /// Response to a [`ToConnection::OpenNotifications`].
+    /// Response to a [`ToConnection::OpenOutNotifications`].
     NotificationsOpenResult {
         connection_id: peerset::ConnectionId,
         /// Outcome of the opening. If `Ok`, the notifications protocol is now open. If `Err`, it
@@ -492,7 +492,7 @@ enum FromBackground {
         result: Result<(), ()>,
     },
 
-    /// Response to a [`ToConnection::CloseNotifications`].
+    /// Response to a [`ToConnection::CloseOutNotifications`].
     ///
     /// Contrary to [`FromBackground::NotificationsOpenResult`], a closing request never fails.
     NotificationsCloseResult {
