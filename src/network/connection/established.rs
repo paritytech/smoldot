@@ -519,14 +519,10 @@ where
                         }
                     }
                     Substream::NotificationsOut { user_data } => {
-                        // TODO: remove
-                        println!("received data on notifications substream?!?! {:?}", data);
                         data = &[];
                         *substream.user_data() = Substream::NotificationsOut { user_data };
                     }
                     Substream::NotificationsOutClosed => {
-                        // TODO: remove
-                        println!("received data on closed notifications substream?!?!");
                         data = &[];
                         *substream.user_data() = Substream::NotificationsOutClosed;
                     }

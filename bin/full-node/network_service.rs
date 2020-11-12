@@ -671,10 +671,8 @@ async fn connection_task(
                 remote_handshake,
             }) => {
                 let hs = protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
-                println!("accepted! {:?}", hs);
             }
             Some(connection::established::Event::NotificationsOutReject { id, user_data }) => {
-                println!("rejected!");
             }
             _ => {}
         }
