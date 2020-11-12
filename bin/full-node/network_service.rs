@@ -672,8 +672,7 @@ async fn connection_task(
             }) => {
                 let hs = protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
             }
-            Some(connection::established::Event::NotificationsOutReject { id, user_data }) => {
-            }
+            Some(connection::established::Event::NotificationsOutReject { id, user_data }) => {}
             _ => {}
         }
 
