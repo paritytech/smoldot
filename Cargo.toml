@@ -12,7 +12,7 @@ default-run = "full-node"
 
 [workspace]
 members = [
-    "bin/browser-node",
+    "bin/wasm-node/rust",
 ]
 
 [features]
@@ -28,27 +28,16 @@ std = [
     "futures/std",
     "futures/thread-pool",
     "futures-timer",
-    "opentelemetry",
-    "opentelemetry-jaeger",
     "rand/std",
     "rand_chacha/std",
     "soketto",
     "structopt",
     "terminal_size",
     "tracing",
-    "tracing-opentelemetry",
+    "tracing-futures",
     "tracing-subscriber",
     "url",
     "wasmtime",
-]
-wasm-bindings = [
-    "futures-timer/wasm-bindgen",
-    "js-sys",
-    "rand/wasm-bindgen",
-    "send_wrapper",
-    "std",
-    "wasm-bindgen",
-    "web-sys",
 ]
 
 [[bin]]
@@ -67,11 +56,11 @@ required-features = ["std"]
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
-ahash = { version = "0.5.6", default-features = false }
+ahash = { version = "0.5.8", default-features = false }
 arrayvec = { version = "0.5.2", default-features = false }
 atomic = "0.5.0"
 blake2-rfc = { version = "0.2.18", default-features = false }
-bs58 = { version = "0.3.1", default-features = false, features = ["alloc"] }
+bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
 derive_more = "0.99.11"
 ed25519-dalek = { version = "1.0.1", default-features = false, features = ["alloc", "batch", "u64_backend"] }
 either = { version = "1.6.1", default-features = false }
@@ -86,7 +75,7 @@ nom = { version = "6.0.0", default-features = false, features = ["alloc"] }
 num-bigint = { version = "0.3.1", default-features = false }
 num-rational = { version = "0.3.1", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.14", default-features = false }
-parity-multiaddr = "0.9.2" # TODO: doesn't support no_std
+parity-multiaddr = "0.9.4" # TODO: doesn't support no_std
 pin-project = "1.0.1"
 prost = "0.6.1"  # TODO: waiting for a published version that supports no_std
 rand = { version = "0.7.3", default-features = false }
@@ -103,30 +92,22 @@ twox-hash = "1.6.0"
 wasmi = { version = "0.7.0", default-features = false, features = ["core"] }  # TODO: having to add `core` is sketchy; maybe report this
 
 # `database-sled` feature
-sled = { version = "0.34.4", optional = true, features = ["compression"] }
+sled = { version = "0.34.5", optional = true, features = ["compression"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
 app_dirs = { version = "1.2.1", optional = true }
 async-std = { version = "1.7.0", optional = true }
 atty = { version = "0.2.14", optional = true }
-futures = { version = "0.3.6", default-features = false, optional = true }
+futures = { version = "0.3.8", default-features = false, optional = true }
 futures-timer = { version = "3.0", optional = true }
-opentelemetry = { version = "0.8.0", optional = true, default-features = false }
-opentelemetry-jaeger = { version = "0.7.0", optional = true, default-features = false }
 soketto = { version = "0.4.2", optional = true }
 structopt = { version = "0.3.20", optional = true, default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = { version = "0.1.12", optional = true }
-tracing = { version = "0.1.21", optional = true }  # While `tracing` can work in `no_std` contexts, the coding rules of this repository forbid this library in the library code.
-tracing-opentelemetry = { version = "0.8.0", optional = true, default-features = false }
-tracing-subscriber = { version = "0.2.15", optional = true, default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "registry", "smallvec"] }
+tracing = { version = "0.1.21", optional = true, features = ["attributes"] }  # While `tracing` can work in `no_std` contexts, the coding rules of this repository forbid this library in the library code.
+tracing-futures = { version = "0.2.4", optional = true, default-features = false, features = ["std", "std-future"] }
+tracing-subscriber = { version = "0.2.15", optional = true, default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "smallvec"] }
 url = { version = "2.1.1", optional = true }
-
-# `wasm-bindings` feature
-js-sys = { version = "0.3.45", optional = true }
-send_wrapper = { version = "0.5.0", optional = true }
-wasm-bindgen = { version = "0.2.68", optional = true }
-web-sys = { version = "0.3.45", optional = true, features = ["BinaryType", "CloseEvent", "DomException", "Event", "Storage", "WebSocket", "Window"] }
 
 # BELOW: DEPENDENCIES TO REMOVE
 # TODO:

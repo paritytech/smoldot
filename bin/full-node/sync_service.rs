@@ -32,7 +32,6 @@ use futures::{
 };
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 use substrate_lite::{chain::sync::full_optimistic, database::full_sled, network};
-use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -48,8 +47,6 @@ pub struct Config {
 pub enum Event {
     BlocksRequest {
         id: BlocksRequestId,
-        /// Span to use to record events specific to that request.
-        request_span: tracing::Span,
         target: network::PeerId,
         request: network::protocol::BlocksRequestConfig,
     },
@@ -80,16 +77,13 @@ pub struct SyncService {
     from_background: Mutex<mpsc::Receiver<FromBackground>>,
 
     /// For each emitted blocks request, an element is stored here.
-    blocks_requests: Mutex<
-        slab::Slab<(
-            tracing::Span,
-            oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>,
-        )>,
-    >,
+    blocks_requests:
+        Mutex<slab::Slab<oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>>>,
 }
 
 impl SyncService {
     /// Initializes the [`SyncService`] with the given configuration.
+    #[tracing::instrument(skip(config))]
     pub async fn new(mut config: Config) -> Arc<Self> {
         let (to_foreground, from_background) = mpsc::channel(16);
         let (to_background, from_foreground) = mpsc::channel(16);
@@ -110,17 +104,10 @@ impl SyncService {
                 from_foreground,
                 to_database,
             )
-            .instrument(tracing::debug_span!("sync-task-init"))
-            .await
-            .instrument(tracing::info_span!(parent: None, "sync-task")),
+            .await,
         ));
 
-        (config.tasks_executor)(Box::pin(
-            start_database_write(config.database, messages_rx).instrument(tracing::info_span!(
-                parent: None,
-                "sync-database-write-task"
-            )),
-        ));
+        (config.tasks_executor)(Box::pin(start_database_write(config.database, messages_rx)));
 
         Arc::new(SyncService {
             sync_state,
@@ -134,11 +121,13 @@ impl SyncService {
     ///
     /// > **Important**: This doesn't represent the content of the database.
     // TODO: maybe remove this in favour of the database; seems like a better idea
+    #[tracing::instrument(skip(self))]
     pub async fn sync_state(&self) -> SyncState {
         self.sync_state.lock().await.clone()
     }
 
     /// Registers a new source for blocks.
+    #[tracing::instrument(skip(self))]
     pub async fn add_source(&self, peer_id: network::PeerId) {
         self.to_background
             .lock()
@@ -149,7 +138,9 @@ impl SyncService {
     }
 
     /// Removes a source of blocks.
+    #[tracing::instrument(skip(self))]
     pub async fn remove_source(&self, peer_id: network::PeerId) {
+        tracing::event!(tracing::Level::INFO, "test");
         self.to_background
             .lock()
             .await
@@ -166,64 +157,39 @@ impl SyncService {
     ///
     /// Panics if the `id` is invalid.
     ///
+    #[tracing::instrument(skip(self, response))]
     pub async fn answer_blocks_request(
         &self,
         id: BlocksRequestId,
         response: Result<Vec<network::protocol::BlockData>, ()>,
     ) {
-        let (request_span, send_back) = self.blocks_requests.lock().await.remove(id.0);
-        async {
-            if send_back.send(response).is_err() {
-                tracing::event!(tracing::Level::WARN, event = "to-background-channel-closed");
-            }
-        }
-        .instrument(tracing::debug_span!(
-            parent: &request_span,
-            "response-to-background-send"
-        ))
-        .instrument(request_span.clone())
-        .await;
+        let _ = self
+            .blocks_requests
+            .lock()
+            .await
+            .remove(id.0)
+            .send(response);
     }
 
     /// Returns the next event that happened in the sync service.
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
+    #[tracing::instrument(skip(self))]
     pub async fn next_event(&self) -> Event {
         loop {
             match self.from_background.lock().await.next().await.unwrap() {
                 FromBackground::RequestStart {
-                    request_span,
                     target,
                     request,
                     send_back,
                 } => {
-                    return async {
-                        let id = BlocksRequestId(
-                            self.blocks_requests
-                                .lock()
-                                .await
-                                .insert((request_span.clone(), send_back)),
-                        );
-
-                        /*tracing::event!(
-                            tracing::Level::DEBUG,
-                            event = "out-sync-service-propagation"
-                        );*/
-
-                        Event::BlocksRequest {
-                            id,
-                            request_span: request_span.clone(),
-                            target,
-                            request,
-                        }
-                    }
-                    .instrument(tracing::debug_span!(
-                        parent: &request_span,
-                        "out-sync-service-propagation"
-                    ))
-                    .instrument(request_span.clone())
-                    .await;
+                    let id = BlocksRequestId(self.blocks_requests.lock().await.insert(send_back));
+                    return Event::BlocksRequest {
+                        id,
+                        target,
+                        request,
+                    };
                 }
             }
         }
@@ -241,8 +207,6 @@ enum ToBackground {
 enum FromBackground {
     /// A blocks request must be started.
     RequestStart {
-        /// [`tracing::Span`] that records all events happening w.r.t this request.
-        request_span: tracing::Span,
         target: network::PeerId,
         request: network::protocol::BlocksRequestConfig,
         send_back: oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>, // TODO: proper error
@@ -254,6 +218,7 @@ enum ToDatabase {
 }
 
 /// Returns the background task of the sync service.
+#[tracing::instrument(skip(database, sync_state, to_foreground, from_foreground, to_database))]
 async fn start_sync(
     database: Arc<full_sled::SledFullDatabase>,
     sync_state: Arc<Mutex<SyncState>>,
@@ -412,76 +377,38 @@ async fn start_sync(
                         num_blocks,
                         ..
                     } => {
-                        // Generate a new span for the request that will be used as the parent
-                        // for everything that processes it.
-                        let request_span = tracing::debug_span!(
-                            parent: None,
-                            "blocks-request",
-                            target = %source,
-                            height = block_height,
-                            count = num_blocks
-                        );
+                        let (send_back, rx) = oneshot::channel();
 
-                        async {
-                            tracing::event!(tracing::Level::INFO, event = "sending-to-foreground");
-
-                            let (send_back, rx) = oneshot::channel();
-
-                            let send_result = to_foreground
-                                .send(FromBackground::RequestStart {
-                                    target: source.clone(),
-                                    request_span: request_span.clone(),
-                                    request: network::protocol::BlocksRequestConfig {
-                                        start: network::protocol::BlocksRequestConfigStart::Number(
-                                            block_height,
-                                        ),
-                                        desired_count: num_blocks,
-                                        direction:
-                                            network::protocol::BlocksRequestDirection::Ascending,
-                                        fields: network::protocol::BlocksRequestFields {
-                                            header: true,
-                                            body: true,
-                                            justification: true,
-                                        },
+                        let send_result = to_foreground
+                            .send(FromBackground::RequestStart {
+                                target: source.clone(),
+                                request: network::protocol::BlocksRequestConfig {
+                                    start: network::protocol::BlocksRequestConfigStart::Number(
+                                        block_height,
+                                    ),
+                                    desired_count: num_blocks,
+                                    direction: network::protocol::BlocksRequestDirection::Ascending,
+                                    fields: network::protocol::BlocksRequestFields {
+                                        header: true,
+                                        body: true,
+                                        justification: true,
                                     },
-                                    send_back,
-                                })
-                                .await;
+                                },
+                                send_back,
+                            })
+                            .await;
 
-                            if send_result.is_ok() {
-                                tracing::event!(tracing::Level::INFO, event = "send-success");
-                                let (rx, abort) = future::abortable(rx);
-                                let request_id = start.start((request_span.clone(), abort));
-                                block_requests_finished.push(rx.map({
-                                    let request_span = request_span.clone();
-                                    move |r| (request_span, request_id, r)
-                                }));
-                            } else {
-                                // If the channel is closed, the sync service has been closed too.
-                                tracing::event!(
-                                    tracing::Level::WARN,
-                                    event = "foreground-channel-closed"
-                                );
-                            }
+                        // If the channel is closed, the sync service has been closed too.
+                        if send_result.is_err() {
+                            return;
                         }
-                        .instrument(tracing::debug_span!(
-                            parent: &request_span,
-                            "foreground-send"
-                        ))
-                        .instrument(request_span.clone())
-                        .await
+
+                        let (rx, abort) = future::abortable(rx);
+                        let request_id = start.start(abort);
+                        block_requests_finished.push(rx.map(move |r| (request_id, r)));
                     }
-                    full_optimistic::RequestAction::Cancel {
-                        user_data: (request_span, abort),
-                        ..
-                    } => {
-                        async {
-                            abort.abort();
-                            tracing::event!(tracing::Level::INFO, event = "aborted");
-                        }
-                        .instrument(tracing::warn_span!(parent: &request_span, "abort"))
-                        .instrument(request_span.clone())
-                        .await;
+                    full_optimistic::RequestAction::Cancel { user_data, .. } => {
+                        user_data.abort();
                     }
                 }
             }
@@ -490,10 +417,7 @@ async fn start_sync(
                 message = from_foreground.next() => {
                     let message = match message {
                         Some(m) => m,
-                        None => {
-                            tracing::event!(tracing::Level::DEBUG, event = "messages-stream-end");
-                            return
-                        },
+                        None => return,
                     };
 
                     match message {
@@ -504,30 +428,25 @@ async fn start_sync(
                         ToBackground::PeerDisconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, rq_list) = sync.remove_source(id);
-                            for (_, (request_span, abort)) in rq_list {
-                                async {
-                                    abort.abort();
-                                    tracing::event!(tracing::Level::INFO, event = "aborted");
-                                }.instrument(tracing::warn_span!(parent: &request_span, "abort")).instrument(request_span.clone()).await;
+                            for (_, rq) in rq_list {
+                                rq.abort();
                             }
                         },
                     }
                 },
 
-                (request_span, request_id, result) = block_requests_finished.select_next_some() => {
-                    async {
-                        // `result` is an error if the block request got cancelled by the sync state
-                        // machine.
-                        // TODO: clarify this piece of code
-                        if let Ok(result) = result {
-                            let result = result.map_err(|_| ()).and_then(|v| v);
-                            let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
-                                scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                                scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                                scale_encoded_justification: block.justification,
-                            })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
-                        }
-                    }.instrument(tracing::debug_span!(parent: &request_span, "result-inject")).instrument(request_span.clone()).await;
+                (request_id, result) = block_requests_finished.select_next_some() => {
+                    // `result` is an error if the block request got cancelled by the sync state
+                    // machine.
+                    // TODO: clarify this piece of code
+                    if let Ok(result) = result {
+                        let result = result.map_err(|_| ()).and_then(|v| v);
+                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
+                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                            scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
+                            scale_encoded_justification: block.justification,
+                        })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
+                    }
                 },
             }
         }
@@ -535,23 +454,15 @@ async fn start_sync(
 }
 
 /// Starts the task that writes blocks to the database.
+#[tracing::instrument(skip(database, messages_rx))]
 async fn start_database_write(
     database: Arc<full_sled::SledFullDatabase>,
     mut messages_rx: mpsc::Receiver<ToDatabase>,
 ) {
     loop {
         match messages_rx.next().await {
-            None => {
-                tracing::event!(tracing::Level::DEBUG, event = "messages-stream-end");
-                break;
-            }
+            None => break,
             Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
-                tracing::event!(
-                    tracing::Level::DEBUG,
-                    event = "blocks-received",
-                    num = finalized_blocks.len()
-                );
-
                 let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
                     Some(last_finalized.header.hash())
                 } else {
@@ -573,13 +484,6 @@ async fn start_database_write(
                             .map(|(k, v)| (k, v.as_ref())),
                     );
 
-                    // TODO: print hash as well
-                    tracing::event!(
-                        tracing::Level::DEBUG,
-                        event = "block-inserted",
-                        block_number = block.header.number
-                    );
-
                     match result {
                         Ok(()) => {}
                         Err(full_sled::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
@@ -589,8 +493,6 @@ async fn start_database_write(
 
                 if let Some(new_finalized_hash) = new_finalized_hash {
                     database.set_finalized(&new_finalized_hash).unwrap();
-                    // TODO: nicer printing of the hash
-                    tracing::event!(tracing::Level::DEBUG, event = "finalized-update", hash = ?new_finalized_hash);
                 }
             }
         }
