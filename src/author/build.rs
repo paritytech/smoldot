@@ -436,7 +436,7 @@ impl BlockBuild {
     }
 }
 
-/// Extra information maintained in parallel of the [`runtime_externals::RuntimeHostVm`].
+/// Extra information maintained in parallel of the [`runtime_host::RuntimeHostVm`].
 #[derive(Debug)]
 struct Shared {
     /// The block building process is separated into multiple stages.
