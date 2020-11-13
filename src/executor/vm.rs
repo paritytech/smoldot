@@ -18,7 +18,7 @@
 //! General-purpose WebAssembly virtual machine.
 //!
 //! Contains code related to running a WebAssembly virtual machine. Contrary to
-//! (`ExternalsVm`)[super::externals::ExternalsVm], this module isn't aware of any of the host
+//! (`HostVm`)[super::host::HostVm], this module isn't aware of any of the host
 //! functions available to Substrate runtimes. It only contains the code required to run a virtual
 //! machine, with some adjustments explained below.
 //!
@@ -204,7 +204,7 @@ impl VirtualMachine {
     /// If this is the first call you call [`run`](VirtualMachine::run) for this thread, then you
     /// must pass a value of `None`.
     /// If, however, you call this function after a previous call to [`run`](VirtualMachine::run)
-    /// that was interrupted by an external function call, then you must pass back the outcome of
+    /// that was interrupted by a host function call, then you must pass back the outcome of
     /// that call.
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         match &mut self.inner {
@@ -501,9 +501,9 @@ pub enum ExecOutcome {
         return_value: Result<Option<WasmValue>, ()>,
     },
 
-    /// The virtual machine has been paused due to a call to an external function.
+    /// The virtual machine has been paused due to a call to a host function.
     ///
-    /// This variant contains the identifier of the external function that is expected to be
+    /// This variant contains the identifier of the host function that is expected to be
     /// called, and its parameters. When you call [`run`](VirtualMachine::run) again, you must
     /// pass back the outcome of calling that function.
     ///

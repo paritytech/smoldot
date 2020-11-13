@@ -18,7 +18,7 @@
 //! Wasm virtual machine that executes a specific function.
 //!
 //! This module handles everything related to executing Wasm code in general. Features specific to
-//! Substrate/Polkadot (such as the external functions available to the Wasm code) are not handled
+//! Substrate/Polkadot (such as the host functions available to the Wasm code) are not handled
 //! by this module and must instead be built on top.
 
 use super::{
@@ -38,20 +38,20 @@ use wasmi::memory_units::ByteSize as _;
 /// # Usage
 ///
 /// - Create an instance of [`VirtualMachinePrototype`] with [`VirtualMachinePrototype::new`]. As
-/// parameter, you must pass a list of external functions that are available to the code running
+/// parameter, you must pass a list of host functions that are available to the code running
 /// in the virtual machine.
 ///
 /// - Call [`VirtualMachinePrototype::start`] to turn it into a [`VirtualMachine`]. This operation
 /// only initializes the machine but doesn't run it.
 ///
 /// - Call [`VirtualMachine::run`], passing `None` as parameter. This runs the Wasm virtual
-/// machine until either function finishes or calls an external function.
+/// machine until either function finishes or calls a host function.
 ///
 /// - If [`VirtualMachine::run`] returns [`ExecOutcome::Finished`], then it is forbidden to call
 /// [`VirtualMachine::run`].
 ///
 /// - If [`VirtualMachine::run`] returns [`ExecOutcome::Interrupted`], then you must later call
-/// [`VirtualMachine::run`] again, passing the return value of the external function.
+/// [`VirtualMachine::run`] again, passing the return value of the host function.
 ///
 pub struct VirtualMachine {
     /// Original module, with resolved imports.
@@ -344,7 +344,7 @@ impl VirtualMachine {
     /// If this is the first call you call [`run`](VirtualMachine::run), then you must pass
     /// a value of `None`.
     /// If, however, you call this function after a previous call to [`run`](VirtualMachine::run)
-    /// that was interrupted by an external function call, then you must pass back the outcome of
+    /// that was interrupted by a host function call, then you must pass back the outcome of
     /// that call.
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         let value = value.map(wasmi::RuntimeValue::from);

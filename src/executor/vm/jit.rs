@@ -79,7 +79,7 @@ impl JitPrototype {
                             &store,
                             f.clone(),
                             move |_, params, ret_val| {
-                                // This closure is executed whenever the Wasm VM calls an external function.
+                                // This closure is executed whenever the Wasm VM calls a host function.
                                 let returned = interrupter.interrupt(FromCoroutine::Interrupt {
                                     function_index,
                                     parameters: params.iter().cloned().map(From::from).collect(),
@@ -209,7 +209,7 @@ impl JitPrototype {
                     assert!(matches!(reinjected, ToCoroutine::Resume(None)));
 
                     // Now running the `start` function of the Wasm code.
-                    // This will interrupt the coroutine every time we reach an external function.
+                    // This will interrupt the coroutine every time we reach a host function.
                     let result = start_function.call(
                         &start_parameters
                             .into_iter()
@@ -344,7 +344,7 @@ impl Jit {
     /// If this is the first call you call [`run`](Jit::run) for this thread, then you must pass
     /// a value of `None`.
     /// If, however, you call this function after a previous call to [`run`](Jit::run) that was
-    /// interrupted by an external function call, then you must pass back the outcome of that call.
+    /// interrupted by a host function call, then you must pass back the outcome of that call.
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         if self.coroutine.is_finished() {
             return Err(RunErr::Poisoned);
@@ -437,7 +437,7 @@ impl Jit {
 
     /// Turns back this virtual machine into a prototype.
     pub fn into_prototype(self) -> JitPrototype {
-        // TODO: how do we handle if the coroutine was in an externality?
+        // TODO: how do we handle if the coroutine was in a host function?
 
         // TODO: necessary?
         /*// Zero-ing the memory.

@@ -20,7 +20,7 @@
 //! The [`execute_block`] verifies the validity of a block header and body by *executing* the
 //! block. Executing the block consists in running the `Core_execute_block` function of the
 //! runtime, passing as parameter the header and the body of the block. The runtime function is
-//! then tasked with verifying the validity of its parameters and calling the external functions
+//! then tasked with verifying the validity of its parameters and calling the host functions
 //! that modify the state of the storage.
 //!
 //! The header passed to the runtime must not contain a seal.
