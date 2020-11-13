@@ -520,36 +520,23 @@ pub enum ExecOutcome {
     },
 }
 /// Error that can happen when initializing a VM.
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
 pub enum NewErr {
     /// Error while parsing or compiling the WebAssembly code.
+    #[display(fmt = "{}", _0)]
     ModuleError(ModuleError),
     /// If a "memory" symbol is provided, it must be a memory.
+    #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
+    #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
     /// Couldn't find the requested function.
+    #[display(fmt = "Function to start was not found.")]
     FunctionNotFound,
     /// The requested function has been found in the list of exports, but it is not a function.
+    #[display(fmt = "Symbol to start is not a function.")]
     NotAFunction,
-}
-
-// TODO: use derive_more instead
-impl fmt::Display for NewErr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            NewErr::ModuleError(err) => write!(f, "Error while parsing or compiling code: {}", err),
-            NewErr::MemoryIsntMemory => {
-                write!(f, "If a \"memory\" symbol is provided, it must be a memory")
-            }
-            NewErr::IndirectTableIsntTable => write!(
-                f,
-                "If a \"__indirect_function_table\" symbol is provided, it must be a table"
-            ),
-            NewErr::FunctionNotFound => write!(f, "Function to start was not found"),
-            NewErr::NotAFunction => write!(f, "Symbol to start is not a function"),
-        }
-    }
 }
 
 /// Opaque error indicating an error while parsing or compiling the WebAssembly code.
