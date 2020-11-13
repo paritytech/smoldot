@@ -66,7 +66,7 @@ pub struct Config<'a, TParams> {
 /// Start running the WebAssembly virtual machine.
 pub fn run(
     config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
-) -> Result<RuntimeExternalsVm, host::NewErr> {
+) -> Result<RuntimeHostVm, host::NewErr> {
     Ok(Inner {
         vm: config
             .virtual_machine
@@ -137,7 +137,7 @@ pub enum Error {
 
 /// Current state of the execution.
 #[must_use]
-pub enum RuntimeExternalsVm {
+pub enum RuntimeHostVm {
     /// Execution is over.
     Finished(Result<Success, Error>),
     /// Loading a storage value is required in order to continue.
@@ -203,7 +203,7 @@ impl StorageGet {
 
     /// Injects the corresponding storage value.
     // TODO: `value` parameter should be something like `Iterator<Item = impl AsRef<[u8]>`
-    pub fn inject_value(mut self, value: Option<&[u8]>) -> RuntimeExternalsVm {
+    pub fn inject_value(mut self, value: Option<&[u8]>) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalStorageGet(req) => {
                 // TODO: should actually report the offset and max_size in the API
@@ -264,10 +264,7 @@ impl PrefixKeys {
     }
 
     /// Injects the list of keys.
-    pub fn inject_keys(
-        mut self,
-        keys: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> RuntimeExternalsVm {
+    pub fn inject_keys(mut self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalStorageClearPrefix(req) => {
                 // TODO: use prefix_remove_update once optimized
@@ -367,7 +364,7 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(mut self, key: Option<impl AsRef<[u8]>>) -> RuntimeExternalsVm {
+    pub fn inject_key(mut self, key: Option<impl AsRef<[u8]>>) -> RuntimeHostVm {
         let key = key.as_ref().map(|k| k.as_ref());
 
         match self.inner.vm {
@@ -408,7 +405,7 @@ impl NextKey {
                         // `self.inner.top_trie_changes`.
                         let key_overwrite = Some(b.clone());
                         self.inner.vm = host::HostVm::ExternalStorageNextKey(req);
-                        return RuntimeExternalsVm::NextKey(NextKey {
+                        return RuntimeHostVm::NextKey(NextKey {
                             inner: self.inner,
                             key_overwrite,
                         });
@@ -434,8 +431,8 @@ impl NextKey {
     }
 }
 
-/// Implementation detail of the execution. Shared by all the variants of [`RuntimeExternalsVm`]
-/// other than [`RuntimeExternalsVm::Finished`].
+/// Implementation detail of the execution. Shared by all the variants of [`RuntimeHostVm`]
+/// other than [`RuntimeHostVm::Finished`].
 struct Inner {
     /// Virtual machine running the call.
     vm: host::HostVm,
@@ -459,20 +456,20 @@ struct Inner {
 
 impl Inner {
     /// Continues the execution.
-    fn run(mut self) -> RuntimeExternalsVm {
+    fn run(mut self) -> RuntimeHostVm {
         loop {
             match self.vm {
                 host::HostVm::ReadyToRun(r) => self.vm = r.run(),
 
                 host::HostVm::Error { error, .. } => {
-                    return RuntimeExternalsVm::Finished(Err(Error::WasmVm {
+                    return RuntimeHostVm::Finished(Err(Error::WasmVm {
                         error,
                         logs: self.logs,
                     }));
                 }
 
                 host::HostVm::Finished(finished) => {
-                    return RuntimeExternalsVm::Finished(Ok(Success {
+                    return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
                         storage_top_trie_changes: self.top_trie_changes,
                         offchain_storage_changes: self.offchain_storage_changes,
@@ -488,7 +485,7 @@ impl Inner {
                         self.vm = req.resume_full_value(overlay.as_ref().map(|v| &v[..]));
                     } else {
                         self.vm = req.into();
-                        return RuntimeExternalsVm::StorageGet(StorageGet { inner: self });
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     }
                 }
 
@@ -516,13 +513,13 @@ impl Inner {
                         self.vm = req.resume();
                     } else {
                         self.vm = req.into();
-                        return RuntimeExternalsVm::StorageGet(StorageGet { inner: self });
+                        return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                     }
                 }
 
                 host::HostVm::ExternalStorageClearPrefix(req) => {
                     self.vm = req.into();
-                    return RuntimeExternalsVm::PrefixKeys(PrefixKeys { inner: self });
+                    return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {
@@ -541,7 +538,7 @@ impl Inner {
                             self.vm = req.into();
                             self.root_calculation =
                                 Some(calculate_root::RootMerkleValueCalculation::AllKeys(keys));
-                            return RuntimeExternalsVm::PrefixKeys(PrefixKeys { inner: self });
+                            return RuntimeHostVm::PrefixKeys(PrefixKeys { inner: self });
                         }
                         calculate_root::RootMerkleValueCalculation::StorageValue(value_request) => {
                             self.vm = req.into();
@@ -557,7 +554,7 @@ impl Inner {
                                     Some(calculate_root::RootMerkleValueCalculation::StorageValue(
                                         value_request,
                                     ));
-                                return RuntimeExternalsVm::StorageGet(StorageGet { inner: self });
+                                return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                             }
                         }
                     }
@@ -565,12 +562,12 @@ impl Inner {
 
                 host::HostVm::ExternalStorageChangesRoot(req) => {
                     self.vm = req.into();
-                    return RuntimeExternalsVm::StorageGet(StorageGet { inner: self });
+                    return RuntimeHostVm::StorageGet(StorageGet { inner: self });
                 }
 
                 host::HostVm::ExternalStorageNextKey(req) => {
                     self.vm = req.into();
-                    return RuntimeExternalsVm::NextKey(NextKey {
+                    return RuntimeHostVm::NextKey(NextKey {
                         inner: self,
                         key_overwrite: None,
                     });
@@ -634,7 +631,7 @@ impl Inner {
                     // TODO: optimize somehow? don't create an intermediary String?
                     let message = req.to_string();
                     if self.logs.len().saturating_add(message.len()) >= 1024 * 1024 {
-                        return RuntimeExternalsVm::Finished(Err(Error::LogsTooLong));
+                        return RuntimeHostVm::Finished(Err(Error::LogsTooLong));
                     }
 
                     self.logs.push_str(&message);

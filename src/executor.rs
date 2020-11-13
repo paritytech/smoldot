@@ -110,7 +110,7 @@ use parity_scale_codec::DecodeAll as _;
 
 mod allocator; // TODO: make public after refactoring
 pub mod host;
-pub mod runtime_externals;
+pub mod runtime_host;
 pub mod vm;
 
 pub use host::{

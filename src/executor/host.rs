@@ -913,10 +913,10 @@ impl ReadyToRun {
                     let data = expect_pointer_size!(0);
                     let out = blake2_rfc::blake2b::blake2b(16, &[], &data);
 
-                    match self.inner.alloc_write_and_return_pointer(
-                        host_fn.name(),
-                        iter::once(out.as_bytes()),
-                    ) {
+                    match self
+                        .inner
+                        .alloc_write_and_return_pointer(host_fn.name(), iter::once(out.as_bytes()))
+                    {
                         HostVm::ReadyToRun(r) => self = r,
                         other => return other,
                     }
@@ -925,10 +925,10 @@ impl ReadyToRun {
                     let data = expect_pointer_size!(0);
                     let out = blake2_rfc::blake2b::blake2b(32, &[], &data);
 
-                    match self.inner.alloc_write_and_return_pointer(
-                        host_fn.name(),
-                        iter::once(out.as_bytes()),
-                    ) {
+                    match self
+                        .inner
+                        .alloc_write_and_return_pointer(host_fn.name(), iter::once(out.as_bytes()))
+                    {
                         HostVm::ReadyToRun(r) => self = r,
                         other => return other,
                     }
