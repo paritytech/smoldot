@@ -15,7 +15,79 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// TODO: documentation
+//! General-purpose WebAssembly virtual machine.
+//!
+//! Contains code related to running a WebAssembly virtual machine. Contrary to
+//! (`ExternalsVm`)[super::externals::ExternalsVm], this module isn't aware of any of the host
+//! functions available to Substrate runtimes. It only contains the code required to run a virtual
+//! machine, with some adjustments explained below.
+//!
+//! # Usage
+//!
+//! Call [`VirtualMachinePrototype::new`] in order to parse and/or compile some WebAssembly code.
+//! One of the parameters of this function is a function that is passed the name of functions
+//! imported by the Wasm code, and must return an opaque `usize`. This `usize` doesn't have any
+//! meaning, but will later be passed back to the user through [`ExecOutcome::Interrupted::id`]
+//! when the corresponding function is called.
+//!
+//! The WebAssembly code can export functions in two different ways:
+//!
+//! - Some functions are exported through an `(export)` statement.
+//!   See <https://webassembly.github.io/spec/core/bikeshed/#export-section%E2%91%A0>.
+//! - Some functions are stored in a global table called `__indirect_function_table`, and are
+//!   later referred to by their index in this table. This is how the concept of "function
+//!   pointers" relevant to programming languages is implemented.
+//!
+//! > **Note**: At the time of writing, it isn't possible to call the second type of functions yet.
+//!
+//! Use [`VirtualMachinePrototype::start`] in order to start executing a function exported through
+//! the `(export)` statement.
+//!
+//! Call [`VirtualMachine::run`] in order to run the WebAssembly code. The `run` method returns
+//! either if the function being called returns, or if the WebAssembly code calls a host function.
+//! In that second case, [`ExecOutcome::Interrupted`] is returned and the virtual machine is now
+//! paused. Once the logic of the host function has been executed, call `run` again, passing the
+//! return value of that host function.
+//!
+//! # About heap pages
+//!
+//! In the WebAssembly specifications, the memory available in the WebAssembly virtual machine has
+//! an initial size and a maximum size. One of the instructions available in WebAssembly code is
+//! [the `memory.grow` instruction](https://webassembly.github.io/spec/core/bikeshed/#-hrefsyntax-instr-memorymathsfmemorygrow),
+//! which allows increasing the size of the memory.
+//!
+//! The Substrate/Polkadot runtime environment, however, differs. Rather than having a resizable
+//! memory, memory has a fixed size that consists of its initial size plus a number of pages equal
+//! to the value of `heap_pages` passed as parameter. It is forbidden for the WebAssembly code
+//! to use `memory.grow`.
+//!
+//! See also the [`../externals`] module for more information about how memory works in the
+//! context of the Substrate/Polkadot runtime.
+//!
+//! # About `__indirect_function_table`
+//!
+//! At initialization, the virtual machine will look for a table named `__indirect_function_table`.
+//! If present, this table is expected to contain functions. These functions can then be referred
+//! to by their index in this table. This is how the concept of "function pointers" commonly found
+//! in programming languages is translated in WebAssembly.
+//!
+//! > **Note**: When compiling C, C++, Rust, or similar languages to WebAssembly, one must pass
+//! >           the `--export-table` option to the LLVM linker in order for this symbol to be
+//! >           exported.
+//!
+//! # About imported vs exported memory
+//!
+//! WebAssembly supports, in theory, addressing multiple different memory objects. The WebAssembly
+//! module can declare memory in two ways:
+//!
+//! - Either by exporting a memory object in the `(export)` section under the name `memory`.
+//! - Or by importing a memory object in its `(import)` section.
+//!
+//! The virtual machine in this module supports both variants. However, no more than one memory
+//! object can be exported or imported.
+//!
+//! The first variant used to be the default model when compiling to WebAssembly, but the second
+//! variant (importing memory objects) is preferred nowadays.
 
 mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -42,7 +114,8 @@ impl VirtualMachinePrototype {
     /// import, or return an error if the import can't be resolved. When the VM calls one of these
     /// functions, this number will be returned back in order for the user to know how to handle
     /// the call.
-    // TODO: explain heap_pages
+    ///
+    /// See [the module-level documentation](..) for an explanation of the parameters.
     pub fn new(
         module: impl AsRef<[u8]>,
         heap_pages: u64,
