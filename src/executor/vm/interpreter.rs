@@ -21,7 +21,9 @@
 //! Substrate/Polkadot (such as the external functions available to the Wasm code) are not handled
 //! by this module and must instead be built on top.
 
-use super::{ExecOutcome, GlobalValueErr, NewErr, RunErr, Signature, ValueType, WasmValue};
+use super::{
+    ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, ValueType, WasmValue,
+};
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, vec::Vec};
 use core::{
@@ -115,8 +117,9 @@ impl VirtualMachinePrototype {
         heap_pages: u64,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        let module =
-            wasmi::Module::from_buffer(module_bytes.as_ref()).map_err(NewErr::Interpreter)?;
+        let module = wasmi::Module::from_buffer(module_bytes.as_ref())
+            .map_err(|err| ModuleError(err.to_string()))
+            .map_err(NewErr::ModuleError)?;
         // TODO: for parity with wasmtime we unwrap() at the moment rather than committing to the
         // idea that floating points are checked at initialization; but ideally wasmtime should
         // check floating points as well
@@ -229,7 +232,9 @@ impl VirtualMachinePrototype {
                 import_memory: RefCell::new(&mut import_memory),
                 heap_pages: usize::try_from(heap_pages).unwrap_or(usize::max_value()),
             };
-            wasmi::ModuleInstance::new(&module, &resolver).map_err(NewErr::Interpreter)?
+            wasmi::ModuleInstance::new(&module, &resolver)
+                .map_err(|err| ModuleError(err.to_string()))
+                .map_err(NewErr::ModuleError)?
         };
         // TODO: explain `assert_no_start`
         let module = not_started.assert_no_start();

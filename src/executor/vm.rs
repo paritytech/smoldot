@@ -522,9 +522,8 @@ pub enum ExecOutcome {
 /// Error that can happen when initializing a VM.
 #[derive(Debug)]
 pub enum NewErr {
-    /// Error in the interpreter.
-    // TODO: don't expose wasmi in API
-    Interpreter(wasmi::Error),
+    /// Error while parsing or compiling the WebAssembly code.
+    ModuleError(ModuleError),
     /// If a "memory" symbol is provided, it must be a memory.
     MemoryIsntMemory,
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
@@ -539,7 +538,7 @@ pub enum NewErr {
 impl fmt::Display for NewErr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            NewErr::Interpreter(_) => write!(f, "Error in the interpreter"),
+            NewErr::ModuleError(err) => write!(f, "Error while parsing or compiling code: {}", err),
             NewErr::MemoryIsntMemory => {
                 write!(f, "If a \"memory\" symbol is provided, it must be a memory")
             }
@@ -552,6 +551,11 @@ impl fmt::Display for NewErr {
         }
     }
 }
+
+/// Opaque error indicating an error while parsing or compiling the WebAssembly code.
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "{}", _0)]
+pub struct ModuleError(String);
 
 /// Error that can happen when resuming the execution of a function.
 #[derive(Debug, derive_more::Display)]

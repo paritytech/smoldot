@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{ExecOutcome, GlobalValueErr, NewErr, RunErr, Signature, WasmValue};
+use super::{ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, WasmValue};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{cmp, convert::TryFrom, fmt};
@@ -58,7 +58,8 @@ impl JitPrototype {
         let engine = wasmtime::Engine::new(&config);
 
         let store = wasmtime::Store::new(&engine);
-        let module = wasmtime::Module::from_binary(&engine, module.as_ref()).unwrap();
+        let module = wasmtime::Module::from_binary(&engine, module.as_ref())
+            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
 
         let builder = corooteen::CoroutineBuilder::new();
 
