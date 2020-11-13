@@ -36,18 +36,18 @@
 //!   See <https://webassembly.github.io/spec/core/bikeshed/#export-section%E2%91%A0>.
 //! - Some functions are stored in a global table called `__indirect_function_table`, and are
 //!   later referred to by their index in this table. This is how the concept of "function
-//!   pointers" relevant to programming languages is implemented.
+//!   pointers" commonly found in low-level programming languages is translated in WebAssembly.
 //!
 //! > **Note**: At the time of writing, it isn't possible to call the second type of functions yet.
 //!
 //! Use [`VirtualMachinePrototype::start`] in order to start executing a function exported through
-//! the `(export)` statement.
+//! an `(export)` statement.
 //!
-//! Call [`VirtualMachine::run`] in order to run the WebAssembly code. The `run` method returns
-//! either if the function being called returns, or if the WebAssembly code calls a host function.
-//! In that second case, [`ExecOutcome::Interrupted`] is returned and the virtual machine is now
-//! paused. Once the logic of the host function has been executed, call `run` again, passing the
-//! return value of that host function.
+//! Call [`VirtualMachine::run`] on the [`VirtualMachine`] returned by `start` in order to run the
+//! WebAssembly code. The `run` method returns either if the function being called returns, or if
+//! the WebAssembly code calls a host function. In the latter case, [`ExecOutcome::Interrupted`]
+//! is returned and the virtual machine is now paused. Once the logic of the host function has
+//! been executed, call `run` again, passing the return value of that host function.
 //!
 //! # About heap pages
 //!
