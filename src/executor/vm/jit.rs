@@ -290,32 +290,10 @@ impl JitPrototype {
 // TODO: really annoying to have to use unsafe code
 unsafe impl Send for JitPrototype {}
 
-/// Type that can be given to the coroutine.
-enum ToCoroutine {
-    /// Start execution of the given function. Answered with [`FromCoroutine::Init`].
-    Start(String, Vec<WasmValue>),
-    /// Resume execution after [`FromCoroutine::Interrupt`].
-    Resume(Option<WasmValue>),
-    /// Return the value of the given global with a [`FromCoroutine::GetGlobalResponse`].
-    GetGlobal(String),
-}
-
-/// Type yielded by the coroutine.
-enum FromCoroutine {
-    /// Reports how well the initialization went. Sent as part of the first interrupt, then again
-    /// as a reponse to [`ToCoroutine::Start`].
-    Init(Result<(), NewErr>),
-    /// Execution of the Wasm code has been interrupted by a call.
-    Interrupt {
-        /// Index of the function, to put in [`ExecOutcome::Interrupted::id`].
-        function_index: usize,
-        /// Parameters of the function.
-        parameters: Vec<WasmValue>,
-    },
-    /// Response to a [`ToCoroutine::GetGlobal`].
-    GetGlobalResponse(Result<u32, GlobalValueErr>),
-    /// Executing the function is finished.
-    Done(Result<Option<wasmtime::Val>, String>),
+impl fmt::Debug for JitPrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("JitPrototype").finish()
+    }
 }
 
 /// See [`super::VirtualMachine`].
@@ -459,4 +437,32 @@ impl fmt::Debug for Jit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Jit").finish()
     }
+}
+
+/// Type that can be given to the coroutine.
+enum ToCoroutine {
+    /// Start execution of the given function. Answered with [`FromCoroutine::Init`].
+    Start(String, Vec<WasmValue>),
+    /// Resume execution after [`FromCoroutine::Interrupt`].
+    Resume(Option<WasmValue>),
+    /// Return the value of the given global with a [`FromCoroutine::GetGlobalResponse`].
+    GetGlobal(String),
+}
+
+/// Type yielded by the coroutine.
+enum FromCoroutine {
+    /// Reports how well the initialization went. Sent as part of the first interrupt, then again
+    /// as a reponse to [`ToCoroutine::Start`].
+    Init(Result<(), NewErr>),
+    /// Execution of the Wasm code has been interrupted by a call.
+    Interrupt {
+        /// Index of the function, to put in [`ExecOutcome::Interrupted::id`].
+        function_index: usize,
+        /// Parameters of the function.
+        parameters: Vec<WasmValue>,
+    },
+    /// Response to a [`ToCoroutine::GetGlobal`].
+    GetGlobalResponse(Result<u32, GlobalValueErr>),
+    /// Executing the function is finished.
+    Done(Result<Option<wasmtime::Val>, String>),
 }

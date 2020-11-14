@@ -29,41 +29,8 @@ use core::{
 };
 use wasmi::memory_units::ByteSize as _;
 
-/// See [`super::VirtualMachine`].
-pub struct VirtualMachine {
-    /// Original module, with resolved imports.
-    _module: wasmi::ModuleRef,
-
-    /// Memory of the module instantiation.
-    ///
-    /// Right now we only support one unique `Memory` object per process. This is it.
-    /// Contains `None` if the process doesn't export any memory object, which means it doesn't
-    /// use any memory.
-    memory: Option<wasmi::MemoryRef>,
-
-    /// Table of the indirect function calls.
-    ///
-    /// In Wasm, function pointers are in reality indices in a table called
-    /// `__indirect_function_table`. This is this table, if it exists.
-    indirect_table: Option<wasmi::TableRef>,
-
-    /// Execution context of this virtual machine. This notably holds the program counter, state
-    /// of the stack, and so on.
-    ///
-    /// This field is an `Option` because we need to be able to temporarily extract it. It must
-    /// always be `Some`.
-    execution: Option<wasmi::FuncInvocation<'static>>,
-
-    /// If false, then one must call `execution.start_execution()` instead of `resume_execution()`.
-    /// This is a particularity of the Wasm interpreter that we don't want to expose in our API.
-    interrupted: bool,
-
-    /// If true, the state machine is in a poisoned state and cannot run any code anymore.
-    is_poisoned: bool,
-}
-
 /// See [`super::VirtualMachinePrototype`].
-pub struct VirtualMachinePrototype {
+pub struct InterpreterPrototype {
     /// Original module, with resolved imports.
     module: wasmi::ModuleRef,
 
@@ -81,7 +48,7 @@ pub struct VirtualMachinePrototype {
     indirect_table: Option<wasmi::TableRef>,
 }
 
-impl VirtualMachinePrototype {
+impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module_bytes: impl AsRef<[u8]>,
@@ -234,7 +201,7 @@ impl VirtualMachinePrototype {
             None
         };
 
-        Ok(VirtualMachinePrototype {
+        Ok(InterpreterPrototype {
             module,
             memory,
             indirect_table,
@@ -265,7 +232,7 @@ impl VirtualMachinePrototype {
         self,
         function_name: &str,
         params: &[WasmValue],
-    ) -> Result<VirtualMachine, NewErr> {
+    ) -> Result<Interpreter, NewErr> {
         let execution = match self.module.export_by_name(function_name) {
             Some(wasmi::ExternVal::Func(f)) => {
                 match wasmi::FuncInstance::invoke_resumable(
@@ -283,7 +250,7 @@ impl VirtualMachinePrototype {
             _ => return Err(NewErr::NotAFunction),
         };
 
-        Ok(VirtualMachine {
+        Ok(Interpreter {
             _module: self.module,
             memory: self.memory,
             execution: Some(execution),
@@ -302,13 +269,52 @@ impl VirtualMachinePrototype {
 // This importantly means that we should never return a `Rc` (even by reference) across the API
 // boundary.
 //
-// For this reason, it would also be unsafe to implement `Clone` on `VirtualMachinePrototype`. A
-// user could clone the `VirtualMachinePrototype` and send it to another thread, which would be
+// For this reason, it would also be unsafe to implement `Clone` on `InterpreterPrototype`. A
+// user could clone the `InterpreterPrototype` and send it to another thread, which would be
 // undefined behaviour.
 // TODO: really annoying to have to use unsafe code
-unsafe impl Send for VirtualMachinePrototype {}
+unsafe impl Send for InterpreterPrototype {}
 
-impl VirtualMachine {
+impl fmt::Debug for InterpreterPrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("InterpreterPrototype").finish()
+    }
+}
+
+/// See [`super::VirtualMachine`].
+pub struct Interpreter {
+    /// Original module, with resolved imports.
+    _module: wasmi::ModuleRef,
+
+    /// Memory of the module instantiation.
+    ///
+    /// Right now we only support one unique `Memory` object per process. This is it.
+    /// Contains `None` if the process doesn't export any memory object, which means it doesn't
+    /// use any memory.
+    memory: Option<wasmi::MemoryRef>,
+
+    /// Table of the indirect function calls.
+    ///
+    /// In Wasm, function pointers are in reality indices in a table called
+    /// `__indirect_function_table`. This is this table, if it exists.
+    indirect_table: Option<wasmi::TableRef>,
+
+    /// Execution context of this virtual machine. This notably holds the program counter, state
+    /// of the stack, and so on.
+    ///
+    /// This field is an `Option` because we need to be able to temporarily extract it. It must
+    /// always be `Some`.
+    execution: Option<wasmi::FuncInvocation<'static>>,
+
+    /// If false, then one must call `execution.start_execution()` instead of `resume_execution()`.
+    /// This is a particularity of the Wasm interpreter that we don't want to expose in our API.
+    interrupted: bool,
+
+    /// If true, the state machine is in a poisoned state and cannot run any code anymore.
+    is_poisoned: bool,
+}
+
+impl Interpreter {
     /// See [`super::VirtualMachine::run`].
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         let value = value.map(wasmi::RuntimeValue::from);
@@ -434,10 +440,10 @@ impl VirtualMachine {
     }
 
     /// See [`super::VirtualMachine::into_prototype`].
-    pub fn into_prototype(self) -> VirtualMachinePrototype {
+    pub fn into_prototype(self) -> InterpreterPrototype {
         // TODO: zero the memory
 
-        VirtualMachinePrototype {
+        InterpreterPrototype {
             module: self._module,
             memory: self.memory,
             indirect_table: self.indirect_table,
@@ -453,10 +459,10 @@ impl VirtualMachine {
 // This importantly means that we should never return a `Rc` (even by reference) across the API
 // boundary.
 // TODO: really annoying to have to use unsafe code
-unsafe impl Send for VirtualMachine {}
+unsafe impl Send for Interpreter {}
 
-impl fmt::Debug for VirtualMachine {
+impl fmt::Debug for Interpreter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("VirtualMachine").finish()
+        f.debug_tuple("Interpreter").finish()
     }
 }

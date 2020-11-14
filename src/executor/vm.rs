@@ -104,7 +104,7 @@ pub struct VirtualMachinePrototype {
 enum VirtualMachinePrototypeInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::JitPrototype),
-    Interpreter(interpreter::VirtualMachinePrototype),
+    Interpreter(interpreter::InterpreterPrototype),
 }
 
 impl VirtualMachinePrototype {
@@ -141,7 +141,7 @@ impl VirtualMachinePrototype {
                 out
             } else {
                 VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::VirtualMachinePrototype::new(module, heap_pages, symbols)?,
+                    interpreter::InterpreterPrototype::new(module, heap_pages, symbols)?,
                 )
             },
         })
@@ -179,8 +179,7 @@ impl VirtualMachinePrototype {
     }
 }
 
-// TODO:
-/*impl fmt::Debug for VirtualMachinePrototype {
+impl fmt::Debug for VirtualMachinePrototype {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -188,7 +187,7 @@ impl VirtualMachinePrototype {
             VirtualMachinePrototypeInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
         }
     }
-}*/
+}
 
 pub struct VirtualMachine {
     inner: VirtualMachineInner,
@@ -197,7 +196,7 @@ pub struct VirtualMachine {
 enum VirtualMachineInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::Jit),
-    Interpreter(interpreter::VirtualMachine),
+    Interpreter(interpreter::Interpreter),
 }
 
 impl VirtualMachine {
