@@ -90,7 +90,6 @@ impl JitPrototype {
                                     // supported.
                                     parameters: params
                                         .iter()
-                                        .cloned()
                                         .map(TryFrom::try_from)
                                         .collect::<Result<_, _>>()
                                         .unwrap(),
@@ -228,7 +227,7 @@ impl JitPrototype {
                     assert!(matches!(reinjected, ToCoroutine::Resume(None)));
 
                     // Now running the `start` function of the Wasm code.
-                    // This will interrupt the coroutine every time we reach a host function.
+                    // This will interrupt the coroutine every time a host function is reached.
                     let result = start_function.call(
                         &start_parameters
                             .into_iter()
@@ -246,13 +245,10 @@ impl JitPrototype {
                     };
 
                     // Execution resumes here when the Wasm code has gracefully finished.
-                    assert!(result.len() == 0 || result.len() == 1); // TODO: I don't know what multiple results means
-                    let result = if result.is_empty() {
-                        Ok(None)
-                    } else {
-                        Ok(Some(result[0].clone())) // TODO: don't clone?
-                    };
-
+                    // The signature of the function has been chedk earlier, and as such it is
+                    // guaranteed that it has only one return value.
+                    assert!(result.len() == 0 || result.len() == 1);
+                    let result = Ok(result.get(0).map(|v| TryFrom::try_from(v).unwrap()));
                     request = interrupter.interrupt(FromCoroutine::Done(result));
                 }
             }) as Box<_>)
@@ -358,7 +354,7 @@ impl Jit {
                     // Since we verify at initialization that the signature of the function to
                     // call is supported, it is guaranteed that the type of this return value is
                     // supported too.
-                    return_value: Ok(val.map(|v| TryFrom::try_from(v).unwrap())),
+                    return_value: Ok(val),
                 })
             }
             corooteen::RunOut::Interrupted(FromCoroutine::Interrupt {
@@ -521,5 +517,5 @@ enum FromCoroutine {
     /// Response to a [`ToCoroutine::GetGlobal`].
     GetGlobalResponse(Result<u32, GlobalValueErr>),
     /// Executing the function is finished.
-    Done(Result<Option<wasmtime::Val>, String>),
+    Done(Result<Option<WasmValue>, String>),
 }

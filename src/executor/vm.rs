@@ -476,13 +476,13 @@ impl From<WasmValue> for wasmtime::Val {
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-impl TryFrom<wasmtime::Val> for WasmValue {
+impl<'a> TryFrom<&'a wasmtime::Val> for WasmValue {
     type Error = UnsupportedTypeError;
 
-    fn try_from(val: wasmtime::Val) -> Result<Self, Self::Error> {
+    fn try_from(val: &'a wasmtime::Val) -> Result<Self, Self::Error> {
         match val {
-            wasmtime::Val::I32(v) => Ok(WasmValue::I32(v)),
-            wasmtime::Val::I64(v) => Ok(WasmValue::I64(v)),
+            wasmtime::Val::I32(v) => Ok(WasmValue::I32(*v)),
+            wasmtime::Val::I64(v) => Ok(WasmValue::I64(*v)),
             _ => Err(UnsupportedTypeError),
         }
     }
