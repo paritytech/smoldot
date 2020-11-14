@@ -396,7 +396,17 @@ impl Jit {
         offset: u32,
         size: u32,
     ) -> Result<impl AsRef<[u8]> + 'a, OutOfBoundsError> {
-        let mem = self.memory.as_ref().ok_or(OutOfBoundsError)?;
+        let mem = match self.memory.as_ref() {
+            Some(m) => m,
+            None => {
+                return if offset == 0 && size == 0 {
+                    Ok(&[][..])
+                } else {
+                    Err(OutOfBoundsError)
+                }
+            }
+        };
+
         let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
         let end = start
             .checked_add(usize::try_from(size).map_err(|_| OutOfBoundsError)?)
@@ -416,7 +426,17 @@ impl Jit {
 
     /// See [`super::VirtualMachine::write_memory`].
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
-        let mem = self.memory.as_ref().ok_or(OutOfBoundsError)?;
+        let mem = match self.memory.as_ref() {
+            Some(m) => m,
+            None => {
+                return if offset == 0 && value.is_empty() {
+                    Ok(())
+                } else {
+                    Err(OutOfBoundsError)
+                }
+            }
+        };
+
         let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
         let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
 
