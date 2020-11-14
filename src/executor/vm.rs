@@ -94,7 +94,7 @@ mod interpreter;
 mod jit;
 
 use alloc::vec::Vec;
-use core::fmt;
+use core::{convert::TryFrom, fmt};
 use smallvec::SmallVec;
 
 pub struct VirtualMachinePrototype {
@@ -140,9 +140,9 @@ impl VirtualMachinePrototype {
                 let out = unreachable!();
                 out
             } else {
-                VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::InterpreterPrototype::new(module, heap_pages, symbols)?,
-                )
+                VirtualMachinePrototypeInner::Interpreter(interpreter::InterpreterPrototype::new(
+                    module, heap_pages, symbols,
+                )?)
             },
         })
     }
@@ -296,7 +296,7 @@ pub enum ExecHint {
 /// Low-level Wasm function signature.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Signature {
-    params: SmallVec<[ValueType; 2]>,
+    params: SmallVec<[ValueType; 8]>,
     ret_ty: Option<ValueType>,
 }
 
@@ -324,7 +324,7 @@ impl Signature {
 }
 
 impl<'a> From<&'a Signature> for wasmi::Signature {
-    fn from(sig: &'a Signature) -> wasmi::Signature {
+    fn from(sig: &'a Signature) -> Self {
         wasmi::Signature::new(
             sig.params
                 .iter()
@@ -342,32 +342,53 @@ impl From<Signature> for wasmi::Signature {
     }
 }
 
-impl<'a> From<&'a wasmi::Signature> for Signature {
-    fn from(sig: &'a wasmi::Signature) -> Signature {
-        Signature::new(
-            sig.params().iter().cloned().map(ValueType::from),
-            sig.return_type().map(ValueType::from),
-        )
+impl<'a> TryFrom<&'a wasmi::Signature> for Signature {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(sig: &'a wasmi::Signature) -> Result<Self, Self::Error> {
+        Ok(Signature {
+            params: sig
+                .params()
+                .iter()
+                .cloned()
+                .map(ValueType::try_from)
+                .collect::<Result<_, _>>()?,
+            ret_ty: sig.return_type().map(ValueType::try_from).transpose()?,
+        })
     }
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-impl<'a> From<&'a wasmtime::FuncType> for Signature {
-    fn from(sig: &'a wasmtime::FuncType) -> Signature {
-        // TODO: we only support one return type at the moment; what even is multiple
-        // return types?
-        assert!(sig.results().len() <= 1);
+impl<'a> TryFrom<&'a wasmtime::FuncType> for Signature {
+    type Error = UnsupportedTypeError;
 
-        Signature::new(
-            sig.params().iter().cloned().map(ValueType::from),
-            sig.results().get(0).cloned().map(ValueType::from),
-        )
+    fn try_from(sig: &'a wasmtime::FuncType) -> Result<Self, Self::Error> {
+        if sig.results().len() > 1 {
+            return Err(UnsupportedTypeError);
+        }
+
+        Ok(Signature {
+            params: sig
+                .params()
+                .iter()
+                .cloned()
+                .map(ValueType::try_from)
+                .collect::<Result<_, _>>()?,
+            ret_ty: sig
+                .results()
+                .get(0)
+                .cloned()
+                .map(ValueType::try_from)
+                .transpose()?,
+        })
     }
 }
 
-impl From<wasmi::Signature> for Signature {
-    fn from(sig: wasmi::Signature) -> Signature {
-        Signature::from(&sig)
+impl TryFrom<wasmi::Signature> for Signature {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(sig: wasmi::Signature) -> Result<Self, Self::Error> {
+        Signature::try_from(&sig)
     }
 }
 
@@ -419,12 +440,14 @@ impl WasmValue {
     }
 }
 
-impl From<wasmi::RuntimeValue> for WasmValue {
-    fn from(val: wasmi::RuntimeValue) -> Self {
+impl TryFrom<wasmi::RuntimeValue> for WasmValue {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: wasmi::RuntimeValue) -> Result<Self, Self::Error> {
         match val {
-            wasmi::RuntimeValue::I32(v) => WasmValue::I32(v),
-            wasmi::RuntimeValue::I64(v) => WasmValue::I64(v),
-            _ => panic!(), // TODO: do something other than panicking here
+            wasmi::RuntimeValue::I32(v) => Ok(WasmValue::I32(v)),
+            wasmi::RuntimeValue::I64(v) => Ok(WasmValue::I64(v)),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
@@ -449,12 +472,14 @@ impl From<WasmValue> for wasmtime::Val {
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-impl From<wasmtime::Val> for WasmValue {
-    fn from(val: wasmtime::Val) -> Self {
+impl TryFrom<wasmtime::Val> for WasmValue {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: wasmtime::Val) -> Result<Self, Self::Error> {
         match val {
-            wasmtime::Val::I32(v) => WasmValue::I32(v),
-            wasmtime::Val::I64(v) => WasmValue::I64(v),
-            _ => unimplemented!(),
+            wasmtime::Val::I32(v) => Ok(WasmValue::I32(v)),
+            wasmtime::Val::I64(v) => Ok(WasmValue::I64(v)),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
@@ -468,26 +493,34 @@ impl From<ValueType> for wasmi::ValueType {
     }
 }
 
-impl From<wasmi::ValueType> for ValueType {
-    fn from(val: wasmi::ValueType) -> Self {
+impl TryFrom<wasmi::ValueType> for ValueType {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: wasmi::ValueType) -> Result<Self, Self::Error> {
         match val {
-            wasmi::ValueType::I32 => ValueType::I32,
-            wasmi::ValueType::I64 => ValueType::I64,
-            _ => panic!(), // TODO: do something other than panicking here
+            wasmi::ValueType::I32 => Ok(ValueType::I32),
+            wasmi::ValueType::I64 => Ok(ValueType::I64),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-impl From<wasmtime::ValType> for ValueType {
-    fn from(val: wasmtime::ValType) -> Self {
+impl TryFrom<wasmtime::ValType> for ValueType {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: wasmtime::ValType) -> Result<Self, Self::Error> {
         match val {
-            wasmtime::ValType::I32 => ValueType::I32,
-            wasmtime::ValType::I64 => ValueType::I64,
-            _ => unimplemented!(), // TODO:
+            wasmtime::ValType::I32 => Ok(ValueType::I32),
+            wasmtime::ValType::I64 => Ok(ValueType::I64),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
+
+/// Error used in the conversions between VM implementation and the public API.
+#[derive(Debug, derive_more::Display)]
+pub struct UnsupportedTypeError;
 
 /// Outcome of the [`run`](VirtualMachine::run) function.
 #[derive(Debug)]
@@ -538,6 +571,9 @@ pub enum NewErr {
     /// The requested function has been found in the list of exports, but it is not a function.
     #[display(fmt = "Symbol to start is not a function.")]
     NotAFunction,
+    /// The requested function has a signature that isn't supported.
+    #[display(fmt = "Function to start uses unsupported signature.")]
+    SignatureNotSupported,
 }
 
 /// Opaque error indicating an error while parsing or compiling the WebAssembly code.

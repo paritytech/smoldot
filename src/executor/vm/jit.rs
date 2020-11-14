@@ -20,18 +20,18 @@
 use super::{ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, WasmValue};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
-use core::{cmp, convert::{Infallible, TryFrom}, fmt};
+use core::{
+    cmp,
+    convert::{Infallible, TryFrom},
+    fmt,
+};
 
 // TODO: this entire module is unsatisfactory
 
 /// See [`super::VirtualMachinePrototype`].
 pub struct JitPrototype {
     /// Coroutine that contains the Wasm execution stack.
-    coroutine: corooteen::Coroutine<
-        Box<dyn FnOnce() -> Infallible>,
-        FromCoroutine,
-        ToCoroutine,
-    >,
+    coroutine: corooteen::Coroutine<Box<dyn FnOnce() -> Infallible>, FromCoroutine, ToCoroutine>,
 
     /// Reference to the memory used by the module, if any.
     memory: Option<wasmtime::Memory>,
@@ -67,9 +67,13 @@ impl JitPrototype {
             for import in module.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
-                        // TODO: don't panic if not found
-                        let function_index =
-                            symbols(import.module(), import.name(), &From::from(&f)).unwrap();
+                        // TODO: don't panic below
+                        let function_index = symbols(
+                            import.module(),
+                            import.name(),
+                            &TryFrom::try_from(&f).unwrap(),
+                        )
+                        .unwrap();
                         let interrupter = builder.interrupter();
                         imports.push(wasmtime::Extern::Func(wasmtime::Func::new(
                             &store,
@@ -78,7 +82,15 @@ impl JitPrototype {
                                 // This closure is executed whenever the Wasm VM calls a host function.
                                 let returned = interrupter.interrupt(FromCoroutine::Interrupt {
                                     function_index,
-                                    parameters: params.iter().cloned().map(From::from).collect(),
+                                    // Since function signatures are checked at initialization,
+                                    // it is guaranteed that the parameter types are also
+                                    // supported.
+                                    parameters: params
+                                        .iter()
+                                        .cloned()
+                                        .map(TryFrom::try_from)
+                                        .collect::<Result<_, _>>()
+                                        .unwrap(),
                                 });
                                 let returned = match returned {
                                     ToCoroutine::Resume(returned) => returned,
@@ -198,6 +210,15 @@ impl JitPrototype {
                         continue;
                     };
 
+                    // Try to convert the signature of the function to call, in order to make sure
+                    // that the type of parameters and return value are supported.
+                    if Signature::try_from(&start_function.ty()).is_err() {
+                        request = interrupter.interrupt(FromCoroutine::StartResult(Err(
+                            NewErr::SignatureNotSupported,
+                        )));
+                        continue;
+                    }
+
                     // Report back that everything went ok.
                     let reinjected: ToCoroutine =
                         interrupter.interrupt(FromCoroutine::StartResult(Ok(())));
@@ -217,7 +238,8 @@ impl JitPrototype {
                         Err(err) => {
                             // TODO: remove
                             println!("trapped in vm: {:?}", err);
-                            request = interrupter.interrupt(FromCoroutine::Done(Err(err.to_string())));
+                            request =
+                                interrupter.interrupt(FromCoroutine::Done(Err(err.to_string())));
                             continue;
                         }
                     };
@@ -266,7 +288,9 @@ impl JitPrototype {
             function_name.to_owned(),
             params.to_owned(),
         ))) {
-            corooteen::RunOut::Interrupted(FromCoroutine::StartResult(Err(err))) => return Err(err),
+            corooteen::RunOut::Interrupted(FromCoroutine::StartResult(Err(err))) => {
+                return Err(err)
+            }
             corooteen::RunOut::Interrupted(FromCoroutine::StartResult(Ok(()))) => {}
             _ => unreachable!(),
         }
@@ -298,11 +322,7 @@ impl fmt::Debug for JitPrototype {
 /// See [`super::VirtualMachine`].
 pub struct Jit {
     /// Coroutine that contains the Wasm execution stack.
-    coroutine: corooteen::Coroutine<
-        Box<dyn FnOnce() -> Infallible>,
-        FromCoroutine,
-        ToCoroutine,
-    >,
+    coroutine: corooteen::Coroutine<Box<dyn FnOnce() -> Infallible>, FromCoroutine, ToCoroutine>,
 
     /// See [`JitPrototype::memory`].
     memory: Option<wasmtime::Memory>,
@@ -334,7 +354,10 @@ impl Jit {
             }
             corooteen::RunOut::Interrupted(FromCoroutine::Done(Ok(val))) => {
                 Ok(ExecOutcome::Finished {
-                    return_value: Ok(val.map(From::from)),
+                    // Since we verify at initialization that the signature of the function to
+                    // call is supported, it is guaranteed that the type of this return value is
+                    // supported too.
+                    return_value: Ok(val.map(|v| TryFrom::try_from(v).unwrap())),
                 })
             }
             corooteen::RunOut::Interrupted(FromCoroutine::Interrupt {

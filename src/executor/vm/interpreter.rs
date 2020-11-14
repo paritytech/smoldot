@@ -77,7 +77,16 @@ impl InterpreterPrototype {
                 signature: &wasmi::Signature,
             ) -> Result<wasmi::FuncRef, wasmi::Error> {
                 let closure = &mut **self.functions.borrow_mut();
-                let index = match closure(module_name, field_name, &From::from(signature)) {
+                let conv_signature = match TryFrom::try_from(signature) {
+                    Ok(i) => i,
+                    Err(_) => {
+                        return Err(wasmi::Error::Instantiation(format!(
+                            "Function with unsupported signature `{}`:`{}`",
+                            module_name, field_name
+                        )))
+                    }
+                };
+                let index = match closure(module_name, field_name, &conv_signature) {
                     Ok(i) => i,
                     Err(_) => {
                         return Err(wasmi::Error::Instantiation(format!(
@@ -228,13 +237,15 @@ impl InterpreterPrototype {
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
-    pub fn start(
-        self,
-        function_name: &str,
-        params: &[WasmValue],
-    ) -> Result<Interpreter, NewErr> {
+    pub fn start(self, function_name: &str, params: &[WasmValue]) -> Result<Interpreter, NewErr> {
         let execution = match self.module.export_by_name(function_name) {
             Some(wasmi::ExternVal::Func(f)) => {
+                // Try to convert the signature of the function to call, in order to make sure
+                // that the type of parameters and return value are supported.
+                if Signature::try_from(f.signature()).is_err() {
+                    return Err(NewErr::SignatureNotSupported);
+                }
+
                 match wasmi::FuncInstance::invoke_resumable(
                     &f,
                     params
@@ -355,9 +366,16 @@ impl Interpreter {
             None => unreachable!(),
         };
 
+        // Since the signature of the function is checked at initialization to be supported, it is
+        // guaranteed that the conversions below won't panic.
+
         let result = if self.interrupted {
-            let expected_ty = execution.resumable_value_type().map(ValueType::from);
-            let obtained_ty = value.as_ref().map(|v| ValueType::from(v.value_type()));
+            let expected_ty = execution
+                .resumable_value_type()
+                .map(|v| ValueType::try_from(v).unwrap());
+            let obtained_ty = value
+                .as_ref()
+                .map(|v| ValueType::try_from(v.value_type()).unwrap());
             if expected_ty != obtained_ty {
                 return Err(RunErr::BadValueTy {
                     expected: expected_ty,
@@ -369,7 +387,9 @@ impl Interpreter {
             if value.is_some() {
                 return Err(RunErr::BadValueTy {
                     expected: None,
-                    obtained: value.as_ref().map(|v| ValueType::from(v.value_type())),
+                    obtained: value
+                        .as_ref()
+                        .map(|v| ValueType::try_from(v.value_type()).unwrap()),
                 });
             }
             self.interrupted = true;
@@ -380,7 +400,7 @@ impl Interpreter {
             Ok(return_value) => {
                 self.is_poisoned = true;
                 Ok(ExecOutcome::Finished {
-                    return_value: Ok(return_value.map(WasmValue::from)),
+                    return_value: Ok(return_value.map(|r| WasmValue::try_from(r).unwrap())),
                 })
             }
             Err(wasmi::ResumableError::AlreadyStarted) => unreachable!(),
@@ -396,7 +416,13 @@ impl Interpreter {
                 self.execution = Some(execution);
                 Ok(ExecOutcome::Interrupted {
                     id: interrupt.index,
-                    params: interrupt.args.iter().cloned().map(From::from).collect(),
+                    params: interrupt
+                        .args
+                        .iter()
+                        .cloned()
+                        .map(TryFrom::try_from)
+                        .collect::<Result<_, _>>()
+                        .unwrap(),
                 })
             }
             Err(wasmi::ResumableError::Trap(_)) => {
