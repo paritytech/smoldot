@@ -574,4 +574,12 @@ pub enum GlobalValueErr {
 #[cfg(test)]
 mod tests {
     // TODO:
+
+    #[test]
+    fn is_send() {
+        // Makes sure that the virtual machine types implement `Send`.
+        fn test<T: Send>() {}
+        test::<super::VirtualMachine>();
+        test::<super::VirtualMachinePrototype>();
+    }
 }
