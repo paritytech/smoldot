@@ -20,7 +20,7 @@
 use super::{ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, WasmValue};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
-use core::{cmp, convert::TryFrom, fmt};
+use core::{cmp, convert::{Infallible, TryFrom}, fmt};
 
 // TODO: this entire module is unsatisfactory
 
@@ -28,7 +28,7 @@ use core::{cmp, convert::TryFrom, fmt};
 pub struct JitPrototype {
     /// Coroutine that contains the Wasm execution stack.
     coroutine: corooteen::Coroutine<
-        Box<dyn FnOnce()>, // TODO: return `!`
+        Box<dyn FnOnce() -> Infallible>,
         FromCoroutine,
         ToCoroutine,
     >,
@@ -157,9 +157,8 @@ impl JitPrototype {
         // We now build the coroutine of the main thread.
         let mut coroutine = {
             let interrupter = builder.interrupter();
-            builder.build(Box::new(move || {
-                // TODO: no, don't send this now but below; need to adjust for this elsewhere
-                let mut request = interrupter.interrupt(FromCoroutine::Init(Ok(())));
+            builder.build(Box::new(move || -> Infallible {
+                let mut request = interrupter.interrupt(FromCoroutine::Init);
 
                 loop {
                     let (start_function_name, start_parameters) = loop {
@@ -190,18 +189,18 @@ impl JitPrototype {
                             f.clone()
                         } else {
                             let err = NewErr::NotAFunction;
-                            interrupter.interrupt(FromCoroutine::Init(Err(err)));
-                            return;
+                            request = interrupter.interrupt(FromCoroutine::StartResult(Err(err)));
+                            continue;
                         }
                     } else {
                         let err = NewErr::FunctionNotFound;
-                        interrupter.interrupt(FromCoroutine::Init(Err(err)));
-                        return;
+                        request = interrupter.interrupt(FromCoroutine::StartResult(Err(err)));
+                        continue;
                     };
 
                     // Report back that everything went ok.
                     let reinjected: ToCoroutine =
-                        interrupter.interrupt(FromCoroutine::Init(Ok(())));
+                        interrupter.interrupt(FromCoroutine::StartResult(Ok(())));
                     assert!(matches!(reinjected, ToCoroutine::Resume(None)));
 
                     // Now running the `start` function of the Wasm code.
@@ -239,7 +238,7 @@ impl JitPrototype {
         // Execute the coroutine once, as described above.
         // The first yield must always be an `FromCoroutine::Init`.
         match coroutine.run(None) {
-            corooteen::RunOut::Interrupted(FromCoroutine::Init(Ok(()))) => {}
+            corooteen::RunOut::Interrupted(FromCoroutine::Init) => {}
             _ => unreachable!(),
         }
 
@@ -267,8 +266,8 @@ impl JitPrototype {
             function_name.to_owned(),
             params.to_owned(),
         ))) {
-            corooteen::RunOut::Interrupted(FromCoroutine::Init(Err(err))) => return Err(err),
-            corooteen::RunOut::Interrupted(FromCoroutine::Init(Ok(()))) => {}
+            corooteen::RunOut::Interrupted(FromCoroutine::StartResult(Err(err))) => return Err(err),
+            corooteen::RunOut::Interrupted(FromCoroutine::StartResult(Ok(()))) => {}
             _ => unreachable!(),
         }
 
@@ -300,7 +299,7 @@ impl fmt::Debug for JitPrototype {
 pub struct Jit {
     /// Coroutine that contains the Wasm execution stack.
     coroutine: corooteen::Coroutine<
-        Box<dyn FnOnce()>, // TODO: return `!`
+        Box<dyn FnOnce() -> Infallible>,
         FromCoroutine,
         ToCoroutine,
     >,
@@ -326,8 +325,7 @@ impl Jit {
             .coroutine
             .run(Some(ToCoroutine::Resume(value.map(From::from))))
         {
-            // TODO: use `!`
-            corooteen::RunOut::Finished(_) => unreachable!(),
+            corooteen::RunOut::Finished(_void) => match _void {},
 
             corooteen::RunOut::Interrupted(FromCoroutine::Done(Err(err))) => {
                 Ok(ExecOutcome::Finished {
@@ -348,7 +346,9 @@ impl Jit {
             }),
 
             // `Init` must only be produced at initialization.
-            corooteen::RunOut::Interrupted(FromCoroutine::Init(_)) => unreachable!(),
+            corooteen::RunOut::Interrupted(FromCoroutine::Init) => unreachable!(),
+            // `StartResult` only happens in response to a request.
+            corooteen::RunOut::Interrupted(FromCoroutine::StartResult(_)) => unreachable!(),
             // `GetGlobalResponse` only happens in response to a request.
             corooteen::RunOut::Interrupted(FromCoroutine::GetGlobalResponse(_)) => unreachable!(),
         }
@@ -400,7 +400,7 @@ impl Jit {
 
     /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> JitPrototype {
-        // TODO: how do we handle if the coroutine was in a host function?
+        // TODO: how do we handle if the coroutine was within a host function?
 
         // TODO: necessary?
         /*// Zero-ing the memory.
@@ -451,9 +451,10 @@ enum ToCoroutine {
 
 /// Type yielded by the coroutine.
 enum FromCoroutine {
-    /// Reports how well the initialization went. Sent as part of the first interrupt, then again
-    /// as a reponse to [`ToCoroutine::Start`].
-    Init(Result<(), NewErr>),
+    /// Reports how well the initialization went. Sent as part of the first interrupt.
+    Init,
+    /// Reponse to [`ToCoroutine::Start`].
+    StartResult(Result<(), NewErr>),
     /// Execution of the Wasm code has been interrupted by a call.
     Interrupt {
         /// Index of the function, to put in [`ExecOutcome::Interrupted::id`].
