@@ -59,10 +59,6 @@ impl InterpreterPrototype {
         let module = wasmi::Module::from_buffer(module_bytes.as_ref())
             .map_err(|err| ModuleError(err.to_string()))
             .map_err(NewErr::ModuleError)?;
-        // TODO: for parity with wasmtime we unwrap() at the moment rather than committing to the
-        // idea that floating points are checked at initialization; but ideally wasmtime should
-        // check floating points as well
-        module.deny_floating_point().unwrap();
 
         struct ImportResolve<'a> {
             functions: RefCell<&'a mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>>,
