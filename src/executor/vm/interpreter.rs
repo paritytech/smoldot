@@ -18,7 +18,8 @@
 //! Implements the API documented [in the parent module](..).
 
 use super::{
-    ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, ValueType, WasmValue,
+    ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, StartErr, ValueType,
+    WasmValue,
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, vec::Vec};
@@ -237,13 +238,13 @@ impl InterpreterPrototype {
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
-    pub fn start(self, function_name: &str, params: &[WasmValue]) -> Result<Interpreter, NewErr> {
+    pub fn start(self, function_name: &str, params: &[WasmValue]) -> Result<Interpreter, StartErr> {
         let execution = match self.module.export_by_name(function_name) {
             Some(wasmi::ExternVal::Func(f)) => {
                 // Try to convert the signature of the function to call, in order to make sure
                 // that the type of parameters and return value are supported.
                 if Signature::try_from(f.signature()).is_err() {
-                    return Err(NewErr::SignatureNotSupported);
+                    return Err(StartErr::SignatureNotSupported);
                 }
 
                 match wasmi::FuncInstance::invoke_resumable(
@@ -257,8 +258,8 @@ impl InterpreterPrototype {
                     Err(err) => unreachable!("{:?}", err), // TODO:
                 }
             }
-            None => return Err(NewErr::FunctionNotFound),
-            _ => return Err(NewErr::NotAFunction),
+            None => return Err(StartErr::FunctionNotFound),
+            _ => return Err(StartErr::NotAFunction),
         };
 
         Ok(Interpreter {

@@ -17,7 +17,9 @@
 
 //! Implements the API documented [in the parent module](..).
 
-use super::{ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, WasmValue};
+use super::{
+    ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, StartErr, WasmValue,
+};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{
@@ -200,12 +202,12 @@ impl JitPrototype {
                         if let Some(f) = f.into_func() {
                             f.clone()
                         } else {
-                            let err = NewErr::NotAFunction;
+                            let err = StartErr::NotAFunction;
                             request = interrupter.interrupt(FromCoroutine::StartResult(Err(err)));
                             continue;
                         }
                     } else {
-                        let err = NewErr::FunctionNotFound;
+                        let err = StartErr::FunctionNotFound;
                         request = interrupter.interrupt(FromCoroutine::StartResult(Err(err)));
                         continue;
                     };
@@ -214,7 +216,7 @@ impl JitPrototype {
                     // that the type of parameters and return value are supported.
                     if Signature::try_from(&start_function.ty()).is_err() {
                         request = interrupter.interrupt(FromCoroutine::StartResult(Err(
-                            NewErr::SignatureNotSupported,
+                            StartErr::SignatureNotSupported,
                         )));
                         continue;
                     }
@@ -283,7 +285,7 @@ impl JitPrototype {
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
-    pub fn start(mut self, function_name: &str, params: &[WasmValue]) -> Result<Jit, NewErr> {
+    pub fn start(mut self, function_name: &str, params: &[WasmValue]) -> Result<Jit, StartErr> {
         match self.coroutine.run(Some(ToCoroutine::Start(
             function_name.to_owned(),
             params.to_owned(),
@@ -477,7 +479,7 @@ enum FromCoroutine {
     /// Reports how well the initialization went. Sent as part of the first interrupt.
     Init,
     /// Reponse to [`ToCoroutine::Start`].
-    StartResult(Result<(), NewErr>),
+    StartResult(Result<(), StartErr>),
     /// Execution of the Wasm code has been interrupted by a call.
     Interrupt {
         /// Index of the function, to put in [`ExecOutcome::Interrupted::id`].

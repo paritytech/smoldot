@@ -164,7 +164,7 @@ impl VirtualMachinePrototype {
         self,
         function_name: &str,
         params: &[WasmValue],
-    ) -> Result<VirtualMachine, NewErr> {
+    ) -> Result<VirtualMachine, StartErr> {
         Ok(VirtualMachine {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -553,7 +553,7 @@ pub enum ExecOutcome {
         params: Vec<WasmValue>,
     },
 }
-/// Error that can happen when initializing a VM.
+/// Error that can happen when initializing a [`VirtualMachinePrototype`].
 #[derive(Debug, derive_more::Display)]
 pub enum NewErr {
     /// Error while parsing or compiling the WebAssembly code.
@@ -565,6 +565,11 @@ pub enum NewErr {
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
+}
+
+/// Error that can happen when calling [`VirtualMachinePrototype::start`].
+#[derive(Debug, derive_more::Display)]
+pub enum StartErr {
     /// Couldn't find the requested function.
     #[display(fmt = "Function to start was not found.")]
     FunctionNotFound,
