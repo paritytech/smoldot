@@ -535,8 +535,7 @@ pub enum ExecOutcome {
     /// will return [`RunErr::Poisoned`].
     Finished {
         /// Return value of the function.
-        // TODO: error type should change here
-        return_value: Result<Option<WasmValue>, ()>,
+        return_value: Result<Option<WasmValue>, Trap>,
     },
 
     /// The virtual machine has been paused due to a call to a host function.
@@ -557,6 +556,12 @@ pub enum ExecOutcome {
         params: Vec<WasmValue>,
     },
 }
+
+/// Opaque error that happened during execution, such as an `unreachable` instruction.
+#[derive(Debug, derive_more::Display, Clone)]
+#[display(fmt = "{}", _0)]
+pub struct Trap(String);
+
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
 #[derive(Debug, derive_more::Display)]
 pub enum NewErr {

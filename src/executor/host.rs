@@ -337,10 +337,10 @@ impl ReadyToRun {
                 }
 
                 Ok(vm::ExecOutcome::Finished {
-                    return_value: Err(()),
+                    return_value: Err(err),
                 }) => {
                     return HostVm::Error {
-                        error: Error::Trapped,
+                        error: Error::Trap(err),
                         prototype: self.inner.into_prototype(),
                     }
                 }
@@ -1969,7 +1969,8 @@ pub enum StartErr {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error in the Wasm code execution.
-    Trapped,
+    #[display(fmt = "{}", _0)]
+    Trap(vm::Trap),
     /// A non-`i64` value has been returned by the Wasm entry point.
     #[display(fmt = "A non-I64 value has been returned: {:?}", actual)]
     BadReturnValue {

@@ -19,7 +19,7 @@
 
 use super::{
     ExecOutcome, GlobalValueErr, ModuleError, NewErr, OutOfBoundsError, RunErr, Signature,
-    StartErr, ValueType, WasmValue,
+    StartErr, Trap, ValueType, WasmValue,
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, vec::Vec};
@@ -422,10 +422,10 @@ impl Interpreter {
                         .unwrap(),
                 })
             }
-            Err(wasmi::ResumableError::Trap(_)) => {
+            Err(wasmi::ResumableError::Trap(err)) => {
                 self.is_poisoned = true;
                 Ok(ExecOutcome::Finished {
-                    return_value: Err(()),
+                    return_value: Err(Trap(err.to_string())),
                 })
             }
         }

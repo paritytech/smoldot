@@ -19,7 +19,7 @@
 
 use super::{
     ExecOutcome, GlobalValueErr, ModuleError, NewErr, OutOfBoundsError, RunErr, Signature,
-    StartErr, WasmValue,
+    StartErr, Trap, WasmValue,
 };
 
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -239,8 +239,6 @@ impl JitPrototype {
                     let result = match result {
                         Ok(r) => r,
                         Err(err) => {
-                            // TODO: remove
-                            println!("trapped in vm: {:?}", err);
                             request =
                                 interrupter.interrupt(FromCoroutine::Done(Err(err.to_string())));
                             continue;
@@ -352,7 +350,7 @@ impl Jit {
 
             corooteen::RunOut::Interrupted(FromCoroutine::Done(Err(err))) => {
                 Ok(ExecOutcome::Finished {
-                    return_value: Err(()),
+                    return_value: Err(Trap(err)),
                 })
             }
             corooteen::RunOut::Interrupted(FromCoroutine::Done(Ok(val))) => {
