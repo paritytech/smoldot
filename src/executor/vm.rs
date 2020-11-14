@@ -229,7 +229,11 @@ impl VirtualMachine {
     /// Copies the given memory range into a `Vec<u8>`.
     ///
     /// Returns an error if the range is invalid or out of range.
-    pub fn read_memory<'a>(&'a self, offset: u32, size: u32) -> Result<impl AsRef<[u8]> + 'a, ()> {
+    pub fn read_memory<'a>(
+        &'a self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + 'a, OutOfBoundsError> {
         Ok(match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => either::Left(inner.read_memory(offset, size)?),
@@ -245,7 +249,7 @@ impl VirtualMachine {
     /// Write the data at the given memory location.
     ///
     /// Returns an error if the range is invalid or out of range.
-    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), ()> {
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.write_memory(offset, value),
@@ -585,6 +589,11 @@ pub enum StartErr {
 #[derive(Debug, derive_more::Display)]
 #[display(fmt = "{}", _0)]
 pub struct ModuleError(String);
+
+/// Error while reading memory.
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "Out of bounds when accessing virtual machine memory")]
+pub struct OutOfBoundsError;
 
 /// Error that can happen when resuming the execution of a function.
 #[derive(Debug, derive_more::Display)]

@@ -484,7 +484,7 @@ impl ReadyToRun {
 
                     match self.inner.vm.read_memory(ptr, len).map(|v| v.as_ref().to_vec()) { // TODO: no; keep the impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
                         Ok(v) => v,
-                        Err(()) => {
+                        Err(vm::OutOfBoundsError) => {
                             return HostVm::Error {
                                 error: Error::ParamOutOfRange {
                                     function: host_fn.name(),
@@ -541,7 +541,7 @@ impl ReadyToRun {
 
                     match self.inner.vm.read_memory(ptr, $size).map(|v| v.as_ref().to_vec()) { // TODO: no; keep the impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
                         Ok(v) => v,
-                        Err(()) => {
+                        Err(vm::OutOfBoundsError) => {
                             return HostVm::Error {
                                 error: Error::ParamOutOfRange {
                                     function: host_fn.name(),

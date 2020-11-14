@@ -18,8 +18,8 @@
 //! Implements the API documented [in the parent module](..).
 
 use super::{
-    ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, StartErr, ValueType,
-    WasmValue,
+    ExecOutcome, GlobalValueErr, ModuleError, NewErr, OutOfBoundsError, RunErr, Signature,
+    StartErr, ValueType, WasmValue,
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, vec::Vec};
@@ -439,31 +439,47 @@ impl Interpreter {
     pub fn memory_size(&self) -> u32 {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
-            None => unreachable!(),
+            None => return 0,
         };
 
         u32::try_from(mem.current_size().0 * wasmi::memory_units::Pages::byte_size().0).unwrap()
     }
 
     /// See [`super::VirtualMachine::read_memory`].
-    pub fn read_memory<'a>(&'a self, offset: u32, size: u32) -> Result<impl AsRef<[u8]> + 'a, ()> {
+    pub fn read_memory<'a>(
+        &'a self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + 'a, OutOfBoundsError> {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
-            None => unreachable!(),
+            None => {
+                return if offset == 0 && size == 0 {
+                    Ok(Vec::new())
+                } else {
+                    Err(OutOfBoundsError)
+                }
+            }
         };
 
-        mem.get(offset, size.try_into().map_err(|_| ())?)
-            .map_err(|_| ())
+        mem.get(offset, size.try_into().map_err(|_| OutOfBoundsError)?)
+            .map_err(|_| OutOfBoundsError)
     }
 
     /// See [`super::VirtualMachine::write_memory`].
-    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), ()> {
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
-            None => unreachable!(),
+            None => {
+                return if offset == 0 && value.is_empty() {
+                    Ok(())
+                } else {
+                    Err(OutOfBoundsError)
+                }
+            }
         };
 
-        mem.set(offset, value).map_err(|_| ())
+        mem.set(offset, value).map_err(|_| OutOfBoundsError)
     }
 
     /// See [`super::VirtualMachine::into_prototype`].

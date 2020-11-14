@@ -18,7 +18,8 @@
 //! Implements the API documented [in the parent module](..).
 
 use super::{
-    ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, StartErr, WasmValue,
+    ExecOutcome, GlobalValueErr, ModuleError, NewErr, OutOfBoundsError, RunErr, Signature,
+    StartErr, WasmValue,
 };
 
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -390,34 +391,46 @@ impl Jit {
     }
 
     /// See [`super::VirtualMachine::read_memory`].
-    pub fn read_memory<'a>(&'a self, offset: u32, size: u32) -> Result<impl AsRef<[u8]> + 'a, ()> {
-        let mem = self.memory.as_ref().ok_or(())?;
-        let start = usize::try_from(offset).map_err(|_| ())?;
+    pub fn read_memory<'a>(
+        &'a self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + 'a, OutOfBoundsError> {
+        let mem = self.memory.as_ref().ok_or(OutOfBoundsError)?;
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
         let end = start
-            .checked_add(usize::try_from(size).map_err(|_| ())?)
-            .ok_or(())?;
-
-        // TODO: we don't check bounds before slicing, meaning that an out of range will panic
-
-        // Soundness: the documentation of wasmtime precisely explains what is safe or not.
-        // Basically, we are safe as long as we are sure that we don't potentially grow the
-        // buffer (which would invalidate the buffer pointer).
-        unsafe { Ok(&mem.data_unchecked()[start..end]) }
-    }
-
-    /// See [`super::VirtualMachine::write_memory`].
-    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), ()> {
-        let mem = self.memory.as_ref().ok_or(())?;
-        let start = usize::try_from(offset).map_err(|_| ())?;
-        let end = start.checked_add(value.len()).ok_or(())?;
-
-        // TODO: we don't check bounds
+            .checked_add(usize::try_from(size).map_err(|_| OutOfBoundsError)?)
+            .ok_or(OutOfBoundsError)?;
 
         // Soundness: the documentation of wasmtime precisely explains what is safe or not.
         // Basically, we are safe as long as we are sure that we don't potentially grow the
         // buffer (which would invalidate the buffer pointer).
         unsafe {
-            mem.data_unchecked_mut()[start..end].copy_from_slice(value);
+            if end > mem.data_unchecked().len() {
+                return Err(OutOfBoundsError);
+            }
+
+            Ok(&mem.data_unchecked()[start..end])
+        }
+    }
+
+    /// See [`super::VirtualMachine::write_memory`].
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
+        let mem = self.memory.as_ref().ok_or(OutOfBoundsError)?;
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+
+        // Soundness: the documentation of wasmtime precisely explains what is safe or not.
+        // Basically, we are safe as long as we are sure that we don't potentially grow the
+        // buffer (which would invalidate the buffer pointer).
+        unsafe {
+            if end > mem.data_unchecked().len() {
+                return Err(OutOfBoundsError);
+            }
+
+            if !value.is_empty() {
+                mem.data_unchecked_mut()[start..end].copy_from_slice(value);
+            }
         }
 
         Ok(())
