@@ -29,8 +29,6 @@ use core::{
     fmt,
 };
 
-// TODO: this entire module is unsatisfactory
-
 /// See [`super::VirtualMachinePrototype`].
 pub struct JitPrototype {
     /// Coroutine that contains the Wasm execution stack.
