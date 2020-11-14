@@ -222,7 +222,7 @@ impl JitPrototype {
                         Err(err) => {
                             // TODO: remove
                             println!("trapped in vm: {:?}", err);
-                            request = interrupter.interrupt(FromCoroutine::Done(Err(err)));
+                            request = interrupter.interrupt(FromCoroutine::Done(Err(err.to_string())));
                             continue;
                         }
                     };
@@ -313,8 +313,7 @@ enum FromCoroutine {
     /// Response to a [`ToCoroutine::GetGlobal`].
     GetGlobalResponse(Result<u32, GlobalValueErr>),
     /// Executing the function is finished.
-    // TODO: report to wasmtime that it's stupid to use anyhow
-    Done(Result<Option<wasmtime::Val>, anyhow::Error>),
+    Done(Result<Option<wasmtime::Val>, String>),
 }
 
 /// Wasm VM that uses JITted compilation.
