@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Implements the API documented [in the parent module](..).
+
 use super::{ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, WasmValue};
 
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -22,7 +24,7 @@ use core::{cmp, convert::TryFrom, fmt};
 
 // TODO: this entire module is unsatisfactory
 
-/// Prototype for a [`Jit`].
+/// See [`super::VirtualMachinePrototype`].
 pub struct JitPrototype {
     /// Coroutine that contains the Wasm execution stack.
     coroutine: corooteen::Coroutine<
@@ -40,13 +42,7 @@ pub struct JitPrototype {
 }
 
 impl JitPrototype {
-    /// Creates a new process state machine from the given module.
-    ///
-    /// The closure is called for each import that the module has. It must assign a number to each
-    /// import, or return an error if the import can't be resolved. When the VM calls one of these
-    /// functions, this number will be returned back in order for the user to know how to handle
-    /// the call.
-    // TODO: explain heap_pages
+    /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module: impl AsRef<[u8]>,
         heap_pages: u64,
@@ -254,7 +250,7 @@ impl JitPrototype {
         })
     }
 
-    /// Returns the value of a global that the module exports.
+    /// See [`super::VirtualMachinePrototype::global_value`].
     pub fn global_value(&mut self, name: &str) -> Result<u32, GlobalValueErr> {
         match self
             .coroutine
@@ -265,8 +261,7 @@ impl JitPrototype {
         }
     }
 
-    /// Turns this prototype into an actual virtual machine. This requires choosing which function
-    /// to execute.
+    /// See [`super::VirtualMachinePrototype::start`].
     pub fn start(mut self, function_name: &str, params: &[WasmValue]) -> Result<Jit, NewErr> {
         match self.coroutine.run(Some(ToCoroutine::Start(
             function_name.to_owned(),
@@ -285,7 +280,14 @@ impl JitPrototype {
     }
 }
 
-// TODO: explain how this is sound
+// The fields related to `wasmtime` do not implement `Send` because they use `std::rc::Rc`. `Rc`
+// does not implement `Send` because incrementing/decrementing the reference counter from
+// multiple threads simultaneously would be racy. It is however perfectly sound to move all the
+// instances of `Rc`s at once between threads, which is what we're doing here.
+//
+// This importantly means that we should never return a `Rc` (even by reference) across the API
+// boundary.
+// TODO: really annoying to have to use unsafe code
 unsafe impl Send for JitPrototype {}
 
 /// Type that can be given to the coroutine.
@@ -316,7 +318,7 @@ enum FromCoroutine {
     Done(Result<Option<wasmtime::Val>, String>),
 }
 
-/// Wasm VM that uses JITted compilation.
+/// See [`super::VirtualMachine`].
 pub struct Jit {
     /// Coroutine that contains the Wasm execution stack.
     coroutine: corooteen::Coroutine<
@@ -333,17 +335,7 @@ pub struct Jit {
 }
 
 impl Jit {
-    /// Returns true if the state machine is in a poisoned state and cannot run anymore.
-    pub fn is_poisoned(&self) -> bool {
-        self.coroutine.is_finished()
-    }
-
-    /// Starts or continues execution of this thread.
-    ///
-    /// If this is the first call you call [`run`](Jit::run) for this thread, then you must pass
-    /// a value of `None`.
-    /// If, however, you call this function after a previous call to [`run`](Jit::run) that was
-    /// interrupted by a host function call, then you must pass back the outcome of that call.
+    /// See [`super::VirtualMachine::run`].
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         if self.coroutine.is_finished() {
             return Err(RunErr::Poisoned);
@@ -384,9 +376,7 @@ impl Jit {
         }
     }
 
-    /// Returns the size of the memory, in bytes.
-    ///
-    /// > **Note**: This can change over time if the Wasm code uses the `grow` opcode.
+    /// See [`super::VirtualMachine::memory_size`].
     pub fn memory_size(&self) -> u32 {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
@@ -396,9 +386,7 @@ impl Jit {
         u32::try_from(mem.data_size()).unwrap()
     }
 
-    /// Copies the given memory range into a `Vec<u8>`.
-    ///
-    /// Returns an error if the range is invalid or out of range.
+    /// See [`super::VirtualMachine::read_memory`].
     pub fn read_memory<'a>(&'a self, offset: u32, size: u32) -> Result<impl AsRef<[u8]> + 'a, ()> {
         let mem = self.memory.as_ref().ok_or(())?;
         let start = usize::try_from(offset).map_err(|_| ())?;
@@ -414,9 +402,7 @@ impl Jit {
         unsafe { Ok(&mem.data_unchecked()[start..end]) }
     }
 
-    /// Write the data at the given memory location.
-    ///
-    /// Returns an error if the range is invalid or out of range.
+    /// See [`super::VirtualMachine::write_memory`].
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), ()> {
         let mem = self.memory.as_ref().ok_or(())?;
         let start = usize::try_from(offset).map_err(|_| ())?;
@@ -434,7 +420,7 @@ impl Jit {
         Ok(())
     }
 
-    /// Turns back this virtual machine into a prototype.
+    /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> JitPrototype {
         // TODO: how do we handle if the coroutine was in a host function?
 
@@ -459,7 +445,14 @@ impl Jit {
     }
 }
 
-// TODO: explain how this is sound
+// The fields related to `wasmtime` do not implement `Send` because they use `std::rc::Rc`. `Rc`
+// does not implement `Send` because incrementing/decrementing the reference counter from
+// multiple threads simultaneously would be racy. It is however perfectly sound to move all the
+// instances of `Rc`s at once between threads, which is what we're doing here.
+//
+// This importantly means that we should never return a `Rc` (even by reference) across the API
+// boundary.
+// TODO: really annoying to have to use unsafe code
 unsafe impl Send for Jit {}
 
 impl fmt::Debug for Jit {

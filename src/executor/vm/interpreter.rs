@@ -15,11 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Wasm virtual machine that executes a specific function.
-//!
-//! This module handles everything related to executing Wasm code in general. Features specific to
-//! Substrate/Polkadot (such as the host functions available to the Wasm code) are not handled
-//! by this module and must instead be built on top.
+//! Implements the API documented [in the parent module](..).
 
 use super::{
     ExecOutcome, GlobalValueErr, ModuleError, NewErr, RunErr, Signature, ValueType, WasmValue,
@@ -33,26 +29,7 @@ use core::{
 };
 use wasmi::memory_units::ByteSize as _;
 
-/// Wasm virtual machine that executes a specific function.
-///
-/// # Usage
-///
-/// - Create an instance of [`VirtualMachinePrototype`] with [`VirtualMachinePrototype::new`]. As
-/// parameter, you must pass a list of host functions that are available to the code running
-/// in the virtual machine.
-///
-/// - Call [`VirtualMachinePrototype::start`] to turn it into a [`VirtualMachine`]. This operation
-/// only initializes the machine but doesn't run it.
-///
-/// - Call [`VirtualMachine::run`], passing `None` as parameter. This runs the Wasm virtual
-/// machine until either function finishes or calls a host function.
-///
-/// - If [`VirtualMachine::run`] returns [`ExecOutcome::Finished`], then it is forbidden to call
-/// [`VirtualMachine::run`].
-///
-/// - If [`VirtualMachine::run`] returns [`ExecOutcome::Interrupted`], then you must later call
-/// [`VirtualMachine::run`] again, passing the return value of the host function.
-///
+/// See [`super::VirtualMachine`].
 pub struct VirtualMachine {
     /// Original module, with resolved imports.
     _module: wasmi::ModuleRef,
@@ -85,7 +62,7 @@ pub struct VirtualMachine {
     is_poisoned: bool,
 }
 
-/// Prototype for a [`VirtualMachine`].
+/// See [`super::VirtualMachinePrototype`].
 pub struct VirtualMachinePrototype {
     /// Original module, with resolved imports.
     module: wasmi::ModuleRef,
@@ -105,13 +82,7 @@ pub struct VirtualMachinePrototype {
 }
 
 impl VirtualMachinePrototype {
-    /// Creates a new state machine from the given module that executes the given function.
-    ///
-    /// The closure is called for each function that the module imports. It must assign a number
-    /// to each import, or return an error if the import can't be resolved. When the VM calls one
-    /// of these functions, this number will be returned back in order for the user to know how
-    /// to handle the call.
-    // TODO: explain heap_pages
+    /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module_bytes: impl AsRef<[u8]>,
         heap_pages: u64,
@@ -270,7 +241,7 @@ impl VirtualMachinePrototype {
         })
     }
 
-    /// Returns the value of a global that the module exports.
+    /// See [`super::VirtualMachinePrototype::global_value`].
     pub fn global_value(&self, name: &str) -> Result<u32, GlobalValueErr> {
         let heap_base_val = self
             .module
@@ -289,8 +260,7 @@ impl VirtualMachinePrototype {
         }
     }
 
-    /// Turns this prototype into an actual virtual machine. This requires choosing which function
-    /// to execute.
+    /// See [`super::VirtualMachinePrototype::start`].
     pub fn start(
         self,
         function_name: &str,
@@ -339,13 +309,7 @@ impl VirtualMachinePrototype {
 unsafe impl Send for VirtualMachinePrototype {}
 
 impl VirtualMachine {
-    /// Starts or continues execution of the virtual machine.
-    ///
-    /// If this is the first call you call [`run`](VirtualMachine::run), then you must pass
-    /// a value of `None`.
-    /// If, however, you call this function after a previous call to [`run`](VirtualMachine::run)
-    /// that was interrupted by a host function call, then you must pass back the outcome of
-    /// that call.
+    /// See [`super::VirtualMachine::run`].
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         let value = value.map(wasmi::RuntimeValue::from);
 
@@ -438,9 +402,7 @@ impl VirtualMachine {
         }
     }
 
-    /// Returns the size of the memory, in bytes.
-    ///
-    /// > **Note**: This can change over time if the Wasm code uses the `grow` opcode.
+    /// See [`super::VirtualMachine::memory_size`].
     pub fn memory_size(&self) -> u32 {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
@@ -450,9 +412,7 @@ impl VirtualMachine {
         u32::try_from(mem.current_size().0 * wasmi::memory_units::Pages::byte_size().0).unwrap()
     }
 
-    /// Copies the given memory range into a `Vec<u8>`.
-    ///
-    /// Returns an error if the range is invalid or out of range.
+    /// See [`super::VirtualMachine::read_memory`].
     pub fn read_memory<'a>(&'a self, offset: u32, size: u32) -> Result<impl AsRef<[u8]> + 'a, ()> {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
@@ -463,9 +423,7 @@ impl VirtualMachine {
             .map_err(|_| ())
     }
 
-    /// Write the data at the given memory location.
-    ///
-    /// Returns an error if the range is invalid or out of range.
+    /// See [`super::VirtualMachine::write_memory`].
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), ()> {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
@@ -475,7 +433,7 @@ impl VirtualMachine {
         mem.set(offset, value).map_err(|_| ())
     }
 
-    /// Turns back this virtual machine into a prototype.
+    /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> VirtualMachinePrototype {
         // TODO: zero the memory
 

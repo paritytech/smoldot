@@ -148,6 +148,8 @@ impl VirtualMachinePrototype {
     }
 
     /// Returns the value of a global that the module exports.
+    ///
+    /// The global variable must be a `u32`, otherwise an error is returned.
     pub fn global_value(&mut self, name: &str) -> Result<u32, GlobalValueErr> {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -567,7 +569,9 @@ pub enum RunErr {
 /// Error that can happen when calling [`VirtualMachinePrototype::global_value`].
 #[derive(Debug, derive_more::Display)]
 pub enum GlobalValueErr {
+    /// Couldn't find requested symbol.
     NotFound,
+    /// Requested symbol isn't a `u32`.
     Invalid,
 }
 
