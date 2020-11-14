@@ -20,7 +20,7 @@
 //! This module contains all the functions that tie together the Rust code and its host (i.e.
 //! the JavaScript code, normally).
 //!
-//! The functions found in the `extern` block and the functions that the Rust code *imports*, and
+//! The functions found in the `extern` block are the functions that the Rust code *imports*, and
 //! need to be implemented on the host side and provided to the WebAssembly virtual machine. The
 //! other functions are functions that the Rust code *exports*, and can be called by the host.
 //!
