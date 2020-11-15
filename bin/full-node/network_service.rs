@@ -38,7 +38,7 @@ use substrate_lite::network::{
     connection,
     multiaddr::{Multiaddr, Protocol},
     peer_id::PeerId,
-    peerset, protocol, with_buffers,
+    peerset, protocol, service, with_buffers,
 };
 
 /// Configuration for a [`NetworkService`].
@@ -83,18 +83,6 @@ pub struct NetworkService {
     /// Fields behind a mutex.
     guarded: Mutex<Guarded>,
 
-    /// See [`Config::protocol_id`].
-    protocol_id: String,
-
-    /// See [`Config::genesis_block_hash`].
-    genesis_block_hash: [u8; 32],
-
-    /// See [`Config::best_block`].
-    best_block: (u64, [u8; 32]),
-
-    /// See [`Config::noise_key`].
-    noise_key: Arc<connection::NoiseKey>,
-
     /// Receiver of events sent by background tasks.
     ///
     /// > **Note**: This field is not in [`Guarded`] despite being inside of a mutex. The mutex
@@ -113,9 +101,8 @@ struct Guarded {
     /// See [`Config::tasks_executor`].
     tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
-    /// Holds the state of all the known nodes of the network, and of all the connections (pending
-    /// or not).
-    peerset: peerset::Peerset<(), mpsc::Sender<ToConnection>, mpsc::Sender<ToConnection>, (), ()>,
+    /// Data structure holding the entire state of the networking.
+    network: service::Network<()>,
 }
 
 impl NetworkService {
@@ -196,21 +183,6 @@ impl NetworkService {
             }))
         }
 
-        // The peerset, created below, is a data structure that helps keep track of the state of
-        // the current peers and connections.
-        let mut peerset = peerset::Peerset::new(peerset::Config {
-            randomness_seed: rand::random(),
-            peers_capacity: 50,
-            num_overlay_networks: 1,
-        });
-
-        // Add to overlay #0 the nodes known to belong to the network.
-        for (peer_id, address) in config.bootstrap_nodes {
-            let mut node = peerset.node_mut(peer_id).or_default();
-            node.add_known_address(address);
-            node.add_to_overlay(0);
-        }
-
         Ok(Arc::new(NetworkService {
             guarded: Mutex::new(Guarded {
                 tasks_executor: config.tasks_executor,
@@ -261,7 +233,7 @@ impl NetworkService {
             .connection_mut(connection)
             .unwrap()
             .into_user_data()
-            .send(ToConnection::BlocksRequest {
+            .send(service::ServiceToConnection::BlocksRequest {
                 config,
                 protocol,
                 send_back,
@@ -284,10 +256,17 @@ impl NetworkService {
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
     pub async fn next_event(&self) -> Event {
-        loop {
-            self.fill_out_slots(&mut self.guarded.lock().await).await;
+        let mut from_background = self.from_background.lock().await;
 
-            match self.from_background.lock().await.next().await.unwrap() {
+        loop {
+            let message = from_background.next().await.unwrap();
+
+            // Note that `from_background` is kept locked while `guarded` is locked, in order to
+            // avoid an accidental reordering of the events coming from `from_background` if
+            // `next_event` is called multiple times simultaneously.
+            let mut guarded = self.guarded.lock().await;
+
+            match message {
                 FromBackground::NewConnection {
                     socket,
                     is_initiator,
@@ -295,8 +274,7 @@ impl NetworkService {
                     // A new socket has been accepted by a listener.
                     // Add the socket to the local state, and spawn the task of that connection.
                     /*let (tx, rx) = mpsc::channel(8);
-                    let mut guarded = self.guarded.lock().await;
-                    let connection_id = guarded.peerset
+                    guarded.network.add_incoming_connection(local_listen_address, remote_addr, user_data);
                     (guarded.tasks_executor)(Box::pin(connection_task(
                         future::ok(socket),
                         is_initiator,
@@ -308,111 +286,9 @@ impl NetworkService {
                     // TODO: there's nothing in place for pending incoming at the moment
                     todo!()
                 }
-                FromBackground::HandshakeError { connection_id, .. } => {
-                    let mut guarded = self.guarded.lock().await;
-                    guarded
-                        .peerset
-                        .pending_mut(connection_id)
-                        .unwrap()
-                        .remove_and_purge_address();
+                FromBackground::ConnectionToService(message) => {
+                    guarded.network.connection_message(message)
                 }
-                FromBackground::HandshakeSuccess {
-                    connection_id,
-                    peer_id,
-                    accept_tx,
-                } => {
-                    let mut guarded = self.guarded.lock().await;
-                    let id = guarded
-                        .peerset
-                        .pending_mut(connection_id)
-                        .unwrap()
-                        .into_established(|tx| tx)
-                        .id();
-                    accept_tx.send(id).unwrap();
-                    return Event::Connected(peer_id);
-                }
-                FromBackground::Disconnected { connection_id } => {
-                    let mut guarded = self.guarded.lock().await;
-                    let connection = guarded.peerset.connection_mut(connection_id).unwrap();
-                    let peer_id = connection.peer_id().clone(); // TODO: clone :(
-                    connection.remove();
-                    return Event::Disconnected(peer_id);
-                }
-                FromBackground::NotificationsOpenResult {
-                    connection_id,
-                    result,
-                } => todo!(),
-                FromBackground::NotificationsCloseResult { connection_id } => todo!(),
-
-                FromBackground::NotificationsInOpen { connection_id } => todo!(),
-
-                FromBackground::NotificationsInClose { connection_id } => todo!(),
-            }
-        }
-    }
-
-    /// Spawns new outgoing connections in order to fill empty outgoing slots.
-    ///
-    /// Must be passed as parameter an existing lock to a [`Guarded`].
-    async fn fill_out_slots<'a>(&self, guarded: &mut MutexGuard<'a, Guarded>) {
-        // Solves borrow checking errors regarding the borrow of multiple different fields at the
-        // same time.
-        let guarded = &mut **guarded;
-
-        // TODO: limit number of slots
-
-        // Grab nodes for which we have an established outgoing connections but haven't opened a
-        // substream to yet.
-        while let Some(node) = guarded.peerset.random_connected_closed_node(0) {
-            let connection_id = node.connections().next().unwrap();
-            let mut connection = guarded.peerset.connection_mut(connection_id).unwrap();
-            // It is possible for the channel to be closed if the task has shut down. This will
-            // be processed by `next_event` when detected.
-            let _ = connection
-                .user_data_mut()
-                .send(ToConnection::OpenOutNotifications {
-                    protocol: format!("/{}/block-announces/1", self.protocol_id),
-                    handshake: protocol::encode_block_announces_handshake(
-                        protocol::BlockAnnouncesHandshakeRef {
-                            best_hash: &self.best_block.1,
-                            best_number: self.best_block.0,
-                            genesis_hash: &self.genesis_block_hash,
-                            role: protocol::Role::Full, // TODO:
-                        },
-                    )
-                    .fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    }),
-                })
-                .await;
-            connection.add_pending_substream(0, ());
-        }
-
-        // TODO: very wip
-        while let Some(mut node) = guarded.peerset.random_not_connected(0) {
-            // TODO: collecting into a Vec, annoying
-            for address in node.known_addresses().cloned().collect::<Vec<_>>() {
-                let tcp_socket = match multiaddr_to_socket(&address) {
-                    Ok(s) => s,
-                    Err(()) => {
-                        node.remove_known_address(&address).unwrap();
-                        continue;
-                    }
-                };
-
-                let (tx, rx) = mpsc::channel(8);
-                let connection_id = node.add_outbound_attempt(address.clone(), tx);
-                (guarded.tasks_executor)(Box::pin(connection_task(
-                    tcp_socket,
-                    true,
-                    self.noise_key.clone(),
-                    connection_id,
-                    self.to_foreground.clone(),
-                    rx,
-                )));
-
-                break;
             }
         }
     }
@@ -428,34 +304,6 @@ pub enum InitError {
     BadListenMultiaddr(Multiaddr),
 }
 
-/// Message sent to a background task dedicated to a connection.
-enum ToConnection {
-    /// Start a block request. See [`NetworkService::blocks_request`].
-    BlocksRequest {
-        config: protocol::BlocksRequestConfig,
-        protocol: String,
-        send_back: oneshot::Sender<Result<Vec<protocol::BlockData>, ()>>,
-    },
-    OpenOutNotifications {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-        /// Handshake to initially send to the remote.
-        handshake: Vec<u8>,
-    },
-    CloseOutNotifications {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-    NotificationsInAccept {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-    NotificationsInReject {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-}
-
 /// Messsage sent from a background task and dedicated to the main [`NetworkService`]. Processed
 /// in [`NetworkService::next_event`].
 enum FromBackground {
@@ -465,66 +313,15 @@ enum FromBackground {
         is_initiator: bool,
     },
 
-    HandshakeError {
-        connection_id: peerset::PendingId,
-        error: HandshakeError,
-    },
-    HandshakeSuccess {
-        connection_id: peerset::PendingId,
-        peer_id: PeerId,
-        accept_tx: oneshot::Sender<peerset::ConnectionId>,
-    },
-
-    /// Connection has closed.
-    ///
-    /// This only concerns connections onto which the handshake had succeeded. For connections on
-    /// which the handshake hadn't succeeded, a [`FromBackground::HandshakeError`] is emitted
-    /// instead.
-    Disconnected {
-        connection_id: peerset::ConnectionId,
-    },
-
-    /// Response to a [`ToConnection::OpenOutNotifications`].
-    NotificationsOpenResult {
-        connection_id: peerset::ConnectionId,
-        /// Outcome of the opening. If `Ok`, the notifications protocol is now open. If `Err`, it
-        /// is still closed.
-        result: Result<(), ()>,
-    },
-
-    /// Response to a [`ToConnection::CloseOutNotifications`].
-    ///
-    /// Contrary to [`FromBackground::NotificationsOpenResult`], a closing request never fails.
-    NotificationsCloseResult {
-        connection_id: peerset::ConnectionId,
-    },
-
-    /// The remote opened a notifications substream.
-    ///
-    /// A [`ToConnection::NotificationsInAccept`] or [`ToConnection::NotificationsInReject`] must
-    /// be sent back.
-    NotificationsInOpen {
-        connection_id: peerset::ConnectionId,
-    },
-
-    /// The remote closed a notifications substream.
-    ///
-    /// This does not cancel any previously-sent [`FromBackground::NotificationsInOpen`]. Instead,
-    /// the response sent to a previously-sent [`FromBackground::NotificationsInOpen`] will be
-    /// ignored.
-    NotificationsInClose {
-        connection_id: peerset::ConnectionId,
-    },
+    ConnectionToService(service::ConnectionToService),
 }
 
 /// Asynchronous task managing a specific TCP connection.
 async fn connection_task(
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
-    is_initiator: bool,
-    noise_key: Arc<connection::NoiseKey>,
-    connection_id: peerset::PendingId,
+    connection: service::Connection<Instant, (), (), (), (), ()>,
     mut to_foreground: mpsc::Sender<FromBackground>,
-    mut to_connection: mpsc::Receiver<ToConnection>,
+    mut to_connection: mpsc::Receiver<service::ServiceToConnection>,
 ) {
     // Finishing any ongoing connection process.
     let tcp_socket = match tcp_socket.await {
@@ -553,36 +350,6 @@ async fn connection_task(
     // reading/writing the socket.
     let tcp_socket = with_buffers::WithBuffers::new(tcp_socket);
     futures::pin_mut!(tcp_socket);
-
-    // Connections start with a handshake where the encryption and multiplexing protocols are
-    // negotiated.
-    let (connection_prototype, peer_id) =
-        match perform_handshake(&mut tcp_socket, &noise_key, is_initiator).await {
-            Ok(v) => v,
-            Err(error) => {
-                let _ = to_foreground
-                    .send(FromBackground::HandshakeError {
-                        connection_id,
-                        error,
-                    })
-                    .await;
-                return;
-            }
-        };
-
-    // Configure the `connection_prototype` to turn it into an actual connection.
-    // The protocol names are hardcoded here.
-    let mut connection = connection_prototype.into_connection::<_, oneshot::Sender<_>, ()>(
-        connection::established::Config {
-            in_request_protocols: vec![],
-            in_notifications_protocols: vec![connection::established::ConfigNotifications {
-                name: "/dot/block-announces/1".to_string(), // TODO: correct protocolId
-                max_handshake_size: 1024 * 1024,
-            }],
-            ping_protocol: "/ipfs/ping/1.0.0".to_string(),
-            randomness_seed: rand::random(),
-        },
-    );
 
     // Notify the outside of the transition from handshake to actual connection, and obtain an
     // updated `connection_id` in return.
@@ -650,36 +417,24 @@ async fn connection_task(
 
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
-        let has_event = read_write.event.is_some();
+        let has_message = read_write.message.is_some();
 
-        match read_write.event {
-            Some(connection::established::Event::Response {
-                response,
-                user_data,
-                ..
-            }) => {
-                if let Ok(response) = response {
-                    let decoded = protocol::decode_block_response(&response).unwrap();
-                    let _ = user_data.send(Ok(decoded));
-                } else {
-                    let _ = user_data.send(Err(()));
-                }
-                continue;
+        if let Some(message) = read_write.message {
+            if to_foreground.send(message).await.is_err() {
+                // Channel is closed. Nothing more can be done.
+                return;
             }
-            Some(connection::established::Event::NotificationsOutAccept {
-                id,
-                remote_handshake,
-            }) => {
-                let hs = protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
-            }
-            Some(connection::established::Event::NotificationsOutReject { id, user_data }) => {}
-            _ => {}
         }
 
-        if has_event || read_write.read_bytes != 0 || read_write.written_bytes != 0 {
+        // TDOO: clean shut down of TCP connection
+        if read_write.ended {
+            return;
+        }
+
+        if has_message || read_write.read_bytes != 0 || read_write.written_bytes != 0 {
             continue;
         }
-
+    
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {
@@ -688,30 +443,7 @@ async fn connection_task(
                 // Nothing to do, but guarantees that we loop again.
             },
             message = to_connection.select_next_some().fuse() => {
-                match message {
-                    ToConnection::BlocksRequest { config, protocol, send_back } => {
-                        let request = protocol::build_block_request(config)
-                            .fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            });
-                        connection.add_request(Instant::now(), protocol, request, send_back);
-                    }
-                    ToConnection::OpenOutNotifications { protocol, handshake } => {
-                        // TODO: finish
-                        let id = connection.open_notifications_substream(
-                            Instant::now(),
-                            protocol,
-                            handshake,
-                            ()
-                        );
-                    },
-                    ToConnection::CloseOutNotifications { protocol } => {
-                        todo!()
-                    },
-                    ToConnection::NotificationsInAccept { .. } => todo!(),
-                    ToConnection::NotificationsInReject { .. } => todo!(),
-                }
+                connection.service_message(message);
             }
         }
     }
@@ -761,78 +493,4 @@ fn multiaddr_to_socket(
             _ => unreachable!(),
         }
     })
-}
-
-/// Drives the handshake of the given connection.
-///
-/// # Panic
-///
-/// Panics if the `tcp_socket` is closed in the writing direction.
-///
-async fn perform_handshake(
-    tcp_socket: &mut Pin<&mut with_buffers::WithBuffers<async_std::net::TcpStream>>,
-    noise_key: &connection::NoiseKey,
-    is_initiator: bool,
-) -> Result<(connection::established::ConnectionPrototype, PeerId), HandshakeError> {
-    let mut handshake = connection::handshake::Handshake::new(is_initiator);
-
-    // Delay that triggers after we consider the remote is considered unresponsive.
-    // The constant here has been chosen arbitrary.
-    let timeout = futures_timer::Delay::new(Duration::from_secs(20));
-    futures::pin_mut!(timeout);
-
-    loop {
-        match handshake {
-            connection::handshake::Handshake::Success {
-                remote_peer_id,
-                connection,
-            } => {
-                break Ok((connection, remote_peer_id));
-            }
-            connection::handshake::Handshake::NoiseKeyRequired(key) => {
-                handshake = key.resume(noise_key).into()
-            }
-            connection::handshake::Handshake::Healthy(healthy) => {
-                let (read_buffer, write_buffer) = match tcp_socket.buffers() {
-                    Ok(v) => v,
-                    Err(_) => return Err(HandshakeError::Io),
-                };
-
-                // Update the handshake state machine with the received data, and writes in the
-                // write buffer..
-                let (new_state, num_read, num_written) = {
-                    let read_buffer = read_buffer.ok_or(HandshakeError::UnexpectedEof)?.0;
-                    // `write_buffer` can only be `None` if `close` has been manually called,
-                    // which never happens.
-                    let write_buffer = write_buffer.unwrap();
-                    healthy.read_write(read_buffer, write_buffer)?
-                };
-                handshake = new_state;
-                tcp_socket.advance(num_read, num_written);
-
-                if num_read != 0 || num_written != 0 {
-                    continue;
-                }
-
-                // Wait either for something to happen on the socket, or for the timeout to
-                // trigger.
-                {
-                    let process_future = tcp_socket.as_mut().process();
-                    futures::pin_mut!(process_future);
-                    match future::select(process_future, &mut timeout).await {
-                        future::Either::Left(_) => {}
-                        future::Either::Right(_) => return Err(HandshakeError::Timeout),
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, derive_more::Display, derive_more::From)]
-enum HandshakeError {
-    Io,
-    Timeout,
-    UnexpectedEof,
-    Protocol(connection::handshake::HandshakeError),
 }
