@@ -133,7 +133,7 @@
 //!     let prototype = HostVmPrototype::new(
 //!         &wasm_binary_code,
 //!         1024,
-//!         substrate_lite::vm::ExecHint::Oneshot
+//!         substrate_lite::executor::vm::ExecHint::Oneshot
 //!     ).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
 //! };
