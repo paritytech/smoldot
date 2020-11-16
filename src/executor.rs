@@ -36,32 +36,28 @@ pub mod host;
 pub mod runtime_host;
 pub mod vm;
 
-pub use host::{
-    Error, ExternalStorageAppend, ExternalStorageGet, Finished, HostVm as WasmVm,
-    HostVmPrototype as WasmVmPrototype, NewErr, ReadyToRun, StartErr,
-};
-// TODO: reexports ^ ? shouldn't we just make the module public?
-
 /// Runs the `Core_version` function using the given virtual machine prototype, and returns
 /// the output.
 ///
 /// All externalities are forbidden.
 // TODO: proper error
-pub fn core_version(vm_proto: WasmVmPrototype) -> Result<(CoreVersion, WasmVmPrototype), ()> {
+pub fn core_version(
+    vm_proto: host::HostVmPrototype,
+) -> Result<(CoreVersion, host::HostVmPrototype), ()> {
     // TODO: is there maybe a better way to handle that?
-    let mut vm: WasmVm = vm_proto
+    let mut vm: host::HostVm = vm_proto
         .run_no_param("Core_version")
         .map_err(|_| ())?
         .into();
 
     loop {
         match vm {
-            WasmVm::ReadyToRun(r) => vm = r.run(),
-            WasmVm::Finished(finished) => {
+            host::HostVm::ReadyToRun(r) => vm = r.run(),
+            host::HostVm::Finished(finished) => {
                 let decoded = CoreVersion::decode_all(&finished.value()).map_err(|_| ())?;
                 return Ok((decoded, finished.into_prototype()));
             }
-            WasmVm::Error { .. } => return Err(()),
+            host::HostVm::Error { .. } => return Err(()),
 
             // Since there are potential ambiguities we don't allow any storage access
             // or anything similar. The last thing we want is to have an infinite
