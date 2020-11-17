@@ -271,6 +271,7 @@ pub struct Header {
     pub extrinsics_root: HashHexString,
     #[serde(rename = "stateRoot")]
     pub state_root: HashHexString,
+    #[serde(serialize_with = "hex_num")] // TODO: deserialize_with?
     pub number: u64,
     pub digest: HeaderDigest,
 }
@@ -407,4 +408,11 @@ impl serde::Serialize for SystemHealth {
         }
         .serialize(serializer)
     }
+}
+
+fn hex_num<S>(num: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serde::Serialize::serialize(&format!("0x{:x}", *num), serializer)
 }
