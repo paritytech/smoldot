@@ -210,8 +210,6 @@ pub async fn start_client(chain_spec: String) {
                         }
                     },
                     sync_service::Event::NewFinalized { scale_encoded_header } => {
-                        // TODO: this is also triggered if we reset the sync to a previous point, which isn't correct
-
                         let decoded = substrate_lite::header::decode(&scale_encoded_header).unwrap();
 
                         let header = methods::Header {
