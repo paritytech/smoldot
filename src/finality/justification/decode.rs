@@ -120,12 +120,7 @@ impl<'a> From<PrecommitRef<'a>> for Precommit {
         Precommit {
             target_hash: *pc.target_hash,
             target_number: pc.target_number,
-            signature: {
-                // TODO: ugh
-                let mut v = [0; 64];
-                v.copy_from_slice(pc.signature);
-                v
-            },
+            signature: *pc.signature,
             authority_public_key: *pc.authority_public_key,
         }
     }
@@ -206,7 +201,13 @@ fn justification(bytes: &[u8]) -> nom::IResult<&[u8], JustificationRef> {
 fn precommits(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitsRef> {
     nom::combinator::map(
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-            nom::combinator::recognize(nom::multi::many_m_n(num_elems, num_elems, precommit))
+            nom::combinator::recognize(nom::multi::fold_many_m_n(
+                num_elems,
+                num_elems,
+                precommit,
+                (),
+                |(), _| (),
+            ))
         }),
         |inner| PrecommitsRef { inner },
     )(bytes)
@@ -239,11 +240,20 @@ fn votes_ancestries(bytes: &[u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
         "votes ancestries",
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
             nom::combinator::map(
-                nom::combinator::recognize(nom::multi::many_m_n(num_elems, num_elems, |s| {
-                    header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
-                        nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
-                    })
-                })),
+                nom::combinator::recognize(nom::multi::fold_many_m_n(
+                    num_elems,
+                    num_elems,
+                    |s| {
+                        header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
+                            nom::Err::Failure(nom::error::make_error(
+                                s,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })
+                    },
+                    (),
+                    |(), _| (),
+                )),
                 move |slice| VotesAncestriesIter {
                     slice,
                     num: num_elems,
