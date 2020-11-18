@@ -15,55 +15,77 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Networking service. Handles a collection of libp2p TCP connections.
+//! Collection of libp2p connections.
 //!
-//! # Usage
-//!
-//! The main data structure in this module is [`Network`], which holds the state of all active
-//! and pending libp2p connections to other nodes. The second most important data structure is
-//! [`Connection`], which holds the state of a single active connection.
-//!
-//! The [`Network`] requires [`Connection`] to be spawned. The [`Network`] only holds the latest
-//! known state of the various [`Connection`]s associated to it. The state of the [`Network`] and
-//! its [`Connection`] isn't performed automatically, and must be performed by the user by
-//! exchanging [`ConnectionToService`] and [`ServiceToConnection`] messages between the two.
-//!
-//! This separation between [`Network`] and [`Connection`] makes it possible to call
-//! [`Connection::read_write`] in parallel for multiple different connections. Only the
-//! synchronization with the [`Network`] needs to be single-threaded.
+//! The [`Network`] struct in this module is a collection of libp2p connections. It uses internal
+//! buffering and interior mutability in order to provide a convenient-to-use API based around
+//! notifications protocols and request-response protocols.
 
-use crate::network::{connection, peerset, protocol, Multiaddr, PeerId};
+use crate::network::{connection, peerset, Multiaddr, PeerId};
 
 use alloc::sync::Arc;
-use core::mem;
+use core::{mem, num::NonZeroUsize, task::Context};
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::{Mutex, MutexGuard},
+}; // TODO: no_std-ize
 
 /// Configuration for a [`Network`].
 pub struct Config<TPeer> {
+    /// Seed for the randomness within the networking state machine.
+    ///
+    /// While this seed influences the general behaviour of the networking state machine, it
+    /// notably isn't used when generating the ephemeral key used for the Diffie-Hellman
+    /// handshake.
+    /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
+    pub randomness_seed: [u8; 32],
+
     /// Addresses to listen for incoming connections.
     pub listen_addresses: Vec<Multiaddr>,
 
-    /// List of node identities and addresses that are known to belong to the chain's peer-to-pee
-    /// network.
-    pub bootstrap_nodes: Vec<(TPeer, PeerId, Multiaddr)>,
+    pub overlay_networks: Vec<OverlayNetwork<TPeer>>,
 
-    /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
-    /// the chain matches between the local and remote node.
-    pub genesis_block_hash: [u8; 32],
-
-    /// Number and hash of the current best block. Can later be updated with // TODO: which function?
-    pub best_block: (u64, [u8; 32]),
-
-    /// Identifier of the chain to connect to.
-    ///
-    /// Each blockchain has (or should have) a different "protocol id". This value identifies the
-    /// chain, so as to not introduce conflicts in the networking messages.
-    pub protocol_id: String,
+    pub known_nodes: Vec<(TPeer, PeerId, Multiaddr)>,
 
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specifications.
     /// Signed using the actual libp2p key.
     pub noise_key: connection::NoiseKey,
+
+    /// Number of events that can be buffered internally before connections are back-pressured.
+    ///
+    /// A good default value is 64.
+    ///
+    /// # Context
+    ///
+    /// The [`Network`] maintains an internal buffer of the events returned by
+    /// [`Network::next_event`]. When [`Network::read_write`] is called, an event might get pushed
+    /// to this buffer. If this buffer is full, back-pressure will be applied to the connections
+    /// in order to prevent new events from being pushed.
+    ///
+    /// This value is important if [`Network::next_event`] is called at a slower than the calls to
+    /// [`Network::read_write`] generate events.
+    pub pending_api_events_buffer_size: NonZeroUsize,
 }
+
+pub struct OverlayNetwork<TPeer> {
+    /// Name of the protocol negotiated on the wire.
+    pub name: String,
+
+    /// Optional alternative names for this protocol. Can represent different versions.
+    pub fallback_names: Vec<String>,
+
+    /// List of node identities that are known to belong to this overlay network.
+    pub bootstrap_nodes: Vec<PeerId>,
+
+    pub in_slots: u32,
+
+    pub out_slots: u32,
+}
+
+/// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PendingId(peerset::PendingId);
 
 /// Identifier of a [`Connection`] spawned by the [`Network`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -71,38 +93,57 @@ pub struct ConnectionId(peerset::ConnectionId);
 
 /// Data structure containing the list of all connections, pending or not, and their latest known
 /// state. See also [the module-level documentation](..).
-pub struct Network<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq> {
-    /// Holds the state of all the known nodes of the network, and of all the connections (pending
-    /// or not).
-    peerset: peerset::Peerset<TPeer, TConn, TPending, TSub, TPendingSub>,
-
-    /// See [`Config::protocol_id`].
-    protocol_id: String,
-
-    /// See [`Config::genesis_block_hash`].
-    genesis_block_hash: [u8; 32],
-
-    /// See [`Config::best_block`].
-    best_block: (u64, [u8; 32]),
+pub struct Network<TNow, TPeer, TConn> {
+    /// Fields behind a mutex.
+    guarded: Mutex<Guarded<TNow, TPeer, TConn>>,
 
     /// See [`Config::noise_key`].
-    noise_key: Arc<connection::NoiseKey>,
+    noise_key: connection::NoiseKey,
+
+    /// Receiver connected to [`Guarded::events_tx`].
+    events_rx: Mutex<mpsc::Receiver<Event>>,
 }
 
-impl<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
-    Network<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
-{
+/// Fields of [`Network`] behind a mutex.
+struct Guarded<TNow, TPeer, TConn> {
+    /// Sender connected to [`Network::events_rx`].
+    events_tx: mpsc::Sender<Event>,
+
+    /// Holds the state of all the known nodes of the network, and of all the connections (pending
+    /// or not).
+    peerset: peerset::Peerset<
+        TPeer,
+        Arc<Mutex<(connection::handshake::HealthyHandshake, TNow, TConn)>>,
+        Arc<
+            Mutex<(
+                connection::established::Established<
+                    TNow,
+                    oneshot::Sender<Result<Vec<u8>, ()>>,
+                    (),
+                >,
+                TConn,
+            )>,
+        >,
+        (),
+        (),
+    >,
+}
+
+impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
     /// Initializes a new network data structure.
     pub fn new(config: Config<TPeer>) -> Self {
+        let (events_tx, events_rx) = mpsc::channel(config.pending_api_events_buffer_size.get() - 1);
+
         // The peerset, created below, is a data structure that helps keep track of the state of
         // the current peers and connections.
         let peerset = peerset::Peerset::new(peerset::Config {
-            randomness_seed: rand::random(),
-            peers_capacity: 50,
-            num_overlay_networks: 1,
+            randomness_seed: config.randomness_seed,
+            peers_capacity: 50, // TODO: ?
+            num_overlay_networks: config.overlay_networks.len(),
         });
 
         // Add to overlay #0 the nodes known to belong to the network.
+        // TODO: update code
         for (user_data, peer_id, address) in config.bootstrap_nodes {
             let mut node = peerset.node_mut(peer_id).or_insert_with(move || user_data);
             node.add_known_address(address);
@@ -110,59 +151,65 @@ impl<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
         }
 
         Network {
-            peerset,
-            genesis_block_hash: config.genesis_block_hash,
-            best_block: config.best_block,
-            protocol_id: config.protocol_id,
-            noise_key: Arc::new(config.noise_key),
+            noise_key: config.noise_key,
+            events_rx: Mutex::new(events_rx),
+            guarded: Mutex::new(Guarded { peerset, events_tx }),
         }
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
     pub async fn num_established_connections(&self) -> usize {
-        self.peerset.num_established_connections()
+        self.guarded
+            .lock()
+            .await
+            .peerset
+            .num_established_connections()
     }
 
     pub fn add_incoming_connection(
-        &mut self,
+        &self,
         local_listen_address: &Multiaddr,
         remote_addr: Multiaddr,
         user_data: TConn,
-    ) -> Connection<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq> {
+    ) -> ConnectionId {
         todo!()
     }
 
     /// Sends a request to the given peer.
     // TODO: more docs
     // TODO: proper error type
-    pub fn start_request(
-        &mut self,
+    pub async fn request(
+        &self,
         target: PeerId,
         protocol: String,
         request_data: Vec<u8>,
-    ) -> Result<Vec<protocol::BlockData>, ()> {
-        let connection = match self.peerset.node_mut(target) {
-            peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
-            peerset::NodeMut::Unknown(n) => return Err(()),
+    ) -> Result<Vec<u8>, ()> {
+        let connection = {
+            let guarded = self.guarded.lock().await;
+
+            let connection = match guarded.peerset.node_mut(target) {
+                peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
+                peerset::NodeMut::Unknown(n) => return Err(()),
+            };
+
+            // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
+            // It is possible for the channel to be closed, if the background task has ended but the
+            // frontend hasn't processed this yet.
+            guarded
+                .peerset
+                .connection_mut(connection)
+                .unwrap()
+                .into_user_data()
+                .clone()
         };
+
+        let connection = connection.lock().await;
 
         let (send_back, receive_result) = oneshot::channel();
 
-        // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
-        // It is possible for the channel to be closed, if the background task has ended but the
-        // frontend hasn't processed this yet.
-        guarded
-            .peerset
-            .connection_mut(connection)
-            .unwrap()
-            .into_user_data()
-            .send(ToConnection::BlocksRequest {
-                config,
-                protocol,
-                send_back,
-            })
-            .await
-            .map_err(|_| ())?;
+        // TODO:
+        // match connection.0 {}
+        todo!();
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
         match receive_result.await {
@@ -171,9 +218,71 @@ impl<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
         }
     }
 
-    /// Inform the [`Network`] of a message coming from a [`Connection`] and returned in a
-    /// [`ReadWrite::message`].
-    pub fn connection_message(&mut self, message: ConnectionToService) -> Option<Event> {
+    /// After a [`Event::StartConnect`], notifies the [`Network`] of the success of the dialing
+    /// attempt.
+    ///
+    /// See also [`Network::pending_outcome_err`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`PendingId`] is invalid.
+    ///
+    // TODO: timeout?
+    pub async fn pending_outcome_ok(&self, id: PendingId, user_data: TConn) -> ConnectionId {
+        // TODO: wrong ; pending in the peerset means "in TCP or during handshake"
+        let guarded = self.guarded.lock().await;
+        let conn = guarded
+            .peerset
+            .pending_mut(id)
+            .unwrap()
+            .into_established(move |_| {
+                Arc::new(Mutex::new((
+                    connection::handshake::HealthyHandshake::new(true),
+                    todo!(), // TODO: must keep same timeout as TCP handshake
+                    user_data,
+                )))
+            });
+        ConnectionId(conn.id())
+    }
+
+    /// After a [`Event::StartConnect`], notifies the [`Network`] of the failure of the dialing
+    /// attempt.
+    ///
+    /// See also [`Network::pending_outcome_ok`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`PendingId`] is invalid.
+    ///
+    // TODO: timeout?
+    pub async fn pending_outcome_err(&self, id: PendingId) {
+        let mut guarded = self.guarded.lock().await;
+        guarded
+            .peerset
+            .pending_mut(id)
+            .unwrap()
+            .remove_and_purge_address();
+    }
+
+    /// Returns the next event produced by the service.
+    ///
+    /// This function should be called at a high enough rate that [`Network::read_write`] can
+    /// continue pushing events to the internal buffer of events. Failure to call this function
+    /// often enough will lead to connections being back-pressured.
+    /// See also [`Config::pending_api_events_buffer_size`].
+    ///
+    /// It is technically possible to call this function multiple times simultaneously, in which
+    /// case the events will be distributed amongst the multiple calls in an unspecified way.
+    /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
+    /// produced, and calling this function multiple times is therefore discouraged.
+    pub async fn next_event(&self) -> Option<Event> {
+        self.fill_out_slots(&mut self.guarded.lock().await).await;
+
+        let events_rx = self.events_rx.lock().await;
+
+        todo!()
+
+        /*
         match message.inner {
             ConnectionToServiceInner::HandshakeError { .. } => {
                 self.peerset
@@ -204,59 +313,17 @@ impl<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
 
             ConnectionToServiceInner::NotificationsInClose { protocol } => todo!(),
         }
+        */
     }
 
-    pub fn next(&mut self) -> Option<Event> {}
-}
-
-/// Event generated by [`Network::next`].
-#[derive(Debug)]
-pub enum Event {
-    Connected(PeerId),
-    Disconnected(PeerId),
-}
-
-pub struct Pending {}
-
-impl Pending {
-    pub fn reached(self) -> Connection {
-        todo!()
-    }
-}
-
-pub struct Connection<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq> {
-    inner: ConnectionInner<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>,
-
-    id: ConnectionId,
-
-    /// Clone of [`Network::noise_key`].
-    noise_key: Arc<connection::NoiseKey>,
-}
-
-enum ConnectionInner<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq> {
-    Dead,
-    Handshake {
-        /// Current state of the handshake.
-        handshake: connection::handshake::HealthyHandshake,
-        /// When the handshake will be considered failed.
-        timeout: TNow,
-    },
-    Established(connection::established::Established<TNow, (), ()>),
-}
-
-impl<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
-    Connection<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
-{
-    pub fn service_message(&mut self, message: ServiceToConnection) {
-        todo!()
-    }
-
-    pub fn read_write<'a>(
-        &mut self,
+    pub async fn read_write<'a>(
+        &self,
+        connection_id: ConnectionId,
         now: TNow,
         mut incoming_buffer: Option<&[u8]>,
         mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
-    ) -> ReadWrite<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq> {
+        cx: &mut Context<'_>,
+    ) -> ReadWrite<TNow, TPeer, TConn> {
         let mut total_read = 0;
         let mut total_written = 0;
 
@@ -311,13 +378,77 @@ impl<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq>
             read_bytes: total_read,
             written_bytes: total_written,
             wake_up_after: None,
-            message,
         }
+    }
+
+    /// Spawns new outgoing connections in order to fill empty outgoing slots.
+    ///
+    /// Must be passed as parameter an existing lock to a [`Guarded`].
+    async fn fill_out_slots<'a>(&self, guarded: &mut MutexGuard<'a, Guarded>) -> Option<Event> {
+        // Solves borrow checking errors regarding the borrow of multiple different fields at the
+        // same time.
+        let guarded = &mut **guarded;
+
+        // TODO: limit number of slots
+
+        for overlay_network_index in 0..1 {
+            // TODO: num overlay networks ^
+            // Grab nodes for which we have an established outgoing connections but haven't yet
+            // opened a substream to.
+            while let Some(node) = guarded
+                .peerset
+                .random_connected_closed_node(overlay_network_index)
+            {
+                let connection_id = node.connections().next().unwrap();
+                let mut connection = guarded.peerset.connection_mut(connection_id).unwrap();
+                // It is possible for the channel to be closed if the task has shut down. This will
+                // be processed by `next_event` when detected.
+                let _ = connection
+                    .user_data_mut()
+                    .send(ToConnection::OpenOutNotifications {
+                        protocol: format!("/{}/block-announces/1", self.protocol_id),
+                        handshake: protocol::encode_block_announces_handshake(
+                            protocol::BlockAnnouncesHandshakeRef {
+                                best_hash: &self.best_block.1,
+                                best_number: self.best_block.0,
+                                genesis_hash: &self.genesis_block_hash,
+                                role: protocol::Role::Full, // TODO:
+                            },
+                        )
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        }),
+                    })
+                    .await;
+                connection.add_pending_substream(0, ());
+            }
+
+            // TODO: very wip
+            while let Some(mut node) = guarded.peerset.random_not_connected(overlay_network_index) {
+                if let Some(multiaddr) = node.known_addresses().next() {
+                    let multiaddr = multiaddr.clone();
+                    let id = node.add_outbound_attempt(multiaddr.clone(), ());
+                    return Some(Event::StartConnect { id, multiaddr });
+                }
+            }
+        }
+
+        None
     }
 }
 
+/// Event generated by [`Network::next_event`].
+#[derive(Debug)]
+pub enum Event {
+    Connected(PeerId),
+    Disconnected(PeerId),
+
+    StartConnect { id: PendingId, multiaddr: Multiaddr },
+}
+
 /// Outcome of calling [`Connection::read_write`].
-pub struct ReadWrite<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq> {
+pub struct ReadWrite<TNow, TPeer, TConn> {
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
     /// should no longer be present the next time [`Connection::read_write`] is called.
     pub read_bytes: usize,
@@ -329,14 +460,6 @@ pub struct ReadWrite<TNow, TPeer, TConn, TPending, TSub, TPendingSub, TRq> {
     /// If `Some`, [`Connection::read_write`] should be called again when the point in time
     /// reaches the value in the `Option`.
     pub wake_up_after: Option<TNow>,
-
-    /// If `Some`, this message must be reported to the [`Network`] by calling
-    /// [`Network::connection_message`].
-    pub message: Option<ConnectionToService>,
-
-    /// If true, this [`Connection`] is now useless and can be dropped.
-    // TODO: must do clean shut down of TCP connection first
-    pub ended: bool,
 }
 
 /// Message to be reported to the [`Network`] by calling [`Network::connection_message`].

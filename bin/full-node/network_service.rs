@@ -434,7 +434,7 @@ async fn connection_task(
         if has_message || read_write.read_bytes != 0 || read_write.written_bytes != 0 {
             continue;
         }
-    
+
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {

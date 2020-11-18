@@ -23,6 +23,7 @@
 pub mod connection;
 pub mod discovery;
 pub mod leb128;
+pub mod libp2p;
 #[doc(inline)]
 pub use parity_multiaddr as multiaddr;
 pub mod peer_id;
