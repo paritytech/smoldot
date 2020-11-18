@@ -21,7 +21,7 @@
 #![recursion_limit = "512"]
 #![deny(unused_crate_dependencies)]
 
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
 use std::{
     collections::{BTreeMap, HashSet},
     convert::TryFrom as _,
@@ -29,7 +29,7 @@ use std::{
 };
 use substrate_lite::{
     chain, chain_spec,
-    json_rpc::methods,
+    json_rpc::{self, methods},
     network::{multiaddr, peer_id::PeerId},
 };
 
@@ -249,11 +249,14 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
         }
         methods::MethodCall::chain_getBlockHash { height } => {
             // TODO: implement correctly
-            assert_eq!(height, 0); // TODO: <- old code
-            let response = methods::Response::chain_getBlockHash(methods::HashHexString(
-                client.best_block.hash(),
-            ))
-            .to_json_response(request_id);
+            let response = if height.is_some() {
+                methods::Response::chain_getBlockHash(methods::HashHexString(
+                    client.best_block.hash(),
+                ))
+                .to_json_response(request_id)
+            } else {
+                json_rpc::parse::build_success_response(request_id, "null")
+            };
             (response, None)
         }
         methods::MethodCall::chain_getFinalizedHead {} => {

@@ -161,7 +161,7 @@ define_methods! {
     author_unwatchExtrinsic() -> (), // TODO:
     babe_epochAuthorship() -> (), // TODO:
     chain_getBlock(hash: Option<HashHexString>) -> (), // TODO: bad return type
-    chain_getBlockHash(height: u64) -> HashHexString [chain_getHead], // TODO: wrong param
+    chain_getBlockHash(height: Option<u64>) -> HashHexString [chain_getHead],
     chain_getFinalizedHead() -> HashHexString [chain_getFinalisedHead],
     chain_getHeader(hash: Option<HashHexString>) -> Header, // TODO: return type is guessed
     chain_subscribeAllHeads() -> &'a str,
