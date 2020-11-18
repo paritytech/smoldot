@@ -160,7 +160,7 @@ define_methods! {
     author_submitExtrinsic() -> (), // TODO:
     author_unwatchExtrinsic() -> (), // TODO:
     babe_epochAuthorship() -> (), // TODO:
-    chain_getBlock(hash: Option<HashHexString>) -> (), // TODO: bad return type
+    chain_getBlock(hash: Option<HashHexString>) -> Block,
     chain_getBlockHash(height: Option<u64>) -> HashHexString [chain_getHead],
     chain_getFinalizedHead() -> HashHexString [chain_getFinalisedHead],
     chain_getHeader(hash: Option<HashHexString>) -> Header, // TODO: return type is guessed
@@ -261,6 +261,13 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
         out.copy_from_slice(&bytes);
         Ok(HashHexString(out))
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Block {
+    pub extrinsics: Vec<HexString>,
+    pub header: Header,
+    pub justification: HexString, // TODO: unsure
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
