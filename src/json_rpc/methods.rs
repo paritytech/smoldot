@@ -267,7 +267,7 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
 pub struct Block {
     pub extrinsics: Vec<HexString>,
     pub header: Header,
-    pub justification: HexString, // TODO: unsure
+    pub justification: HexString, // TODO: unsure of the type
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
