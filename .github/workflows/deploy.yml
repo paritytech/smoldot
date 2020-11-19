@@ -18,6 +18,7 @@
 name: deploy
 
 on:
+  pull_request:  # All deployment steps are tested on PRs, but the actual deployment doesn't happen.
   push:
     branches:
       - main
@@ -27,12 +28,19 @@ jobs:
     name: Build and push Docker image
     runs-on: ubuntu-latest
     steps:
+    - uses: docker/setup-qemu-action@v1
+    - uses: docker/setup-buildx-action@v1
     - uses: actions/checkout@v2
+    - name: Login to DockerHub
+      uses: docker/login-action@v1 
+      # This `if` adds an additional satefy against accidental pushes.
+      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      with:
+        registry: docker.pkg.github.com
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     - name: Push to GitHub Packages
       uses: docker/build-push-action@v2.1.0
       with:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-        registry: docker.pkg.github.com
-        repository: paritytech/substrate-lite/node
-        tag_with_ref: true
+        push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        tags: docker.pkg.github.com/paritytech/substrate-lite/node:main
