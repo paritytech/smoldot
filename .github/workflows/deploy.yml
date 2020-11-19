@@ -52,7 +52,7 @@ jobs:
       - uses: actions/setup-node@v1
         with:
           node-version: 12
-      - run: apt-get update && apt install -y binaryen # For `wasm-opt`
+      - run: sudo apt-get update && apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
           # The Rust version used for compiling the Wasm node is pinned.
