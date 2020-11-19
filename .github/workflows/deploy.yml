@@ -44,3 +44,18 @@ jobs:
       with:
         push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         tags: docker.pkg.github.com/paritytech/substrate-lite/node:main
+
+  npm-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - run: cd bin/wasm-node/javascript
+      - uses: actions/setup-node@v1
+        with:
+          node-version: 12
+      - run: npm install
+      - uses: JS-DevTools/npm-publish@v1
+        with:
+          dry-run: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+          access: public
+          token: ${{ secrets.NPM_TOKEN }}
