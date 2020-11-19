@@ -54,8 +54,9 @@ jobs:
         with:
           node-version: 12
       - run: npm install
-      - uses: JS-DevTools/npm-publish@v1
-        with:
-          dry-run: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-          access: public
-          token: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --dry-run
+        if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      - run: npm publish
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
