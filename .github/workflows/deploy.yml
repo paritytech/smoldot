@@ -49,14 +49,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - run: cd bin/wasm-node/javascript
       - uses: actions/setup-node@v1
         with:
           node-version: 12
       - run: npm install
+        working-directory: ./bin/wasm-node/javascript
       - run: npm publish --dry-run
+        working-directory: ./bin/wasm-node/javascript
         if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
       - run: npm publish
+        working-directory: ./bin/wasm-node/javascript
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
