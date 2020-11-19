@@ -70,10 +70,10 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-node-${{ hashFiles('**/Cargo.lock') }}
       - run: npm install
         working-directory: ./bin/wasm-node/javascript
-      - run: npm publish --dry-run
+      - run: npm publish --unsafe-perm --dry-run
         working-directory: ./bin/wasm-node/javascript
         if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
-      - run: npm publish
+      - run: npm publish --unsafe-perm
         working-directory: ./bin/wasm-node/javascript
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
