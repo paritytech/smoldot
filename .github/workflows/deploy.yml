@@ -46,13 +46,15 @@ jobs:
         tags: docker.pkg.github.com/paritytech/substrate-lite/node:main
 
   npm-publish:
-    runs-on: debian:buster
+    runs-on: ubuntu-latest
+    container:
+      image: debian:buster
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-node@v1
         with:
           node-version: 12
-      - run: sudo apt-get update && sudo apt install -y binaryen # For `wasm-opt`
+      - run: apt-get update && apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
           # The Rust version used for compiling the Wasm node is pinned.
