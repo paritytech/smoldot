@@ -55,9 +55,7 @@ pub(super) struct ClientSpec {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ChainSpecParachain {
-    /// The relay chain of the Parachain.
     pub(super) relay_chain: String,
-    /// The id of the Parachain.
     pub(super) para_id: u32,
 }
 
