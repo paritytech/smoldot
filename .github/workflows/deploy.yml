@@ -52,6 +52,20 @@ jobs:
       - uses: actions/setup-node@v1
         with:
           node-version: 12
+      - run: apt-get update && apt install -y binaryen # For `wasm-opt`
+      - uses: actions-rs/toolchain@v1
+        with:
+          # The Rust version used for compiling the Wasm node is pinned.
+          toolchain: 1.47.0
+          target: wasm32-wasi
+          profile: minimal
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-node-${{ hashFiles('**/Cargo.lock') }}
       - run: npm install
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --dry-run
