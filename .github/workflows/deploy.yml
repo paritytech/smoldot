@@ -48,7 +48,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: debian:buster
+      image: rust
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-node@v1
