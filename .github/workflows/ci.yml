@@ -89,7 +89,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Check rustdoc links
-      run: RUSTDOCFLAGS="--deny broken_intra_doc_links" cargo doc --verbose --workspace --all-features --no-deps --document-private-items
+      run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
     name: Rustfmt
