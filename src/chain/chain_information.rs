@@ -276,8 +276,8 @@ pub enum ChainInformationFinality {
         /// Contains the block number where the changes are to be triggered.
         ///
         /// The block whose height is contained in this field must still be finalized using the
-        /// authorities found in [`ChainInformation::grandpa_finalized_triggered_authorities`]. Only
-        /// the next block and further use the new list of authorities.
+        /// authorities found in [`ChainInformationFinality::Grandpa::finalized_triggered_authorities`].
+        /// Only the next block and further use the new list of authorities.
         ///
         /// The block height must always be strictly superior to the height found in
         /// [`ChainInformation::finalized_block_header`].
