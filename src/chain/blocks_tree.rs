@@ -1096,6 +1096,165 @@ struct VerifyContext<T> {
     consensus: VerifyConsensusSpecific,
 }
 
+impl<T> VerifyContext<T> {
+    fn with_body_verify(self, inner: verify::header_body::Verify) -> BodyVerifyStep2<T> {
+        loop {
+            match inner {
+                verify::header_body::Verify::Finished(Ok(success)) => {
+                    // TODO: lots of code in common with header verification
+
+                    // Block verification is successful!
+                    let is_new_best = if let Some(current_best) = self.chain.current_best {
+                        is_better_block(
+                            &self.chain.blocks,
+                            current_best,
+                            self.parent_tree_index,
+                            (&self.header).into(),
+                        )
+                    } else {
+                        true
+                    };
+
+                    let consensus = match (
+                        success.consensus,
+                        &self.consensus,
+                        self.chain.finalized_consensus.clone(),
+                        self.parent_tree_index
+                            .map(|idx| self.chain.blocks.get(idx).unwrap().consensus.clone()),
+                    ) {
+                        (
+                            verify::header_body::SuccessConsensus::AllAuthorized,
+                            VerifyConsensusSpecific::AllAuthorized,
+                            FinalizedConsensus::AllAuthorized,
+                            _,
+                        ) => BlockConsensus::AllAuthorized,
+                        (
+                            verify::header_body::SuccessConsensus::Aura { authorities_change },
+                            VerifyConsensusSpecific::Aura {
+                                authorities_list: parent_authorities,
+                            },
+                            FinalizedConsensus::Aura { .. },
+                            _,
+                        ) => {
+                            if authorities_change {
+                                BlockConsensus::Aura {
+                                    authorities_list: todo!(), // TODO: fetch from header
+                                }
+                            } else {
+                                BlockConsensus::Aura {
+                                    authorities_list: parent_authorities.clone(),
+                                }
+                            }
+                        }
+
+                        (
+                            verify::header_body::SuccessConsensus::Babe {
+                                epoch_transition_target: Some(epoch_transition_target),
+                                slot_number,
+                            },
+                            VerifyConsensusSpecific::Babe { .. },
+                            FinalizedConsensus::Babe { .. },
+                            Some(BlockConsensus::Babe { next_epoch, .. }),
+                        ) => BlockConsensus::Babe {
+                            current_epoch: Some(next_epoch),
+                            next_epoch: Arc::new(epoch_transition_target),
+                        },
+
+                        (
+                            verify::header_body::SuccessConsensus::Babe {
+                                epoch_transition_target: None,
+                                slot_number,
+                            },
+                            VerifyConsensusSpecific::Babe { .. },
+                            FinalizedConsensus::Babe { .. },
+                            Some(BlockConsensus::Babe {
+                                current_epoch,
+                                next_epoch,
+                            }),
+                        ) => BlockConsensus::Babe {
+                            current_epoch,
+                            next_epoch,
+                        },
+
+                        (
+                            verify::header_body::SuccessConsensus::Babe {
+                                epoch_transition_target: Some(epoch_transition_target),
+                                slot_number,
+                            },
+                            VerifyConsensusSpecific::Babe { .. },
+                            FinalizedConsensus::Babe {
+                                next_epoch_transition,
+                                ..
+                            },
+                            None,
+                        ) => BlockConsensus::Babe {
+                            current_epoch: Some(next_epoch_transition),
+                            next_epoch: Arc::new(epoch_transition_target),
+                        },
+
+                        (
+                            verify::header_body::SuccessConsensus::Babe {
+                                epoch_transition_target: None,
+                                slot_number,
+                            },
+                            VerifyConsensusSpecific::Babe { .. },
+                            FinalizedConsensus::Babe {
+                                block_epoch_information,
+                                next_epoch_transition,
+                                ..
+                            },
+                            None,
+                        ) => BlockConsensus::Babe {
+                            current_epoch: block_epoch_information.clone(),
+                            next_epoch: next_epoch_transition.clone(),
+                        },
+
+                        // Any mismatch between consensus algorithms should have been detected by the
+                        // block verification.
+                        _ => unreachable!(),
+                    };
+
+                    let hash = self.header.hash();
+
+                    return BodyVerifyStep2::Finished {
+                        parent_runtime: success.parent_runtime,
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
+                        result: Ok(BodyInsert {
+                            chain: self.chain,
+                            parent_tree_index: self.parent_tree_index,
+                            is_new_best,
+                            header: self.header,
+                            hash,
+                            consensus,
+                        }),
+                    };
+                }
+                verify::header_body::Verify::Finished(Err(err)) => todo!("verify err: {:?}", err),
+                verify::header_body::Verify::StorageGet(inner) => {
+                    return BodyVerifyStep2::StorageGet(StorageGet {
+                        context: self,
+                        inner,
+                    })
+                }
+                verify::header_body::Verify::StorageNextKey(inner) => {
+                    return BodyVerifyStep2::StorageNextKey(StorageNextKey {
+                        context: self,
+                        inner,
+                    })
+                }
+                verify::header_body::Verify::StoragePrefixKeys(inner) => {
+                    return BodyVerifyStep2::StoragePrefixKeys(StoragePrefixKeys {
+                        context: self,
+                        inner,
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// Block verification, either just finished or still in progress.
 ///
 /// Holds ownership of both the block to verify and the [`NonFinalizedTree`].
@@ -1262,7 +1421,7 @@ where
             top_trie_root_calculation_cache,
         });
 
-        BodyVerifyStep2::from_inner(process, self.context)
+        self.context.with_body_verify(process)
     }
 
     /// Abort the verification and return the unmodified tree.
@@ -1307,166 +1466,6 @@ pub enum BodyVerifyStep2<T> {
     StoragePrefixKeys(StoragePrefixKeys<T>),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey<T>),
-}
-
-impl<T> BodyVerifyStep2<T> {
-    fn from_inner(inner: verify::header_body::Verify, chain: VerifyContext<T>) -> Self {
-        loop {
-            match inner {
-                verify::header_body::Verify::Finished(Ok(success)) => {
-                    // TODO: lots of code in common with header verification
-
-                    // Block verification is successful!
-                    let is_new_best = if let Some(current_best) = chain.chain.current_best {
-                        is_better_block(
-                            &chain.chain.blocks,
-                            current_best,
-                            chain.parent_tree_index,
-                            (&chain.header).into(),
-                        )
-                    } else {
-                        true
-                    };
-
-                    let consensus = match (
-                        success.consensus,
-                        &chain.consensus,
-                        chain.chain.finalized_consensus.clone(),
-                        chain
-                            .parent_tree_index
-                            .map(|idx| chain.chain.blocks.get(idx).unwrap().consensus.clone()),
-                    ) {
-                        (
-                            verify::header_body::SuccessConsensus::AllAuthorized,
-                            VerifyConsensusSpecific::AllAuthorized,
-                            FinalizedConsensus::AllAuthorized,
-                            _,
-                        ) => BlockConsensus::AllAuthorized,
-                        (
-                            verify::header_body::SuccessConsensus::Aura { authorities_change },
-                            VerifyConsensusSpecific::Aura {
-                                authorities_list: parent_authorities,
-                            },
-                            FinalizedConsensus::Aura { .. },
-                            _,
-                        ) => {
-                            if authorities_change {
-                                BlockConsensus::Aura {
-                                    authorities_list: todo!(), // TODO: fetch from header
-                                }
-                            } else {
-                                BlockConsensus::Aura {
-                                    authorities_list: parent_authorities.clone(),
-                                }
-                            }
-                        }
-
-                        (
-                            verify::header_body::SuccessConsensus::Babe {
-                                epoch_transition_target: Some(epoch_transition_target),
-                                slot_number,
-                            },
-                            VerifyConsensusSpecific::Babe { .. },
-                            FinalizedConsensus::Babe { .. },
-                            Some(BlockConsensus::Babe { next_epoch, .. }),
-                        ) => BlockConsensus::Babe {
-                            current_epoch: Some(next_epoch),
-                            next_epoch: Arc::new(epoch_transition_target),
-                        },
-
-                        (
-                            verify::header_body::SuccessConsensus::Babe {
-                                epoch_transition_target: None,
-                                slot_number,
-                            },
-                            VerifyConsensusSpecific::Babe { .. },
-                            FinalizedConsensus::Babe { .. },
-                            Some(BlockConsensus::Babe {
-                                current_epoch,
-                                next_epoch,
-                            }),
-                        ) => BlockConsensus::Babe {
-                            current_epoch,
-                            next_epoch,
-                        },
-
-                        (
-                            verify::header_body::SuccessConsensus::Babe {
-                                epoch_transition_target: Some(epoch_transition_target),
-                                slot_number,
-                            },
-                            VerifyConsensusSpecific::Babe { .. },
-                            FinalizedConsensus::Babe {
-                                next_epoch_transition,
-                                ..
-                            },
-                            None,
-                        ) => BlockConsensus::Babe {
-                            current_epoch: Some(next_epoch_transition),
-                            next_epoch: Arc::new(epoch_transition_target),
-                        },
-
-                        (
-                            verify::header_body::SuccessConsensus::Babe {
-                                epoch_transition_target: None,
-                                slot_number,
-                            },
-                            VerifyConsensusSpecific::Babe { .. },
-                            FinalizedConsensus::Babe {
-                                block_epoch_information,
-                                next_epoch_transition,
-                                ..
-                            },
-                            None,
-                        ) => BlockConsensus::Babe {
-                            current_epoch: block_epoch_information.clone(),
-                            next_epoch: next_epoch_transition.clone(),
-                        },
-
-                        // Any mismatch between consensus algorithms should have been detected by the
-                        // block verification.
-                        _ => unreachable!(),
-                    };
-
-                    let hash = chain.header.hash();
-
-                    return BodyVerifyStep2::Finished {
-                        parent_runtime: success.parent_runtime,
-                        storage_top_trie_changes: success.storage_top_trie_changes,
-                        offchain_storage_changes: success.offchain_storage_changes,
-                        top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
-                        result: Ok(BodyInsert {
-                            chain: chain.chain,
-                            parent_tree_index: chain.parent_tree_index,
-                            is_new_best,
-                            header: chain.header,
-                            hash,
-                            consensus,
-                        }),
-                    };
-                }
-                verify::header_body::Verify::Finished(Err(err)) => todo!("verify err: {:?}", err),
-                verify::header_body::Verify::StorageGet(inner) => {
-                    return BodyVerifyStep2::StorageGet(StorageGet {
-                        context: chain,
-                        inner,
-                    })
-                }
-                verify::header_body::Verify::StorageNextKey(inner) => {
-                    return BodyVerifyStep2::StorageNextKey(StorageNextKey {
-                        context: chain,
-                        inner,
-                    })
-                }
-                verify::header_body::Verify::StoragePrefixKeys(inner) => {
-                    return BodyVerifyStep2::StoragePrefixKeys(StoragePrefixKeys {
-                        context: chain,
-                        inner,
-                    })
-                }
-            }
-        }
-    }
 }
 
 /// Loading a storage value is required in order to continue.
@@ -1529,7 +1528,7 @@ impl<T> StorageGet<T> {
     // TODO: change API, see execute_block::StorageGet
     pub fn inject_value(self, value: Option<&[u8]>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_value(value);
-        BodyVerifyStep2::from_inner(inner, self.context)
+        self.context.with_body_verify(inner)
     }
 }
 
@@ -1585,7 +1584,7 @@ impl<T> StoragePrefixKeys<T> {
     /// Injects the list of keys.
     pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_keys(keys);
-        BodyVerifyStep2::from_inner(inner, self.context)
+        self.context.with_body_verify(inner)
     }
 }
 
@@ -1646,7 +1645,7 @@ impl<T> StorageNextKey<T> {
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_key(key);
-        BodyVerifyStep2::from_inner(inner, self.context)
+        self.context.with_body_verify(inner)
     }
 }
 
