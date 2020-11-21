@@ -341,12 +341,6 @@ impl<T> NonFinalizedTree<T> {
             }
         };
 
-        let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
-            &self_inner.blocks.get(parent_tree_index).unwrap().header
-        } else {
-            &self_inner.finalized_block_header
-        };
-
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
         let consensus_specific = if let Some(parent_tree_index) = parent_tree_index {
@@ -364,40 +358,28 @@ impl<T> NonFinalizedTree<T> {
                 },
             }
         } else {
-            // Some consensus-specific information must be fetched from the tree of ancestry. The
-            // information is found either in the parent block, or in the finalized block.
-            if let Some(parent_tree_index) = parent_tree_index {
-                match &self_inner.blocks.get(parent_tree_index).unwrap().consensus {
-                    BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
-                    BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
-                        authorities_list: authorities_list.clone(),
-                    },
-                    BlockConsensus::Babe {
-                        current_epoch,
-                        next_epoch,
-                    } => VerifyConsensusSpecific::Babe {
-                        current_epoch: current_epoch.clone(),
-                        next_epoch: next_epoch.clone(),
-                    },
-                }
-            } else {
-                match &self_inner.finalized_consensus {
-                    FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
-                    FinalizedConsensus::Aura {
-                        authorities_list, ..
-                    } => VerifyConsensusSpecific::Aura {
-                        authorities_list: authorities_list.clone(),
-                    },
-                    FinalizedConsensus::Babe {
-                        block_epoch_information,
-                        next_epoch_transition,
-                        ..
-                    } => VerifyConsensusSpecific::Babe {
-                        current_epoch: block_epoch_information.clone(),
-                        next_epoch: next_epoch_transition.clone(),
-                    },
-                }
+            match &self_inner.finalized_consensus {
+                FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
+                FinalizedConsensus::Aura {
+                    authorities_list, ..
+                } => VerifyConsensusSpecific::Aura {
+                    authorities_list: authorities_list.clone(),
+                },
+                FinalizedConsensus::Babe {
+                    block_epoch_information,
+                    next_epoch_transition,
+                    ..
+                } => VerifyConsensusSpecific::Babe {
+                    current_epoch: block_epoch_information.clone(),
+                    next_epoch: next_epoch_transition.clone(),
+                },
             }
+        };
+
+        let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
+            &self_inner.blocks.get(parent_tree_index).unwrap().header
+        } else {
+            &self_inner.finalized_block_header
         };
 
         let result = verify::header_only::verify(verify::header_only::Config {
@@ -581,98 +563,9 @@ impl<T> NonFinalizedTree<T> {
         I: ExactSizeIterator<Item = E> + Clone,
         E: AsRef<[u8]> + Clone,
     {
-        let self_inner = self.inner.unwrap();
-
-        let decoded_header = match header::decode(&scale_encoded_header) {
-            Ok(h) => h,
-            Err(err) => {
-                return BodyVerifyStep1::InvalidHeader(
-                    NonFinalizedTree {
-                        inner: Some(self_inner),
-                    },
-                    err,
-                )
-            }
-        };
-
-        let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
-
-        if self_inner.blocks.find(|b| b.hash == hash).is_some() {
-            return BodyVerifyStep1::Duplicate(NonFinalizedTree {
-                inner: Some(self_inner),
-            });
-        }
-
-        // Try to find the parent block in the tree of known blocks.
-        // `Some` with an index of the parent within the tree of unfinalized blocks.
-        // `None` means that the parent is the finalized block.
-        //
-        // The parent hash is first checked against `self.current_best`, as it is most likely
-        // that new blocks are built on top of the current best.
-        let parent_tree_index = if self_inner.current_best.map_or(false, |best| {
-            *decoded_header.parent_hash == self_inner.blocks.get(best).unwrap().hash
-        }) {
-            Some(self_inner.current_best.unwrap())
-        } else if *decoded_header.parent_hash == self_inner.finalized_block_hash {
-            None
-        } else {
-            let parent_hash = *decoded_header.parent_hash;
-            match self_inner.blocks.find(|b| b.hash == parent_hash) {
-                Some(parent) => Some(parent),
-                None => {
-                    return BodyVerifyStep1::BadParent {
-                        chain: NonFinalizedTree {
-                            inner: Some(self_inner),
-                        },
-                        parent_hash,
-                    }
-                }
-            }
-        };
-
-        // Some consensus-specific information must be fetched from the tree of ancestry. The
-        // information is found either in the parent block, or in the finalized block.
-        let consensus = if let Some(parent_tree_index) = parent_tree_index {
-            match &self_inner.blocks.get(parent_tree_index).unwrap().consensus {
-                BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
-                BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
-                    authorities_list: authorities_list.clone(),
-                },
-                BlockConsensus::Babe {
-                    current_epoch,
-                    next_epoch,
-                } => VerifyConsensusSpecific::Babe {
-                    current_epoch: current_epoch.clone(),
-                    next_epoch: next_epoch.clone(),
-                },
-            }
-        } else {
-            match &self_inner.finalized_consensus {
-                FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
-                FinalizedConsensus::Aura {
-                    authorities_list, ..
-                } => VerifyConsensusSpecific::Aura {
-                    authorities_list: authorities_list.clone(),
-                },
-                FinalizedConsensus::Babe {
-                    block_epoch_information,
-                    next_epoch_transition,
-                    ..
-                } => VerifyConsensusSpecific::Babe {
-                    current_epoch: block_epoch_information.clone(),
-                    next_epoch: next_epoch_transition.clone(),
-                },
-            }
-        };
-
-        BodyVerifyStep1::ParentRuntimeRequired(BodyVerifyRuntimeRequired {
-            chain: self_inner,
-            header: decoded_header.into(),
-            parent_tree_index,
-            body,
-            consensus,
-            now_from_unix_epoch,
-        })
+        self.inner
+            .unwrap()
+            .verify(scale_encoded_header, now_from_unix_epoch, Some(body))
     }
 
     /// Verifies the given justification.
@@ -826,6 +719,151 @@ enum BlockConsensus {
 }
 
 impl<T> NonFinalizedTreeInner<T> {
+    /// Common implementation for both [`NonFinalizedTree::verify_header`] and
+    /// [`NonFinalizedTree::verify_body`].
+    fn verify<I, E>(
+        self,
+        scale_encoded_header: Vec<u8>,
+        now_from_unix_epoch: Duration,
+        body: Option<I>,
+    ) -> BodyVerifyStep1<T, I>
+    where
+        I: ExactSizeIterator<Item = E> + Clone,
+        E: AsRef<[u8]> + Clone,
+    {
+        let decoded_header = match header::decode(&scale_encoded_header) {
+            Ok(h) => h,
+            Err(err) => {
+                return BodyVerifyStep1::InvalidHeader(NonFinalizedTree { inner: Some(self) }, err)
+            }
+        };
+
+        let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
+
+        if self.blocks.find(|b| b.hash == hash).is_some() {
+            return BodyVerifyStep1::Duplicate(NonFinalizedTree { inner: Some(self) });
+        }
+
+        // Try to find the parent block in the tree of known blocks.
+        // `Some` with an index of the parent within the tree of unfinalized blocks.
+        // `None` means that the parent is the finalized block.
+        //
+        // The parent hash is first checked against `self.current_best`, as it is most likely
+        // that new blocks are built on top of the current best.
+        let parent_tree_index = if self.current_best.map_or(false, |best| {
+            *decoded_header.parent_hash == self.blocks.get(best).unwrap().hash
+        }) {
+            Some(self.current_best.unwrap())
+        } else if *decoded_header.parent_hash == self.finalized_block_hash {
+            None
+        } else {
+            let parent_hash = *decoded_header.parent_hash;
+            match self.blocks.find(|b| b.hash == parent_hash) {
+                Some(parent) => Some(parent),
+                None => {
+                    return BodyVerifyStep1::BadParent {
+                        chain: NonFinalizedTree { inner: Some(self) },
+                        parent_hash,
+                    }
+                }
+            }
+        };
+
+        // Some consensus-specific information must be fetched from the tree of ancestry. The
+        // information is found either in the parent block, or in the finalized block.
+        let consensus = if let Some(parent_tree_index) = parent_tree_index {
+            match &self.blocks.get(parent_tree_index).unwrap().consensus {
+                BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
+                BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
+                    authorities_list: authorities_list.clone(),
+                },
+                BlockConsensus::Babe {
+                    current_epoch,
+                    next_epoch,
+                } => VerifyConsensusSpecific::Babe {
+                    current_epoch: current_epoch.clone(),
+                    next_epoch: next_epoch.clone(),
+                },
+            }
+        } else {
+            match &self.finalized_consensus {
+                FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
+                FinalizedConsensus::Aura {
+                    authorities_list, ..
+                } => VerifyConsensusSpecific::Aura {
+                    authorities_list: authorities_list.clone(),
+                },
+                FinalizedConsensus::Babe {
+                    block_epoch_information,
+                    next_epoch_transition,
+                    ..
+                } => VerifyConsensusSpecific::Babe {
+                    current_epoch: block_epoch_information.clone(),
+                    next_epoch: next_epoch_transition.clone(),
+                },
+            }
+        };
+
+        if let Some(body) = body {
+            BodyVerifyStep1::ParentRuntimeRequired(BodyVerifyRuntimeRequired {
+                context: VerifyContext {
+                    chain: self,
+                    header: decoded_header.into(),
+                    parent_tree_index,
+                    consensus,
+                },
+                body,
+                now_from_unix_epoch,
+            })
+        } else {
+            let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
+                &self.blocks.get(parent_tree_index).unwrap().header
+            } else {
+                &self.finalized_block_header
+            };
+
+            let result = verify::header_only::verify(verify::header_only::Config {
+                consensus: match (&self.finalized_consensus, &consensus) {
+                    (
+                        FinalizedConsensus::Aura { slot_duration, .. },
+                        VerifyConsensusSpecific::Aura { authorities_list },
+                    ) => {
+                        verify::header_only::ConfigConsensus::Aura {
+                            // TODO: meh for allocating :-/
+                            current_authorities: authorities_list
+                                .iter()
+                                .map(|a| a.into())
+                                .collect(),
+                            now_from_unix_epoch,
+                            slot_duration: *slot_duration,
+                        }
+                    }
+                    (
+                        FinalizedConsensus::Babe {
+                            slots_per_epoch, ..
+                        },
+                        VerifyConsensusSpecific::Babe {
+                            current_epoch,
+                            next_epoch,
+                        },
+                    ) => verify::header_only::ConfigConsensus::Babe {
+                        parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
+                        parent_block_next_epoch: (&**next_epoch).into(),
+                        slots_per_epoch: *slots_per_epoch,
+                        now_from_unix_epoch,
+                    },
+                    // TODO: don't panic! this is before any verification
+                    _ => unreachable!(),
+                },
+                block_header: decoded_header.clone(),
+                parent_block_header: parent_block_header.into(),
+            })
+            .map_err(HeaderVerifyError::VerificationFailed);
+
+            todo!() // TODO:
+        }
+    }
+
     /// See [`NonFinalizedTree::verify_justification`].
     fn verify_justification(
         &mut self,
@@ -1051,6 +1089,13 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 }
 
+struct VerifyContext<T> {
+    chain: NonFinalizedTreeInner<T>,
+    parent_tree_index: Option<fork_tree::NodeIndex>,
+    header: header::Header,
+    consensus: VerifyConsensusSpecific,
+}
+
 /// Block verification, either just finished or still in progress.
 ///
 /// Holds ownership of both the block to verify and the [`NonFinalizedTree`].
@@ -1091,11 +1136,8 @@ enum VerifyConsensusSpecific {
 /// of the parent block must be provided.
 #[must_use]
 pub struct BodyVerifyRuntimeRequired<T, I> {
-    chain: NonFinalizedTreeInner<T>,
-    header: header::Header,
-    parent_tree_index: Option<fork_tree::NodeIndex>,
+    context: VerifyContext<T>,
     body: I,
-    consensus: VerifyConsensusSpecific,
     now_from_unix_epoch: Duration,
 }
 
@@ -1108,8 +1150,8 @@ where
     /// the finalized block.
     pub fn parent_block(&mut self) -> Option<BlockAccess<T>> {
         Some(BlockAccess {
-            tree: &mut self.chain,
-            node_index: self.parent_tree_index?,
+            tree: &mut self.context.chain,
+            node_index: self.context.parent_tree_index?,
         })
     }
 
@@ -1117,11 +1159,16 @@ where
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
     pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.parent_tree_index?;
+        let parent_index = self.context.parent_tree_index?;
         let n = usize::try_from(n).ok()?;
-        let ret = self.chain.blocks.node_to_root_path(parent_index).nth(n)?;
+        let ret = self
+            .context
+            .chain
+            .blocks
+            .node_to_root_path(parent_index)
+            .nth(n)?;
         Some(BlockAccess {
-            tree: &mut self.chain,
+            tree: &mut self.context.chain,
             node_index: ret,
         })
     }
@@ -1129,12 +1176,19 @@ where
     /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
     /// being verified.
     pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.parent_tree_index {
+        let parent_index = match self.context.parent_tree_index {
             Some(p) => p,
             None => return 0,
         };
 
-        u64::try_from(self.chain.blocks.node_to_root_path(parent_index).count()).unwrap()
+        u64::try_from(
+            self.context
+                .chain
+                .blocks
+                .node_to_root_path(parent_index)
+                .count(),
+        )
+        .unwrap()
     }
 
     /// Resume the verification process by passing the requested information.
@@ -1153,15 +1207,24 @@ where
         parent_runtime: host::HostVmPrototype,
         top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
     ) -> BodyVerifyStep2<T> {
-        let parent_block_header = if let Some(parent_tree_index) = self.parent_tree_index {
-            &self.chain.blocks.get(parent_tree_index).unwrap().header
+        let parent_block_header = if let Some(parent_tree_index) = self.context.parent_tree_index {
+            &self
+                .context
+                .chain
+                .blocks
+                .get(parent_tree_index)
+                .unwrap()
+                .header
         } else {
-            &self.chain.finalized_block_header
+            &self.context.chain.finalized_block_header
         };
 
         let process = verify::header_body::verify(verify::header_body::Config {
             parent_runtime,
-            consensus: match (&self.chain.finalized_consensus, &self.consensus) {
+            consensus: match (
+                &self.context.chain.finalized_consensus,
+                &self.context.consensus,
+            ) {
                 (FinalizedConsensus::AllAuthorized, VerifyConsensusSpecific::AllAuthorized) => {
                     verify::header_body::ConfigConsensus::AllAuthorized
                 }
@@ -1193,27 +1256,19 @@ where
                 // TODO: don't panic /!\ this is before the verification
                 _ => unreachable!(),
             },
-            block_header: (&self.header).into(),
+            block_header: (&self.context.header).into(),
             parent_block_header: parent_block_header.into(),
             block_body: self.body,
             top_trie_root_calculation_cache,
         });
 
-        BodyVerifyStep2::from_inner(
-            process,
-            BodyVerifyShared {
-                chain: self.chain,
-                parent_tree_index: self.parent_tree_index,
-                header: self.header,
-                consensus: self.consensus,
-            },
-        )
+        BodyVerifyStep2::from_inner(process, self.context)
     }
 
     /// Abort the verification and return the unmodified tree.
     pub fn abort(self) -> NonFinalizedTree<T> {
         NonFinalizedTree {
-            inner: Some(self.chain),
+            inner: Some(self.context.chain),
         }
     }
 }
@@ -1254,15 +1309,8 @@ pub enum BodyVerifyStep2<T> {
     StorageNextKey(StorageNextKey<T>),
 }
 
-struct BodyVerifyShared<T> {
-    chain: NonFinalizedTreeInner<T>,
-    parent_tree_index: Option<fork_tree::NodeIndex>,
-    header: header::Header,
-    consensus: VerifyConsensusSpecific,
-}
-
 impl<T> BodyVerifyStep2<T> {
-    fn from_inner(mut inner: verify::header_body::Verify, chain: BodyVerifyShared<T>) -> Self {
+    fn from_inner(inner: verify::header_body::Verify, chain: VerifyContext<T>) -> Self {
         loop {
             match inner {
                 verify::header_body::Verify::Finished(Ok(success)) => {
@@ -1399,13 +1447,22 @@ impl<T> BodyVerifyStep2<T> {
                 }
                 verify::header_body::Verify::Finished(Err(err)) => todo!("verify err: {:?}", err),
                 verify::header_body::Verify::StorageGet(inner) => {
-                    return BodyVerifyStep2::StorageGet(StorageGet { chain, inner })
+                    return BodyVerifyStep2::StorageGet(StorageGet {
+                        context: chain,
+                        inner,
+                    })
                 }
                 verify::header_body::Verify::StorageNextKey(inner) => {
-                    return BodyVerifyStep2::StorageNextKey(StorageNextKey { chain, inner })
+                    return BodyVerifyStep2::StorageNextKey(StorageNextKey {
+                        context: chain,
+                        inner,
+                    })
                 }
                 verify::header_body::Verify::StoragePrefixKeys(inner) => {
-                    return BodyVerifyStep2::StoragePrefixKeys(StoragePrefixKeys { chain, inner })
+                    return BodyVerifyStep2::StoragePrefixKeys(StoragePrefixKeys {
+                        context: chain,
+                        inner,
+                    })
                 }
             }
         }
@@ -1416,7 +1473,7 @@ impl<T> BodyVerifyStep2<T> {
 #[must_use]
 pub struct StorageGet<T> {
     inner: verify::header_body::StorageGet,
-    chain: BodyVerifyShared<T>,
+    context: VerifyContext<T>,
 }
 
 impl<T> StorageGet<T> {
@@ -1436,16 +1493,16 @@ impl<T> StorageGet<T> {
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
     pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.chain.parent_tree_index?;
+        let parent_index = self.context.parent_tree_index?;
         let n = usize::try_from(n).ok()?;
         let ret = self
-            .chain
+            .context
             .chain
             .blocks
             .node_to_root_path(parent_index)
             .nth(n)?;
         Some(BlockAccess {
-            tree: &mut self.chain.chain,
+            tree: &mut self.context.chain,
             node_index: ret,
         })
     }
@@ -1453,13 +1510,13 @@ impl<T> StorageGet<T> {
     /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
     /// being verified.
     pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.chain.parent_tree_index {
+        let parent_index = match self.context.parent_tree_index {
             Some(p) => p,
             None => return 0,
         };
 
         u64::try_from(
-            self.chain
+            self.context
                 .chain
                 .blocks
                 .node_to_root_path(parent_index)
@@ -1472,7 +1529,7 @@ impl<T> StorageGet<T> {
     // TODO: change API, see execute_block::StorageGet
     pub fn inject_value(self, value: Option<&[u8]>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_value(value);
-        BodyVerifyStep2::from_inner(inner, self.chain)
+        BodyVerifyStep2::from_inner(inner, self.context)
     }
 }
 
@@ -1480,7 +1537,7 @@ impl<T> StorageGet<T> {
 #[must_use]
 pub struct StoragePrefixKeys<T> {
     inner: verify::header_body::StoragePrefixKeys,
-    chain: BodyVerifyShared<T>,
+    context: VerifyContext<T>,
 }
 
 impl<T> StoragePrefixKeys<T> {
@@ -1493,16 +1550,16 @@ impl<T> StoragePrefixKeys<T> {
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
     pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.chain.parent_tree_index?;
+        let parent_index = self.context.parent_tree_index?;
         let n = usize::try_from(n).ok()?;
         let ret = self
-            .chain
+            .context
             .chain
             .blocks
             .node_to_root_path(parent_index)
             .nth(n)?;
         Some(BlockAccess {
-            tree: &mut self.chain.chain,
+            tree: &mut self.context.chain,
             node_index: ret,
         })
     }
@@ -1510,13 +1567,13 @@ impl<T> StoragePrefixKeys<T> {
     /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
     /// being verified.
     pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.chain.parent_tree_index {
+        let parent_index = match self.context.parent_tree_index {
             Some(p) => p,
             None => return 0,
         };
 
         u64::try_from(
-            self.chain
+            self.context
                 .chain
                 .blocks
                 .node_to_root_path(parent_index)
@@ -1528,7 +1585,7 @@ impl<T> StoragePrefixKeys<T> {
     /// Injects the list of keys.
     pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_keys(keys);
-        BodyVerifyStep2::from_inner(inner, self.chain)
+        BodyVerifyStep2::from_inner(inner, self.context)
     }
 }
 
@@ -1536,7 +1593,7 @@ impl<T> StoragePrefixKeys<T> {
 #[must_use]
 pub struct StorageNextKey<T> {
     inner: verify::header_body::StorageNextKey,
-    chain: BodyVerifyShared<T>,
+    context: VerifyContext<T>,
 }
 
 impl<T> StorageNextKey<T> {
@@ -1549,16 +1606,16 @@ impl<T> StorageNextKey<T> {
     /// large. A value of `0` for `n` corresponds to the parent block. A value of `1` corresponds
     /// to the parent's parent. And so on.
     pub fn nth_ancestor(&mut self, n: u64) -> Option<BlockAccess<T>> {
-        let parent_index = self.chain.parent_tree_index?;
+        let parent_index = self.context.parent_tree_index?;
         let n = usize::try_from(n).ok()?;
         let ret = self
-            .chain
+            .context
             .chain
             .blocks
             .node_to_root_path(parent_index)
             .nth(n)?;
         Some(BlockAccess {
-            tree: &mut self.chain.chain,
+            tree: &mut self.context.chain,
             node_index: ret,
         })
     }
@@ -1566,13 +1623,13 @@ impl<T> StorageNextKey<T> {
     /// Returns the number of non-finalized blocks in the tree that are ancestors to the block
     /// being verified.
     pub fn num_non_finalized_ancestors(&self) -> u64 {
-        let parent_index = match self.chain.parent_tree_index {
+        let parent_index = match self.context.parent_tree_index {
             Some(p) => p,
             None => return 0,
         };
 
         u64::try_from(
-            self.chain
+            self.context
                 .chain
                 .blocks
                 .node_to_root_path(parent_index)
@@ -1589,7 +1646,7 @@ impl<T> StorageNextKey<T> {
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_key(key);
-        BodyVerifyStep2::from_inner(inner, self.chain)
+        BodyVerifyStep2::from_inner(inner, self.context)
     }
 }
 
