@@ -91,96 +91,6 @@ pub struct NonFinalizedTree<T> {
     inner: Option<NonFinalizedTreeInner<T>>,
 }
 
-/// See [`NonFinalizedTree::inner`].
-struct NonFinalizedTreeInner<T> {
-    /// Header of the highest known finalized block.
-    finalized_block_header: header::Header,
-    /// Hash of [`NonFinalizedTree::finalized_block_header`].
-    finalized_block_hash: [u8; 32],
-    /// State of the chain finality engine.
-    finality: Finality,
-
-    /// State of the consensus of the finalized block.
-    finalized_consensus: FinalizedConsensus,
-
-    /// Container for non-finalized blocks.
-    blocks: fork_tree::ForkTree<Block<T>>,
-    /// Index within [`NonFinalizedTree::blocks`] of the current best block. `None` if and only
-    /// if the fork tree is empty.
-    current_best: Option<fork_tree::NodeIndex>,
-}
-
-/// State of the consensus of the finalized block.
-#[derive(Clone)]
-enum FinalizedConsensus {
-    AllAuthorized,
-    Aura {
-        /// List of authorities that must sign the child of the finalized block.
-        authorities_list: Arc<Vec<header::AuraAuthority>>,
-
-        /// Duration, in milliseconds, of a slot.
-        slot_duration: NonZeroU64,
-    },
-    Babe {
-        /// See [`chain_information::ChainInformationConsensus::Babe::finalized_block_epoch_information`].
-        block_epoch_information: Option<Arc<chain_information::BabeEpochInformation>>,
-
-        /// See [`chain_information::ChainInformationConsensus::Babe::finalized_next_epoch_transition`].
-        next_epoch_transition: Arc<chain_information::BabeEpochInformation>,
-
-        /// See [`chain_information::ChainInformationConsensus::Babe::slots_per_epoch`].
-        slots_per_epoch: NonZeroU64,
-    },
-}
-
-/// State of the chain finality engine.
-#[derive(Clone)]
-enum Finality {
-    Grandpa {
-        /// Grandpa authorities set ID of the block right after the finalized block.
-        after_finalized_block_authorities_set_id: u64,
-        /// List of GrandPa authorities that need to finalize the block right after the finalized
-        /// block.
-        finalized_triggered_authorities: Vec<header::GrandpaAuthority>,
-        /// Change in the GrandPa authorities list that has been scheduled by a block that is already
-        /// finalized but not triggered yet. These changes will for sure happen. Contains the block
-        /// number where the changes are to be triggered.
-        finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
-    },
-}
-
-struct Block<T> {
-    /// Header of the block.
-    header: header::Header,
-    /// Cache of the hash of the block. Always equal to the hash of the header stored in this
-    /// same struct.
-    hash: [u8; 32],
-    /// Changes to the consensus made by the block.
-    consensus: BlockConsensus,
-    /// Opaque data decided by the user.
-    user_data: T,
-}
-
-/// Changes to the consensus made by a block.
-#[derive(Clone)]
-enum BlockConsensus {
-    AllAuthorized,
-    Aura {
-        /// If `Some`, list of authorities that must verify the child of this block.
-        /// This can be a clone of the value of the parent, a clone of
-        /// [`FinalizedConsensus::Aura::authorities_list`], or a new value if the block modifies
-        /// this list.
-        authorities_list: Arc<Vec<header::AuraAuthority>>,
-    },
-    Babe {
-        /// Information about the Babe epoch the block belongs to. `None` if the block belongs to
-        /// epoch #0.
-        current_epoch: Option<Arc<chain_information::BabeEpochInformation>>,
-        /// Information about the Babe epoch the block belongs to.
-        next_epoch: Arc<chain_information::BabeEpochInformation>,
-    },
-}
-
 impl<T> NonFinalizedTree<T> {
     /// Initializes a new queue.
     ///
@@ -777,8 +687,151 @@ impl<T> NonFinalizedTree<T> {
         &mut self,
         scale_encoded_justification: &[u8],
     ) -> Result<JustificationApply<T>, JustificationVerifyError> {
-        let self_inner = self.inner.as_mut().unwrap();
-        match &self_inner.finality {
+        self.inner
+            .as_mut()
+            .unwrap()
+            .verify_justification(scale_encoded_justification)
+    }
+
+    /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
+    /// that block will fail.
+    ///
+    /// The block must have been passed to [`NonFinalizedTree::verify_header`].
+    ///
+    /// Returns an iterator containing the now-finalized blocks in decreasing block numbers. In
+    /// other words, the first element of the iterator is always the block whose hash is the
+    /// `block_hash` passed as parameter.
+    ///
+    /// > **Note**: This function returns blocks in decreasing block number, because any other
+    /// >           ordering would incur a performance cost. While returning blocks in increasing
+    /// >           block number would often be more convenient, the overhead of doing so is
+    /// >           moved to the user.
+    ///
+    /// The pruning is completely performed, even if the iterator is dropped eagerly.
+    pub fn set_finalized_block(
+        &mut self,
+        block_hash: &[u8; 32],
+    ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
+        let inner = self.inner.as_mut().unwrap();
+
+        let block_index = match inner.blocks.find(|b| b.hash == *block_hash) {
+            Some(idx) => idx,
+            None => return Err(SetFinalizedError::UnknownBlock),
+        };
+
+        Ok(inner.set_finalized_block(block_index))
+    }
+}
+
+impl<T> fmt::Debug for NonFinalizedTree<T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let inner = self.inner.as_ref().unwrap();
+        f.debug_map()
+            .entries(inner.blocks.iter().map(|v| (&v.hash, &v.user_data)))
+            .finish()
+    }
+}
+
+/// See [`NonFinalizedTree::inner`].
+struct NonFinalizedTreeInner<T> {
+    /// Header of the highest known finalized block.
+    finalized_block_header: header::Header,
+    /// Hash of [`NonFinalizedTree::finalized_block_header`].
+    finalized_block_hash: [u8; 32],
+    /// State of the chain finality engine.
+    finality: Finality,
+
+    /// State of the consensus of the finalized block.
+    finalized_consensus: FinalizedConsensus,
+
+    /// Container for non-finalized blocks.
+    blocks: fork_tree::ForkTree<Block<T>>,
+    /// Index within [`NonFinalizedTree::blocks`] of the current best block. `None` if and only
+    /// if the fork tree is empty.
+    current_best: Option<fork_tree::NodeIndex>,
+}
+
+/// State of the consensus of the finalized block.
+#[derive(Clone)]
+enum FinalizedConsensus {
+    AllAuthorized,
+    Aura {
+        /// List of authorities that must sign the child of the finalized block.
+        authorities_list: Arc<Vec<header::AuraAuthority>>,
+
+        /// Duration, in milliseconds, of a slot.
+        slot_duration: NonZeroU64,
+    },
+    Babe {
+        /// See [`chain_information::ChainInformationConsensus::Babe::finalized_block_epoch_information`].
+        block_epoch_information: Option<Arc<chain_information::BabeEpochInformation>>,
+
+        /// See [`chain_information::ChainInformationConsensus::Babe::finalized_next_epoch_transition`].
+        next_epoch_transition: Arc<chain_information::BabeEpochInformation>,
+
+        /// See [`chain_information::ChainInformationConsensus::Babe::slots_per_epoch`].
+        slots_per_epoch: NonZeroU64,
+    },
+}
+
+/// State of the chain finality engine.
+#[derive(Clone)]
+enum Finality {
+    Grandpa {
+        /// Grandpa authorities set ID of the block right after the finalized block.
+        after_finalized_block_authorities_set_id: u64,
+        /// List of GrandPa authorities that need to finalize the block right after the finalized
+        /// block.
+        finalized_triggered_authorities: Vec<header::GrandpaAuthority>,
+        /// Change in the GrandPa authorities list that has been scheduled by a block that is already
+        /// finalized but not triggered yet. These changes will for sure happen. Contains the block
+        /// number where the changes are to be triggered.
+        finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
+    },
+}
+
+struct Block<T> {
+    /// Header of the block.
+    header: header::Header,
+    /// Cache of the hash of the block. Always equal to the hash of the header stored in this
+    /// same struct.
+    hash: [u8; 32],
+    /// Changes to the consensus made by the block.
+    consensus: BlockConsensus,
+    /// Opaque data decided by the user.
+    user_data: T,
+}
+
+/// Changes to the consensus made by a block.
+#[derive(Clone)]
+enum BlockConsensus {
+    AllAuthorized,
+    Aura {
+        /// If `Some`, list of authorities that must verify the child of this block.
+        /// This can be a clone of the value of the parent, a clone of
+        /// [`FinalizedConsensus::Aura::authorities_list`], or a new value if the block modifies
+        /// this list.
+        authorities_list: Arc<Vec<header::AuraAuthority>>,
+    },
+    Babe {
+        /// Information about the Babe epoch the block belongs to. `None` if the block belongs to
+        /// epoch #0.
+        current_epoch: Option<Arc<chain_information::BabeEpochInformation>>,
+        /// Information about the Babe epoch the block belongs to.
+        next_epoch: Arc<chain_information::BabeEpochInformation>,
+    },
+}
+
+impl<T> NonFinalizedTreeInner<T> {
+    /// See [`NonFinalizedTree::verify_justification`].
+    fn verify_justification(
+        &mut self,
+        scale_encoded_justification: &[u8],
+    ) -> Result<JustificationApply<T>, JustificationVerifyError> {
+        match &self.finality {
             Finality::Grandpa {
                 after_finalized_block_authorities_set_id,
                 finalized_scheduled_change,
@@ -789,7 +842,7 @@ impl<T> NonFinalizedTree<T> {
                     .map_err(JustificationVerifyError::InvalidJustification)?;
 
                 // Find in the list of non-finalized blocks the one targeted by the justification.
-                let block_index = match self_inner.blocks.find(|b| b.hash == *decoded.target_hash) {
+                let block_index = match self.blocks.find(|b| b.hash == *decoded.target_hash) {
                     Some(idx) => idx,
                     None => {
                         return Err(JustificationVerifyError::UnknownTargetBlock {
@@ -814,8 +867,8 @@ impl<T> NonFinalizedTree<T> {
                     let would_happen = {
                         let mut trigger_height = None;
                         // TODO: lot of boilerplate code here
-                        for node in self_inner.blocks.root_to_node_path(block_index) {
-                            let header = &self_inner.blocks.get(node).unwrap().header;
+                        for node in self.blocks.root_to_node_path(block_index) {
+                            let header = &self.blocks.get(node).unwrap().header;
                             for grandpa_digest_item in
                                 header.digest.logs().filter_map(|d| match d {
                                     header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
@@ -852,11 +905,11 @@ impl<T> NonFinalizedTree<T> {
                 // finalization is unsecure.
                 if let Some(earliest_trigger) = earliest_trigger {
                     if u64::from(decoded.target_number) > earliest_trigger {
-                        let block_to_finalize_hash = self_inner
+                        let block_to_finalize_hash = self
                             .blocks
                             .node_to_root_path(block_index)
                             .filter_map(|b| {
-                                let b = self_inner.blocks.get(b).unwrap();
+                                let b = self.blocks.get(b).unwrap();
                                 if b.header.number == earliest_trigger {
                                     Some(b.hash)
                                 } else {
@@ -902,53 +955,14 @@ impl<T> NonFinalizedTree<T> {
         }
     }
 
-    /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
-    /// that block will fail.
-    ///
-    /// The block must have been passed to [`NonFinalizedTree::verify_header`].
-    ///
-    /// Returns an iterator containing the now-finalized blocks in decreasing block numbers. In
-    /// other words, the first element of the iterator is always the block whose hash is the
-    /// `block_hash` passed as parameter.
-    ///
-    /// > **Note**: This function returns blocks in decreasing block number, because any other
-    /// >           ordering would incur a performance cost. While returning blocks in increasing
-    /// >           block number would often be more convenient, the overhead of doing so is
-    /// >           moved to the user.
-    ///
-    /// The pruning is completely performed, even if the iterator is dropped eagerly.
-    pub fn set_finalized_block(
-        &mut self,
-        block_hash: &[u8; 32],
-    ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
-        let block_index = match self
-            .inner
-            .as_ref()
-            .unwrap()
-            .blocks
-            .find(|b| b.hash == *block_hash)
-        {
-            Some(idx) => idx,
-            None => return Err(SetFinalizedError::UnknownBlock),
-        };
-
-        Ok(self.set_finalized_block_inner(block_index))
-    }
-
-    /// Private function that does the same as [`NonFinalizedTree::set_finalized_block`].
-    fn set_finalized_block_inner(
+    /// Implementation of [`NonFinalizedTree::set_finalized_block`].
+    fn set_finalized_block(
         &mut self,
         block_index: fork_tree::NodeIndex,
     ) -> SetFinalizedBlockIter<T> {
-        let self_inner = self.inner.as_mut().unwrap();
-        let target_block_height = self_inner
-            .blocks
-            .get_mut(block_index)
-            .unwrap()
-            .header
-            .number;
+        let target_block_height = self.blocks.get_mut(block_index).unwrap().header.number;
 
-        match &mut self_inner.finality {
+        match &mut self.finality {
             Finality::Grandpa {
                 after_finalized_block_authorities_set_id,
                 finalized_scheduled_change,
@@ -957,8 +971,8 @@ impl<T> NonFinalizedTree<T> {
                 // Update the scheduled GrandPa change with the latest scheduled-but-non-finalized change
                 // that could be found.
                 *finalized_scheduled_change = None;
-                for node in self_inner.blocks.root_to_node_path(block_index) {
-                    let node = self_inner.blocks.get(node).unwrap();
+                for node in self.blocks.root_to_node_path(block_index) {
+                    let node = self.blocks.get(node).unwrap();
                     //node.header.number
                     for grandpa_digest_item in node.header.digest.logs().filter_map(|d| match d {
                         header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
@@ -989,10 +1003,10 @@ impl<T> NonFinalizedTree<T> {
             }
         }
 
-        let new_finalized_block = self_inner.blocks.get_mut(block_index).unwrap();
+        let new_finalized_block = self.blocks.get_mut(block_index).unwrap();
 
         match (
-            &mut self_inner.finalized_consensus,
+            &mut self.finalized_consensus,
             &new_finalized_block.consensus,
         ) {
             (
@@ -1025,27 +1039,15 @@ impl<T> NonFinalizedTree<T> {
         }
 
         mem::swap(
-            &mut self_inner.finalized_block_header,
+            &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
-        self_inner.finalized_block_hash = self_inner.finalized_block_header.hash();
+        self.finalized_block_hash = self.finalized_block_header.hash();
 
         SetFinalizedBlockIter {
-            iter: self_inner.blocks.prune_ancestors(block_index),
-            current_best: &mut self_inner.current_best,
+            iter: self.blocks.prune_ancestors(block_index),
+            current_best: &mut self.current_best,
         }
-    }
-}
-
-impl<T> fmt::Debug for NonFinalizedTree<T>
-where
-    T: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let inner = self.inner.as_ref().unwrap();
-        f.debug_map()
-            .entries(inner.blocks.iter().map(|v| (&v.hash, &v.user_data)))
-            .finish()
     }
 }
 
@@ -1672,7 +1674,7 @@ pub enum HeaderVerifyError {
 /// isn't modified.
 #[must_use]
 pub struct JustificationApply<'c, T> {
-    chain: &'c mut NonFinalizedTree<T>,
+    chain: &'c mut NonFinalizedTreeInner<T>,
     to_finalize: fork_tree::NodeIndex,
 }
 
@@ -1682,16 +1684,13 @@ impl<'c, T> JustificationApply<'c, T> {
     /// This function, including its return type, behaves in the same way as
     /// [`NonFinalizedTree::set_finalized_block`].
     pub fn apply(self) -> SetFinalizedBlockIter<'c, T> {
-        self.chain.set_finalized_block_inner(self.to_finalize)
+        self.chain.set_finalized_block(self.to_finalize)
     }
 
     /// Returns the user data of the block about to be justified.
     pub fn block_user_data(&mut self) -> &mut T {
         &mut self
             .chain
-            .inner
-            .as_mut()
-            .unwrap()
             .blocks
             .get_mut(self.to_finalize)
             .unwrap()
@@ -1700,7 +1699,7 @@ impl<'c, T> JustificationApply<'c, T> {
 
     /// Returns true if the block to be finalized is the current best block.
     pub fn is_current_best_block(&self) -> bool {
-        Some(self.to_finalize) == self.chain.inner.as_ref().unwrap().current_best
+        Some(self.to_finalize) == self.chain.current_best
     }
 }
 
