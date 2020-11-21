@@ -39,8 +39,8 @@
 //! >           `highest_block - 5` is automatically finalized, and fall back to rebuilding a new
 //! >           [`NonFinalizedTree`] if that assumption turns out to not be true. The finalized
 //! >           block in the [`NonFinalizedTree`] only represents a block that the
-//! >           [`NonFinalizedTree`] cannot remove, not a block that cannot be removed in the
-//! >           absolute.
+//! >           [`NonFinalizedTree`] itself cannot remove, not a block that cannot be removed in
+//! >           the absolute.
 //!
 //! A block can be added to the chain by calling [`NonFinalizedTree::verify_header`] or
 //! [`NonFinalizedTree::verify_body`]. As explained in details in

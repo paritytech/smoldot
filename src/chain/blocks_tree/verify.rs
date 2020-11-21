@@ -18,6 +18,8 @@
 //! Extension module containing the API and implementation of everything related to verifying
 //! blocks.
 
+// TODO: clean up this module
+
 use crate::{
     chain::{chain_information, fork_tree},
     executor::host,
