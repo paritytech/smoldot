@@ -24,11 +24,13 @@
 use crate::network::{connection, peerset, Multiaddr, PeerId};
 
 use alloc::sync::Arc;
-use core::{mem, num::NonZeroUsize, task::Context};
+use core::{num::NonZeroUsize, task::Context};
 use futures::{
     channel::{mpsc, oneshot},
     lock::{Mutex, MutexGuard},
 }; // TODO: no_std-ize
+use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::ChaCha20Core;
 
 /// Configuration for a [`Network`].
 pub struct Config<TPeer> {
@@ -68,6 +70,9 @@ pub struct Config<TPeer> {
     pub pending_api_events_buffer_size: NonZeroUsize,
 }
 
+/// Configuration for a specific overlay network.
+///
+/// See [`Config::overlay_networks`].
 pub struct OverlayNetwork<TPeer> {
     /// Name of the protocol negotiated on the wire.
     pub name: String,
@@ -85,7 +90,7 @@ pub struct OverlayNetwork<TPeer> {
 
 /// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PendingId(peerset::PendingId);
+pub struct PendingId(peerset::ConnectionId);
 
 /// Identifier of a [`Connection`] spawned by the [`Network`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,6 +105,10 @@ pub struct Network<TNow, TPeer, TConn> {
     /// See [`Config::noise_key`].
     noise_key: connection::NoiseKey,
 
+    /// Generator for randomness seeds given to the established connections.
+    // TODO: what if children use ChaCha20 as well? is that safe?
+    randomness_seeds: Mutex<ChaCha20Core>,
+
     /// Receiver connected to [`Guarded::events_tx`].
     events_rx: Mutex<mpsc::Receiver<Event>>,
 }
@@ -113,7 +122,6 @@ struct Guarded<TNow, TPeer, TConn> {
     /// or not).
     peerset: peerset::Peerset<
         TPeer,
-        Arc<Mutex<(connection::handshake::HealthyHandshake, TNow, TConn)>>,
         Arc<
             Mutex<(
                 connection::established::Established<
@@ -124,6 +132,7 @@ struct Guarded<TNow, TPeer, TConn> {
                 TConn,
             )>,
         >,
+        Arc<Mutex<Option<(connection::handshake::HealthyHandshake, TNow, TConn)>>>,
         (),
         (),
     >,
@@ -134,8 +143,6 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
     pub fn new(config: Config<TPeer>) -> Self {
         let (events_tx, events_rx) = mpsc::channel(config.pending_api_events_buffer_size.get() - 1);
 
-        // The peerset, created below, is a data structure that helps keep track of the state of
-        // the current peers and connections.
         let peerset = peerset::Peerset::new(peerset::Config {
             randomness_seed: config.randomness_seed,
             peers_capacity: 50, // TODO: ?
@@ -154,6 +161,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
             noise_key: config.noise_key,
             events_rx: Mutex::new(events_rx),
             guarded: Mutex::new(Guarded { peerset, events_tx }),
+            randomness_seeds: Mutex::new(ChaCha20Core::from_seed(config.randomness_seed)),
         }
     }
 
@@ -275,47 +283,17 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
     /// case the events will be distributed amongst the multiple calls in an unspecified way.
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
-    pub async fn next_event(&self) -> Option<Event> {
+    pub async fn next_event(&self) -> Event {
         self.fill_out_slots(&mut self.guarded.lock().await).await;
-
         let events_rx = self.events_rx.lock().await;
-
-        todo!()
-
-        /*
-        match message.inner {
-            ConnectionToServiceInner::HandshakeError { .. } => {
-                self.peerset
-                    .pending_mut(message.id)
-                    .unwrap()
-                    .remove_and_purge_address();
-            }
-            ConnectionToServiceInner::HandshakeSuccess { peer_id, accept_tx } => {
-                let id = self
-                    .peerset
-                    .pending_mut(message.id)
-                    .unwrap()
-                    .into_established(|tx| tx)
-                    .id();
-                accept_tx.send(id).unwrap();
-                return Event::Connected(peer_id);
-            }
-            ConnectionToServiceInner::Disconnected => {
-                let connection = self.peerset.connection_mut(message.id).unwrap();
-                let peer_id = connection.peer_id().clone(); // TODO: clone :(
-                connection.remove();
-                return Event::Disconnected(peer_id);
-            }
-            ConnectionToServiceInner::NotificationsOpenResult { result, protocol } => todo!(),
-            ConnectionToServiceInner::NotificationsCloseResult { protocol } => todo!(),
-
-            ConnectionToServiceInner::NotificationsInOpen { protocol } => todo!(),
-
-            ConnectionToServiceInner::NotificationsInClose { protocol } => todo!(),
-        }
-        */
+        events_rx.next().await
     }
 
+    ///
+    /// # Panic
+    ///
+    /// Panics if `connection_id` isn't a valid connection.
+    ///
     pub async fn read_write<'a>(
         &self,
         connection_id: ConnectionId,
@@ -327,25 +305,41 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
         let mut total_read = 0;
         let mut total_written = 0;
 
-        let message = 'outer_loop: loop {
-            match mem::replace(&mut self.inner, ConnectionInner::Dead) {
-                ConnectionInner::Handshake { handshake, timeout } => {
+        'outer_loop: loop {
+            let mut guarded = self.guarded.lock().await;
+            match guarded
+                .peerset
+                .pending_or_connection_mut(connection_id.0)
+                .unwrap()
+            {
+                peerset::PendingOrConnectionMut::Pending(pending) => {
+                    let pending = pending.user_data_mut().clone();
+                    drop(guarded);
+
+                    let pending = pending.lock().await;
+
+                    let (mut handshake, timeout, user_data) = pending.take().unwrap();
+
                     // TODO: check timeout
 
-                    let (mut result, num_read, num_written) =
-                        match handshake.read_write(incoming_buffer, outgoing_buffer) {
-                            Ok(r) => r,
-                            Err(_) => todo!(),
-                        };
-
-                    total_read += num_read;
-                    total_written += num_written;
+                    let is_idle = {
+                        let (result, num_read, num_written) =
+                            match handshake.read_write(incoming_buffer, outgoing_buffer) {
+                                Ok(r) => r,
+                                Err(_) => todo!(),
+                            };
+                        total_read += num_read;
+                        total_written += num_written;
+                        handshake = result;
+                        num_read == 0 && num_written == 0
+                    };
 
                     loop {
-                        match result {
-                            connection::handshake::Handshake::Healthy(handshake) => {
-                                self.inner = ConnectionInner::Handshake { handshake, timeout };
-                                if num_read == 0 && num_written == 0 {
+                        match handshake {
+                            connection::handshake::Handshake::Healthy(updated_handshake) => {
+                                handshake = updated_handshake;
+                                if is_idle {
+                                    pending = Some((handshake, timeout, user_data));
                                     break 'outer_loop None;
                                 } else {
                                     break;
@@ -355,24 +349,45 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                                 remote_peer_id,
                                 connection,
                             } => {
-                                self.inner = ConnectionInner::Established(connection);
-                                break 'outer_loop Some(ConnectionToService {
-                                    id: self.id,
-                                    inner: ConnectionToServiceInner::HandshakeSuccess {
-                                        peer_id: remote_peer_id,
-                                    },
+                                let randomness_seed = self.randomness_seeds.lock().await.gen();
+
+                                let mut guarded = self.guarded.lock().await;
+                                let pending = guarded.peerset.pending_mut(connection_id).unwrap();
+                                if pending.peer_id() != remote_peer_id {
+                                    pending.remove_and_purge_address();
+                                    continue;
+                                }
+
+                                pending.into_established(|_| {
+                                    Arc::new(Mutex::new(connection.into_connection(
+                                        connection::established::Config {
+                                            in_notifications_protocols: todo!(),
+                                            in_request_protocols: todo!(),
+                                            randomness_seed,
+                                            ping_protocol: todo!(),
+                                        },
+                                    )))
                                 });
+
+                                // TODO: notify external API
                             }
                             connection::handshake::Handshake::NoiseKeyRequired(key) => {
-                                result = key.resume(&self.noise_key);
+                                handshake = key.resume(&self.noise_key);
                             }
                         }
                     }
                 }
-                ConnectionInner::Established(_) => todo!(),
-                ConnectionInner::Dead => break,
+                peerset::PendingOrConnectionMut::Connection(established) => {
+                    let established = established.user_data_mut().clone();
+                    drop(guarded);
+
+                    let established = established.lock().await;
+
+                    // TODO:
+                    todo!()
+                }
             }
-        };
+        }
 
         ReadWrite {
             read_bytes: total_read,
@@ -384,7 +399,10 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
     ///
     /// Must be passed as parameter an existing lock to a [`Guarded`].
-    async fn fill_out_slots<'a>(&self, guarded: &mut MutexGuard<'a, Guarded>) -> Option<Event> {
+    async fn fill_out_slots<'a>(
+        &self,
+        guarded: &mut MutexGuard<'a, Guarded<TNow, TPeer, TConn>>,
+    ) -> Option<Event> {
         // Solves borrow checking errors regarding the borrow of multiple different fields at the
         // same time.
         let guarded = &mut **guarded;
@@ -395,7 +413,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
             // TODO: num overlay networks ^
             // Grab nodes for which we have an established outgoing connections but haven't yet
             // opened a substream to.
-            while let Some(node) = guarded
+            /*while let Some(node) = guarded
                 .peerset
                 .random_connected_closed_node(overlay_network_index)
             {
@@ -422,7 +440,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                     })
                     .await;
                 connection.add_pending_substream(0, ());
-            }
+            }*/
 
             // TODO: very wip
             while let Some(mut node) = guarded.peerset.random_not_connected(overlay_network_index) {
@@ -444,7 +462,14 @@ pub enum Event {
     Connected(PeerId),
     Disconnected(PeerId),
 
-    StartConnect { id: PendingId, multiaddr: Multiaddr },
+    /// User must start connecting to the given multiaddress.
+    ///
+    /// Either [`Network::pending_outcome_ok`] or [`Network::pending_outcome_err`] must later be
+    /// called in order to inform of the outcome of the connection.
+    StartConnect {
+        id: PendingId,
+        multiaddr: Multiaddr,
+    },
 }
 
 /// Outcome of calling [`Connection::read_write`].
