@@ -318,8 +318,8 @@ struct NonFinalizedTreeInner<T> {
 
     /// Container for non-finalized blocks.
     blocks: fork_tree::ForkTree<Block<T>>,
-    /// Index within [`NonFinalizedTree::blocks`] of the current best block. `None` if and only
-    /// if the fork tree is empty.
+    /// Index within [`NonFinalizedTreeInner::blocks`] of the current best block. `None` if and
+    /// only if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,
 }
 
