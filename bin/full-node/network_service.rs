@@ -102,7 +102,7 @@ struct Guarded {
     tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::Network<()>,
+    network: service::ChainNetwork<()>,
 }
 
 impl NetworkService {

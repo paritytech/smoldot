@@ -487,12 +487,6 @@ pub struct ReadWrite<TNow, TPeer, TConn> {
     pub wake_up_after: Option<TNow>,
 }
 
-/// Message to be reported to the [`Network`] by calling [`Network::connection_message`].
-pub struct ConnectionToService {
-    id: ConnectionId,
-    inner: ConnectionToServiceInner,
-}
-
 enum ConnectionToServiceInner {
     /// Handshake phased has failed. The connection is now dead.
     HandshakeError(connection::handshake::HandshakeError),
