@@ -86,6 +86,13 @@ pub struct Config {
 
 /// Holds state about the current state of the chain for the purpose of verifying headers.
 pub struct NonFinalizedTree<T> {
+    /// All fields are wrapped into an `Option` in order to be able to extract the
+    /// [`NonFinalizedTree`] and later put it back.
+    inner: Option<NonFinalizedTreeInner<T>>,
+}
+
+/// See [`NonFinalizedTree::inner`].
+struct NonFinalizedTreeInner<T> {
     /// Header of the highest known finalized block.
     finalized_block_header: header::Header,
     /// Hash of [`NonFinalizedTree::finalized_block_header`].
@@ -224,77 +231,81 @@ impl<T> NonFinalizedTree<T> {
         let finalized_block_hash = config.chain_information.finalized_block_header.hash();
 
         NonFinalizedTree {
-            finalized_block_header: config.chain_information.finalized_block_header,
-            finalized_block_hash,
-            finality: match config.chain_information.finality {
-                chain_information::ChainInformationFinality::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    finalized_scheduled_change,
-                    finalized_triggered_authorities,
-                } => Finality::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    finalized_scheduled_change,
-                    finalized_triggered_authorities,
+            inner: Some(NonFinalizedTreeInner {
+                finalized_block_header: config.chain_information.finalized_block_header,
+                finalized_block_hash,
+                finality: match config.chain_information.finality {
+                    chain_information::ChainInformationFinality::Grandpa {
+                        after_finalized_block_authorities_set_id,
+                        finalized_scheduled_change,
+                        finalized_triggered_authorities,
+                    } => Finality::Grandpa {
+                        after_finalized_block_authorities_set_id,
+                        finalized_scheduled_change,
+                        finalized_triggered_authorities,
+                    },
                 },
-            },
-            finalized_consensus: match config.chain_information.consensus {
-                chain_information::ChainInformationConsensus::AllAuthorized => {
-                    FinalizedConsensus::AllAuthorized
-                }
-                chain_information::ChainInformationConsensus::Aura {
-                    finalized_authorities_list,
-                    slot_duration,
-                } => FinalizedConsensus::Aura {
-                    authorities_list: Arc::new(finalized_authorities_list),
-                    slot_duration,
+                finalized_consensus: match config.chain_information.consensus {
+                    chain_information::ChainInformationConsensus::AllAuthorized => {
+                        FinalizedConsensus::AllAuthorized
+                    }
+                    chain_information::ChainInformationConsensus::Aura {
+                        finalized_authorities_list,
+                        slot_duration,
+                    } => FinalizedConsensus::Aura {
+                        authorities_list: Arc::new(finalized_authorities_list),
+                        slot_duration,
+                    },
+                    chain_information::ChainInformationConsensus::Babe {
+                        finalized_block_epoch_information,
+                        finalized_next_epoch_transition,
+                        slots_per_epoch,
+                    } => FinalizedConsensus::Babe {
+                        slots_per_epoch,
+                        block_epoch_information: finalized_block_epoch_information.map(Arc::new),
+                        next_epoch_transition: Arc::new(finalized_next_epoch_transition),
+                    },
                 },
-                chain_information::ChainInformationConsensus::Babe {
-                    finalized_block_epoch_information,
-                    finalized_next_epoch_transition,
-                    slots_per_epoch,
-                } => FinalizedConsensus::Babe {
-                    slots_per_epoch,
-                    block_epoch_information: finalized_block_epoch_information.map(Arc::new),
-                    next_epoch_transition: Arc::new(finalized_next_epoch_transition),
-                },
-            },
-            blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
-            current_best: None,
+                blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
+                current_best: None,
+            }),
         }
     }
 
     /// Removes all non-finalized blocks from the tree.
     pub fn clear(&mut self) {
-        self.blocks.clear();
-        self.current_best = None;
+        let mut inner = self.inner.as_mut().unwrap();
+        inner.blocks.clear();
+        inner.current_best = None;
     }
 
     /// Returns true if there isn't any non-finalized block in the chain.
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.inner.as_ref().unwrap().blocks.is_empty()
     }
 
     /// Returns the number of non-finalized blocks in the chain.
     pub fn len(&self) -> usize {
-        self.blocks.len()
+        self.inner.as_ref().unwrap().blocks.len()
     }
 
     /// Reserves additional capacity for at least `additional` new blocks without allocating.
     pub fn reserve(&mut self, additional: usize) {
-        self.blocks.reserve(additional)
+        self.inner.as_mut().unwrap().blocks.reserve(additional)
     }
 
     /// Shrink the capacity of the chain as much as possible.
     pub fn shrink_to_fit(&mut self) {
-        self.blocks.shrink_to_fit()
+        self.inner.as_mut().unwrap().blocks.shrink_to_fit()
     }
 
     /// Builds a [`chain_information::ChainInformationRef`] struct that might later be used to
     /// build a new [`NonFinalizedTree`].
     pub fn as_chain_information(&self) -> chain_information::ChainInformationRef {
+        let inner = self.inner.as_ref().unwrap();
         chain_information::ChainInformationRef {
-            finalized_block_header: (&self.finalized_block_header).into(),
-            consensus: match &self.finalized_consensus {
+            finalized_block_header: (&inner.finalized_block_header).into(),
+            consensus: match &inner.finalized_consensus {
                 FinalizedConsensus::AllAuthorized => {
                     chain_information::ChainInformationConsensusRef::AllAuthorized
                 }
@@ -319,7 +330,7 @@ impl<T> NonFinalizedTree<T> {
                     finalized_next_epoch_transition: next_epoch_transition.as_ref().into(),
                 },
             },
-            finality: match &self.finality {
+            finality: match &inner.finality {
                 Finality::Grandpa {
                     after_finalized_block_authorities_set_id,
                     finalized_triggered_authorities,
@@ -338,29 +349,31 @@ impl<T> NonFinalizedTree<T> {
 
     /// Returns the header of the latest finalized block.
     pub fn finalized_block_header(&self) -> header::HeaderRef {
-        (&self.finalized_block_header).into()
+        (&self.inner.as_ref().unwrap().finalized_block_header).into()
     }
 
     /// Returns the hash of the latest finalized block.
     pub fn finalized_block_hash(&self) -> [u8; 32] {
-        self.finalized_block_hash
+        self.inner.as_ref().unwrap().finalized_block_hash
     }
 
     /// Returns the header of the best block.
     pub fn best_block_header(&self) -> header::HeaderRef {
-        if let Some(index) = self.current_best {
-            (&self.blocks.get(index).unwrap().header).into()
+        let inner = self.inner.as_ref().unwrap();
+        if let Some(index) = inner.current_best {
+            (&inner.blocks.get(index).unwrap().header).into()
         } else {
-            (&self.finalized_block_header).into()
+            (&inner.finalized_block_header).into()
         }
     }
 
     /// Returns the hash of the best block.
     pub fn best_block_hash(&self) -> [u8; 32] {
-        if let Some(index) = self.current_best {
-            self.blocks.get(index).unwrap().hash
+        let inner = self.inner.as_ref().unwrap();
+        if let Some(index) = inner.current_best {
+            inner.blocks.get(index).unwrap().hash
         } else {
-            self.finalized_block_hash
+            inner.finalized_block_hash
         }
     }
 
@@ -381,6 +394,7 @@ impl<T> NonFinalizedTree<T> {
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess<T>, HeaderVerifyError> {
         // TODO: lots of code here is duplicated from verify_body
+        let self_inner = self.inner.as_mut().unwrap();
 
         let decoded_header = match header::decode(&scale_encoded_header) {
             Ok(h) => h,
@@ -391,7 +405,7 @@ impl<T> NonFinalizedTree<T> {
 
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
-        if self.blocks.find(|b| b.hash == hash).is_some() {
+        if self_inner.blocks.find(|b| b.hash == hash).is_some() {
             return Ok(HeaderVerifySuccess::Duplicate);
         }
 
@@ -401,15 +415,15 @@ impl<T> NonFinalizedTree<T> {
         //
         // The parent hash is first checked against `self.current_best`, as it is most likely
         // that new blocks are built on top of the current best.
-        let parent_tree_index = if self.current_best.map_or(false, |best| {
-            *decoded_header.parent_hash == self.blocks.get(best).unwrap().hash
+        let parent_tree_index = if self_inner.current_best.map_or(false, |best| {
+            *decoded_header.parent_hash == self_inner.blocks.get(best).unwrap().hash
         }) {
-            Some(self.current_best.unwrap())
-        } else if *decoded_header.parent_hash == self.finalized_block_hash {
+            Some(self_inner.current_best.unwrap())
+        } else if *decoded_header.parent_hash == self_inner.finalized_block_hash {
             None
         } else {
             let parent_hash = *decoded_header.parent_hash;
-            match self.blocks.find(|b| b.hash == parent_hash) {
+            match self_inner.blocks.find(|b| b.hash == parent_hash) {
                 Some(parent) => Some(parent),
                 None => {
                     return Err(HeaderVerifyError::BadParent { parent_hash });
@@ -418,15 +432,15 @@ impl<T> NonFinalizedTree<T> {
         };
 
         let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
-            &self.blocks.get(parent_tree_index).unwrap().header
+            &self_inner.blocks.get(parent_tree_index).unwrap().header
         } else {
-            &self.finalized_block_header
+            &self_inner.finalized_block_header
         };
 
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
         let consensus_specific = if let Some(parent_tree_index) = parent_tree_index {
-            match &self.blocks.get(parent_tree_index).unwrap().consensus {
+            match &self_inner.blocks.get(parent_tree_index).unwrap().consensus {
                 BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
                 BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
                     authorities_list: authorities_list.clone(),
@@ -443,7 +457,7 @@ impl<T> NonFinalizedTree<T> {
             // Some consensus-specific information must be fetched from the tree of ancestry. The
             // information is found either in the parent block, or in the finalized block.
             if let Some(parent_tree_index) = parent_tree_index {
-                match &self.blocks.get(parent_tree_index).unwrap().consensus {
+                match &self_inner.blocks.get(parent_tree_index).unwrap().consensus {
                     BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
                     BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
                         authorities_list: authorities_list.clone(),
@@ -457,7 +471,7 @@ impl<T> NonFinalizedTree<T> {
                     },
                 }
             } else {
-                match &self.finalized_consensus {
+                match &self_inner.finalized_consensus {
                     FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
                     FinalizedConsensus::Aura {
                         authorities_list, ..
@@ -477,7 +491,7 @@ impl<T> NonFinalizedTree<T> {
         };
 
         let result = verify::header_only::verify(verify::header_only::Config {
-            consensus: match (&self.finalized_consensus, &consensus_specific) {
+            consensus: match (&self_inner.finalized_consensus, &consensus_specific) {
                 (
                     FinalizedConsensus::Aura { slot_duration, .. },
                     VerifyConsensusSpecific::Aura { authorities_list },
@@ -511,9 +525,9 @@ impl<T> NonFinalizedTree<T> {
         })
         .map_err(HeaderVerifyError::VerificationFailed)?;
 
-        let is_new_best = if let Some(current_best) = self.current_best {
+        let is_new_best = if let Some(current_best) = self_inner.current_best {
             is_better_block(
-                &self.blocks,
+                &self_inner.blocks,
                 current_best,
                 parent_tree_index,
                 decoded_header.clone(),
@@ -525,8 +539,8 @@ impl<T> NonFinalizedTree<T> {
         let consensus = match (
             result,
             consensus_specific,
-            self.finalized_consensus.clone(),
-            parent_tree_index.map(|idx| self.blocks.get(idx).unwrap().consensus.clone()),
+            self_inner.finalized_consensus.clone(),
+            parent_tree_index.map(|idx| self_inner.blocks.get(idx).unwrap().consensus.clone()),
         ) {
             (
                 verify::header_only::Success::AllAuthorized,
@@ -624,7 +638,7 @@ impl<T> NonFinalizedTree<T> {
             block_height: decoded_header.number,
             is_new_best,
             insert: HeaderInsert {
-                chain: self,
+                chain: self_inner,
                 parent_tree_index,
                 is_new_best,
                 header: decoded_header.into(),
@@ -657,15 +671,26 @@ impl<T> NonFinalizedTree<T> {
         I: ExactSizeIterator<Item = E> + Clone,
         E: AsRef<[u8]> + Clone,
     {
+        let self_inner = self.inner.unwrap();
+
         let decoded_header = match header::decode(&scale_encoded_header) {
             Ok(h) => h,
-            Err(err) => return BodyVerifyStep1::InvalidHeader(self, err),
+            Err(err) => {
+                return BodyVerifyStep1::InvalidHeader(
+                    NonFinalizedTree {
+                        inner: Some(self_inner),
+                    },
+                    err,
+                )
+            }
         };
 
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
-        if self.blocks.find(|b| b.hash == hash).is_some() {
-            return BodyVerifyStep1::Duplicate(self);
+        if self_inner.blocks.find(|b| b.hash == hash).is_some() {
+            return BodyVerifyStep1::Duplicate(NonFinalizedTree {
+                inner: Some(self_inner),
+            });
         }
 
         // Try to find the parent block in the tree of known blocks.
@@ -674,19 +699,21 @@ impl<T> NonFinalizedTree<T> {
         //
         // The parent hash is first checked against `self.current_best`, as it is most likely
         // that new blocks are built on top of the current best.
-        let parent_tree_index = if self.current_best.map_or(false, |best| {
-            *decoded_header.parent_hash == self.blocks.get(best).unwrap().hash
+        let parent_tree_index = if self_inner.current_best.map_or(false, |best| {
+            *decoded_header.parent_hash == self_inner.blocks.get(best).unwrap().hash
         }) {
-            Some(self.current_best.unwrap())
-        } else if *decoded_header.parent_hash == self.finalized_block_hash {
+            Some(self_inner.current_best.unwrap())
+        } else if *decoded_header.parent_hash == self_inner.finalized_block_hash {
             None
         } else {
             let parent_hash = *decoded_header.parent_hash;
-            match self.blocks.find(|b| b.hash == parent_hash) {
+            match self_inner.blocks.find(|b| b.hash == parent_hash) {
                 Some(parent) => Some(parent),
                 None => {
                     return BodyVerifyStep1::BadParent {
-                        chain: self,
+                        chain: NonFinalizedTree {
+                            inner: Some(self_inner),
+                        },
                         parent_hash,
                     }
                 }
@@ -696,7 +723,7 @@ impl<T> NonFinalizedTree<T> {
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
         let consensus = if let Some(parent_tree_index) = parent_tree_index {
-            match &self.blocks.get(parent_tree_index).unwrap().consensus {
+            match &self_inner.blocks.get(parent_tree_index).unwrap().consensus {
                 BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
                 BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
                     authorities_list: authorities_list.clone(),
@@ -710,7 +737,7 @@ impl<T> NonFinalizedTree<T> {
                 },
             }
         } else {
-            match &self.finalized_consensus {
+            match &self_inner.finalized_consensus {
                 FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
                 FinalizedConsensus::Aura {
                     authorities_list, ..
@@ -729,7 +756,7 @@ impl<T> NonFinalizedTree<T> {
         };
 
         BodyVerifyStep1::ParentRuntimeRequired(BodyVerifyRuntimeRequired {
-            chain: self,
+            chain: self_inner,
             header: decoded_header.into(),
             parent_tree_index,
             body,
@@ -750,7 +777,8 @@ impl<T> NonFinalizedTree<T> {
         &mut self,
         scale_encoded_justification: &[u8],
     ) -> Result<JustificationApply<T>, JustificationVerifyError> {
-        match &self.finality {
+        let self_inner = self.inner.as_mut().unwrap();
+        match &self_inner.finality {
             Finality::Grandpa {
                 after_finalized_block_authorities_set_id,
                 finalized_scheduled_change,
@@ -761,7 +789,7 @@ impl<T> NonFinalizedTree<T> {
                     .map_err(JustificationVerifyError::InvalidJustification)?;
 
                 // Find in the list of non-finalized blocks the one targeted by the justification.
-                let block_index = match self.blocks.find(|b| b.hash == *decoded.target_hash) {
+                let block_index = match self_inner.blocks.find(|b| b.hash == *decoded.target_hash) {
                     Some(idx) => idx,
                     None => {
                         return Err(JustificationVerifyError::UnknownTargetBlock {
@@ -786,8 +814,8 @@ impl<T> NonFinalizedTree<T> {
                     let would_happen = {
                         let mut trigger_height = None;
                         // TODO: lot of boilerplate code here
-                        for node in self.blocks.root_to_node_path(block_index) {
-                            let header = &self.blocks.get(node).unwrap().header;
+                        for node in self_inner.blocks.root_to_node_path(block_index) {
+                            let header = &self_inner.blocks.get(node).unwrap().header;
                             for grandpa_digest_item in
                                 header.digest.logs().filter_map(|d| match d {
                                     header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
@@ -824,11 +852,11 @@ impl<T> NonFinalizedTree<T> {
                 // finalization is unsecure.
                 if let Some(earliest_trigger) = earliest_trigger {
                     if u64::from(decoded.target_number) > earliest_trigger {
-                        let block_to_finalize_hash = self
+                        let block_to_finalize_hash = self_inner
                             .blocks
                             .node_to_root_path(block_index)
                             .filter_map(|b| {
-                                let b = self.blocks.get(b).unwrap();
+                                let b = self_inner.blocks.get(b).unwrap();
                                 if b.header.number == earliest_trigger {
                                     Some(b.hash)
                                 } else {
@@ -893,7 +921,13 @@ impl<T> NonFinalizedTree<T> {
         &mut self,
         block_hash: &[u8; 32],
     ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
-        let block_index = match self.blocks.find(|b| b.hash == *block_hash) {
+        let block_index = match self
+            .inner
+            .as_ref()
+            .unwrap()
+            .blocks
+            .find(|b| b.hash == *block_hash)
+        {
             Some(idx) => idx,
             None => return Err(SetFinalizedError::UnknownBlock),
         };
@@ -906,9 +940,15 @@ impl<T> NonFinalizedTree<T> {
         &mut self,
         block_index: fork_tree::NodeIndex,
     ) -> SetFinalizedBlockIter<T> {
-        let target_block_height = self.blocks.get_mut(block_index).unwrap().header.number;
+        let self_inner = self.inner.as_mut().unwrap();
+        let target_block_height = self_inner
+            .blocks
+            .get_mut(block_index)
+            .unwrap()
+            .header
+            .number;
 
-        match &mut self.finality {
+        match &mut self_inner.finality {
             Finality::Grandpa {
                 after_finalized_block_authorities_set_id,
                 finalized_scheduled_change,
@@ -917,8 +957,8 @@ impl<T> NonFinalizedTree<T> {
                 // Update the scheduled GrandPa change with the latest scheduled-but-non-finalized change
                 // that could be found.
                 *finalized_scheduled_change = None;
-                for node in self.blocks.root_to_node_path(block_index) {
-                    let node = self.blocks.get(node).unwrap();
+                for node in self_inner.blocks.root_to_node_path(block_index) {
+                    let node = self_inner.blocks.get(node).unwrap();
                     //node.header.number
                     for grandpa_digest_item in node.header.digest.logs().filter_map(|d| match d {
                         header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
@@ -949,10 +989,10 @@ impl<T> NonFinalizedTree<T> {
             }
         }
 
-        let new_finalized_block = self.blocks.get_mut(block_index).unwrap();
+        let new_finalized_block = self_inner.blocks.get_mut(block_index).unwrap();
 
         match (
-            &mut self.finalized_consensus,
+            &mut self_inner.finalized_consensus,
             &new_finalized_block.consensus,
         ) {
             (
@@ -985,14 +1025,14 @@ impl<T> NonFinalizedTree<T> {
         }
 
         mem::swap(
-            &mut self.finalized_block_header,
+            &mut self_inner.finalized_block_header,
             &mut new_finalized_block.header,
         );
-        self.finalized_block_hash = self.finalized_block_header.hash();
+        self_inner.finalized_block_hash = self_inner.finalized_block_header.hash();
 
         SetFinalizedBlockIter {
-            iter: self.blocks.prune_ancestors(block_index),
-            current_best: &mut self.current_best,
+            iter: self_inner.blocks.prune_ancestors(block_index),
+            current_best: &mut self_inner.current_best,
         }
     }
 }
@@ -1002,8 +1042,9 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let inner = self.inner.as_ref().unwrap();
         f.debug_map()
-            .entries(self.blocks.iter().map(|v| (&v.hash, &v.user_data)))
+            .entries(inner.blocks.iter().map(|v| (&v.hash, &v.user_data)))
             .finish()
     }
 }
@@ -1047,9 +1088,8 @@ enum VerifyConsensusSpecific {
 /// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the runtime
 /// of the parent block must be provided.
 #[must_use]
-#[derive(Debug)]
 pub struct BodyVerifyRuntimeRequired<T, I> {
-    chain: NonFinalizedTree<T>,
+    chain: NonFinalizedTreeInner<T>,
     header: header::Header,
     parent_tree_index: Option<fork_tree::NodeIndex>,
     body: I,
@@ -1170,7 +1210,15 @@ where
 
     /// Abort the verification and return the unmodified tree.
     pub fn abort(self) -> NonFinalizedTree<T> {
-        self.chain
+        NonFinalizedTree {
+            inner: Some(self.chain),
+        }
+    }
+}
+
+impl<T, I> fmt::Debug for BodyVerifyRuntimeRequired<T, I> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("BodyVerifyRuntimeRequired").finish()
     }
 }
 
@@ -1205,7 +1253,7 @@ pub enum BodyVerifyStep2<T> {
 }
 
 struct BodyVerifyShared<T> {
-    chain: NonFinalizedTree<T>,
+    chain: NonFinalizedTreeInner<T>,
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
     consensus: VerifyConsensusSpecific,
@@ -1563,10 +1611,10 @@ pub enum HeaderVerifySuccess<'c, T> {
 /// into it.
 #[must_use]
 pub struct HeaderInsert<'c, T> {
-    chain: &'c mut NonFinalizedTree<T>,
+    chain: &'c mut NonFinalizedTreeInner<T>,
     /// Copy of the value in [`HeaderVerifySuccess::is_new_best`].
     is_new_best: bool,
-    /// Index of the parent in [`NonFinalizedTree::blocks`].
+    /// Index of the parent in [`NonFinalizedTreeInner::blocks`].
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
     hash: [u8; 32],
@@ -1641,6 +1689,9 @@ impl<'c, T> JustificationApply<'c, T> {
     pub fn block_user_data(&mut self) -> &mut T {
         &mut self
             .chain
+            .inner
+            .as_mut()
+            .unwrap()
             .blocks
             .get_mut(self.to_finalize)
             .unwrap()
@@ -1649,7 +1700,7 @@ impl<'c, T> JustificationApply<'c, T> {
 
     /// Returns true if the block to be finalized is the current best block.
     pub fn is_current_best_block(&self) -> bool {
-        Some(self.to_finalize) == self.chain.current_best
+        Some(self.to_finalize) == self.chain.inner.as_ref().unwrap().current_best
     }
 }
 
@@ -1740,9 +1791,9 @@ pub enum SetFinalizedError {
 /// Holds the [`NonFinalizedTree`] and allows insert a successfully-verified block into it.
 #[must_use]
 pub struct BodyInsert<T> {
-    chain: NonFinalizedTree<T>,
+    chain: NonFinalizedTreeInner<T>,
     is_new_best: bool,
-    /// Index of the parent in [`NonFinalizedTree::blocks`].
+    /// Index of the parent in [`NonFinalizedTreeInner::blocks`].
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
     hash: [u8; 32],
@@ -1771,12 +1822,16 @@ impl<T> BodyInsert<T> {
             self.chain.current_best = Some(new_node_index);
         }
 
-        self.chain
+        NonFinalizedTree {
+            inner: Some(self.chain),
+        }
     }
 
     /// Destroys the object without inserting the block in the chain.
     pub fn abort(self) -> NonFinalizedTree<T> {
-        self.chain
+        NonFinalizedTree {
+            inner: Some(self.chain),
+        }
     }
 }
 
@@ -1788,7 +1843,7 @@ impl<T> fmt::Debug for BodyInsert<T> {
 
 /// Access to a block's information and hierarchy.
 pub struct BlockAccess<'a, T> {
-    tree: &'a mut NonFinalizedTree<T>,
+    tree: &'a mut NonFinalizedTreeInner<T>,
     node_index: fork_tree::NodeIndex,
 }
 
