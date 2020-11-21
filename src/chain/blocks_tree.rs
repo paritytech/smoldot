@@ -308,21 +308,29 @@ impl<T> NonFinalizedTree<T> {
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess<T>, HeaderVerifyError> {
         let self_inner = self.inner.take().unwrap();
-        self_inner.verify(scale_encoded_header, now_from_unix_epoch, None::<iter::Empty::<Vec<u8>>>);
-
-        todo!()
-        /*Ok(HeaderVerifySuccess::Insert {
-            block_height: decoded_header.number,
-            is_new_best,
-            insert: HeaderInsert {
-                chain: self_inner,
-                parent_tree_index,
-                is_new_best,
-                header: decoded_header.into(),
-                hash,
-                consensus,
-            },
-        })*/
+        match self_inner.verify(
+            scale_encoded_header,
+            now_from_unix_epoch,
+            None::<iter::Empty<Vec<u8>>>,
+        ) {
+            VerifyOut::Header(Err(err)) => return Err(err),
+            VerifyOut::Header(Ok((context, is_new_best, consensus))) => {
+                let hash = context.header.hash();
+                Ok(HeaderVerifySuccess::Insert {
+                    block_height: context.header.number,
+                    is_new_best,
+                    insert: HeaderInsert {
+                        chain: self,
+                        context,
+                        is_new_best,
+                        hash,
+                        consensus,
+                    },
+                })
+            }
+            VerifyOut::Duplicate => Ok(HeaderVerifySuccess::Duplicate),
+            _ => unreachable!(),
+        }
     }
 
     /// Verifies the given block.
@@ -348,9 +356,14 @@ impl<T> NonFinalizedTree<T> {
         I: ExactSizeIterator<Item = E> + Clone,
         E: AsRef<[u8]> + Clone,
     {
-        self.inner
+        match self
+            .inner
             .unwrap()
             .verify(scale_encoded_header, now_from_unix_epoch, Some(body))
+        {
+            VerifyOut::Body(step) => step,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -464,7 +477,7 @@ impl<T> NonFinalizedTreeInner<T> {
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
         body: Option<I>,
-    ) -> BodyVerifyStep1<T, I>
+    ) -> VerifyOut<T, I>
     where
         I: ExactSizeIterator<Item = E> + Clone,
         E: AsRef<[u8]> + Clone,
@@ -472,14 +485,27 @@ impl<T> NonFinalizedTreeInner<T> {
         let decoded_header = match header::decode(&scale_encoded_header) {
             Ok(h) => h,
             Err(err) => {
-                return BodyVerifyStep1::InvalidHeader(NonFinalizedTree { inner: Some(self) }, err)
+                return if body.is_some() {
+                    VerifyOut::Body(BodyVerifyStep1::InvalidHeader(
+                        NonFinalizedTree { inner: Some(self) },
+                        err,
+                    ))
+                } else {
+                    VerifyOut::Header(Err(HeaderVerifyError::InvalidHeader(err)))
+                }
             }
         };
 
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
         if self.blocks.find(|b| b.hash == hash).is_some() {
-            return BodyVerifyStep1::Duplicate(NonFinalizedTree { inner: Some(self) });
+            return if body.is_some() {
+                VerifyOut::Body(BodyVerifyStep1::Duplicate(NonFinalizedTree {
+                    inner: Some(self),
+                }))
+            } else {
+                VerifyOut::Duplicate
+            };
         }
 
         // Try to find the parent block in the tree of known blocks.
@@ -499,9 +525,13 @@ impl<T> NonFinalizedTreeInner<T> {
             match self.blocks.find(|b| b.hash == parent_hash) {
                 Some(parent) => Some(parent),
                 None => {
-                    return BodyVerifyStep1::BadParent {
-                        chain: NonFinalizedTree { inner: Some(self) },
-                        parent_hash,
+                    return if body.is_some() {
+                        VerifyOut::Body(BodyVerifyStep1::BadParent {
+                            chain: NonFinalizedTree { inner: Some(self) },
+                            parent_hash,
+                        })
+                    } else {
+                        VerifyOut::Header(Err(HeaderVerifyError::BadParent { parent_hash }))
                     }
                 }
             }
@@ -550,11 +580,13 @@ impl<T> NonFinalizedTreeInner<T> {
         };
 
         if let Some(body) = body {
-            BodyVerifyStep1::ParentRuntimeRequired(BodyVerifyRuntimeRequired {
-                context,
-                body,
-                now_from_unix_epoch,
-            })
+            VerifyOut::Body(BodyVerifyStep1::ParentRuntimeRequired(
+                BodyVerifyRuntimeRequired {
+                    context,
+                    body,
+                    now_from_unix_epoch,
+                },
+            ))
         } else {
             let parent_block_header = if let Some(parent_tree_index) = parent_tree_index {
                 &context.chain.blocks.get(parent_tree_index).unwrap().header
@@ -595,35 +627,23 @@ impl<T> NonFinalizedTreeInner<T> {
                     // TODO: don't panic! this is before any verification
                     _ => unreachable!(),
                 },
-                block_header: (&context.header).into(),  // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+                block_header: (&context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
                 parent_block_header: parent_block_header.into(),
             })
             .map_err(HeaderVerifyError::VerificationFailed)
             .unwrap(); // TODO: no unwrap
 
             let (is_new_best, consensus) = context.apply_success_header(result);
-            /*Ok(HeaderVerifySuccess::Insert {
-                block_height: decoded_header.number,
-                is_new_best,
-                insert: HeaderInsert {
-                    chain: context.chain,
-                    parent_tree_index,
-                    is_new_best,
-                    header: decoded_header.into(),
-                    hash,
-                    consensus,
-                },
-            });*/
-
-            todo!() // TODO:
+            VerifyOut::Header(Ok((context, is_new_best, consensus)))
         }
     }
 }
 
-/*enum VerifyOut<T, I> {
-    Header(Result<HeaderVerifySuccess<'static, T>, HeaderVerifyError>),
+enum VerifyOut<T, I> {
+    Header(Result<(VerifyContext<T>, bool, BlockConsensus), HeaderVerifyError>),
+    Duplicate,
     Body(BodyVerifyStep1<T, I>),
-}*/
+}
 
 struct VerifyContext<T> {
     chain: NonFinalizedTreeInner<T>,
@@ -789,10 +809,8 @@ impl<T> VerifyContext<T> {
                         offchain_storage_changes: success.offchain_storage_changes,
                         top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
                         result: Ok(BodyInsert {
-                            chain: self.chain,
-                            parent_tree_index: self.parent_tree_index,
+                            context: self,
                             is_new_best,
-                            header: self.header,
                             hash,
                             consensus,
                         }),
@@ -1236,23 +1254,20 @@ pub enum HeaderVerifySuccess<'c, T> {
 /// into it.
 #[must_use]
 pub struct HeaderInsert<'c, T> {
-    chain: &'c mut NonFinalizedTreeInner<T>,
-    /// Copy of the value in [`HeaderVerifySuccess::is_new_best`].
-    is_new_best: bool,
-    /// Index of the parent in [`NonFinalizedTreeInner::blocks`].
-    parent_tree_index: Option<fork_tree::NodeIndex>,
-    header: header::Header,
+    chain: &'c mut NonFinalizedTree<T>,
+    context: VerifyContext<T>,
     hash: [u8; 32],
+    is_new_best: bool,
     consensus: BlockConsensus,
 }
 
 impl<'c, T> HeaderInsert<'c, T> {
     /// Inserts the block with the given user data.
-    pub fn insert(self, user_data: T) {
-        let new_node_index = self.chain.blocks.insert(
-            self.parent_tree_index,
+    pub fn insert(mut self, user_data: T) {
+        let new_node_index = self.context.chain.blocks.insert(
+            self.context.parent_tree_index,
             Block {
-                header: self.header,
+                header: self.context.header,
                 hash: self.hash,
                 consensus: self.consensus,
                 user_data,
@@ -1260,21 +1275,32 @@ impl<'c, T> HeaderInsert<'c, T> {
         );
 
         if self.is_new_best {
-            self.chain.current_best = Some(new_node_index);
+            self.context.chain.current_best = Some(new_node_index);
         }
+
+        self.chain.inner = Some(self.context.chain);
     }
 
     /// Destroys the object without inserting the block in the chain. Returns the block header.
     pub fn into_header(self) -> header::Header {
-        self.header
+        self.chain.inner = Some(self.context.chain);
+        self.context.header
     }
 }
 
 impl<'c, T> fmt::Debug for HeaderInsert<'c, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("HeaderInsert").field(&self.header).finish()
+        f.debug_tuple("HeaderInsert")
+            .field(&self.context.header)
+            .finish()
     }
 }
+
+// TODO: restore self.chain.inner
+/*impl<'c, T> Drop for HeaderInsert<'c, T> {
+    fn drop(&mut self) {
+    }
+}*/
 
 /// Error that can happen when verifying a block header.
 #[derive(Debug, derive_more::Display)]
@@ -1294,27 +1320,24 @@ pub enum HeaderVerifyError {
 /// Holds the [`NonFinalizedTree`] and allows insert a successfully-verified block into it.
 #[must_use]
 pub struct BodyInsert<T> {
-    chain: NonFinalizedTreeInner<T>,
-    is_new_best: bool,
-    /// Index of the parent in [`NonFinalizedTreeInner::blocks`].
-    parent_tree_index: Option<fork_tree::NodeIndex>,
-    header: header::Header,
+    context: VerifyContext<T>,
     hash: [u8; 32],
+    is_new_best: bool,
     consensus: BlockConsensus,
 }
 
 impl<T> BodyInsert<T> {
     /// Returns the header of the block about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        (&self.header).into()
+        (&self.context.header).into()
     }
 
     /// Inserts the block with the given user data.
     pub fn insert(mut self, user_data: T) -> NonFinalizedTree<T> {
-        let new_node_index = self.chain.blocks.insert(
-            self.parent_tree_index,
+        let new_node_index = self.context.chain.blocks.insert(
+            self.context.parent_tree_index,
             Block {
-                header: self.header,
+                header: self.context.header,
                 hash: self.hash,
                 consensus: self.consensus,
                 user_data,
@@ -1322,25 +1345,27 @@ impl<T> BodyInsert<T> {
         );
 
         if self.is_new_best {
-            self.chain.current_best = Some(new_node_index);
+            self.context.chain.current_best = Some(new_node_index);
         }
 
         NonFinalizedTree {
-            inner: Some(self.chain),
+            inner: Some(self.context.chain),
         }
     }
 
     /// Destroys the object without inserting the block in the chain.
     pub fn abort(self) -> NonFinalizedTree<T> {
         NonFinalizedTree {
-            inner: Some(self.chain),
+            inner: Some(self.context.chain),
         }
     }
 }
 
 impl<T> fmt::Debug for BodyInsert<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("BodyInsert").field(&self.header).finish()
+        f.debug_tuple("BodyInsert")
+            .field(&self.context.header)
+            .finish()
     }
 }
 
