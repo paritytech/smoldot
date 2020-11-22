@@ -24,7 +24,12 @@
 use crate::network::{connection, peerset, Multiaddr, PeerId};
 
 use alloc::sync::Arc;
-use core::{num::NonZeroUsize, task::Context};
+use core::{
+    num::NonZeroUsize,
+    ops::{Add, Sub},
+    task::Context,
+    time::Duration,
+};
 use futures::{
     channel::{mpsc, oneshot},
     lock::{Mutex, MutexGuard},
@@ -136,10 +141,12 @@ struct Guarded<TNow, TPeer, TConn> {
         TPeer,
         Arc<
             Mutex<(
-                connection::established::Established<
-                    TNow,
-                    oneshot::Sender<Result<Vec<u8>, ()>>,
-                    (),
+                Option<
+                    connection::established::Established<
+                        TNow,
+                        oneshot::Sender<Result<Vec<u8>, ()>>,
+                        (),
+                    >,
                 >,
                 TConn,
             )>,
@@ -331,108 +338,156 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
-    ) -> ReadWrite<TNow> {
+    ) -> ReadWrite<TNow>
+    where
+        TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+    {
         let mut total_read = 0;
         let mut total_written = 0;
 
-        'outer_loop: loop {
-            let mut guarded = self.guarded.lock().await;
-            match guarded
-                .peerset
-                .pending_or_connection_mut(connection_id.0)
-                .unwrap()
-            {
-                peerset::PendingOrConnectionMut::Pending(mut pending) => {
-                    let pending = pending.user_data_mut().clone();
-                    drop(guarded);
+        let mut guarded = self.guarded.lock().await;
+        match guarded
+            .peerset
+            .pending_or_connection_mut(connection_id.0)
+            .unwrap()
+        {
+            peerset::PendingOrConnectionMut::Pending(mut pending) => {
+                let pending = pending.user_data_mut().clone();
+                drop(guarded);
 
-                    let mut pending = pending.lock().await;
+                let mut pending = pending.lock().await;
 
-                    let incoming_buffer = match incoming_buffer {
-                        Some(b) => b,
-                        None => {
-                            let mut guarded = self.guarded.lock().await;
-                            guarded
-                                .peerset
-                                .pending_mut(connection_id.0)
-                                .unwrap()
-                                .remove_and_purge_address();
+                let incoming_buffer = match incoming_buffer {
+                    Some(b) => b,
+                    None => {
+                        let mut guarded = self.guarded.lock().await;
+                        guarded
+                            .peerset
+                            .pending_mut(connection_id.0)
+                            .unwrap()
+                            .remove_and_purge_address();
 
-                            debug_assert_eq!(total_read, 0);
-                            return ReadWrite {
-                                read_bytes: 0,
-                                written_bytes: total_written,
-                                write_close: true,
-                                wake_up_after: None,
-                            };
+                        debug_assert_eq!(total_read, 0);
+                        return ReadWrite {
+                            read_bytes: 0,
+                            written_bytes: total_written,
+                            write_close: true,
+                            wake_up_after: None,
+                        };
+                    }
+                };
+
+                let (handshake, user_data) = pending.take().unwrap();
+
+                // TODO: check timeout
+
+                let (mut result, is_idle) = {
+                    let (result, num_read, num_written) =
+                        match handshake.read_write(incoming_buffer, outgoing_buffer) {
+                            Ok(r) => r,
+                            Err(_) => todo!(),
+                        };
+                    total_read += num_read;
+                    total_written += num_written;
+                    (result, num_read == 0 && num_written == 0)
+                };
+
+                loop {
+                    match result {
+                        connection::handshake::Handshake::Healthy(updated_handshake) => {
+                            *pending = Some((updated_handshake, user_data));
+                            break;
                         }
-                    };
+                        connection::handshake::Handshake::Success {
+                            remote_peer_id,
+                            connection,
+                        } => {
+                            let randomness_seed = self.randomness_seeds.lock().await.gen();
 
-                    let (handshake, user_data) = pending.take().unwrap();
-
-                    // TODO: check timeout
-
-                    let (mut result, is_idle) = {
-                        let (result, num_read, num_written) =
-                            match handshake.read_write(incoming_buffer, outgoing_buffer) {
-                                Ok(r) => r,
-                                Err(_) => todo!(),
-                            };
-                        total_read += num_read;
-                        total_written += num_written;
-                        (result, num_read == 0 && num_written == 0)
-                    };
-
-                    loop {
-                        match result {
-                            connection::handshake::Handshake::Healthy(updated_handshake) => {
-                                *pending = Some((updated_handshake, user_data));
-                                break 'outer_loop;
+                            let mut guarded = self.guarded.lock().await;
+                            let pending = guarded.peerset.pending_mut(connection_id.0).unwrap();
+                            if *pending.peer_id() != remote_peer_id {
+                                pending.remove_and_purge_address();
+                                break; // TODO: ?
                             }
-                            connection::handshake::Handshake::Success {
-                                remote_peer_id,
-                                connection,
-                            } => {
-                                let randomness_seed = self.randomness_seeds.lock().await.gen();
 
-                                let mut guarded = self.guarded.lock().await;
-                                let pending = guarded.peerset.pending_mut(connection_id.0).unwrap();
-                                if *pending.peer_id() != remote_peer_id {
-                                    pending.remove_and_purge_address();
-                                    break 'outer_loop; // TODO: ?
-                                }
+                            pending.into_established(|_| {
+                                let established =
+                                    connection.into_connection(connection::established::Config {
+                                        in_notifications_protocols: vec![], // TODO:
+                                        in_request_protocols: vec![],       // TODO:
+                                        randomness_seed,
+                                        ping_protocol: "/ipfs/ping/1.0.0".into(), // TODO: configurable
+                                    });
 
-                                pending.into_established(|_| {
-                                    let established = connection.into_connection(
-                                        connection::established::Config {
-                                            in_notifications_protocols: vec![], // TODO:
-                                            in_request_protocols: vec![],       // TODO:
-                                            randomness_seed,
-                                            ping_protocol: "/ipfs/ping/1.0.0".into(), // TODO: configurable
-                                        },
-                                    );
+                                Arc::new(Mutex::new((Some(established), user_data)))
+                            });
 
-                                    Arc::new(Mutex::new((established, user_data)))
-                                });
+                            break;
 
-                                break 'outer_loop;
-
-                                // TODO: notify external API
-                            }
-                            connection::handshake::Handshake::NoiseKeyRequired(key) => {
-                                result = key.resume(&self.noise_key).into();
-                            }
+                            // TODO: notify external API
+                        }
+                        connection::handshake::Handshake::NoiseKeyRequired(key) => {
+                            result = key.resume(&self.noise_key).into();
                         }
                     }
                 }
-                peerset::PendingOrConnectionMut::Connection(mut established) => {
-                    let established = established.user_data_mut().clone();
-                    drop(guarded);
+            }
+            peerset::PendingOrConnectionMut::Connection(mut established) => {
+                let established = established.user_data_mut().clone();
+                drop(guarded);
 
-                    let established = established.lock().await;
+                let mut established = established.lock().await;
+                let established = &mut *established;
 
-                    // TODO:
-                    todo!()
+                let read_write = match established.0.take().unwrap().read_write(
+                    now,
+                    incoming_buffer,
+                    outgoing_buffer,
+                ) {
+                    Ok(r) => r,
+                    Err(_) => todo!(), // TODO:
+                };
+                total_read += read_write.read_bytes;
+                total_written += read_write.written_bytes;
+                established.0 = Some(read_write.connection);
+
+                // TODO: finish here
+
+                match read_write.event {
+                    None => {}
+                    Some(connection::established::Event::EndOfData) => todo!(),
+                    Some(connection::established::Event::RequestIn {
+                        id,
+                        protocol,
+                        request,
+                    }) => todo!(),
+                    Some(connection::established::Event::Response {
+                        response,
+                        id,
+                        user_data: send_back,
+                    }) => {
+                        let _ = send_back.send(response.map_err(|_| ()));
+                    }
+                    Some(connection::established::Event::NotificationsInOpen {
+                        id,
+                        protocol,
+                        handshake,
+                    }) => todo!(),
+                    Some(connection::established::Event::NotificationIn { id, notification }) => {
+                        todo!()
+                    }
+                    Some(connection::established::Event::NotificationsOutAccept {
+                        id,
+                        remote_handshake,
+                    }) => todo!(),
+                    Some(connection::established::Event::NotificationsOutReject {
+                        id,
+                        user_data,
+                    }) => todo!(),
+                    Some(connection::established::Event::NotificationsOutCloseDemanded { id }) => {
+                        todo!()
+                    }
                 }
             }
         }
@@ -544,89 +599,4 @@ pub struct ReadWrite<TNow> {
     /// If, after calling [`Network::read_write`], the returned [`ReadWrite`] contains `true` here,
     /// and the inbound buffer is `None`, then the [`ConnectionId`] is now invalid.
     pub write_close: bool,
-}
-
-enum ConnectionToServiceInner {
-    /// Handshake phased has failed. The connection is now dead.
-    HandshakeError(connection::handshake::HandshakeError),
-
-    /// Handshake has succeeded. Must be answered with a
-    /// [`ServiceToConnectionInner::PostHandshake`] message.
-    HandshakeSuccess { peer_id: PeerId },
-
-    /// Connection has closed.
-    ///
-    /// This only concerns connections onto which the handshake had succeeded. For connections on
-    /// which the handshake hadn't succeeded, a [`FromBackground::HandshakeError`] is emitted
-    /// instead.
-    Disconnected,
-
-    /// Response to a [`ToConnection::OpenOutNotifications`].
-    NotificationsOpenResult {
-        /// Outcome of the opening. If `Ok`, the notifications protocol is now open. If `Err`, it
-        /// is still closed.
-        result: Result<(), ()>,
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-
-    /// Response to a [`ToConnection::CloseOutNotifications`].
-    ///
-    /// Contrary to [`FromBackground::NotificationsOpenResult`], a closing request never fails.
-    NotificationsCloseResult {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-
-    /// The remote opened a notifications substream.
-    ///
-    /// A [`ToConnection::NotificationsInAccept`] or [`ToConnection::NotificationsInReject`] must
-    /// be sent back.
-    NotificationsInOpen {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-
-    /// The remote closed a notifications substream.
-    ///
-    /// This does not cancel any previously-sent [`FromBackground::NotificationsInOpen`]. Instead,
-    /// the response sent to a previously-sent [`FromBackground::NotificationsInOpen`] will be
-    /// ignored.
-    NotificationsInClose {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-}
-
-pub struct ServiceToConnection {
-    inner: ServiceToConnectionInner,
-}
-
-enum ServiceToConnectionInner {
-    /// Must be sent in response to a [`ConnectionToServiceInner::HandshakeSuccess`].
-    PostHandshake {
-        /// True if the connection should continue. False if the connection should be dropped.
-        accepted: bool,
-    },
-
-    /// Start a block request. See [`NetworkService::blocks_request`].
-    Request { protocol: String, bytes: Vec<u8> },
-    OpenOutNotifications {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-        /// Handshake to initially send to the remote.
-        handshake: Vec<u8>,
-    },
-    CloseOutNotifications {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-    NotificationsInAccept {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
-    NotificationsInReject {
-        // TODO: shouldn't pass protocol by String, ideally
-        protocol: String,
-    },
 }

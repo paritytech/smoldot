@@ -34,7 +34,12 @@
 
 use crate::network::{connection, libp2p, protocol, Multiaddr, PeerId};
 
-use core::{num::NonZeroUsize, task::Context};
+use core::{
+    num::NonZeroUsize,
+    ops::{Add, Sub},
+    task::Context,
+    time::Duration,
+};
 
 /// Configuration for a [`Network`].
 pub struct Config<TPeer> {
@@ -253,7 +258,10 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
-    ) -> ReadWrite<TNow> {
+    ) -> ReadWrite<TNow>
+    where
+        TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+    {
         let inner = self
             .libp2p
             .read_write(connection_id.0, now, incoming_buffer, outgoing_buffer, cx)
