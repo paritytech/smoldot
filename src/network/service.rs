@@ -34,11 +34,7 @@
 
 use crate::network::{connection, libp2p, protocol, Multiaddr, PeerId};
 
-use alloc::sync::Arc;
 use core::{num::NonZeroUsize, task::Context};
-use futures::{
-    lock::{Mutex, MutexGuard},
-}; // TODO: no_std-ize
 
 /// Configuration for a [`Network`].
 pub struct Config<TPeer> {
@@ -60,7 +56,7 @@ pub struct Config<TPeer> {
     ///
     /// The order in which the chains are list is important. The index of each entry needs to be
     /// used later in order to refer to a specific chain.
-    pub chains: Vec<ChainConfig<TPeer>>,
+    pub chains: Vec<ChainConfig>,
 
     pub known_nodes: Vec<(TPeer, PeerId, Multiaddr)>,
 
@@ -88,15 +84,16 @@ pub struct Config<TPeer> {
 /// Configuration for a specific overlay network.
 ///
 /// See [`Config::overlay_networks`].
-pub struct ChainConfig<TPeer> {
+pub struct ChainConfig {
     /// Identifier of the protocol, used on the wire to determine which chain messages refer to.
     ///
     /// > **Note**: This value is typically found in the specifications of the chain (the
     /// >           "chain specs").
     pub protocol_id: String,
 
-    /// List of node identities that are known to belong to this overlay network.
-    pub bootstrap_nodes: Vec<PeerId>,
+    /// List of node identities that are known to belong to this overlay network. The node
+    /// identities are indices in [`Config::known_nodes`].
+    pub bootstrap_nodes: Vec<usize>,
 
     pub in_slots: u32,
 
@@ -105,7 +102,7 @@ pub struct ChainConfig<TPeer> {
 
 /// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PendingId(libp2p::ConnectionId);
+pub struct PendingId(libp2p::PendingId);
 
 /// Identifier of a [`Connection`] spawned by the [`Network`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -125,15 +122,42 @@ pub struct ChainNetwork<TNow, TPeer, TConn> {
 impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
     /// Initializes a new [`ChainNetwork`].
     pub fn new(config: Config<TPeer>) -> Self {
+        // TODO: figure out the cloning situation here
+
+        let overlay_networks = config
+            .chains
+            .iter()
+            .map(|chain| libp2p::OverlayNetwork {
+                main_protocol: libp2p::ProtocolConfig {
+                    name: format!("/{}/block-announces/1", chain.protocol_id),
+                    fallback_names: Vec::new(),
+                },
+                optional_protocols: vec![libp2p::ProtocolConfig {
+                    name: format!("/{}/transactions/1", chain.protocol_id),
+                    fallback_names: Vec::new(),
+                }],
+                bootstrap_nodes: chain.bootstrap_nodes.clone(),
+                in_slots: chain.in_slots,
+                out_slots: chain.out_slots,
+            })
+            .collect();
+
         ChainNetwork {
-            libp2p: todo!(),
+            libp2p: libp2p::Network::new(libp2p::Config {
+                known_nodes: config.known_nodes,
+                listen_addresses: config.listen_addresses,
+                noise_key: config.noise_key,
+                randomness_seed: config.randomness_seed,
+                pending_api_events_buffer_size: config.pending_api_events_buffer_size,
+                overlay_networks,
+            }),
             protocol_ids: config.chains.into_iter().map(|c| c.protocol_id).collect(),
         }
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
     pub async fn num_established_connections(&self) -> usize {
-        self.libp2p.num_established_connections()
+        self.libp2p.num_established_connections().await
     }
 
     pub fn add_incoming_connection(
@@ -142,7 +166,11 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
         remote_addr: Multiaddr,
         user_data: TConn,
     ) -> ConnectionId {
-        todo!()
+        ConnectionId(self.libp2p.add_incoming_connection(
+            local_listen_address,
+            remote_addr,
+            user_data,
+        ))
     }
 
     /// Sends a blocks request to the given peer.
@@ -163,9 +191,7 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
         protocol::decode_block_response(&response).map_err(|_| ())
     }
 
-    pub async fn announce_transaction(&self, transaction: Vec<u8>) {
-
-    }
+    pub async fn announce_transaction(&self, transaction: Vec<u8>) {}
 
     /// After a [`Event::StartConnect`], notifies the [`Network`] of the success of the dialing
     /// attempt.
@@ -176,22 +202,8 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    // TODO: timeout?
     pub async fn pending_outcome_ok(&self, id: PendingId, user_data: TConn) -> ConnectionId {
-        // TODO: wrong ; pending in the peerset means "in TCP or during handshake"
-        let guarded = self.guarded.lock().await;
-        let conn = guarded
-            .peerset
-            .pending_mut(id)
-            .unwrap()
-            .into_established(move |_| {
-                Arc::new(Mutex::new((
-                    connection::handshake::HealthyHandshake::new(true),
-                    todo!(), // TODO: must keep same timeout as TCP handshake
-                    user_data,
-                )))
-            });
-        ConnectionId(conn.id())
+        ConnectionId(self.libp2p.pending_outcome_ok(id.0, user_data).await)
     }
 
     /// After a [`Event::StartConnect`], notifies the [`Network`] of the failure of the dialing
@@ -203,14 +215,8 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    // TODO: timeout?
     pub async fn pending_outcome_err(&self, id: PendingId) {
-        let mut guarded = self.guarded.lock().await;
-        guarded
-            .peerset
-            .pending_mut(id)
-            .unwrap()
-            .remove_and_purge_address();
+        self.libp2p.pending_outcome_err(id.0).await
     }
 
     /// Returns the next event produced by the service.
@@ -225,9 +231,14 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
     pub async fn next_event(&self) -> Event {
-        self.fill_out_slots(&mut self.guarded.lock().await).await;
-        let events_rx = self.events_rx.lock().await;
-        events_rx.next().await
+        match self.libp2p.next_event().await {
+            libp2p::Event::Connected(peer_id) => Event::Connected(peer_id),
+            libp2p::Event::Disconnected(peer_id) => Event::Disconnected(peer_id),
+            libp2p::Event::StartConnect { id, multiaddr } => Event::StartConnect {
+                id: PendingId(id),
+                multiaddr,
+            },
+        }
     }
 
     ///
@@ -239,12 +250,19 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
         &self,
         connection_id: ConnectionId,
         now: TNow,
-        mut incoming_buffer: Option<&[u8]>,
-        mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
+        incoming_buffer: Option<&[u8]>,
+        outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
-    ) -> ReadWrite<TNow, TPeer, TConn> {
-        self.libp2p
-            .read_write(connection_id.0, incoming_buffer, outgoing_buffer, cx)
+    ) -> ReadWrite<TNow> {
+        let inner = self
+            .libp2p
+            .read_write(connection_id.0, now, incoming_buffer, outgoing_buffer, cx)
+            .await;
+        ReadWrite {
+            read_bytes: inner.read_bytes,
+            written_bytes: inner.written_bytes,
+            wake_up_after: inner.wake_up_after,
+        }
     }
 }
 
@@ -265,7 +283,7 @@ pub enum Event {
 }
 
 /// Outcome of calling [`Connection::read_write`].
-pub struct ReadWrite<TNow, TPeer, TConn> {
+pub struct ReadWrite<TNow> {
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
     /// should no longer be present the next time [`Connection::read_write`] is called.
     pub read_bytes: usize,

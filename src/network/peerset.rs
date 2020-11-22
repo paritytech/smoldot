@@ -175,6 +175,11 @@ impl<TPeer, TConn, TPending, TSub, TPendingSub> Peerset<TPeer, TConn, TPending, 
             .count()
     }
 
+    /// Returns the number of overlay networks registered towards the peerset.
+    pub fn num_overlay_networks(&self) -> usize {
+        self.num_overlay_networks
+    }
+
     /// Returns the list of nodes that belong to the given overlay network.
     ///
     /// # Panic
@@ -368,7 +373,7 @@ pub enum PendingOrConnectionMut<'a, TPeer, TConn, TPending, TSub, TPendingSub> {
 }
 
 /// Identifier for a connection in a [`Peerset`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(usize);
 
 /// Access to a connection in the [`Peerset`].
@@ -569,6 +574,14 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
         TPeer: Default,
     {
         self.or_insert_with(Default::default)
+    }
+
+    /// Shortcut method. If [`NodeMut::Known`], returns a `Some` containing it.
+    pub fn into_known(self) -> Option<NodeMutKnown<'a, TPeer, TConn, TPending, TSub, TPendingSub>> {
+        match self {
+            NodeMut::Known(k) => Some(k),
+            NodeMut::Unknown(k) => None,
+        }
     }
 }
 
