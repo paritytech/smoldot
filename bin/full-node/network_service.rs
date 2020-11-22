@@ -184,7 +184,9 @@ impl NetworkService {
         target: PeerId,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, ()> {
-        self.network.blocks_request(target, 0, config).await // TODO: chain_index
+        self.network
+            .blocks_request(Instant::now(), target, 0, config)
+            .await // TODO: chain_index
     }
 
     /// Returns the next event that happens in the network service.
@@ -270,6 +272,20 @@ async fn connection_task(
 
         let now = Instant::now();
 
+        // TODO: hacky code
+        struct Waker(std::sync::Mutex<(bool, Option<std::task::Waker>)>);
+        impl futures::task::ArcWake for Waker {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                let mut lock = arc_self.0.lock().unwrap();
+                lock.0 = true;
+                if let Some(w) = lock.1.take() {
+                    w.wake();
+                }
+            }
+        }
+
+        let waker = Arc::new(Waker(std::sync::Mutex::new((false, None))));
+
         let read_write = network_service
             .network
             .read_write(
@@ -277,7 +293,7 @@ async fn connection_task(
                 now,
                 read_buffer.map(|b| b.0),
                 write_buffer.unwrap(),
-                &mut std::task::Context::from_waker(futures::task::noop_waker_ref()),
+                &mut std::task::Context::from_waker(&*futures::task::waker_ref(&waker)),
             )
             .await;
 
@@ -288,7 +304,7 @@ async fn connection_task(
 
         if read_write.write_close && read_buffer.is_none() {
             // Make sure to finish closing the TCP socket.
-            tcp_socket.process().await;
+            tcp_socket.flush_close().await;
             return;
         }
 
@@ -313,7 +329,18 @@ async fn connection_task(
 
         futures::select! {
             _ = tcp_socket.as_mut().process().fuse() => {},
-            timeout = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
+            _ = future::poll_fn(move |cx| {
+                let mut lock = waker.0.lock().unwrap();
+                if lock.0 {
+                    return std::task::Poll::Ready(());
+                }
+                match lock.1 {
+                    Some(ref w) if w.will_wake(cx.waker()) => {}
+                    _ => lock.1 = Some(cx.waker().clone()),
+                }
+                std::task::Poll::Pending
+            }).fuse() => {}
+            _ = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
                 // Nothing to do, but guarantees that we loop again.
             }
         }

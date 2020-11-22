@@ -124,7 +124,10 @@ pub struct ChainNetwork<TNow, TPeer, TConn> {
     protocol_ids: Vec<String>,
 }
 
-impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
+impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
     /// Initializes a new [`ChainNetwork`].
     pub fn new(config: Config<TPeer>) -> Self {
         // TODO: figure out the cloning situation here
@@ -183,6 +186,7 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
     // TODO: proper error type
     pub async fn blocks_request(
         &self,
+        now: TNow,
         target: PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
@@ -192,7 +196,10 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
             a
         });
         let protocol = format!("/{}/sync/2", &self.protocol_ids[chain_index]);
-        let response = self.libp2p.request(target, protocol, request_data).await?; // TODO: correct protocol
+        let response = self
+            .libp2p
+            .request(now, target, protocol, request_data)
+            .await?;
         protocol::decode_block_response(&response).map_err(|_| ())
     }
 
@@ -258,10 +265,7 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
-    ) -> ReadWrite<TNow>
-    where
-        TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-    {
+    ) -> ReadWrite<TNow> {
         let inner = self
             .libp2p
             .read_write(connection_id.0, now, incoming_buffer, outgoing_buffer, cx)

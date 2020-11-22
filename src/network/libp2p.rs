@@ -27,7 +27,7 @@ use alloc::sync::Arc;
 use core::{
     num::NonZeroUsize,
     ops::{Add, Sub},
-    task::Context,
+    task::{Context, Waker},
     time::Duration,
 };
 use futures::{
@@ -149,6 +149,7 @@ struct Guarded<TNow, TPeer, TConn> {
                     >,
                 >,
                 TConn,
+                Option<Waker>,
             )>,
         >,
         Arc<Mutex<Option<(connection::handshake::HealthyHandshake, TConn)>>>,
@@ -157,7 +158,10 @@ struct Guarded<TNow, TPeer, TConn> {
     >,
 }
 
-impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
+impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
     /// Initializes a new network data structure.
     pub fn new(config: Config<TPeer>) -> Self {
         let (events_tx, events_rx) = mpsc::channel(config.pending_api_events_buffer_size.get() - 1);
@@ -219,6 +223,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
     // TODO: proper error type
     pub async fn request(
         &self,
+        now: TNow,
         target: PeerId,
         protocol: String,
         request_data: Vec<u8>,
@@ -228,12 +233,9 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
 
             let connection = match guarded.peerset.node_mut(target) {
                 peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
-                peerset::NodeMut::Unknown(n) => return Err(()),
+                peerset::NodeMut::Unknown(_) => return Err(()),
             };
 
-            // TODO: is awaiting here a good idea? if the background task is stuck, we block the entire `Guarded`
-            // It is possible for the channel to be closed, if the background task has ended but the
-            // frontend hasn't processed this yet.
             guarded
                 .peerset
                 .connection_mut(connection)
@@ -242,13 +244,17 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                 .clone()
         };
 
-        let connection = connection.lock().await;
+        let mut connection = connection.lock().await;
 
         let (send_back, receive_result) = oneshot::channel();
-
-        // TODO:
-        // match connection.0 {}
-        todo!();
+        connection
+            .0
+            .as_mut()
+            .unwrap()
+            .add_request(now, protocol, request_data, send_back);
+        if let Some(waker) = connection.2.take() {
+            waker.wake();
+        }
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
         match receive_result.await {
@@ -338,12 +344,10 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
-    ) -> ReadWrite<TNow>
-    where
-        TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-    {
+    ) -> ReadWrite<TNow> {
         let mut total_read = 0;
         let mut total_written = 0;
+        let mut wake_up_after = None;
 
         let mut guarded = self.guarded.lock().await;
         match guarded
@@ -420,12 +424,19 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                                         ping_protocol: "/ipfs/ping/1.0.0".into(), // TODO: configurable
                                     });
 
-                                Arc::new(Mutex::new((Some(established), user_data)))
+                                Arc::new(Mutex::new((
+                                    Some(established),
+                                    user_data,
+                                    Some(cx.waker().clone()),
+                                )))
                             });
 
+                            guarded
+                                .events_tx
+                                .send(Event::Connected(remote_peer_id))
+                                .await
+                                .unwrap();
                             break;
-
-                            // TODO: notify external API
                         }
                         connection::handshake::Handshake::NoiseKeyRequired(key) => {
                             result = key.resume(&self.noise_key).into();
@@ -440,16 +451,24 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                 let mut established = established.lock().await;
                 let established = &mut *established;
 
+                // Update the `core::task::Waker` if necessary.
+                match established.2 {
+                    Some(ref w) if w.will_wake(cx.waker()) => {}
+                    _ => established.2 = Some(cx.waker().clone()),
+                }
+
                 let read_write = match established.0.take().unwrap().read_write(
                     now,
                     incoming_buffer,
                     outgoing_buffer,
                 ) {
                     Ok(r) => r,
-                    Err(_) => todo!(), // TODO:
+                    Err(_err) => todo!("{:?}", _err), // TODO:
                 };
                 total_read += read_write.read_bytes;
                 total_written += read_write.written_bytes;
+                debug_assert!(wake_up_after.is_none());
+                wake_up_after = read_write.wake_up_after;
                 established.0 = Some(read_write.connection);
 
                 // TODO: finish here
@@ -464,9 +483,10 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                     }) => todo!(),
                     Some(connection::established::Event::Response {
                         response,
-                        id,
                         user_data: send_back,
+                        ..
                     }) => {
+                        println!("response");
                         let _ = send_back.send(response.map_err(|_| ()));
                     }
                     Some(connection::established::Event::NotificationsInOpen {
@@ -495,7 +515,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
         ReadWrite {
             read_bytes: total_read,
             written_bytes: total_written,
-            wake_up_after: None,
+            wake_up_after,
             write_close: false, // TODO:
         }
     }
