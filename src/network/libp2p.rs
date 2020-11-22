@@ -436,6 +436,8 @@ where
                                 .send(Event::Connected(remote_peer_id))
                                 .await
                                 .unwrap();
+
+                            cx.waker().wake_by_ref();
                             break;
                         }
                         connection::handshake::Handshake::NoiseKeyRequired(key) => {
