@@ -418,6 +418,9 @@ impl SledFullDatabase {
                             slot_duration,
                         }
                     }
+                    (None, None, None, None) => {
+                        chain_information::ChainInformationConsensus::AllAuthorized
+                    }
                     _ => {
                         return Err(sled::transaction::ConflictableTransactionError::Abort(
                             FinalizedAccessError::Access(AccessError::Corrupted(
