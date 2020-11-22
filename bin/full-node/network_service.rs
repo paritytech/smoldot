@@ -242,8 +242,6 @@ async fn connection_task(
 
     let id = network_service.network.pending_outcome_ok(id, ()).await;
 
-    println!("established!");
-
     // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
     // out and waiting a bit before actually sending it out, in order to potentially merge
     // multiple writes in a row into one packet. In the implementation below, it is guaranteed

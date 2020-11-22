@@ -329,17 +329,15 @@ impl<TPeer, TConn, TPending, TSub, TPendingSub> Peerset<TPeer, TConn, TPending, 
         if let Some(c) = self.connections.get(id.0) {
             match c.ty {
                 ConnectionTy::Connected { .. } => {
-                    Some(PendingOrConnectionMut::Pending(PendingMut {
-                        peerset: self,
-                        id,
-                    }))
-                }
-                ConnectionTy::Pending { .. } => {
                     Some(PendingOrConnectionMut::Connection(ConnectionMut {
                         peerset: self,
                         id,
                     }))
                 }
+                ConnectionTy::Pending { .. } => Some(PendingOrConnectionMut::Pending(PendingMut {
+                    peerset: self,
+                    id,
+                })),
                 ConnectionTy::Poisoned => unreachable!(),
             }
         } else {

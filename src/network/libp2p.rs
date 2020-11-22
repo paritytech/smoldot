@@ -144,7 +144,7 @@ struct Guarded<TNow, TPeer, TConn> {
                 TConn,
             )>,
         >,
-        Arc<Mutex<Option<(connection::handshake::HealthyHandshake, TNow, TConn)>>>,
+        Arc<Mutex<Option<(connection::handshake::HealthyHandshake, TConn)>>>,
         (),
         (),
     >,
@@ -271,11 +271,10 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
             .user_data_mut()
             .clone();
 
-        let conn = conn.try_lock().unwrap();
+        let mut conn = conn.try_lock().unwrap();
         assert!(conn.is_none());
         *conn = Some((
             connection::handshake::HealthyHandshake::new(true),
-            todo!(), // TODO: must keep same timeout as TCP handshake
             user_data,
         ));
         ConnectionId(id.0)
@@ -354,7 +353,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                         None => todo!(), // TODO:
                     };
 
-                    let (handshake, timeout, user_data) = pending.take().unwrap();
+                    let (handshake, user_data) = pending.take().unwrap();
 
                     // TODO: check timeout
 
@@ -372,7 +371,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                     loop {
                         match result {
                             connection::handshake::Handshake::Healthy(updated_handshake) => {
-                                *pending = Some((updated_handshake, timeout, user_data));
+                                *pending = Some((updated_handshake, user_data));
                                 break 'outer_loop;
                             }
                             connection::handshake::Handshake::Success {
