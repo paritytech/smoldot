@@ -221,6 +221,11 @@ impl<T> WithBuffers<T> {
             self.close_pending = true;
         }
     }
+
+    /// True if [`WithBuffers::close`] has been called earlier.
+    pub fn is_closed(&self) -> bool {
+        self.write_closed
+    }
 }
 
 impl<T> WithBuffers<T>

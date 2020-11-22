@@ -328,8 +328,8 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
         &self,
         connection_id: ConnectionId,
         now: TNow,
-        mut incoming_buffer: Option<&[u8]>,
-        mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
+        incoming_buffer: Option<&[u8]>,
+        outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
     ) -> ReadWrite<TNow> {
         let mut total_read = 0;
@@ -350,7 +350,22 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
 
                     let incoming_buffer = match incoming_buffer {
                         Some(b) => b,
-                        None => todo!(), // TODO:
+                        None => {
+                            let mut guarded = self.guarded.lock().await;
+                            guarded
+                                .peerset
+                                .pending_mut(connection_id.0)
+                                .unwrap()
+                                .remove_and_purge_address();
+
+                            debug_assert_eq!(total_read, 0);
+                            return ReadWrite {
+                                read_bytes: 0,
+                                written_bytes: total_written,
+                                write_close: true,
+                                wake_up_after: None,
+                            };
+                        }
                     };
 
                     let (handshake, user_data) = pending.take().unwrap();
@@ -390,10 +405,10 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
                                 pending.into_established(|_| {
                                     let established = connection.into_connection(
                                         connection::established::Config {
-                                            in_notifications_protocols: todo!(),
-                                            in_request_protocols: todo!(),
+                                            in_notifications_protocols: vec![], // TODO:
+                                            in_request_protocols: vec![],       // TODO:
                                             randomness_seed,
-                                            ping_protocol: todo!(),
+                                            ping_protocol: "/ipfs/ping/1.0.0".into(), // TODO: configurable
                                         },
                                     );
 
@@ -426,6 +441,7 @@ impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn> {
             read_bytes: total_read,
             written_bytes: total_written,
             wake_up_after: None,
+            write_close: false, // TODO:
         }
     }
 
@@ -521,6 +537,13 @@ pub struct ReadWrite<TNow> {
     /// If `Some`, [`Connection::read_write`] should be called again when the point in time
     /// reaches the value in the `Option`.
     pub wake_up_after: Option<TNow>,
+
+    /// If `true`, the writing side the connection must be closed. Will always remain to `true`
+    /// after it has been set.
+    ///
+    /// If, after calling [`Network::read_write`], the returned [`ReadWrite`] contains `true` here,
+    /// and the inbound buffer is `None`, then the [`ConnectionId`] is now invalid.
+    pub write_close: bool,
 }
 
 enum ConnectionToServiceInner {

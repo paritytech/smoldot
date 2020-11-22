@@ -262,6 +262,7 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn> {
             read_bytes: inner.read_bytes,
             written_bytes: inner.written_bytes,
             wake_up_after: inner.wake_up_after,
+            write_close: inner.write_close,
         }
     }
 }
@@ -295,4 +296,11 @@ pub struct ReadWrite<TNow> {
     /// If `Some`, [`Connection::read_write`] should be called again when the point in time
     /// reaches the value in the `Option`.
     pub wake_up_after: Option<TNow>,
+
+    /// If `true`, the writing side the connection must be closed. Will always remain to `true`
+    /// after it has been set.
+    ///
+    /// If, after calling [`Network::read_write`], the returned [`ReadWrite`] contains `true` here,
+    /// and the inbound buffer is `None`, then the [`ConnectionId`] is now invalid.
+    pub write_close: bool,
 }

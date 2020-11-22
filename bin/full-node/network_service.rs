@@ -281,6 +281,17 @@ async fn connection_task(
             )
             .await;
 
+        // TODO:
+        /*if read_write.write_close && !tcp_socket.is_closed() {
+            tcp_socket.close();
+        }*/
+
+        if read_write.write_close && read_buffer.is_none() {
+            // Make sure to finish closing the TCP socket.
+            tcp_socket.process().await;
+            return;
+        }
+
         if let Some(wake_up) = read_write.wake_up_after {
             if wake_up > now {
                 let dur = wake_up - now;
