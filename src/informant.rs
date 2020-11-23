@@ -33,6 +33,7 @@
 //! eprint!("{}\r", InformantLine {
 //!     enable_colors: true,
 //!     chain_name: "My chain",
+//!     relay_chain: None,
 //!     max_line_width: 80,
 //!     num_network_connections: 12,
 //!     best_number: 220,
