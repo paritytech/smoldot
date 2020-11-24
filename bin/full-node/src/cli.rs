@@ -52,7 +52,7 @@ pub struct CliOptions {
     /// Coloring: auto, always, never
     #[structopt(long, default_value = "auto")]
     pub color: ColorChoice,
-    /// Ed25519 private key of network identity [hexadecimal].
+    /// Ed25519 private key of network identity \[hexadecimal\].
     #[structopt(long)]
     pub node_key: Option<NodeKey>,
 }
