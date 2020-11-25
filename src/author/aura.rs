@@ -60,7 +60,7 @@ pub fn next_slot_claim<'a>(
 
     let mut claim = None;
 
-    for local_pub_key in config.local_authorities {
+    for (pub_key_index, local_pub_key) in config.local_authorities.enumerate() {
         // TODO: O(n) complexity
         let mut index = match config
             .best_block_authorities
@@ -79,11 +79,11 @@ pub fn next_slot_claim<'a>(
 
         match claim {
             Some((s, _)) if s <= claimable_slot => {}
-            _ => claim = Some((claimable_slot, local_pub_key)),
+            _ => claim = Some((claimable_slot, pub_key_index)),
         }
     }
 
-    if let Some((slot_number, public_key)) = claim {
+    if let Some((slot_number, local_authorities_index)) = claim {
         let slot_start_from_unix_epoch =
             Duration::from_secs(slot_number * config.slot_duration.get());
         let slot_end_from_unix_epoch =
@@ -94,7 +94,7 @@ pub fn next_slot_claim<'a>(
             slot_start_from_unix_epoch,
             slot_end_from_unix_epoch,
             slot_number,
-            public_key: *public_key,
+            local_authorities_index,
         })
     } else {
         None
@@ -115,7 +115,6 @@ pub struct SlotClaim {
     pub slot_end_from_unix_epoch: Duration,
     /// Slot number of the claim. Used when building the block.
     pub slot_number: u64,
-    /// sr25519 public key that can be used to produce the block. This public key will need to
-    /// sign the block.
-    pub public_key: [u8; 32],
+    /// Index within [`Config::local_authorities`] of the authority that can produce the block.
+    pub local_authorities_index: usize,
 }
