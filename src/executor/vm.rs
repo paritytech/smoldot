@@ -374,16 +374,9 @@ impl<'a> TryFrom<&'a wasmtime::FuncType> for Signature {
         Ok(Signature {
             params: sig
                 .params()
-                .iter()
-                .cloned()
                 .map(ValueType::try_from)
                 .collect::<Result<_, _>>()?,
-            ret_ty: sig
-                .results()
-                .get(0)
-                .cloned()
-                .map(ValueType::try_from)
-                .transpose()?,
+            ret_ty: sig.results().next().map(ValueType::try_from).transpose()?,
         })
     }
 }
@@ -577,7 +570,7 @@ pub enum NewErr {
 }
 
 /// Error that can happen when calling [`VirtualMachinePrototype::start`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum StartErr {
     /// Couldn't find the requested function.
     #[display(fmt = "Function to start was not found.")]
