@@ -557,6 +557,8 @@ pub struct InherentData {
     ///
     /// `TUnc` must be an iterator yielding SCALE-encoded headers.
     pub uncles: TUnc,*/
+
+    // TODO: parachain-related inherents are missing
 }
 
 /// Extra consensus-specific items in [`InherentData`].
