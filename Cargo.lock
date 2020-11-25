@@ -71,15 +71,14 @@ dependencies = [
 
 [[package]]
 name = "ahash"
-version = "0.4.6"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6789e291be47ace86a60303502173d84af8327e3627ecf334356ee0f87a164c"
-
-[[package]]
-name = "ahash"
-version = "0.5.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4eb6ec8807cd25b59e6b8100815afc73f54e294f1a425a2e555971969889a8f8"
+checksum = "865f8b0b3fced577b7df82e9b0eb7609595d7209c0b39e78d0646672e244b1b1"
+dependencies = [
+ "getrandom 0.2.0",
+ "lazy_static",
+ "version_check",
+]
 
 [[package]]
 name = "ansi_term"
@@ -230,15 +229,6 @@ name = "async-task"
 version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91831deabf0d6d7ec49552e489aed63b7456a7a3c46cff62adad428110b0af0"
-
-[[package]]
-name = "atomic"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3410529e8288c463bedb5930f82833bc0c90e5d2fe639a56582a4d09220b281"
-dependencies = [
- "autocfg",
-]
 
 [[package]]
 name = "atomic-waker"
@@ -994,6 +984,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "getrandom"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8025cf36f917e6a52cce185b7c7177689b838b7ec138364e50cc2277a56cf4"
+dependencies = [
+ "cfg-if 0.1.10",
+ "libc",
+ "wasi",
+]
+
+[[package]]
 name = "ghash"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1047,7 +1048,6 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7afe4a420e3fe79967a00898cc1f4db7c8a49a9333a29f8a4bd76a253d5cd04"
 dependencies = [
- "ahash 0.4.6",
  "serde",
 ]
 
@@ -1225,15 +1225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lru"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be716eb6878ca2263eb5d00a781aa13264a794f519fe6af4fbb2668b2d5441c0"
-dependencies = [
- "hashbrown 0.9.1",
-]
-
-[[package]]
 name = "mach"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1283,9 +1274,9 @@ dependencies = [
 
 [[package]]
 name = "mick-jaeger"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49d4cafcd75d1485627dc17f931aa54468eaf127e541e59a02e4264434f6ed4b"
+checksum = "68c751e6643309568aa78a725b75755c11d866d6d0d0f7209033142007971cdd"
 dependencies = [
  "futures",
  "rand",
@@ -1379,9 +1370,9 @@ dependencies = [
 
 [[package]]
 name = "num-rational"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5fa6d5f418879385b213d905f7cf5bf4aa553d4c380f0152d1d4f2749186fa9"
+checksum = "12ac428b1cb17fce6f731001d307d351ec70a6d202fc2e60f7d4c5e42d8f4f07"
 dependencies = [
  "autocfg",
  "num-bigint",
@@ -1464,9 +1455,9 @@ dependencies = [
 
 [[package]]
 name = "parity-multiaddr"
-version = "0.9.4"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22fe99b938abd57507e37f8d4ef30cd74b33c71face2809b37b8beb71bab15ab"
+checksum = "43244a26dc1ddd3097216bb12eaa6cf8a07b060c72718d9ebd60fd297d6401df"
 dependencies = [
  "arrayref",
  "bs58",
@@ -1770,7 +1761,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a6b1679d49b24bbfe0c803429aa1874472f50d9b363131f0e89fc356b544d03"
 dependencies = [
- "getrandom",
+ "getrandom 0.1.14",
  "libc",
  "rand_chacha",
  "rand_core",
@@ -1793,7 +1784,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90bde5296fc891b0cef12a6d03ddccc162ce7b2aff54160af9338f8d40df6d19"
 dependencies = [
- "getrandom",
+ "getrandom 0.1.14",
 ]
 
 [[package]]
@@ -1889,7 +1880,7 @@ dependencies = [
  "arrayref",
  "arrayvec 0.5.2",
  "curve25519-dalek",
- "getrandom",
+ "getrandom 0.1.14",
  "merlin",
  "rand",
  "rand_core",
@@ -2133,12 +2124,9 @@ dependencies = [
 name = "substrate-lite"
 version = "0.1.0"
 dependencies = [
- "ahash 0.5.8",
- "app_dirs",
+ "ahash",
  "arrayvec 0.5.2",
  "async-std",
- "atomic",
- "atty",
  "blake2-rfc",
  "bs58",
  "corooteen",
@@ -2147,17 +2135,14 @@ dependencies = [
  "either",
  "fnv",
  "futures",
- "futures-timer",
  "hashbrown 0.9.1",
  "hex",
  "libsecp256k1",
- "lru",
  "merlin",
- "mick-jaeger",
  "multihash",
  "nom",
  "num-bigint",
- "num-rational 0.3.1",
+ "num-rational 0.3.2",
  "num-traits",
  "parity-multiaddr",
  "parity-scale-codec",
@@ -2175,13 +2160,32 @@ dependencies = [
  "smallvec",
  "snow",
  "soketto",
- "structopt",
- "terminal_size",
  "tiny-keccak",
  "twox-hash",
- "url",
  "wasmi",
  "wasmtime",
+]
+
+[[package]]
+name = "substrate-lite-full-node"
+version = "0.1.0"
+dependencies = [
+ "app_dirs",
+ "async-std",
+ "atty",
+ "derive_more",
+ "ed25519-dalek",
+ "fnv",
+ "futures",
+ "futures-timer",
+ "hashbrown 0.9.1",
+ "hex",
+ "mick-jaeger",
+ "rand",
+ "slab",
+ "structopt",
+ "substrate-lite",
+ "terminal_size",
 ]
 
 [[package]]
