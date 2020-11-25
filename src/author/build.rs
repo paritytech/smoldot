@@ -26,7 +26,7 @@ use crate::{
 };
 
 use alloc::{string::String, vec::Vec};
-use core::{iter, time::Duration};
+use core::{iter, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
 pub use runtime::{InherentData, InherentDataConsensus};
@@ -189,7 +189,10 @@ impl AuthoringStart {
             },
         });
 
-        todo!()
+        match self.shared.with_runtime_inner(inner_block_build) {
+            Builder::Authoring(a) => a,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -226,7 +229,8 @@ impl InherentExtrinsics {
     ///
     /// See the module-level documentation for more information.
     pub fn inject_inherents<'a>(self, inherents: InherentData) -> Builder {
-        self.inner.inject_inherents(inherents)
+        self.shared
+            .with_runtime_inner(self.inner.inject_inherents(inherents))
     }
 
     /// Injects a raw list of inherents and resumes execution.
@@ -237,7 +241,8 @@ impl InherentExtrinsics {
         self,
         list: impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone)> + Clone,
     ) -> Builder {
-        self.inner.inject_raw_inherents_list(list)
+        self.shared
+            .with_runtime_inner(self.inner.inject_raw_inherents_list(list))
     }
 }
 
@@ -253,12 +258,13 @@ impl ApplyExtrinsic {
     ///
     /// See the module-level documentation for more information.
     pub fn add_extrinsic(mut self, extrinsic: Vec<u8>) -> Builder {
-        self.inner.add_extrinsic(extrinsic)
+        self.shared
+            .with_runtime_inner(self.inner.add_extrinsic(extrinsic))
     }
 
     /// Indicate that no more extrinsics will be added, and resume execution.
     pub fn finish(mut self) -> Builder {
-        self.inner.finish()
+        self.shared.with_runtime_inner(self.inner.finish())
     }
 }
 
@@ -349,19 +355,19 @@ impl Shared {
                 Builder::Authoring(BuilderAuthoring::ApplyExtrinsicResult {
                     result,
                     resume: ApplyExtrinsic {
-                        inner,
+                        inner: resume,
                         shared: self,
                     },
                 })
             }
             runtime::BlockBuild::StorageGet(inner) => {
-                Builder::Authoring(BuilderAuthoring::StorageGet(StorageGet(self, inner)))
+                Builder::Authoring(BuilderAuthoring::StorageGet(StorageGet(inner, self)))
             }
             runtime::BlockBuild::PrefixKeys(inner) => {
-                Builder::Authoring(BuilderAuthoring::PrefixKeys(PrefixKeys(self, inner)))
+                Builder::Authoring(BuilderAuthoring::PrefixKeys(PrefixKeys(inner, self)))
             }
             runtime::BlockBuild::NextKey(inner) => {
-                Builder::Authoring(BuilderAuthoring::NextKey(NextKey(self, inner)))
+                Builder::Authoring(BuilderAuthoring::NextKey(NextKey(inner, self)))
             }
         }
     }
