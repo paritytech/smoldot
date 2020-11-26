@@ -372,12 +372,10 @@ where
                             .remove_and_purge_address();
 
                         debug_assert_eq!(total_read, 0);
-                        return Ok(ReadWrite {
-                            read_bytes: 0,
-                            written_bytes: total_written,
-                            write_close: true,
-                            wake_up_after: None,
-                        });
+                        // TODO: more appropriate error?
+                        return Err(ConnectionError::Established(
+                            connection::established::Error::ConnectionClosed,
+                        ));
                     }
                 };
 
