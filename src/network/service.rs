@@ -19,18 +19,19 @@
 //!
 //! # Usage
 //!
-//! The main data structure in this module is [`Network`], which holds the state of all active
-//! and pending libp2p connections to other nodes. The second most important data structure is
-//! [`Connection`], which holds the state of a single active connection.
+//! The main data structure in this module is [`ChainNetwork`], which holds the state of all
+//! active and pending libp2p connections to other nodes. The second most important data structure
+//! is [`Connection`], which holds the state of a single active connection.
 //!
-//! The [`Network`] requires [`Connection`] to be spawned. The [`Network`] only holds the latest
-//! known state of the various [`Connection`]s associated to it. The state of the [`Network`] and
-//! its [`Connection`] isn't performed automatically, and must be performed by the user by
-//! exchanging [`ConnectionToService`] and [`ServiceToConnection`] messages between the two.
+//! The [`ChainNetwork`] requires [`Connection`] to be spawned. The [`ChainNetwork`] only holds
+//! the latest known state of the various [`Connection`]s associated to it. The state of the
+//! [`ChainNetwork`] and its [`Connection`] isn't performed automatically, and must be performed
+//! by the user by exchanging [`ConnectionToService`] and [`ServiceToConnection`] messages between
+//! the two.
 //!
-//! This separation between [`Network`] and [`Connection`] makes it possible to call
+//! This separation between [`ChainNetwork`] and [`Connection`] makes it possible to call
 //! [`Connection::read_write`] in parallel for multiple different connections. Only the
-//! synchronization with the [`Network`] needs to be single-threaded.
+//! synchronization with the [`ChainNetwork`] needs to be single-threaded.
 
 use crate::network::{connection, libp2p, protocol, Multiaddr, PeerId};
 
@@ -41,7 +42,7 @@ use core::{
     time::Duration,
 };
 
-/// Configuration for a [`Network`].
+/// Configuration for a [`ChainNetwork`].
 pub struct Config<TPeer> {
     /// Seed for the randomness within the networking state machine.
     ///
@@ -76,7 +77,7 @@ pub struct Config<TPeer> {
     ///
     /// # Context
     ///
-    /// The [`Network`] maintains an internal buffer of the events returned by
+    /// The [`ChainNetwork`] maintains an internal buffer of the events returned by
     /// [`ChainNetwork::next_event`]. When [`ChainNetwork::read_write`] is called, an event might
     /// get pushed to this buffer. If this buffer is full, back-pressure will be applied to the
     /// connections in order to prevent new events from being pushed.
@@ -109,7 +110,7 @@ pub struct ChainConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(libp2p::PendingId);
 
-/// Identifier of a [`Connection`] spawned by the [`Network`].
+/// Identifier of a [`Connection`] spawned by the [`ChainNetwork`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(libp2p::ConnectionId);
 
@@ -205,8 +206,8 @@ where
 
     pub async fn announce_transaction(&self, transaction: Vec<u8>) {}
 
-    /// After a [`Event::StartConnect`], notifies the [`Network`] of the success of the dialing
-    /// attempt.
+    /// After a [`Event::StartConnect`], notifies the [`ChainNetwork`] of the success of the
+    /// dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
@@ -218,8 +219,8 @@ where
         ConnectionId(self.libp2p.pending_outcome_ok(id.0, user_data).await)
     }
 
-    /// After a [`Event::StartConnect`], notifies the [`Network`] of the failure of the dialing
-    /// attempt.
+    /// After a [`Event::StartConnect`], notifies the [`ChainNetwork`] of the failure of the
+    /// dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_ok`].
     ///
