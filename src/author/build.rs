@@ -113,11 +113,13 @@ pub enum BuilderAuthoring {
     ///
     /// > **Note**: These extrinsics are generally coming from a transactions pool, but this is
     /// >           out of scope of this module.
+    // TODO: change it to be only a documentation of what we do, instead of asking the user
     ApplyExtrinsic(ApplyExtrinsic),
 
     /// Result of the previous call to [`ApplyExtrinsic::add_extrinsic`].
     ///
     /// An [`ApplyExtrinsic`] object is provided in order to continue the operation.
+    // TODO: change it to be only a documentation of what we do, instead of asking the user
     ApplyExtrinsicResult {
         /// Result of the previous call to [`ApplyExtrinsic::add_extrinsic`].
         result: Result<Result<(), DispatchError>, TransactionValidityError>,
@@ -288,7 +290,7 @@ impl StorageGet {
     /// Injects the corresponding storage value.
     // TODO: `value` parameter should be something like `Iterator<Item = impl AsRef<[u8]>`
     pub fn inject_value(self, value: Option<&[u8]>) -> Builder {
-        Builder::from_inner(self.0.inject_value(value), self.1)
+        self.1.with_runtime_inner(self.0.inject_value(value))
     }
 }
 
@@ -305,7 +307,7 @@ impl PrefixKeys {
 
     /// Injects the list of keys.
     pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Builder {
-        Builder::from_inner(self.0.inject_keys(keys), self.1)
+        self.1.with_runtime_inner(self.0.inject_keys(keys))
     }
 }
 
@@ -327,7 +329,7 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Builder {
-        Builder::from_inner(self.0.inject_key(key), self.1)
+        self.1.with_runtime_inner(self.0.inject_key(key))
     }
 }
 
@@ -336,38 +338,37 @@ impl NextKey {
 struct Shared {}
 
 impl Shared {
-    fn with_runtime_inner(self, inner: runtime::BlockBuild) -> Builder {
-        match inner {
-            runtime::BlockBuild::Finished(result) => {}
-            runtime::BlockBuild::InherentExtrinsics(inner) => {
-                Builder::Authoring(BuilderAuthoring::InherentExtrinsics(InherentExtrinsics {
-                    shared: self,
-                    inner,
-                }))
-            }
-            runtime::BlockBuild::ApplyExtrinsic(inner) => {
-                Builder::Authoring(BuilderAuthoring::ApplyExtrinsic(ApplyExtrinsic {
-                    inner,
-                    shared: self,
-                }))
-            }
-            runtime::BlockBuild::ApplyExtrinsicResult { result, resume } => {
-                Builder::Authoring(BuilderAuthoring::ApplyExtrinsicResult {
-                    result,
-                    resume: ApplyExtrinsic {
-                        inner: resume,
+    fn with_runtime_inner(self, mut inner: runtime::BlockBuild) -> Builder {
+        loop {
+            match inner {
+                runtime::BlockBuild::Finished(result) => todo!(),
+                runtime::BlockBuild::InherentExtrinsics(inner) => {
+                    break Builder::Authoring(BuilderAuthoring::InherentExtrinsics(InherentExtrinsics {
                         shared: self,
-                    },
-                })
-            }
-            runtime::BlockBuild::StorageGet(inner) => {
-                Builder::Authoring(BuilderAuthoring::StorageGet(StorageGet(inner, self)))
-            }
-            runtime::BlockBuild::PrefixKeys(inner) => {
-                Builder::Authoring(BuilderAuthoring::PrefixKeys(PrefixKeys(inner, self)))
-            }
-            runtime::BlockBuild::NextKey(inner) => {
-                Builder::Authoring(BuilderAuthoring::NextKey(NextKey(inner, self)))
+                        inner,
+                    }))
+                }
+                runtime::BlockBuild::ApplyExtrinsic(a) => {
+                    inner = a.finish();
+                }
+                runtime::BlockBuild::ApplyExtrinsicResult { result, resume } => {
+                    break Builder::Authoring(BuilderAuthoring::ApplyExtrinsicResult {
+                        result,
+                        resume: ApplyExtrinsic {
+                            inner: resume,
+                            shared: self,
+                        },
+                    })
+                }
+                runtime::BlockBuild::StorageGet(inner) => {
+                    break Builder::Authoring(BuilderAuthoring::StorageGet(StorageGet(inner, self)))
+                }
+                runtime::BlockBuild::PrefixKeys(inner) => {
+                    break Builder::Authoring(BuilderAuthoring::PrefixKeys(PrefixKeys(inner, self)))
+                }
+                runtime::BlockBuild::NextKey(inner) => {
+                    break Builder::Authoring(BuilderAuthoring::NextKey(NextKey(inner, self)))
+                }
             }
         }
     }
