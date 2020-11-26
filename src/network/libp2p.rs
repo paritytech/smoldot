@@ -109,7 +109,7 @@ pub struct ProtocolConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(peerset::ConnectionId);
 
-/// Identifier of a [`Connection`] spawned by the [`Network`].
+/// Identifier of a connection spawned by the [`Network`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(peerset::ConnectionId);
 

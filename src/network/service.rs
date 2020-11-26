@@ -71,7 +71,7 @@ pub struct Config<TPeer> {
 
 /// Configuration for a specific overlay network.
 ///
-/// See [`Config::overlay_networks`].
+/// See [`Config::chains`].
 pub struct ChainConfig {
     /// Identifier of the protocol, used on the wire to determine which chain messages refer to.
     ///
@@ -92,7 +92,7 @@ pub struct ChainConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(libp2p::PendingId);
 
-/// Identifier of a [`Connection`] spawned by the [`ChainNetwork`].
+/// Identifier of a connection spawned by the [`ChainNetwork`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(libp2p::ConnectionId);
 
