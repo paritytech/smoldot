@@ -10,7 +10,9 @@ readme = "README.md"
 keywords = ["blockchain", "peer-to-peer"]
 
 [workspace]
+default-members = [".", "bin/full-node"]
 members = [
+    ".",
     "bin/full-node",
     "bin/wasm-node/rust",
 ]
@@ -35,7 +37,7 @@ std = [
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
-ahash = { version = "0.5.8", default-features = false }
+ahash = { version = "0.6.1", default-features = false }
 arrayvec = { version = "0.5.2", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
@@ -49,11 +51,11 @@ hex = { version = "0.4.2", default-features = false }
 libsecp256k1 = { version = "0.3.5", default-features = false }
 merlin = { version = "2.0", default-features = false }
 multihash = "0.11.4"  # TODO: waiting for a crates.io publication of https://github.com/multiformats/rust-multihash/pull/82 that adds no_std support
-nom = { version = "6.0.0", default-features = false, features = ["alloc"] }
+nom = { version = "6.0.1", default-features = false, features = ["alloc"] }
 num-bigint = { version = "0.3.1", default-features = false }
 num-rational = { version = "0.3.2", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.14", default-features = false }
-parity-multiaddr = "0.9.4" # TODO: doesn't support no_std
+parity-multiaddr = "0.9.6" # TODO: doesn't support no_std
 prost = "0.6.1"  # TODO: waiting for a published version that supports no_std
 rand = { version = "0.7.3", default-features = false }
 rand_chacha = { version = "0.2.2", default-features = false }
