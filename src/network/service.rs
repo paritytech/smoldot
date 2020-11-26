@@ -265,17 +265,17 @@ where
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
-    ) -> ReadWrite<TNow> {
+    ) -> Result<ReadWrite<TNow>, libp2p::ConnectionError> {
         let inner = self
             .libp2p
             .read_write(connection_id.0, now, incoming_buffer, outgoing_buffer, cx)
-            .await;
-        ReadWrite {
+            .await?;
+        Ok(ReadWrite {
             read_bytes: inner.read_bytes,
             written_bytes: inner.written_bytes,
             wake_up_after: inner.wake_up_after,
             write_close: inner.write_close,
-        }
+        })
     }
 }
 

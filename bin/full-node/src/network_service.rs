@@ -286,7 +286,7 @@ async fn connection_task(
 
         let waker = Arc::new(Waker(std::sync::Mutex::new((false, None))));
 
-        let read_write = network_service
+        let read_write = match network_service
             .network
             .read_write(
                 id,
@@ -295,7 +295,11 @@ async fn connection_task(
                 write_buffer.unwrap(),
                 &mut std::task::Context::from_waker(&*futures::task::waker_ref(&waker)),
             )
-            .await;
+            .await
+        {
+            Ok(rw) => rw,
+            Err(_) => return,
+        };
 
         // TODO:
         /*if read_write.write_close && !tcp_socket.is_closed() {

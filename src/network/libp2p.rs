@@ -344,7 +344,7 @@ where
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
-    ) -> ReadWrite<TNow> {
+    ) -> Result<ReadWrite<TNow>, ConnectionError> {
         let mut total_read = 0;
         let mut total_written = 0;
         let mut wake_up_after = None;
@@ -372,12 +372,12 @@ where
                             .remove_and_purge_address();
 
                         debug_assert_eq!(total_read, 0);
-                        return ReadWrite {
+                        return Ok(ReadWrite {
                             read_bytes: 0,
                             written_bytes: total_written,
                             write_close: true,
                             wake_up_after: None,
-                        };
+                        });
                     }
                 };
 
@@ -388,8 +388,13 @@ where
                 let (mut result, is_idle) = {
                     let (result, num_read, num_written) =
                         match handshake.read_write(incoming_buffer, outgoing_buffer) {
-                            Ok(r) => r,
-                            Err(_) => todo!(),
+                            Ok(rw) => rw,
+                            Err(err) => {
+                                let mut guarded = self.guarded.lock().await;
+                                let pending = guarded.peerset.pending_mut(connection_id.0).unwrap();
+                                pending.remove_and_purge_address();
+                                return Err(ConnectionError::Handshake(err));
+                            }
                         };
                     total_read += num_read;
                     total_written += num_written;
@@ -412,7 +417,7 @@ where
                             let pending = guarded.peerset.pending_mut(connection_id.0).unwrap();
                             if *pending.peer_id() != remote_peer_id {
                                 pending.remove_and_purge_address();
-                                break; // TODO: ?
+                                return Err(ConnectionError::PeerIdMismatch);
                             }
 
                             pending.into_established(|_| {
@@ -459,14 +464,26 @@ where
                     _ => established.2 = Some(cx.waker().clone()),
                 }
 
-                let read_write = match established.0.take().unwrap().read_write(
-                    now,
-                    incoming_buffer,
-                    outgoing_buffer,
-                ) {
-                    Ok(r) => r,
-                    Err(_err) => todo!("{:?}", _err), // TODO:
+                let read_write_result =
+                    established
+                        .0
+                        .take()
+                        .unwrap()
+                        .read_write(now, incoming_buffer, outgoing_buffer);
+
+                let read_write = match read_write_result {
+                    Ok(rw) => rw,
+                    Err(err) => {
+                        let mut guarded = self.guarded.lock().await;
+                        guarded
+                            .peerset
+                            .connection_mut(connection_id.0)
+                            .unwrap()
+                            .remove();
+                        return Err(ConnectionError::Established(err));
+                    }
                 };
+
                 total_read += read_write.read_bytes;
                 total_written += read_write.written_bytes;
                 debug_assert!(wake_up_after.is_none());
@@ -514,12 +531,12 @@ where
             }
         }
 
-        ReadWrite {
+        Ok(ReadWrite {
             read_bytes: total_read,
             written_bytes: total_written,
             wake_up_after,
             write_close: false, // TODO:
-        }
+        })
     }
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
@@ -621,4 +638,10 @@ pub struct ReadWrite<TNow> {
     /// If, after calling [`Network::read_write`], the returned [`ReadWrite`] contains `true` here,
     /// and the inbound buffer is `None`, then the [`ConnectionId`] is now invalid.
     pub write_close: bool,
+}
+
+pub enum ConnectionError {
+    Established(connection::established::Error),
+    Handshake(connection::handshake::HandshakeError),
+    PeerIdMismatch,
 }
