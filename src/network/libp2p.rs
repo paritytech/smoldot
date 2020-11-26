@@ -244,17 +244,23 @@ where
                 .clone()
         };
 
-        let mut connection = connection.lock().await;
+        let mut connection_lock = connection.lock().await;
 
         let (send_back, receive_result) = oneshot::channel();
-        connection
+        connection_lock
             .0
             .as_mut()
             .unwrap()
             .add_request(now, protocol, request_data, send_back);
-        if let Some(waker) = connection.2.take() {
+        if let Some(waker) = connection_lock.2.take() {
             waker.wake();
         }
+
+        // Make sure to unlock the connection before waiting for the result.
+        drop(connection_lock);
+        // The `Arc` to the connection should also be dropped, so that the channel gets dropped
+        // if the connection is removed from the peerset.
+        drop(connection);
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
         match receive_result.await {
@@ -421,8 +427,13 @@ where
                             pending.into_established(|_| {
                                 let established =
                                     connection.into_connection(connection::established::Config {
-                                        in_notifications_protocols: vec![], // TODO:
-                                        in_request_protocols: vec![],       // TODO:
+                                        in_notifications_protocols: vec![
+                                            connection::established::ConfigNotifications {
+                                                name: "/dot/block-announces/1".to_string(), // TODO: correct protocolId
+                                                max_handshake_size: 1024 * 1024,
+                                            },
+                                        ],
+                                        in_request_protocols: vec![], // TODO:
                                         randomness_seed,
                                         ping_protocol: "/ipfs/ping/1.0.0".into(), // TODO: configurable
                                     });
@@ -473,11 +484,20 @@ where
                     Ok(rw) => rw,
                     Err(err) => {
                         let mut guarded = self.guarded.lock().await;
+                        let peer_id = {
+                            let c = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                            let peer_id = c.peer_id().clone();
+                            c.remove();
+                            peer_id
+                        };
+
+                        // TODO: only send if last connection
                         guarded
-                            .peerset
-                            .connection_mut(connection_id.0)
-                            .unwrap()
-                            .remove();
+                            .events_tx
+                            .send(Event::Disconnected(peer_id))
+                            .await
+                            .unwrap();
+
                         return Err(ConnectionError::Established(err));
                     }
                 };
@@ -503,14 +523,13 @@ where
                         user_data: send_back,
                         ..
                     }) => {
-                        println!("response");
                         let _ = send_back.send(response.map_err(|_| ()));
                     }
                     Some(connection::established::Event::NotificationsInOpen {
                         id,
                         protocol,
                         handshake,
-                    }) => todo!(),
+                    }) => {} // TODO:
                     Some(connection::established::Event::NotificationIn { id, notification }) => {
                         todo!()
                     }
