@@ -635,17 +635,17 @@ pub enum Event {
     },
 }
 
-/// Outcome of calling [`Connection::read_write`].
+/// Outcome of calling [`Network::read_write`].
 pub struct ReadWrite<TNow> {
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
-    /// should no longer be present the next time [`Connection::read_write`] is called.
+    /// should no longer be present the next time [`Network::read_write`] is called.
     pub read_bytes: usize,
 
     /// Number of bytes written to the outgoing buffer. These bytes should be sent out to the
     /// remote. The rest of the outgoing buffer is left untouched.
     pub written_bytes: usize,
 
-    /// If `Some`, [`Connection::read_write`] should be called again when the point in time
+    /// If `Some`, [`Network::read_write`] should be called again when the point in time
     /// reaches the value in the `Option`.
     pub wake_up_after: Option<TNow>,
 

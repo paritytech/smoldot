@@ -15,24 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Networking service. Handles a collection of libp2p TCP connections.
-//!
-//! # Usage
-//!
-//! The main data structure in this module is [`ChainNetwork`], which holds the state of all
-//! active and pending libp2p connections to other nodes. The second most important data structure
-//! is [`Connection`], which holds the state of a single active connection.
-//!
-//! The [`ChainNetwork`] requires [`Connection`] to be spawned. The [`ChainNetwork`] only holds
-//! the latest known state of the various [`Connection`]s associated to it. The state of the
-//! [`ChainNetwork`] and its [`Connection`] isn't performed automatically, and must be performed
-//! by the user by exchanging [`ConnectionToService`] and [`ServiceToConnection`] messages between
-//! the two.
-//!
-//! This separation between [`ChainNetwork`] and [`Connection`] makes it possible to call
-//! [`Connection::read_write`] in parallel for multiple different connections. Only the
-//! synchronization with the [`ChainNetwork`] needs to be single-threaded.
-
 use crate::network::{connection, libp2p, protocol, Multiaddr, PeerId};
 
 use core::{
@@ -296,17 +278,17 @@ pub enum Event {
     },
 }
 
-/// Outcome of calling [`Connection::read_write`].
+/// Outcome of calling [`ChainNetwork::read_write`].
 pub struct ReadWrite<TNow> {
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
-    /// should no longer be present the next time [`Connection::read_write`] is called.
+    /// should no longer be present the next time [`ChainNetwork::read_write`] is called.
     pub read_bytes: usize,
 
     /// Number of bytes written to the outgoing buffer. These bytes should be sent out to the
     /// remote. The rest of the outgoing buffer is left untouched.
     pub written_bytes: usize,
 
-    /// If `Some`, [`Connection::read_write`] should be called again when the point in time
+    /// If `Some`, [`ChainNetwork::read_write`] should be called again when the point in time
     /// reaches the value in the `Option`.
     pub wake_up_after: Option<TNow>,
 
