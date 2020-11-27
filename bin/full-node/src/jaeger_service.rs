@@ -59,7 +59,7 @@ pub struct Config {
     /// Service name to report to the Jaeger agent.
     pub service_name: String,
 
-    /// Address of the Jaeger agent to send traces to.
+    /// Address of the Jaeger agent to send traces to. Uses UDP.
     pub jaeger_agent: Option<SocketAddr>,
 }
 
