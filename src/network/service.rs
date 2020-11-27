@@ -206,7 +206,7 @@ where
             .libp2p
             .request(now, target, protocol, request_data)
             .await?;
-        Ok(protocol::decode_storage_proof_response(&response).unwrap()) //.map_err(|_| ())
+        protocol::decode_storage_proof_response(&response).map_err(|_| ())
     }
 
     pub async fn announce_transaction(&self, transaction: Vec<u8>) {}
