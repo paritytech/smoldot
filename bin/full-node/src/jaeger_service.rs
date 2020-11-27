@@ -15,19 +15,34 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// TODO: documentation
-/* TODO: docker run -d --name jaeger \
-  -e COLLECTOR_ZIPKIN_HTTP_PORT=9411 \
-  -p 5775:5775/udp \
-  -p 6831:6831/udp \
-  -p 6832:6832/udp \
-  -p 5778:5778 \
-  -p 16686:16686 \
-  -p 14268:14268 \
-  -p 14250:14250 \
-  -p 9411:9411 \
-  jaegertracing/all-in-one:1.21
-*/
+//! Jaeger integration.
+//!
+//! See <https://www.jaegertracing.io/> for an introduction.
+//!
+//! The easiest way to try Jaeger is:
+//!
+//! - Start a docker container with the all-in-one docker image (see below).
+//! - Run [`JaegerService`] with [`Config::jaeger_agent`] set to `127.0.0.1:6831`.
+//! - Open your browser and navigate to <https://localhost:16686> to acces the UI.
+//!
+//! The all-in-one docker image can be started with:
+//!
+//! ```not_rust
+//! docker run -d --name jaeger \
+//!  -e COLLECTOR_ZIPKIN_HTTP_PORT=9411 \
+//!  -p 5775:5775/udp \
+//!  -p 6831:6831/udp \
+//!  -p 6832:6832/udp \
+//!  -p 5778:5778 \
+//!  -p 16686:16686 \
+//!  -p 14268:14268 \
+//!  -p 14250:14250 \
+//!  -p 9411:9411 \
+//!  jaegertracing/all-in-one:1.21
+//! ```
+//!
+
+// TODO: more documentation
 
 use async_std::net::UdpSocket;
 use substrate_lite::network::PeerId;
@@ -41,8 +56,11 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
-    /// Address of the Jaeger server to send traces to.
-    pub jaeger_server: Option<SocketAddr>,
+    /// Service name to report to the Jaeger agent.
+    pub service_name: String,
+
+    /// Address of the Jaeger agent to send traces to.
+    pub jaeger_agent: Option<SocketAddr>,
 }
 
 pub struct JaegerService {
@@ -52,10 +70,10 @@ pub struct JaegerService {
 impl JaegerService {
     pub async fn new(mut config: Config) -> Result<Arc<Self>, io::Error> {
         let (traces_in, mut traces_out) = mick_jaeger::init(mick_jaeger::Config {
-            service_name: env!("CARGO_PKG_NAME").to_string(),
+            service_name: config.service_name,
         });
 
-        if let Some(jaeger_server) = config.jaeger_server {
+        if let Some(jaeger_agent) = config.jaeger_agent {
             let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
 
             // Spawn a background task that pulls span information and sends them on the network.
@@ -65,7 +83,7 @@ impl JaegerService {
                     // UDP sending errors happen only either if the API is misused (in which case
                     // panicking is desirable) or in case of missing priviledge, in which case a
                     // panic is preferable in order to inform the user.
-                    udp_socket.send_to(&buf, jaeger_server).await.unwrap();
+                    udp_socket.send_to(&buf, jaeger_agent).await.unwrap();
                 }
             }));
         }

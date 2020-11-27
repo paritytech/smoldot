@@ -117,7 +117,8 @@ async fn async_main() {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
-        jaeger_server: cli_options.jaeger,
+        service_name: env!("CARGO_PKG_NAME").to_string(),  // TODO: append the PeerId of the node
+        jaeger_agent: cli_options.jaeger,
     })
     .await
     .unwrap();
