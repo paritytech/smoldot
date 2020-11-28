@@ -186,7 +186,8 @@
 
 // TODO: for `no_std`, fix all the compilation errors caused by the copy-pasted code
 //#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![recursion_limit = "1024"]
+#![deny(broken_intra_doc_links)]
+#![deny(unused_crate_dependencies)]
 
 extern crate alloc;
 

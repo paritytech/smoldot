@@ -20,7 +20,7 @@
 //! The [`execute_block`] verifies the validity of a block header and body by *executing* the
 //! block. Executing the block consists in running the `Core_execute_block` function of the
 //! runtime, passing as parameter the header and the body of the block. The runtime function is
-//! then tasked with verifying the validity of its parameters and calling the external functions
+//! then tasked with verifying the validity of its parameters and calling the host functions
 //! that modify the state of the storage.
 //!
 //! The header passed to the runtime must not contain a seal.
@@ -40,7 +40,7 @@
 //!
 
 use crate::{
-    executor::{self, runtime_externals},
+    executor::{host, runtime_host},
     header,
     trie::calculate_root,
     util,
@@ -54,7 +54,7 @@ use hashbrown::HashMap;
 pub struct Config<'a, TBody> {
     /// Runtime used to check the new block. Must be built using the Wasm code found at the
     /// `:code` key of the parent block storage.
-    pub parent_runtime: executor::WasmVmPrototype,
+    pub parent_runtime: host::HostVmPrototype,
 
     /// Header of the block to verify, in SCALE encoding.
     ///
@@ -75,7 +75,7 @@ pub struct Config<'a, TBody> {
 /// Block successfully verified.
 pub struct Success {
     /// Runtime that was passed by [`Config`].
-    pub parent_runtime: executor::WasmVmPrototype,
+    pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
     pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// List of changes to the offchain storage that this block performs.
@@ -89,18 +89,21 @@ pub struct Success {
 /// Error that can happen during the verification.
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
-    /// Error while executing the Wasm virtual machine.
+    /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
-    WasmVm(runtime_externals::Error),
+    WasmStart(host::StartErr),
+    /// Error while running the Wasm virtual machine.
+    #[display(fmt = "{}", _0)]
+    WasmVm(runtime_host::Error),
     /// Output of `Core_execute_block` wasn't empty.
     NonEmptyOutput,
 }
 
 /// Verifies whether a block is valid.
-pub fn execute_block<'a>(
-    config: Config<'a, impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
+pub fn execute_block(
+    config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
-    let vm = runtime_externals::run(runtime_externals::Config {
+    let vm = runtime_host::run(runtime_host::Config {
         virtual_machine: config.parent_runtime,
         function_to_call: "Core_execute_block",
         parameter: {
@@ -123,12 +126,12 @@ pub fn execute_block<'a>(
         top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
         storage_top_trie_changes: Default::default(),
         offchain_storage_changes: Default::default(),
-    })
-    .unwrap();
+    });
 
-    // TODO: shouldn't unwrap ^
-
-    Verify::from_inner(vm)
+    match vm {
+        Ok(vm) => Verify::from_inner(vm),
+        Err(err) => Verify::Finished(Err(Error::WasmStart(err))),
+    }
 }
 
 /// Current state of the verification.
@@ -145,40 +148,34 @@ pub enum Verify {
 }
 
 impl Verify {
-    fn from_inner(inner: runtime_externals::RuntimeExternalsVm) -> Self {
+    fn from_inner(inner: runtime_host::RuntimeHostVm) -> Self {
         match inner {
-            runtime_externals::RuntimeExternalsVm::Finished(Ok(success)) => {
+            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 if !success.virtual_machine.value().is_empty() {
                     return Verify::Finished(Err(Error::NonEmptyOutput));
                 }
 
-                return Verify::Finished(Ok(Success {
+                Verify::Finished(Ok(Success {
                     parent_runtime: success.virtual_machine.into_prototype(),
                     storage_top_trie_changes: success.storage_top_trie_changes,
                     offchain_storage_changes: success.offchain_storage_changes,
                     top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
                     logs: success.logs,
-                }));
+                }))
             }
-            runtime_externals::RuntimeExternalsVm::Finished(Err(err)) => {
+            runtime_host::RuntimeHostVm::Finished(Err(err)) => {
                 Verify::Finished(Err(Error::WasmVm(err)))
             }
-            runtime_externals::RuntimeExternalsVm::StorageGet(inner) => {
-                Verify::StorageGet(StorageGet(inner))
-            }
-            runtime_externals::RuntimeExternalsVm::PrefixKeys(inner) => {
-                Verify::PrefixKeys(PrefixKeys(inner))
-            }
-            runtime_externals::RuntimeExternalsVm::NextKey(inner) => {
-                Verify::NextKey(NextKey(inner))
-            }
+            runtime_host::RuntimeHostVm::StorageGet(inner) => Verify::StorageGet(StorageGet(inner)),
+            runtime_host::RuntimeHostVm::PrefixKeys(inner) => Verify::PrefixKeys(PrefixKeys(inner)),
+            runtime_host::RuntimeHostVm::NextKey(inner) => Verify::NextKey(NextKey(inner)),
         }
     }
 }
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(runtime_externals::StorageGet);
+pub struct StorageGet(runtime_host::StorageGet);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -202,7 +199,7 @@ impl StorageGet {
 
 /// Fetching the list of keys with a given prefix is required in order to continue.
 #[must_use]
-pub struct PrefixKeys(runtime_externals::PrefixKeys);
+pub struct PrefixKeys(runtime_host::PrefixKeys);
 
 impl PrefixKeys {
     /// Returns the prefix whose keys to load.
@@ -218,7 +215,7 @@ impl PrefixKeys {
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(runtime_externals::NextKey);
+pub struct NextKey(runtime_host::NextKey);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.

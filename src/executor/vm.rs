@@ -15,14 +15,86 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// TODO: documentation
+//! General-purpose WebAssembly virtual machine.
+//!
+//! Contains code related to running a WebAssembly virtual machine. Contrary to
+//! (`HostVm`)[super::host::HostVm], this module isn't aware of any of the host
+//! functions available to Substrate runtimes. It only contains the code required to run a virtual
+//! machine, with some adjustments explained below.
+//!
+//! # Usage
+//!
+//! Call [`VirtualMachinePrototype::new`] in order to parse and/or compile some WebAssembly code.
+//! One of the parameters of this function is a function that is passed the name of functions
+//! imported by the Wasm code, and must return an opaque `usize`. This `usize` doesn't have any
+//! meaning, but will later be passed back to the user through [`ExecOutcome::Interrupted::id`]
+//! when the corresponding function is called.
+//!
+//! The WebAssembly code can export functions in two different ways:
+//!
+//! - Some functions are exported through an `(export)` statement.
+//!   See <https://webassembly.github.io/spec/core/bikeshed/#export-section%E2%91%A0>.
+//! - Some functions are stored in a global table called `__indirect_function_table`, and are
+//!   later referred to by their index in this table. This is how the concept of "function
+//!   pointers" commonly found in low-level programming languages is translated in WebAssembly.
+//!
+//! > **Note**: At the time of writing, it isn't possible to call the second type of functions yet.
+//!
+//! Use [`VirtualMachinePrototype::start`] in order to start executing a function exported through
+//! an `(export)` statement.
+//!
+//! Call [`VirtualMachine::run`] on the [`VirtualMachine`] returned by `start` in order to run the
+//! WebAssembly code. The `run` method returns either if the function being called returns, or if
+//! the WebAssembly code calls a host function. In the latter case, [`ExecOutcome::Interrupted`]
+//! is returned and the virtual machine is now paused. Once the logic of the host function has
+//! been executed, call `run` again, passing the return value of that host function.
+//!
+//! # About heap pages
+//!
+//! In the WebAssembly specifications, the memory available in the WebAssembly virtual machine has
+//! an initial size and a maximum size. One of the instructions available in WebAssembly code is
+//! [the `memory.grow` instruction](https://webassembly.github.io/spec/core/bikeshed/#-hrefsyntax-instr-memorymathsfmemorygrow),
+//! which allows increasing the size of the memory.
+//!
+//! The Substrate/Polkadot runtime environment, however, differs. Rather than having a resizable
+//! memory, memory has a fixed size that consists of its initial size plus a number of pages equal
+//! to the value of `heap_pages` passed as parameter. It is forbidden for the WebAssembly code
+//! to use `memory.grow`.
+//!
+//! See also the [`../externals`] module for more information about how memory works in the
+//! context of the Substrate/Polkadot runtime.
+//!
+//! # About `__indirect_function_table`
+//!
+//! At initialization, the virtual machine will look for a table named `__indirect_function_table`.
+//! If present, this table is expected to contain functions. These functions can then be referred
+//! to by their index in this table. This is how the concept of "function pointers" commonly found
+//! in programming languages is translated in WebAssembly.
+//!
+//! > **Note**: When compiling C, C++, Rust, or similar languages to WebAssembly, one must pass
+//! >           the `--export-table` option to the LLVM linker in order for this symbol to be
+//! >           exported.
+//!
+//! # About imported vs exported memory
+//!
+//! WebAssembly supports, in theory, addressing multiple different memory objects. The WebAssembly
+//! module can declare memory in two ways:
+//!
+//! - Either by exporting a memory object in the `(export)` section under the name `memory`.
+//! - Or by importing a memory object in its `(import)` section.
+//!
+//! The virtual machine in this module supports both variants. However, no more than one memory
+//! object can be exported or imported.
+//!
+//! The first variant used to be the default model when compiling to WebAssembly, but the second
+//! variant (importing memory objects) is preferred nowadays.
 
 mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod jit;
 
 use alloc::vec::Vec;
-use core::fmt;
+use core::{convert::TryFrom, fmt};
 use smallvec::SmallVec;
 
 pub struct VirtualMachinePrototype {
@@ -32,7 +104,7 @@ pub struct VirtualMachinePrototype {
 enum VirtualMachinePrototypeInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::JitPrototype),
-    Interpreter(interpreter::VirtualMachinePrototype),
+    Interpreter(interpreter::InterpreterPrototype),
 }
 
 impl VirtualMachinePrototype {
@@ -42,7 +114,8 @@ impl VirtualMachinePrototype {
     /// import, or return an error if the import can't be resolved. When the VM calls one of these
     /// functions, this number will be returned back in order for the user to know how to handle
     /// the call.
-    // TODO: explain heap_pages
+    ///
+    /// See [the module-level documentation](..) for an explanation of the parameters.
     pub fn new(
         module: impl AsRef<[u8]>,
         heap_pages: u64,
@@ -67,14 +140,16 @@ impl VirtualMachinePrototype {
                 let out = unreachable!();
                 out
             } else {
-                VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::VirtualMachinePrototype::new(module, heap_pages, symbols)?,
-                )
+                VirtualMachinePrototypeInner::Interpreter(interpreter::InterpreterPrototype::new(
+                    module, heap_pages, symbols,
+                )?)
             },
         })
     }
 
     /// Returns the value of a global that the module exports.
+    ///
+    /// The global variable must be a `u32`, otherwise an error is returned.
     pub fn global_value(&mut self, name: &str) -> Result<u32, GlobalValueErr> {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -89,7 +164,7 @@ impl VirtualMachinePrototype {
         self,
         function_name: &str,
         params: &[WasmValue],
-    ) -> Result<VirtualMachine, NewErr> {
+    ) -> Result<VirtualMachine, StartErr> {
         Ok(VirtualMachine {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -104,8 +179,7 @@ impl VirtualMachinePrototype {
     }
 }
 
-// TODO:
-/*impl fmt::Debug for VirtualMachinePrototype {
+impl fmt::Debug for VirtualMachinePrototype {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -113,7 +187,7 @@ impl VirtualMachinePrototype {
             VirtualMachinePrototypeInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
         }
     }
-}*/
+}
 
 pub struct VirtualMachine {
     inner: VirtualMachineInner,
@@ -122,7 +196,7 @@ pub struct VirtualMachine {
 enum VirtualMachineInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::Jit),
-    Interpreter(interpreter::VirtualMachine),
+    Interpreter(interpreter::Interpreter),
 }
 
 impl VirtualMachine {
@@ -131,7 +205,7 @@ impl VirtualMachine {
     /// If this is the first call you call [`run`](VirtualMachine::run) for this thread, then you
     /// must pass a value of `None`.
     /// If, however, you call this function after a previous call to [`run`](VirtualMachine::run)
-    /// that was interrupted by an external function call, then you must pass back the outcome of
+    /// that was interrupted by a host function call, then you must pass back the outcome of
     /// that call.
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         match &mut self.inner {
@@ -155,7 +229,11 @@ impl VirtualMachine {
     /// Copies the given memory range into a `Vec<u8>`.
     ///
     /// Returns an error if the range is invalid or out of range.
-    pub fn read_memory<'a>(&'a self, offset: u32, size: u32) -> Result<impl AsRef<[u8]> + 'a, ()> {
+    pub fn read_memory<'a>(
+        &'a self,
+        offset: u32,
+        size: u32,
+    ) -> Result<impl AsRef<[u8]> + 'a, OutOfBoundsError> {
         Ok(match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => either::Left(inner.read_memory(offset, size)?),
@@ -171,7 +249,7 @@ impl VirtualMachine {
     /// Write the data at the given memory location.
     ///
     /// Returns an error if the range is invalid or out of range.
-    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), ()> {
+    pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.write_memory(offset, value),
@@ -222,7 +300,7 @@ pub enum ExecHint {
 /// Low-level Wasm function signature.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Signature {
-    params: SmallVec<[ValueType; 2]>,
+    params: SmallVec<[ValueType; 8]>,
     ret_ty: Option<ValueType>,
 }
 
@@ -250,7 +328,7 @@ impl Signature {
 }
 
 impl<'a> From<&'a Signature> for wasmi::Signature {
-    fn from(sig: &'a Signature) -> wasmi::Signature {
+    fn from(sig: &'a Signature) -> Self {
         wasmi::Signature::new(
             sig.params
                 .iter()
@@ -268,32 +346,46 @@ impl From<Signature> for wasmi::Signature {
     }
 }
 
-impl<'a> From<&'a wasmi::Signature> for Signature {
-    fn from(sig: &'a wasmi::Signature) -> Signature {
-        Signature::new(
-            sig.params().iter().cloned().map(ValueType::from),
-            sig.return_type().map(ValueType::from),
-        )
+impl<'a> TryFrom<&'a wasmi::Signature> for Signature {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(sig: &'a wasmi::Signature) -> Result<Self, Self::Error> {
+        Ok(Signature {
+            params: sig
+                .params()
+                .iter()
+                .cloned()
+                .map(ValueType::try_from)
+                .collect::<Result<_, _>>()?,
+            ret_ty: sig.return_type().map(ValueType::try_from).transpose()?,
+        })
     }
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-impl<'a> From<&'a wasmtime::FuncType> for Signature {
-    fn from(sig: &'a wasmtime::FuncType) -> Signature {
-        // TODO: we only support one return type at the moment; what even is multiple
-        // return types?
-        assert!(sig.results().len() <= 1);
+impl<'a> TryFrom<&'a wasmtime::FuncType> for Signature {
+    type Error = UnsupportedTypeError;
 
-        Signature::new(
-            sig.params().iter().cloned().map(ValueType::from),
-            sig.results().get(0).cloned().map(ValueType::from),
-        )
+    fn try_from(sig: &'a wasmtime::FuncType) -> Result<Self, Self::Error> {
+        if sig.results().len() > 1 {
+            return Err(UnsupportedTypeError);
+        }
+
+        Ok(Signature {
+            params: sig
+                .params()
+                .map(ValueType::try_from)
+                .collect::<Result<_, _>>()?,
+            ret_ty: sig.results().next().map(ValueType::try_from).transpose()?,
+        })
     }
 }
 
-impl From<wasmi::Signature> for Signature {
-    fn from(sig: wasmi::Signature) -> Signature {
-        Signature::from(&sig)
+impl TryFrom<wasmi::Signature> for Signature {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(sig: wasmi::Signature) -> Result<Self, Self::Error> {
+        Signature::try_from(&sig)
     }
 }
 
@@ -345,12 +437,14 @@ impl WasmValue {
     }
 }
 
-impl From<wasmi::RuntimeValue> for WasmValue {
-    fn from(val: wasmi::RuntimeValue) -> Self {
+impl TryFrom<wasmi::RuntimeValue> for WasmValue {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: wasmi::RuntimeValue) -> Result<Self, Self::Error> {
         match val {
-            wasmi::RuntimeValue::I32(v) => WasmValue::I32(v),
-            wasmi::RuntimeValue::I64(v) => WasmValue::I64(v),
-            _ => panic!(), // TODO: do something other than panicking here
+            wasmi::RuntimeValue::I32(v) => Ok(WasmValue::I32(v)),
+            wasmi::RuntimeValue::I64(v) => Ok(WasmValue::I64(v)),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
@@ -375,12 +469,14 @@ impl From<WasmValue> for wasmtime::Val {
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-impl From<wasmtime::Val> for WasmValue {
-    fn from(val: wasmtime::Val) -> Self {
+impl<'a> TryFrom<&'a wasmtime::Val> for WasmValue {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: &'a wasmtime::Val) -> Result<Self, Self::Error> {
         match val {
-            wasmtime::Val::I32(v) => WasmValue::I32(v),
-            wasmtime::Val::I64(v) => WasmValue::I64(v),
-            _ => unimplemented!(),
+            wasmtime::Val::I32(v) => Ok(WasmValue::I32(*v)),
+            wasmtime::Val::I64(v) => Ok(WasmValue::I64(*v)),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
@@ -394,26 +490,34 @@ impl From<ValueType> for wasmi::ValueType {
     }
 }
 
-impl From<wasmi::ValueType> for ValueType {
-    fn from(val: wasmi::ValueType) -> Self {
+impl TryFrom<wasmi::ValueType> for ValueType {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: wasmi::ValueType) -> Result<Self, Self::Error> {
         match val {
-            wasmi::ValueType::I32 => ValueType::I32,
-            wasmi::ValueType::I64 => ValueType::I64,
-            _ => panic!(), // TODO: do something other than panicking here
+            wasmi::ValueType::I32 => Ok(ValueType::I32),
+            wasmi::ValueType::I64 => Ok(ValueType::I64),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
 
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-impl From<wasmtime::ValType> for ValueType {
-    fn from(val: wasmtime::ValType) -> Self {
+impl TryFrom<wasmtime::ValType> for ValueType {
+    type Error = UnsupportedTypeError;
+
+    fn try_from(val: wasmtime::ValType) -> Result<Self, Self::Error> {
         match val {
-            wasmtime::ValType::I32 => ValueType::I32,
-            wasmtime::ValType::I64 => ValueType::I64,
-            _ => unimplemented!(), // TODO:
+            wasmtime::ValType::I32 => Ok(ValueType::I32),
+            wasmtime::ValType::I64 => Ok(ValueType::I64),
+            _ => Err(UnsupportedTypeError),
         }
     }
 }
+
+/// Error used in the conversions between VM implementation and the public API.
+#[derive(Debug, derive_more::Display)]
+pub struct UnsupportedTypeError;
 
 /// Outcome of the [`run`](VirtualMachine::run) function.
 #[derive(Debug)]
@@ -424,13 +528,12 @@ pub enum ExecOutcome {
     /// will return [`RunErr::Poisoned`].
     Finished {
         /// Return value of the function.
-        // TODO: error type should change here
-        return_value: Result<Option<WasmValue>, ()>,
+        return_value: Result<Option<WasmValue>, Trap>,
     },
 
-    /// The virtual machine has been paused due to a call to an external function.
+    /// The virtual machine has been paused due to a call to a host function.
     ///
-    /// This variant contains the identifier of the external function that is expected to be
+    /// This variant contains the identifier of the host function that is expected to be
     /// called, and its parameters. When you call [`run`](VirtualMachine::run) again, you must
     /// pass back the outcome of calling that function.
     ///
@@ -446,39 +549,49 @@ pub enum ExecOutcome {
         params: Vec<WasmValue>,
     },
 }
-/// Error that can happen when initializing a VM.
-#[derive(Debug)]
+
+/// Opaque error that happened during execution, such as an `unreachable` instruction.
+#[derive(Debug, derive_more::Display, Clone)]
+#[display(fmt = "{}", _0)]
+pub struct Trap(String);
+
+/// Error that can happen when initializing a [`VirtualMachinePrototype`].
+#[derive(Debug, derive_more::Display)]
 pub enum NewErr {
-    /// Error in the interpreter.
-    // TODO: don't expose wasmi in API
-    Interpreter(wasmi::Error),
+    /// Error while parsing or compiling the WebAssembly code.
+    #[display(fmt = "{}", _0)]
+    ModuleError(ModuleError),
     /// If a "memory" symbol is provided, it must be a memory.
+    #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
+    #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
-    /// Couldn't find the requested function.
-    FunctionNotFound,
-    /// The requested function has been found in the list of exports, but it is not a function.
-    NotAFunction,
 }
 
-// TODO: use derive_more instead
-impl fmt::Display for NewErr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            NewErr::Interpreter(_) => write!(f, "Error in the interpreter"),
-            NewErr::MemoryIsntMemory => {
-                write!(f, "If a \"memory\" symbol is provided, it must be a memory")
-            }
-            NewErr::IndirectTableIsntTable => write!(
-                f,
-                "If a \"__indirect_function_table\" symbol is provided, it must be a table"
-            ),
-            NewErr::FunctionNotFound => write!(f, "Function to start was not found"),
-            NewErr::NotAFunction => write!(f, "Symbol to start is not a function"),
-        }
-    }
+/// Error that can happen when calling [`VirtualMachinePrototype::start`].
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum StartErr {
+    /// Couldn't find the requested function.
+    #[display(fmt = "Function to start was not found.")]
+    FunctionNotFound,
+    /// The requested function has been found in the list of exports, but it is not a function.
+    #[display(fmt = "Symbol to start is not a function.")]
+    NotAFunction,
+    /// The requested function has a signature that isn't supported.
+    #[display(fmt = "Function to start uses unsupported signature.")]
+    SignatureNotSupported,
 }
+
+/// Opaque error indicating an error while parsing or compiling the WebAssembly code.
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "{}", _0)]
+pub struct ModuleError(String);
+
+/// Error while reading memory.
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "Out of bounds when accessing virtual machine memory")]
+pub struct OutOfBoundsError;
 
 /// Error that can happen when resuming the execution of a function.
 #[derive(Debug, derive_more::Display)]
@@ -503,11 +616,21 @@ pub enum RunErr {
 /// Error that can happen when calling [`VirtualMachinePrototype::global_value`].
 #[derive(Debug, derive_more::Display)]
 pub enum GlobalValueErr {
+    /// Couldn't find requested symbol.
     NotFound,
+    /// Requested symbol isn't a `u32`.
     Invalid,
 }
 
 #[cfg(test)]
 mod tests {
     // TODO:
+
+    #[test]
+    fn is_send() {
+        // Makes sure that the virtual machine types implement `Send`.
+        fn test<T: Send>() {}
+        test::<super::VirtualMachine>();
+        test::<super::VirtualMachinePrototype>();
+    }
 }

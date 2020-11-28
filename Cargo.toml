@@ -8,10 +8,12 @@ license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
 edition = "2018"
 readme = "README.md"
 keywords = ["blockchain", "peer-to-peer"]
-default-run = "full-node"
 
 [workspace]
+default-members = [".", "bin/full-node"]
 members = [
+    ".",
+    "bin/full-node",
     "bin/wasm-node/rust",
 ]
 
@@ -21,34 +23,12 @@ database-sled = [
     "sled",
 ]
 std = [
-    "app_dirs",
     "async-std",
-    "atty",
     "corooteen",
-    "futures/std",
     "futures/thread-pool",
-    "futures-timer",
-    "rand/std",
-    "rand_chacha/std",
     "soketto",
-    "structopt",
-    "terminal_size",
-    "tracing",
-    "tracing-futures",
-    "tracing-subscriber",
-    "url",
     "wasmtime",
 ]
-
-[[bin]]
-name = "full-node"
-path = "bin/full-node/main.rs"
-required-features = ["database-sled", "std"]
-
-[[bin]]
-name = "json-rpc-test"
-path = "bin/json-rpc-test/main.rs"
-required-features = ["std"]
 
 [dependencies]
 # This section contains only no_std-compatible crates. See below for std-only crates.
@@ -56,68 +36,55 @@ required-features = ["std"]
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
-ahash = { version = "0.5.8", default-features = false }
+ahash = { version = "0.6.1", default-features = false }
 arrayvec = { version = "0.5.2", default-features = false }
-atomic = "0.5.0"
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
 derive_more = "0.99.11"
 ed25519-dalek = { version = "1.0.1", default-features = false, features = ["alloc", "batch", "u64_backend"] }
 either = { version = "1.6.1", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
+futures = "0.3.8"   # TODO: no-std-ize
 hashbrown = { version = "0.9.1", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.2", default-features = false }
 libsecp256k1 = { version = "0.3.5", default-features = false }
-lru = "0.6.1"   # TODO: audit the unsafe code in that crate
 merlin = { version = "2.0", default-features = false }
 multihash = "0.11.4"  # TODO: waiting for a crates.io publication of https://github.com/multiformats/rust-multihash/pull/82 that adds no_std support
-nom = { version = "6.0.0", default-features = false, features = ["alloc"] }
+nom = { version = "6.0.1", default-features = false, features = ["alloc"] }
 num-bigint = { version = "0.3.1", default-features = false }
-num-rational = { version = "0.3.1", default-features = false, features = ["num-bigint"] }
+num-rational = { version = "0.3.2", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.14", default-features = false }
-parity-multiaddr = "0.9.4" # TODO: doesn't support no_std
-pin-project = "1.0.1"
+parity-multiaddr = "0.9.6" # TODO: doesn't support no_std
 prost = "0.6.1"  # TODO: waiting for a published version that supports no_std
 rand = { version = "0.7.3", default-features = false }
 rand_chacha = { version = "0.2.2", default-features = false }
 schnorrkel = { git = "https://github.com/w3f/schnorrkel", rev = "cfdbe9ae865a4d3ffa2566d896d4dbedf5107028", features = ["preaudit_deprecated"] } # TODO: waiting for a publication { version = "0.9.1", default-features = false, features = ["preaudit_deprecated"] }
 serde = { version = "1.0.117", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.59", default-features = false, features = ["alloc", "raw_value"] }
-sha2 = { version = "0.9.1", default-features = false }
+sha2 = { version = "0.9.2", default-features = false }
 slab = "0.4.2"  # TODO: doesn't support no_std and is unmaintained :-/
-smallvec = "1.4.2"
+smallvec = "1.5.0"
 snow = { version = "0.7.2", default-features = false, features = ["default-resolver"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 twox-hash = "1.6.0"
 wasmi = { version = "0.7.0", default-features = false, features = ["core"] }  # TODO: having to add `core` is sketchy; maybe report this
 
 # `database-sled` feature
-sled = { version = "0.34.5", optional = true, features = ["compression"] }
+sled = { version = "0.34.6", optional = true, features = ["compression"] }
 
 # `std` feature
 # Add here the crates that cannot function without the help of the operating system or environment.
-app_dirs = { version = "1.2.1", optional = true }
 async-std = { version = "1.7.0", optional = true }
-atty = { version = "0.2.14", optional = true }
-futures = { version = "0.3.8", default-features = false, optional = true }
-futures-timer = { version = "3.0", optional = true }
 soketto = { version = "0.4.2", optional = true }
-structopt = { version = "0.3.20", optional = true, default-features = false, features = ["color", "suggestions", "wrap_help"] }
-terminal_size = { version = "0.1.12", optional = true }
-tracing = { version = "0.1.21", optional = true, features = ["attributes"] }  # While `tracing` can work in `no_std` contexts, the coding rules of this repository forbid this library in the library code.
-tracing-futures = { version = "0.2.4", optional = true, default-features = false, features = ["std", "std-future"] }
-tracing-subscriber = { version = "0.2.15", optional = true, default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "smallvec"] }
-url = { version = "2.1.1", optional = true }
 
 # BELOW: DEPENDENCIES TO REMOVE
 # TODO:
-anyhow = "1.0.34"  # TODO: wasmtime returns these errors for some reason
 parity-scale-codec = { version = "1.3.5", features = ["derive"] } # TODO: a lot of unnecessary overhead in terms of memory allocations
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
 corooteen = { git = "https://github.com/tomaka/corooteen", optional = true } # TODO: CRITICAL /!\ this code is veeery unsafe at the moment
-wasmtime = { version = "0.20.0", default-features = false, optional = true }
+wasmtime = { version = "0.21.0", default-features = false, optional = true }
 
 [build-dependencies]
 prost-build = "0.6.1"

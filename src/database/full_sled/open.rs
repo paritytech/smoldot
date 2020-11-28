@@ -32,12 +32,17 @@ use std::path::Path;
 ///
 /// Note that this doesn't return a [`SledFullDatabase`], but rather a [`DatabaseOpen`].
 pub fn open(config: Config) -> Result<DatabaseOpen, SledError> {
-    let database = sled::Config::default()
-        // We put a `/v1/` behind the path in case we change the schema.
-        .path(config.path.join("v1"))
-        .use_compression(true)
-        .open()
-        .map_err(SledError)?;
+    let database = {
+        let mut cfg = sled::Config::default();
+        match config.ty {
+            ConfigTy::Disk(path) => {
+                // We put a `/v1/` behind the path in case we change the schema.
+                cfg = cfg.path(path.join("v1"));
+            }
+            ConfigTy::Memory => cfg = cfg.temporary(true),
+        };
+        cfg.use_compression(true).open().map_err(SledError)?
+    };
 
     let meta_tree = database.open_tree(b"meta").map_err(SledError)?;
     let block_hashes_by_number_tree = database
@@ -86,8 +91,17 @@ pub fn open(config: Config) -> Result<DatabaseOpen, SledError> {
 /// Configuration for the database.
 #[derive(Debug)]
 pub struct Config<'a> {
-    /// Path to the directory containing the database.
-    pub path: &'a Path,
+    /// Type of database.
+    pub ty: ConfigTy<'a>,
+}
+
+/// Type of database.
+#[derive(Debug)]
+pub enum ConfigTy<'a> {
+    /// Store the database on disk. Path to the directory containing the database.
+    Disk(&'a Path),
+    /// Store the database in memory. The database is discarded on destruction.
+    Memory,
 }
 
 /// Either existing database or database prototype.
@@ -220,32 +234,44 @@ impl DatabaseEmpty {
                             .number
                             .to_be_bytes()[..],
                     )?;
-                    meta.insert(
-                        b"grandpa_authorities_set_id",
-                        &chain_information
-                            .grandpa_after_finalized_block_authorities_set_id
-                            .to_be_bytes()[..],
-                    )?;
-                    meta.insert(
-                        b"grandpa_triggered_authorities",
-                        encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
-                            &chain_information.grandpa_finalized_triggered_authorities,
-                        )),
-                    )?;
 
-                    if let Some((height, list)) =
-                        &chain_information.grandpa_finalized_scheduled_change
-                    {
-                        meta.insert(b"grandpa_scheduled_target", &height.to_be_bytes()[..])?;
-                        meta.insert(
-                            b"grandpa_scheduled_authorities",
-                            encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
-                                list,
-                            )),
-                        )?;
+                    match &chain_information.finality {
+                        chain_information::ChainInformationFinalityRef::Outsourced => {}
+                        chain_information::ChainInformationFinalityRef::Grandpa {
+                            finalized_triggered_authorities,
+                            after_finalized_block_authorities_set_id,
+                            finalized_scheduled_change,
+                        } => {
+                            meta.insert(
+                                b"grandpa_authorities_set_id",
+                                &after_finalized_block_authorities_set_id.to_be_bytes()[..],
+                            )?;
+                            meta.insert(
+                                b"grandpa_triggered_authorities",
+                                encode_grandpa_authorities_list(
+                                    header::GrandpaAuthoritiesIter::new(
+                                        finalized_triggered_authorities,
+                                    ),
+                                ),
+                            )?;
+
+                            if let Some((height, list)) = finalized_scheduled_change {
+                                meta.insert(
+                                    b"grandpa_scheduled_target",
+                                    &height.to_be_bytes()[..],
+                                )?;
+                                meta.insert(
+                                    b"grandpa_scheduled_authorities",
+                                    encode_grandpa_authorities_list(
+                                        header::GrandpaAuthoritiesIter::new(list),
+                                    ),
+                                )?;
+                            }
+                        }
                     }
 
                     match &chain_information.consensus {
+                        chain_information::ChainInformationConsensusRef::AllAuthorized => {}
                         chain_information::ChainInformationConsensusRef::Aura {
                             finalized_authorities_list,
                             slot_duration,

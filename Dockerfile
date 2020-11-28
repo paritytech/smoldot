@@ -1,14 +1,12 @@
 FROM rust:1 AS builder
 LABEL maintainer "Pierre Krieger <pierre.krieger1708@gmail.com>"
 
-# TODO: add a CI check that tries build this image on pull requests
-
 COPY . /build
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y musl-tools
 RUN rustup target add x86_64-unknown-linux-musl
-RUN cargo build --target x86_64-unknown-linux-musl --bin full-node --release --verbose
+RUN cargo build --target x86_64-unknown-linux-musl --package substrate-lite-full-node --release --verbose
 
 
 FROM alpine:latest

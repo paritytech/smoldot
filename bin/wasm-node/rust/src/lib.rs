@@ -19,29 +19,34 @@
 //! `wasm-bindgen` library.
 
 #![recursion_limit = "512"]
+#![deny(broken_intra_doc_links)]
+#![deny(unused_crate_dependencies)]
 
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     convert::TryFrom as _,
-    num::NonZeroU32,
     sync::Arc,
 };
 use substrate_lite::{
-    chain,
-    chain::sync::headers_optimistic,
-    chain_spec,
-    json_rpc::methods,
-    network::{self, multiaddr, peer_id::PeerId, protocol},
+    chain, chain_spec,
+    json_rpc::{self, methods},
+    network::{multiaddr, peer_id::PeerId},
 };
 
 pub mod ffi;
 
 mod network_service;
+mod sync_service;
 
-// This custom allocator is used in order to reduce the size of the Wasm binary.
+// Use the default "system" allocator. In the context of Wasm, this uses the `dlmalloc` library.
+// See <https://github.com/rust-lang/rust/tree/1.47.0/library/std/src/sys/wasm>.
+//
+// While the `wee_alloc` crate is usually the recommended choice in WebAssembly, testing has shown
+// that using it makes memory usage explode from ~100MiB to ~2GiB and more (the environment then
+// refuses to allocate 4GiB).
 #[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+static ALLOC: std::alloc::System = std::alloc::System;
 
 // TODO: several places in this module where we unwrap when we shouldn't
 
@@ -76,10 +81,7 @@ pub async fn start_client(chain_spec: String) {
         .unwrap()
     };
 
-    let (mut to_sync_tx, to_sync_rx) = mpsc::channel(64);
-    let (to_db_save_tx, _to_db_save_rx) = mpsc::channel(16);
-    let (sync_feedback_tx, mut sync_feedback_rx) = mpsc::channel(16);
-
+    // TODO: un-Arc-ify
     let network_service = network_service::NetworkService::new(network_service::Config {
         tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
         bootstrap_nodes: {
@@ -100,14 +102,11 @@ pub async fn start_client(chain_spec: String) {
     .await
     .unwrap();
 
-    ffi::spawn_task(
-        start_sync(
-            chain_information,
-            network_service.clone(),
-            to_sync_rx,
-            to_db_save_tx,
-            sync_feedback_tx,
-        )
+    let sync_service = Arc::new(
+        sync_service::SyncService::new(sync_service::Config {
+            chain_information: chain_information.clone(),
+            tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
+        })
         .await,
     );
 
@@ -116,11 +115,7 @@ pub async fn start_client(chain_spec: String) {
         .map(|(k, v)| (k.to_vec(), v.to_vec()))
         .collect::<BTreeMap<_, _>>();
 
-    let genesis_block_header =
-        substrate_lite::calculate_genesis_block_header(chain_spec.genesis_storage());
-    let genesis_block_hash = genesis_block_header.hash();
-
-    let metadata = {
+    let best_block_metadata = {
         let code = genesis_storage.get(&b":code"[..]).unwrap();
         let heap_pages = 1024; // TODO: laziness
         substrate_lite::metadata::metadata_from_runtime_code(code, heap_pages).unwrap()
@@ -128,10 +123,10 @@ pub async fn start_client(chain_spec: String) {
 
     let mut client = Client {
         chain_spec,
+        best_block: chain_information.finalized_block_header.clone(),
+        finalized_block: chain_information.finalized_block_header,
         genesis_storage,
-        genesis_block_hash,
-        genesis_block_header,
-        metadata,
+        best_block_metadata,
         next_subscription: 0,
         runtime_version: HashSet::new(),
         all_heads: HashSet::new(),
@@ -145,11 +140,71 @@ pub async fn start_client(chain_spec: String) {
             network_message = network_service.next_event().fuse() => {
                 match network_message {
                     network_service::Event::Connected(peer_id) => {
-                        to_sync_tx.send(ToSync::NewPeer(peer_id)).await.unwrap();
+                        sync_service.add_source(peer_id).await;
                     }
                     network_service::Event::Disconnected(peer_id) => {
-                        to_sync_tx.send(ToSync::PeerDisconnected(peer_id)).await.unwrap();
+                        sync_service.remove_source(peer_id).await;
                     }
+                }
+            },
+
+            sync_message = sync_service.next_event().fuse() => {
+                match sync_message {
+                    sync_service::Event::BlocksRequest { id, target, request } => {
+                        let block_request = network_service.clone().blocks_request(
+                            target,
+                            request
+                        );
+
+                        ffi::spawn_task({
+                            let sync_service = sync_service.clone();
+                            async move {
+                                let result = block_request.await;
+                                sync_service.answer_blocks_request(id, result).await;
+                            }
+                        });
+                    },
+                    sync_service::Event::NewBest { scale_encoded_header } => {
+                        // TODO: this is also triggered if we reset the sync to a previous point, which isn't correct
+
+                        let decoded = substrate_lite::header::decode(&scale_encoded_header).unwrap();
+                        let header = header_conv(decoded.clone());
+
+                        for subscription_id in &client.new_heads {
+                            let notification = substrate_lite::json_rpc::parse::build_subscription_event(
+                                "chain_newHead",
+                                subscription_id,
+                                &serde_json::to_string(&header).unwrap(),
+                            );
+                            ffi::emit_json_rpc_response(&notification);
+                        }
+                        for subscription_id in &client.all_heads {
+                            let notification = substrate_lite::json_rpc::parse::build_subscription_event(
+                                "chain_newHead",
+                                subscription_id,
+                                &serde_json::to_string(&header).unwrap(),
+                            );
+                            ffi::emit_json_rpc_response(&notification);
+                        }
+
+                        client.best_block = decoded.into();
+                        // TODO: need to update `best_block_metadata` if necessary, and notify the runtime version subscriptions
+                    },
+                    sync_service::Event::NewFinalized { scale_encoded_header } => {
+                        let decoded = substrate_lite::header::decode(&scale_encoded_header).unwrap();
+                        let header = header_conv(decoded.clone());
+
+                        for subscription_id in &client.finalized_heads {
+                            let notification = substrate_lite::json_rpc::parse::build_subscription_event(
+                                "chain_finalizedHead",
+                                subscription_id,
+                                &serde_json::to_string(&header).unwrap(),
+                            );
+                            ffi::emit_json_rpc_response(&notification);
+                        }
+
+                        client.finalized_block = decoded.into();
+                    },
                 }
             },
 
@@ -161,26 +216,6 @@ pub async fn start_client(chain_spec: String) {
                     ffi::emit_json_rpc_response(&response2);
                 }
             },
-
-            hash = sync_feedback_rx.next().fuse() => {
-                let hash = hash.unwrap();
-                for subscription_id in &client.new_heads {
-                    let notification = substrate_lite::json_rpc::parse::build_subscription_event(
-                        "chain_subscribeNewHeads",
-                        subscription_id,
-                        &serde_json::to_string(&hash).unwrap(),  // TODO: wrong format! just for testing
-                    );
-                    ffi::emit_json_rpc_response(&notification);
-                }
-                for subscription_id in &client.all_heads {
-                    let notification = substrate_lite::json_rpc::parse::build_subscription_event(
-                        "chain_subscribeAllHeads",
-                        subscription_id,
-                        &serde_json::to_string(&hash).unwrap(),  // TODO: wrong format! just for testing
-                    );
-                    ffi::emit_json_rpc_response(&notification);
-                }
-            },
         }
     }
 }
@@ -188,11 +223,14 @@ pub async fn start_client(chain_spec: String) {
 struct Client {
     chain_spec: chain_spec::ChainSpec,
 
-    genesis_storage: BTreeMap<Vec<u8>, Vec<u8>>,
-    genesis_block_hash: [u8; 32],
-    genesis_block_header: substrate_lite::header::Header,
+    /// Current best block.
+    best_block: substrate_lite::header::Header,
+    /// Latest finalized block.
+    finalized_block: substrate_lite::header::Header,
 
-    metadata: Vec<u8>,
+    genesis_storage: BTreeMap<Vec<u8>, Vec<u8>>,
+
+    best_block_metadata: Vec<u8>,
 
     next_subscription: u64,
 
@@ -212,44 +250,39 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::chain_getBlockHash { height } => {
-            assert_eq!(height, 0);
-            let response = methods::Response::chain_getBlockHash(methods::HashHexString(
-                client.genesis_block_hash,
-            ))
-            .to_json_response(request_id);
+            // TODO: implement correctly
+            let response = if height.is_some() {
+                methods::Response::chain_getBlockHash(methods::HashHexString(
+                    client.best_block.hash(),
+                ))
+                .to_json_response(request_id)
+            } else {
+                json_rpc::parse::build_success_response(request_id, "null")
+            };
             (response, None)
         }
         methods::MethodCall::chain_getFinalizedHead {} => {
             let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                client.genesis_block_hash,
+                client.finalized_block.hash(),
             ))
             .to_json_response(request_id);
             (response, None)
         }
         methods::MethodCall::chain_getHeader { hash } => {
-            // TODO: use hash parameter
-            let response = methods::Response::chain_getHeader(methods::Header {
-                parent_hash: methods::HashHexString(client.genesis_block_header.parent_hash),
-                extrinsics_root: methods::HashHexString(
-                    client.genesis_block_header.extrinsics_root,
-                ),
-                state_root: methods::HashHexString(client.genesis_block_header.state_root),
-                number: client.genesis_block_header.number,
-                digest: methods::HeaderDigest {
-                    logs: client
-                        .genesis_block_header
-                        .digest
-                        .logs()
-                        .map(|log| {
-                            methods::HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            }))
-                        })
-                        .collect(),
-                },
-            })
-            .to_json_response(request_id);
+            let response = if let Some(hash) = hash {
+                if hash.0 == client.best_block.hash() {
+                    methods::Response::chain_getHeader(header_conv(&client.best_block))
+                        .to_json_response(request_id)
+                } else if hash.0 == client.finalized_block.hash() {
+                    methods::Response::chain_getHeader(header_conv(&client.finalized_block))
+                        .to_json_response(request_id)
+                } else {
+                    json_rpc::parse::build_success_response(request_id, "null")
+                }
+            } else {
+                methods::Response::chain_getHeader(header_conv(&client.best_block))
+                    .to_json_response(request_id)
+            };
             (response, None)
         }
         methods::MethodCall::chain_subscribeAllHeads {} => {
@@ -258,9 +291,16 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
 
             let response = methods::Response::chain_subscribeAllHeads(&subscription)
                 .to_json_response(request_id);
+
+            let response2 = substrate_lite::json_rpc::parse::build_subscription_event(
+                "chain_allHeads", // TODO: is this string correct?
+                &subscription,
+                &serde_json::to_string(&header_conv(&client.best_block)).unwrap(),
+            );
+
             client.all_heads.insert(subscription.clone());
-            // TODO: should return the current state, I think
-            (response, None)
+
+            (response, Some(response2))
         }
         methods::MethodCall::chain_subscribeNewHeads {} => {
             let subscription = client.next_subscription.to_string();
@@ -268,9 +308,16 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
 
             let response = methods::Response::chain_subscribeNewHeads(&subscription)
                 .to_json_response(request_id);
+
+            let response2 = substrate_lite::json_rpc::parse::build_subscription_event(
+                "chain_newHead",
+                &subscription,
+                &serde_json::to_string(&header_conv(&client.best_block)).unwrap(),
+            );
+
             client.new_heads.insert(subscription.clone());
-            // TODO: should return the current state, I think
-            (response, None)
+
+            (response, Some(response2))
         }
         methods::MethodCall::chain_subscribeFinalizedHeads {} => {
             let subscription = client.next_subscription.to_string();
@@ -278,8 +325,21 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
 
             let response = methods::Response::chain_subscribeFinalizedHeads(&subscription)
                 .to_json_response(request_id);
+
+            let response2 = substrate_lite::json_rpc::parse::build_subscription_event(
+                "chain_finalizedHead",
+                &subscription,
+                &serde_json::to_string(&header_conv(&client.finalized_block)).unwrap(),
+            );
+
             client.finalized_heads.insert(subscription.clone());
-            // TODO: should return the current state, I think
+
+            (response, Some(response2))
+        }
+        methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
+            let valid = client.finalized_heads.remove(&subscription);
+            let response = methods::Response::chain_unsubscribeFinalizedHeads(valid)
+                .to_json_response(request_id);
             (response, None)
         }
         methods::MethodCall::rpc_methods {} => {
@@ -297,7 +357,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             assert!(at.is_none()); // TODO:
 
             let mut out = methods::StorageChangeSet {
-                block: methods::HashHexString(client.genesis_block_hash),
+                block: methods::HashHexString(client.best_block.hash()),
                 changes: Vec::new(),
             };
 
@@ -345,17 +405,22 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::state_getMetadata {} => {
-            let response =
-                methods::Response::state_getMetadata(methods::HexString(client.metadata.clone()))
-                    .to_json_response(request_id);
+            let response = methods::Response::state_getMetadata(methods::HexString(
+                client.best_block_metadata.clone(),
+            ))
+            .to_json_response(request_id);
             (response, None)
         }
         methods::MethodCall::state_getStorage { key, hash } => {
             // TODO: use hash
 
-            let value = client.genesis_storage.get(&key.0[..]).unwrap().to_vec(); // TODO: don't unwrap
-            let response = methods::Response::state_getStorage(methods::HexString(value))
-                .to_json_response(request_id);
+            let response = if let Some(value) = client.genesis_storage.get(&key.0[..]) {
+                methods::Response::state_getStorage(methods::HexString(value.clone()))
+                    .to_json_response(request_id)
+            } else {
+                json_rpc::parse::build_success_response(request_id, "null")
+            };
+
             (response, None)
         }
         methods::MethodCall::state_subscribeRuntimeVersion {} => {
@@ -365,8 +430,19 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             let response = methods::Response::state_subscribeRuntimeVersion(&subscription)
                 .to_json_response(request_id);
             client.runtime_version.insert(subscription.clone());
-            // TODO: should return the current state, I think
-            (response, None)
+
+            // FIXME: hack
+            let response2 = methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
+                spec_name: "polkadot".to_string(),
+                impl_name: "substrate-lite".to_string(),
+                authoring_version: 0,
+                spec_version: 23,
+                impl_version: 0,
+                transaction_version: 4,
+            })
+            .to_json_response(request_id);
+
+            (response, Some(response2))
         }
         methods::MethodCall::state_subscribeStorage { list } => {
             let subscription = client.next_subscription.to_string();
@@ -378,7 +454,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
 
             // TODO: have no idea what this describes actually
             let mut out = methods::StorageChangeSet {
-                block: methods::HashHexString(client.genesis_block_hash),
+                block: methods::HashHexString(client.best_block.hash()),
                 changes: Vec::new(),
             };
 
@@ -442,6 +518,11 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                 methods::Response::system_name("substrate-lite!").to_json_response(request_id);
             (response, None)
         }
+        methods::MethodCall::system_peers {} => {
+            // TODO: return proper response
+            let response = methods::Response::system_peers(vec![]).to_json_response(request_id);
+            (response, None)
+        }
         methods::MethodCall::system_properties {} => {
             let response = methods::Response::system_properties(
                 serde_json::from_str(client.chain_spec.properties()).unwrap(),
@@ -460,135 +541,27 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
     }
 }
 
-async fn start_sync(
-    chain_information: chain::chain_information::ChainInformation,
-    network_service: Arc<network_service::NetworkService>,
-    mut to_sync: mpsc::Receiver<ToSync>,
-    mut to_db_save_tx: mpsc::Sender<chain::chain_information::ChainInformation>,
-    mut sync_feedback: mpsc::Sender<[u8; 32]>,
-) -> impl Future<Output = ()> {
-    let mut sync = headers_optimistic::OptimisticHeadersSync::<_, network::PeerId>::new(
-        headers_optimistic::Config {
-            chain_information,
-            sources_capacity: 32,
-            source_selection_randomness_seed: rand::random(),
-            blocks_request_granularity: NonZeroU32::new(128).unwrap(),
-            download_ahead_blocks: {
-                // Assuming a verification speed of 1k blocks/sec and a 95% latency of one second,
-                // the number of blocks to download ahead of time in order to not block is 1000.
-                1024
-            },
+fn header_conv<'a>(header: impl Into<substrate_lite::header::HeaderRef<'a>>) -> methods::Header {
+    let header = header.into();
+
+    methods::Header {
+        parent_hash: methods::HashHexString(*header.parent_hash),
+        extrinsics_root: methods::HashHexString(*header.extrinsics_root),
+        state_root: methods::HashHexString(*header.state_root),
+        number: header.number,
+        digest: methods::HeaderDigest {
+            logs: header
+                .digest
+                .logs()
+                .map(|log| {
+                    methods::HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    }))
+                })
+                .collect(),
         },
-    );
-
-    async move {
-        let mut peers_source_id_map = HashMap::new();
-        let mut block_requests_finished = stream::FuturesUnordered::new();
-
-        loop {
-            while let Some(action) = sync.next_request_action() {
-                match action {
-                    headers_optimistic::RequestAction::Start {
-                        start,
-                        block_height,
-                        source,
-                        num_blocks,
-                        ..
-                    } => {
-                        let block_request = network_service.clone().blocks_request(
-                            source.clone(),
-                            protocol::BlocksRequestConfig {
-                                start: protocol::BlocksRequestConfigStart::Number(block_height),
-                                desired_count: num_blocks,
-                                direction: protocol::BlocksRequestDirection::Ascending,
-                                fields: protocol::BlocksRequestFields {
-                                    header: true,
-                                    body: false,
-                                    justification: true,
-                                },
-                            },
-                        );
-
-                        let (block_request, abort) = future::abortable(block_request);
-                        let request_id = start.start(abort);
-                        block_requests_finished.push(block_request.map(move |r| (request_id, r)));
-                    }
-                    headers_optimistic::RequestAction::Cancel { user_data, .. } => {
-                        user_data.abort();
-                    }
-                }
-            }
-
-            // Verify blocks that have been fetched from queries.
-            loop {
-                match sync.process_one(ffi::unix_time()) {
-                    headers_optimistic::ProcessOneOutcome::Idle => break,
-                    headers_optimistic::ProcessOneOutcome::Updated {
-                        best_block_hash,
-                        best_block_number,
-                        ..
-                    } => {
-                        sync_feedback.send(best_block_hash).await.unwrap();
-                    }
-                    headers_optimistic::ProcessOneOutcome::Reset {
-                        reason,
-                        new_best_block_hash,
-                        new_best_block_number,
-                    } => {}
-                }
-
-                // Since `process_one` is a CPU-heavy operation, looping until it is done can
-                // take a long time. In order to avoid blocking the rest of the program in the
-                // meanwhile, the `yield_once` function interrupts the current task and gives a
-                // chance for other tasks to progress.
-                yield_once().await;
-            }
-
-            // TODO: save less often
-            let _ = to_db_save_tx.send(sync.as_chain_information().into()).await;
-
-            futures::select! {
-                message = to_sync.next() => {
-                    let message = match message {
-                        Some(m) => m,
-                        None => {
-                            return
-                        },
-                    };
-
-                    match message {
-                        ToSync::NewPeer(peer_id) => {
-                            let id = sync.add_source(peer_id.clone());
-                            peers_source_id_map.insert(peer_id.clone(), id);
-                        },
-                        ToSync::PeerDisconnected(peer_id) => {
-                            let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (_, rq_list) = sync.remove_source(id);
-                            for (_, rq) in rq_list {
-                                rq.abort();
-                            }
-                        },
-                    }
-                },
-
-                (request_id, result) = block_requests_finished.select_next_some() => {
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
-                    if let Ok(result) = result {
-                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| headers_optimistic::RequestSuccessBlock {
-                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justification: block.justification,
-                        })).map_err(|()| headers_optimistic::RequestFail::BlocksUnavailable));
-                    }
-                },
-            }
-        }
     }
-}
-
-enum ToSync {
-    NewPeer(network::PeerId),
-    PeerDisconnected(network::PeerId),
 }
 
 /// Use in an asynchronous context to interrupt the current task execution and schedule it back.
