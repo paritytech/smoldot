@@ -237,7 +237,7 @@ async fn async_main() {
                     // If any other line gets printed, it will overwrite the informant, and the
                     // informant will then print itself below, which is a fine behaviour.
                     let sync_state = sync_service.sync_state().await;
-                    print!("{}\r", substrate_lite::informant::InformantLine {
+                    eprint!("{}\r", substrate_lite::informant::InformantLine {
                         enable_colors: match cli_options.color {
                             cli::ColorChoice::Always => true,
                             cli::ColorChoice::Never => false,
@@ -471,7 +471,7 @@ async fn background_open_database(
         futures::select! {
             res = rx => return res.unwrap(),
             _ = progress_timer.next() => {
-                print!("    Opening database... {}\r", next_progress_icon.next().unwrap());
+                eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
             }
         }
     }
