@@ -20,27 +20,54 @@
 //! This state machine builds, from a set of sources, a fully verified chain of blocks headers
 //! and bodies.
 //!
-//! In addition to managing the sources, using [`OptimisticFullSync`] also requires holding the
-//! storage of the latest finalized block.
+//! # Overview
+//!
+//! The algorithm used by this state machine is called "optimistic syncing". It consists in
+//! sending requests for blocks to a certain list of sources, aggregating the answers, and
+//! verifying them.
+//!
+//! The [`OptimisticFullSync`] struct holds a list of sources, a list of pending block requests,
+//! a chain, and a list of blocks received as answers and waiting to be verified.
+//!
+//! The requests are emitted ahead of time, so that they can be answered asynchronously while
+//! blocks in the verification queue are being processed.
+//!
+//! The syncing is said to be *optimistic* because it is assumed that all sources will provide
+//! correct blocks.
+//! In the case where the verification of a block fails, the state machine jumps back to the
+//! latest known finalized block and resumes syncing from there, possibly using different sources
+//! this time.
+//!
+//! The *optimism* aspect comes from the fact that, while a bad source can't corrupt the state of
+//! the local chain, and can't stall the syncing process (unless there isn't any other source
+//! available), it can still slow it down.
 
 // TODO: document better
 // TODO: this entire module needs clean up
 
 use super::super::{blocks_tree, chain_information};
-use super::optimistic;
 use crate::{
     executor::{host, vm},
     header,
     trie::calculate_root,
 };
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
-use core::{convert::TryFrom as _, iter, num::NonZeroU32, time::Duration};
-use hashbrown::{HashMap, HashSet};
-
-pub use optimistic::{
-    FinishRequestOutcome, RequestAction, RequestFail, RequestId, SourceId, Start,
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec,
+    vec::Vec,
 };
+use core::{
+    cmp,
+    convert::TryFrom as _,
+    fmt, iter,
+    marker::PhantomData,
+    mem,
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
+use hashbrown::{HashMap, HashSet};
+use rand::{seq::IteratorRandom as _, SeedableRng as _};
 
 /// Configuration for the [`OptimisticFullSync`].
 #[derive(Debug)]
@@ -85,6 +112,14 @@ pub struct Config {
     pub full: bool,
 }
 
+/// Identifier for an ongoing request in the [`OptimisticFullSync`].
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct RequestId(u64);
+
+/// Identifier for a source in the [`OptimisticFullSync`].
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct SourceId(usize);
+
 /// Optimistic headers-only syncing.
 pub struct OptimisticFullSync<TRq, TSrc> {
     /// Data structure containing the blocks.
@@ -94,15 +129,11 @@ pub struct OptimisticFullSync<TRq, TSrc> {
     chain: blocks_tree::NonFinalizedTree<Block>,
 
     /// Extra fields. In a separate structure in order to be moved around.
-    inner: OptimisticFullSyncInner,
-
-    /// Underlying helper. Manages sources and requests.
-    /// Always `Some`, except during some temporary extractions.
-    sync: Option<optimistic::OptimisticSync<TRq, TSrc, RequestSuccessBlock>>,
+    inner: OptimisticFullSyncInner<TRq, TSrc>,
 }
 
 /// Extra fields. In a separate structure in order to be moved around.
-struct OptimisticFullSyncInner {
+struct OptimisticFullSyncInner<TRq, TSrc> {
     /// Configuration for the actual finalized block of the chain.
     /// Used if the `chain` field needs to be recreated.
     finalized_chain_information: blocks_tree::Config,
@@ -123,6 +154,50 @@ struct OptimisticFullSyncInner {
 
     /// See [`Config::full`].
     full: bool,
+
+    /// See [`Config::blocks_request_granularity`].
+    blocks_request_granularity: NonZeroU32,
+
+    /// See [`Config::download_ahead_blocks`].
+    download_ahead_blocks: u32,
+
+    /// List of sources of blocks.
+    sources: slab::Slab<Source<TSrc>>,
+
+    /// If true, the next step of the state machine is to cancel requests in progress, as they
+    /// are no longer valid.
+    cancelling_requests: bool,
+
+    /// Queue of block requests, either waiting to be started, in progress, or completed.
+    verification_queue: VecDeque<VerificationQueueEntry<TRq>>,
+
+    /// Identifier to assign to the next request.
+    next_request_id: RequestId,
+
+    /// PRNG used to select the source to start a query with.
+    source_selection_rng: rand_chacha::ChaCha8Rng,
+}
+
+struct Source<TSrc> {
+    user_data: TSrc,
+    banned: bool, // TODO: ban shouldn't be held forever
+}
+
+struct VerificationQueueEntry<TRq> {
+    block_height: NonZeroU64,
+    ty: VerificationQueueEntryTy<TRq>,
+}
+
+enum VerificationQueueEntryTy<TRq> {
+    Missing,
+    Requested {
+        id: RequestId,
+        /// User-chosen data for this request.
+        user_data: TRq,
+        // Index of this source within [`OptimisticFullSyncInner::sources`].
+        source: usize,
+    },
+    Queued(VecDeque<RequestSuccessBlock>),
 }
 
 // TODO: doc
@@ -153,7 +228,6 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
         };
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree_config.clone());
-        let best_block_number = chain.best_block_header().number;
 
         OptimisticFullSync {
             chain,
@@ -163,14 +237,22 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
                 runtime_code_cache: None,
                 top_trie_root_calculation_cache: None,
                 full: config.full,
-            },
-            sync: Some(optimistic::OptimisticSync::new(optimistic::Config {
-                best_block_number,
-                sources_capacity: config.sources_capacity,
+                sources: slab::Slab::with_capacity(config.sources_capacity),
+                cancelling_requests: false,
+                verification_queue: VecDeque::with_capacity(
+                    usize::try_from(
+                        config.download_ahead_blocks / config.blocks_request_granularity.get(),
+                    )
+                    .unwrap()
+                    .saturating_add(1),
+                ),
                 blocks_request_granularity: config.blocks_request_granularity,
                 download_ahead_blocks: config.download_ahead_blocks,
-                source_selection_randomness_seed: config.source_selection_randomness_seed,
-            })),
+                next_request_id: RequestId(0),
+                source_selection_rng: rand_chacha::ChaCha8Rng::seed_from_u64(
+                    config.source_selection_randomness_seed,
+                ),
+            },
         }
     }
 
@@ -197,8 +279,12 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
     }
 
     /// Inform the [`OptimisticFullSync`] of a new potential source of blocks.
+    // TODO: pass best block
     pub fn add_source(&mut self, source: TSrc) -> SourceId {
-        self.sync.as_mut().unwrap().add_source(source)
+        SourceId(self.inner.sources.insert(Source {
+            user_data: source,
+            banned: false,
+        }))
     }
 
     /// Inform the [`OptimisticFullSync`] that a source of blocks is no longer available.
@@ -214,18 +300,124 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
         &'a mut self,
         source: SourceId,
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + 'a) {
-        self.sync.as_mut().unwrap().remove_source(source)
+        let src_user_data = self.inner.sources.remove(source.0).user_data;
+        let drain = RequestsDrain {
+            iter: self.inner.verification_queue.iter_mut().fuse(),
+            source_index: source.0,
+        };
+        (src_user_data, drain)
     }
 
     /// Returns an iterator that extracts all requests that need to be started and requests that
     /// need to be cancelled.
-    pub fn next_request_action(&mut self) -> Option<RequestAction<TRq, TSrc, RequestSuccessBlock>> {
-        self.sync.as_mut().unwrap().next_request_action()
+    pub fn next_request_action(&mut self) -> Option<RequestAction<TRq, TSrc>> {
+        if self.inner.cancelling_requests {
+            while let Some(queue_elem) = self.inner.verification_queue.pop_back() {
+                if let VerificationQueueEntryTy::Requested {
+                    id,
+                    source,
+                    user_data,
+                } = queue_elem.ty
+                {
+                    return Some(RequestAction::Cancel {
+                        request_id: id,
+                        user_data,
+                        source_id: SourceId(source),
+                        source: &mut self.inner.sources[source].user_data,
+                    });
+                }
+            }
+
+            self.inner.cancelling_requests = false;
+        }
+
+        while self.inner.verification_queue.back().map_or(true, |rq| {
+            rq.block_height.get() + u64::from(self.inner.blocks_request_granularity.get())
+                < self
+                    .chain
+                    .best_block_header()
+                    .number
+                    .checked_add(u64::from(self.inner.download_ahead_blocks))
+                    .unwrap()
+        }) {
+            let block_height = self
+                .inner
+                .verification_queue
+                .back()
+                .map(|rq| {
+                    rq.block_height.get() + u64::from(self.inner.blocks_request_granularity.get())
+                })
+                .unwrap_or(self.chain.best_block_header().number + 1);
+            self.inner
+                .verification_queue
+                .push_back(VerificationQueueEntry {
+                    block_height: NonZeroU64::new(block_height).unwrap(),
+                    ty: VerificationQueueEntryTy::Missing,
+                });
+        }
+
+        if let Some((missing_pos, _)) = self
+            .inner
+            .verification_queue
+            .iter()
+            .enumerate()
+            .find(|(_, e)| matches!(e.ty, VerificationQueueEntryTy::Missing))
+        {
+            let source = self
+                .inner
+                .sources
+                .iter()
+                .filter(|(_, src)| !src.banned)
+                .choose(&mut self.inner.source_selection_rng)?
+                .0;
+
+            let block_height = self.inner.verification_queue[missing_pos].block_height;
+
+            let num_blocks = if let Some(next) = self.inner.verification_queue.get(missing_pos + 1)
+            {
+                NonZeroU32::new(
+                    u32::try_from(cmp::min(
+                        u64::from(self.inner.blocks_request_granularity.get()),
+                        next.block_height
+                            .get()
+                            .checked_sub(block_height.get())
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+                )
+                .unwrap()
+            } else {
+                self.inner.blocks_request_granularity
+            };
+
+            return Some(RequestAction::Start {
+                source_id: SourceId(source),
+                source: &mut self.inner.sources[source].user_data,
+                block_height,
+                num_blocks,
+                start: Start {
+                    verification_queue: &mut self.inner.verification_queue,
+                    missing_pos,
+                    next_request_id: &mut self.inner.next_request_id,
+                    source,
+                    marker: PhantomData,
+                },
+            });
+        }
+
+        None
     }
 
     /// Update the [`OptimisticFullSync`] with the outcome of a request.
     ///
     /// Returns the user data that was associated to that request.
+    ///
+    /// If the state machine only handles light clients, that is if [`Config::full`] was `false`,
+    /// then the values of [`RequestSuccessBlock::scale_encoded_extrinsics`] are silently ignored.
+    ///
+    /// > **Note**: If [`Config::full`] is `false`, you are encouraged to not request the block's
+    /// >           body from the source altogether, and to fill the
+    /// >           [`RequestSuccessBlock::scale_encoded_extrinsics`] fields with `Vec::new()`.
     ///
     /// # Panic
     ///
@@ -236,10 +428,55 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
         request_id: RequestId,
         outcome: Result<impl Iterator<Item = RequestSuccessBlock>, RequestFail>,
     ) -> (TRq, FinishRequestOutcome<TSrc>) {
-        self.sync
-            .as_mut()
-            .unwrap()
-            .finish_request(request_id, outcome)
+        // TODO: what if cancelling requests?
+
+        let (verification_queue_entry, source_id) = self
+            .inner
+            .verification_queue
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, entry)| match entry.ty {
+                VerificationQueueEntryTy::Requested { id, source, .. } if id == request_id => {
+                    Some((pos, source))
+                }
+                _ => None,
+            })
+            .next()
+            .expect("invalid RequestId");
+
+        let blocks = match outcome {
+            Ok(blocks) => blocks.collect(),
+            Err(_) => {
+                let user_data = match mem::replace(
+                    &mut self.inner.verification_queue[verification_queue_entry].ty,
+                    VerificationQueueEntryTy::Missing,
+                ) {
+                    VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
+                    _ => unreachable!(),
+                };
+
+                // TODO: we don't actually punish the source
+
+                return (
+                    user_data,
+                    FinishRequestOutcome::SourcePunished(
+                        &mut self.inner.sources[source_id].user_data,
+                    ),
+                );
+            }
+        };
+
+        // TODO: handle if blocks.len() < expected_number_of_blocks
+
+        let user_data = match mem::replace(
+            &mut self.inner.verification_queue[verification_queue_entry].ty,
+            VerificationQueueEntryTy::Queued(blocks),
+        ) {
+            VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
+            _ => unreachable!(),
+        };
+
+        (user_data, FinishRequestOutcome::Queued)
     }
 
     /// Process the next block in the queue of verification.
@@ -247,31 +484,80 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
     /// This method takes ownership of the [`OptimisticFullSync`] and starts a verification
     /// process. The [`OptimisticFullSync`] is yielded back at the end of this process.
     ///
-    /// Must be passed the current UNIX time in order to verify that the blocks don't pretend to
+    /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
     pub fn process_one(mut self, now_from_unix_epoch: Duration) -> ProcessOne<TRq, TSrc> {
-        let sync = self.sync.take().unwrap();
+        if self.inner.cancelling_requests {
+            return ProcessOne::Idle { sync: self };
+        }
 
-        let to_process = match sync.process_one() {
-            Ok(tp) => tp,
-            Err(sync) => {
-                self.sync = Some(sync);
-                return ProcessOne::Idle { sync: self };
+        // Extract the block to process next.
+        let block = loop {
+            match &mut self.inner.verification_queue.get_mut(0).map(|b| &mut b.ty) {
+                Some(VerificationQueueEntryTy::Queued(blocks)) => match blocks.pop_front() {
+                    Some(b) => break b,
+                    None => {
+                        self.inner.verification_queue.pop_front().unwrap();
+                    }
+                },
+                _ => return ProcessOne::Idle { sync: self },
             }
         };
 
-        self.chain.reserve(to_process.blocks.len());
+        let expected_block_height = self.inner.verification_queue[0].block_height.get();
 
-        ProcessOne::from(
-            Inner::Start(self.chain),
-            ProcessOneShared {
-                pending_encoded_justification: None,
-                to_process,
-                inner: self.inner,
-                finalized_blocks: Vec::new(),
-                now_from_unix_epoch,
-            },
-        )
+        if self.inner.full {
+            ProcessOne::from(
+                Inner::Step1(self.chain.verify_body(
+                    block.scale_encoded_header,
+                    now_from_unix_epoch,
+                    block.scale_encoded_extrinsics.into_iter(),
+                )),
+                ProcessOneShared {
+                    pending_encoded_justification: block.scale_encoded_justification,
+                    expected_block_height,
+                    inner: self.inner,
+                    now_from_unix_epoch,
+                },
+            )
+        } else {
+            match self
+                .chain
+                .verify_header(block.scale_encoded_header, now_from_unix_epoch)
+            {
+                Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => todo!(),
+                Ok(blocks_tree::HeaderVerifySuccess::Insert {
+                    insert,
+                    ..  // TODO: check is_new_best?
+                }) => {
+                    let header = insert.header().into();
+                    // TODO: half of the fields of `Block` are irrelevant for headers-only
+                    insert.insert(Block {
+                        header,
+                        body: Vec::new(),
+                        justification: block.scale_encoded_justification.clone(),
+                        storage_top_trie_changes: Default::default(),
+                        offchain_storage_changes: Default::default(),
+                    });
+                    ProcessOne::from(
+                        Inner::JustificationVerif(self.chain),
+                        ProcessOneShared {
+                            pending_encoded_justification: block.scale_encoded_justification,
+                            expected_block_height,
+                            inner: self.inner,
+                            now_from_unix_epoch,
+                        },
+                    )
+                }
+                Err(err) => {
+                    self.inner.cancelling_requests = true;
+                    ProcessOne::Reset {
+                        sync: self,
+                        reason: ResetCause::HeaderError(err),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -311,7 +597,7 @@ pub enum ProcessOne<TRq, TSrc> {
     /// Processing of the block is over.
     ///
     /// There might be more blocks remaining. Call [`OptimisticFullSync::process_one`] again.
-    Finished {
+    NewBest {
         /// The state machine.
         /// The [`OptimisticFullSync::process_one`] method takes ownership of the
         /// [`OptimisticFullSync`]. This field yields it back.
@@ -319,6 +605,19 @@ pub enum ProcessOne<TRq, TSrc> {
 
         new_best_number: u64,
         new_best_hash: [u8; 32],
+    },
+
+    /// Processing of the block is over. The block has been finalized.
+    ///
+    /// There might be more blocks remaining. Call [`OptimisticFullSync::process_one`] again.
+    Finalized {
+        /// The state machine.
+        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
+        /// [`OptimisticFullSync`]. This field yields it back.
+        sync: OptimisticFullSync<TRq, TSrc>,
+
+        /// Blocks that have been finalized. Includes the block that has just been verified.
+        finalized_blocks: Vec<Block>,
     },
 
     /// Loading a storage value of the finalized block is required in order to continue.
@@ -334,18 +633,16 @@ pub enum ProcessOne<TRq, TSrc> {
 }
 
 enum Inner {
-    Start(blocks_tree::NonFinalizedTree<Block>),
     Step1(blocks_tree::BodyVerifyStep1<Block, vec::IntoIter<Vec<u8>>>),
     Step2(blocks_tree::BodyVerifyStep2<Block>),
+    JustificationVerif(blocks_tree::NonFinalizedTree<Block>),
 }
 
 struct ProcessOneShared<TRq, TSrc> {
     pending_encoded_justification: Option<Vec<u8>>,
-    to_process: optimistic::ProcessOne<TRq, TSrc, RequestSuccessBlock>,
+    expected_block_height: u64,
     /// See [`OptimisticFullSync::inner`].
-    inner: OptimisticFullSyncInner,
-    // TODO: make sure we're not throwing this away in case of error
-    finalized_blocks: Vec<Block>,
+    inner: OptimisticFullSyncInner<TRq, TSrc>,
     now_from_unix_epoch: Duration,
 }
 
@@ -355,81 +652,47 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
         // `inner` is updated at each iteration until a state that cannot be resolved internally
         // is found.
         'verif_steps: loop {
-            match (inner, shared.inner.full) {
-                (Inner::Start(chain), false) => {
-                    debug_assert!(shared.pending_encoded_justification.is_none());
-
-                    let next_block = shared.to_process.blocks.next().unwrap();
-                    if let Some(justification) = next_block.scale_encoded_justification {
-                        shared.pending_encoded_justification = Some(justification);
-                    }
-                    inner = Inner::Step1(chain.verify_header(
-                        next_block.scale_encoded_header,
-                        shared.now_from_unix_epoch,
-                    ));
-                }
-
-                (Inner::Start(chain), true) => {
-                    // Start of the verification process.
-                    // The next block needs to be picked.
-                    debug_assert!(shared.pending_encoded_justification.is_none());
-
-                    let next_block = shared.to_process.blocks.next().unwrap();
-                    if let Some(justification) = next_block.scale_encoded_justification {
-                        shared.pending_encoded_justification = Some(justification);
-                    }
-                    inner = Inner::Step1(chain.verify_body(
-                        next_block.scale_encoded_header,
-                        shared.now_from_unix_epoch,
-                        next_block.scale_encoded_extrinsics.into_iter(),
-                    ));
-                }
-
-                (Inner::Step1(blocks_tree::BodyVerifyStep1::InvalidHeader(chain, error)), true) => {
+            match inner {
+                Inner::Step1(blocks_tree::BodyVerifyStep1::InvalidHeader(chain, error)) => {
                     // TODO: DRY
                     println!("invalid header: {:?}", error); // TODO: remove
-                    let sync = shared
-                        .to_process
-                        .report
-                        .reset_to_finalized(chain.finalized_block_header().number);
+
                     break ProcessOne::Reset {
                         sync: OptimisticFullSync {
-                            chain,
                             inner: OptimisticFullSyncInner {
                                 best_to_finalized_storage_diff: Default::default(),
                                 runtime_code_cache: None,
                                 top_trie_root_calculation_cache: None,
+                                cancelling_requests: true,
                                 ..shared.inner
                             },
-                            sync: Some(sync),
+                            chain,
                         },
-                        reason: ResetCause::HeaderError(error),
+                        reason: ResetCause::HeaderError(
+                            blocks_tree::HeaderVerifyError::InvalidHeader(error),
+                        ),
                     };
                 }
 
-                (Inner::Step1(blocks_tree::BodyVerifyStep1::Duplicate(chain)), true)
-                | (Inner::Step1(blocks_tree::BodyVerifyStep1::BadParent { chain, .. }), true) => {
+                Inner::Step1(blocks_tree::BodyVerifyStep1::Duplicate(chain))
+                | Inner::Step1(blocks_tree::BodyVerifyStep1::BadParent { chain, .. }) => {
                     // TODO: DRY
-                    let sync = shared
-                        .to_process
-                        .report
-                        .reset_to_finalized(chain.finalized_block_header().number);
                     break ProcessOne::Reset {
                         sync: OptimisticFullSync {
-                            chain,
                             inner: OptimisticFullSyncInner {
                                 best_to_finalized_storage_diff: Default::default(),
                                 runtime_code_cache: None,
                                 top_trie_root_calculation_cache: None,
+                                cancelling_requests: true,
                                 ..shared.inner
                             },
-                            sync: Some(sync),
+                            chain,
                         },
                         reason: ResetCause::NonCanonical,
                     };
                 }
 
-                (Inner::Step1(blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(req)), true) => {
+                Inner::Step1(blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(req)) => {
                     // The verification process is asking for a Wasm virtual machine containing
                     // the parent block's runtime.
                     //
@@ -504,16 +767,13 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     ));
                 }
 
-                (
-                    Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
-                        storage_top_trie_changes,
-                        offchain_storage_changes,
-                        top_trie_root_calculation_cache,
-                        parent_runtime,
-                        result: Ok(success),
-                    }),
-                    true,
-                ) => {
+                Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
+                    storage_top_trie_changes,
+                    offchain_storage_changes,
+                    top_trie_root_calculation_cache,
+                    parent_runtime,
+                    result: Ok(success),
+                }) => {
                     // Successfully verified block!
                     // Inserting it into the chain and updated all the caches.
                     if !storage_top_trie_changes.contains_key(&b":code"[..])
@@ -530,7 +790,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                             .insert(key.clone(), value.clone());
                     }
 
-                    let mut chain = {
+                    let chain = {
                         let header = success.header().into();
                         success.insert(Block {
                             header,
@@ -542,6 +802,10 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         })
                     };
 
+                    inner = Inner::JustificationVerif(chain);
+                }
+
+                Inner::JustificationVerif(mut chain) => {
                     // `pending_encoded_justification` contains the justification (if any)
                     // corresponding to the block that has just been verified. Verifying the
                     // justification as well.
@@ -563,46 +827,44 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         // instead.
                         // While this intermediary buffering is an overhead, the increased code
                         // complexity to avoid it is probably not worth the speed gain.
-                        for block in apply.apply().collect::<Vec<_>>().into_iter().rev() {
-                            shared.finalized_blocks.push(block);
-                        }
+                        let finalized_blocks = apply
+                            .apply()
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
 
                         // Since the best block is now the finalized block, reset the storage
                         // diff.
                         debug_assert!(chain.is_empty());
                         shared.inner.best_to_finalized_storage_diff.clear();
 
-                        // Since the verification process requires querying the finalized block
-                        // storage from the user, we need to report changes to the finalized
-                        // blocks to the user before we can continue.
-                        let sync = shared
-                            .to_process
-                            .report
-                            .update_block_height(chain.best_block_header().number);
+                        break ProcessOne::Finalized {
+                            sync: OptimisticFullSync {
+                                chain,
+                                inner: shared.inner,
+                            },
+                            finalized_blocks,
+                        };
+                    } else {
+                        let new_best_hash = chain.best_block_hash();
+                        let new_best_number = chain.best_block_header().number;
+                        break ProcessOne::NewBest {
+                            sync: OptimisticFullSync {
+                                chain,
+                                inner: shared.inner,
+                            },
+                            new_best_hash,
+                            new_best_number,
+                        };
                     }
-
-                    // Before looping again, report the progress to the user.
-                    let new_best_hash = chain.best_block_hash();
-                    let new_best_number = chain.best_block_header().number;
-                    break ProcessOne::Finished {
-                        sync: OptimisticFullSync {
-                            chain,
-                            inner: shared.inner,
-                            sync: Some(sync),
-                        },
-                        new_best_hash,
-                        new_best_number,
-                    };
                 }
 
-                (
-                    Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
-                        result: Err(err), ..
-                    }),
-                    true,
-                ) => todo!("verif failure"),
+                Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
+                    result: Err(err), ..
+                }) => todo!("verif failure"),
 
-                (Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)), true) => {
+                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)) => {
                     // The underlying verification process is asking for a storage entry in the
                     // parent block.
                     //
@@ -629,7 +891,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     });
                 }
 
-                (Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)), true) => {
+                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
                     // The underlying verification process is asking for the key that follows
                     // the requested one.
                     break ProcessOne::FinalizedStorageNextKey(StorageNextKey {
@@ -639,7 +901,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     });
                 }
 
-                (Inner::Step2(blocks_tree::BodyVerifyStep2::StoragePrefixKeys(req)), true) => {
+                Inner::Step2(blocks_tree::BodyVerifyStep2::StoragePrefixKeys(req)) => {
                     // The underlying verification process is asking for all the keys that start
                     // with a certain prefix.
                     // The first step is to ask the user for that information when it comes to
@@ -649,8 +911,6 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         shared,
                     });
                 }
-
-                (_, false) => unreachable!(),
             }
         }
     }
@@ -891,17 +1151,133 @@ impl<TRq, TBl> StorageNextKey<TRq, TBl> {
     }
 }
 
-/// Resume the processing after a [`ProcessOne::InProgress`].
-#[must_use]
-pub struct InProgress<TRq, TBl> {
-    inner: Inner,
-    shared: ProcessOneShared<TRq, TBl>,
+/// Request that should be emitted towards a certain source.
+#[derive(Debug)]
+pub enum RequestAction<'a, TRq, TSrc> {
+    /// A request must be emitted for the given source.
+    ///
+    /// The request has **not** been acknowledged when this event is emitted. You **must** call
+    /// [`Start::start`] to notify the [`OptimisticFullSyncInner`] that the request has been sent
+    /// out.
+    Start {
+        /// Source where to request blocks from.
+        source_id: SourceId,
+        /// User data of source where to request blocks from.
+        source: &'a mut TSrc,
+        /// Must be used to accept the request.
+        start: Start<'a, TRq, TSrc>,
+        /// Height of the block to request.
+        block_height: NonZeroU64,
+        /// Number of blocks to request. Always smaller than the value passed through
+        /// [`Config::blocks_request_granularity`].
+        num_blocks: NonZeroU32,
+    },
+
+    /// The given [`RequestId`] is no longer valid.
+    ///
+    /// > **Note**: The request can either be cancelled, or the request can be let through but
+    /// >           marked in a way that [`OptimisticFullSyncInner::finish_request`] isn't called.
+    Cancel {
+        /// Identifier for the request. No longer valid.
+        request_id: RequestId,
+        /// User data associated with the request.
+        user_data: TRq,
+        /// Source where to request blocks from.
+        source_id: SourceId,
+        /// User data of source where to request blocks from.
+        source: &'a mut TSrc,
+    },
 }
 
-impl<TRq, TBl> InProgress<TRq, TBl> {
-    /// Resume the processing.
-    pub fn resume(self) -> ProcessOne<TRq, TBl> {
-        ProcessOne::from(self.inner, self.shared)
+/// Must be used to accept the request.
+#[must_use]
+pub struct Start<'a, TRq, TSrc> {
+    verification_queue: &'a mut VecDeque<VerificationQueueEntry<TRq>>,
+    source: usize,
+    missing_pos: usize,
+    next_request_id: &'a mut RequestId,
+    marker: PhantomData<&'a TSrc>,
+}
+
+impl<'a, TRq, TSrc> Start<'a, TRq, TSrc> {
+    /// Updates the [`OptimisticFullSyncInner`] with the fact that the request has actually been
+    /// started. Returns the identifier for the request that must later be passed back to
+    /// [`OptimisticFullSyncInner::finish_request`].
+    pub fn start(self, user_data: TRq) -> RequestId {
+        let request_id = *self.next_request_id;
+        self.next_request_id.0 += 1;
+
+        self.verification_queue[self.missing_pos].ty = VerificationQueueEntryTy::Requested {
+            id: request_id,
+            source: self.source,
+            user_data,
+        };
+
+        request_id
+    }
+}
+
+impl<'a, TRq, TSrc> fmt::Debug for Start<'a, TRq, TSrc> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Start").finish()
+    }
+}
+
+pub enum FinishRequestOutcome<'a, TSrc> {
+    Queued,
+    SourcePunished(&'a mut TSrc),
+}
+
+/// Reason why a request has failed.
+pub enum RequestFail {
+    /// Requested blocks aren't available from this source.
+    BlocksUnavailable,
+}
+
+/// Iterator that drains requests after a source has been removed.
+pub struct RequestsDrain<'a, TRq> {
+    iter: iter::Fuse<alloc::collections::vec_deque::IterMut<'a, VerificationQueueEntry<TRq>>>,
+    source_index: usize,
+}
+
+impl<'a, TRq> Iterator for RequestsDrain<'a, TRq> {
+    type Item = (RequestId, TRq);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let entry = self.iter.next()?;
+            match entry.ty {
+                VerificationQueueEntryTy::Requested { source, .. }
+                    if source == self.source_index =>
+                {
+                    match mem::replace(&mut entry.ty, VerificationQueueEntryTy::Missing) {
+                        VerificationQueueEntryTy::Requested { id, user_data, .. } => {
+                            return Some((id, user_data));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.iter.size_hint().1)
+    }
+}
+
+impl<'a, TRq> fmt::Debug for RequestsDrain<'a, TRq> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("RequestsDrain").finish()
+    }
+}
+
+impl<'a, TRq> Drop for RequestsDrain<'a, TRq> {
+    fn drop(&mut self) {
+        // Drain all remaining elements even if the iterator is dropped eagerly.
+        // This is the reason why a custom iterator type is needed, rather than using combinators.
+        for _ in self {}
     }
 }
 

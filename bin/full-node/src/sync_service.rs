@@ -252,6 +252,7 @@ async fn start_sync(
                 // the number of blocks to download ahead of time in order to not block is 1000.
                 1024
             },
+            full: true,
         });
 
     // Holds, in parallel of the database, the storage of the latest finalized block.
@@ -290,7 +291,11 @@ async fn start_sync(
                         sync = s;
                         break;
                     }
-                    full_optimistic::ProcessOne::Finished {
+                    full_optimistic::ProcessOne::Reset { sync: s, reason } => {
+                        tracing::warn!(%reason, "failed-block-verification");
+                        process = s.process_one(unix_time);
+                    }
+                    full_optimistic::ProcessOne::Finalized {
                         sync: s,
                         finalized_blocks,
                     } => {
@@ -321,20 +326,20 @@ async fn start_sync(
                             .unwrap();
                     }
 
-                    full_optimistic::ProcessOne::InProgress {
-                        current_best_hash,
-                        current_best_number,
-                        resume,
+                    full_optimistic::ProcessOne::NewBest {
+                        sync: s,
+                        new_best_hash,
+                        new_best_number,
                     } => {
                         // Processing has made a step forward.
                         // There is nothing to do, but this is used to update to best block
                         // shown on the informant.
                         let mut lock = sync_state.lock().await;
-                        lock.best_block_hash = current_best_hash;
-                        lock.best_block_number = current_best_number;
+                        lock.best_block_hash = new_best_hash;
+                        lock.best_block_number = new_best_number;
                         drop(lock);
 
-                        process = resume.resume();
+                        process = s.process_one(unix_time);
                     }
 
                     full_optimistic::ProcessOne::FinalizedStorageGet(req) => {
