@@ -31,7 +31,6 @@ use substrate_lite::{
     network::{connection, multiaddr, peer_id::PeerId},
 };
 use tracing::Instrument as _;
-use tracing_subscriber::prelude::*;
 
 mod cli;
 mod network_service;
@@ -51,8 +50,8 @@ async fn async_main() {
     ) {
         let builder = tracing_subscriber::fmt()
             .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
-            .with_target(false)
-            .with_max_level(tracing::Level::DEBUG) // TODO:
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ACTIVE)
+            .with_max_level(tracing::Level::TRACE) // TODO: configurable?
             .with_writer(io::stdout);
 
         // Because calling `builder.json()` changes the type of `builder`, we do it at the end
@@ -197,6 +196,7 @@ async fn async_main() {
                 },
                 database: relay_chain_database,
             })
+            .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
             .await,
         )
     } else {
@@ -372,6 +372,7 @@ async fn async_main() {
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
+#[tracing::instrument(skip(chain_spec))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     tmp: bool,
@@ -429,6 +430,7 @@ async fn open_database(
 /// in the background while showing a small progress bar to the user.
 ///
 /// If `path` is `None`, the database is opened in memory.
+#[tracing::instrument]
 async fn background_open_database(
     path: Option<PathBuf>,
 ) -> Result<full_sled::DatabaseOpen, full_sled::SledError> {

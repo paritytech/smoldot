@@ -32,6 +32,7 @@ use futures::{
 };
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 use substrate_lite::{chain::sync::full_optimistic, database::full_sled, network};
+use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -89,6 +90,8 @@ impl SyncService {
         let (to_background, from_foreground) = mpsc::channel(16);
         let (to_database, messages_rx) = mpsc::channel(4);
 
+        let finalized_block_hash = config.database.finalized_block_hash().unwrap();
+
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_hash: [0; 32],      // TODO:
             best_block_number: 0,          // TODO:
@@ -104,10 +107,17 @@ impl SyncService {
                 from_foreground,
                 to_database,
             )
+            .instrument(
+                tracing::debug_span!(parent: None, "sync-service", root = ?finalized_block_hash), // TDOO: better display
+            )
             .await,
         ));
 
-        (config.tasks_executor)(Box::pin(start_database_write(config.database, messages_rx)));
+        (config.tasks_executor)(Box::pin(
+            start_database_write(config.database, messages_rx).instrument(
+                tracing::debug_span!(parent: None, "database-write", root = ?finalized_block_hash), // TDOO: better display
+            ),
+        ));
 
         Arc::new(SyncService {
             sync_state,
@@ -140,7 +150,6 @@ impl SyncService {
     /// Removes a source of blocks.
     #[tracing::instrument(skip(self))]
     pub async fn remove_source(&self, peer_id: network::PeerId) {
-        tracing::event!(tracing::Level::INFO, "test");
         self.to_background
             .lock()
             .await
@@ -463,6 +472,9 @@ async fn start_database_write(
         match messages_rx.next().await {
             None => break,
             Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
+                let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
+                let _enter = span.enter();
+
                 let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
                     Some(last_finalized.header.hash())
                 } else {
