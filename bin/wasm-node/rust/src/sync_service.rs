@@ -21,7 +21,7 @@ use futures::{
     prelude::*,
 };
 use std::{collections::HashMap, num::NonZeroU32, pin::Pin};
-use substrate_lite::{chain, chain::sync::headers_optimistic, network};
+use substrate_lite::{chain, chain::sync::full_optimistic, network};
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -168,12 +168,16 @@ async fn start_sync(
     mut from_foreground: mpsc::Receiver<ToBackground>,
     mut to_foreground: mpsc::Sender<FromBackground>,
 ) -> impl Future<Output = ()> {
-    let mut sync = headers_optimistic::OptimisticHeadersSync::<_, network::PeerId>::new(
-        headers_optimistic::Config {
+    let mut sync =
+        full_optimistic::OptimisticFullSync::<_, network::PeerId>::new(full_optimistic::Config {
             chain_information,
             sources_capacity: 32,
             source_selection_randomness_seed: rand::random(),
             blocks_request_granularity: NonZeroU32::new(128).unwrap(),
+            blocks_capacity: {
+                // This is the maximum number of blocks between two consecutive justifications.
+                1024
+            },
             download_ahead_blocks: {
                 // Verifying a block mostly consists in:
                 //
@@ -190,8 +194,8 @@ async fn start_sync(
                 // is 5k.
                 5000
             },
-        },
-    );
+            full: false,
+        });
 
     async move {
         let mut peers_source_id_map = HashMap::new();
@@ -200,7 +204,7 @@ async fn start_sync(
         loop {
             while let Some(action) = sync.next_request_action() {
                 match action {
-                    headers_optimistic::RequestAction::Start {
+                    full_optimistic::RequestAction::Start {
                         start,
                         block_height,
                         source,
@@ -237,7 +241,7 @@ async fn start_sync(
                         let request_id = start.start(abort);
                         block_requests_finished.push(rx.map(move |r| (request_id, r)));
                     }
-                    headers_optimistic::RequestAction::Cancel { user_data, .. } => {
+                    full_optimistic::RequestAction::Cancel { user_data, .. } => {
                         user_data.abort();
                     }
                 }
@@ -245,52 +249,65 @@ async fn start_sync(
 
             // Verify blocks that have been fetched from queries.
             loop {
-                let process_result = sync.process_one(crate::ffi::unix_time());
-                if let headers_optimistic::ProcessOneOutcome::Idle = process_result {
-                    break;
-                }
-
-                if let headers_optimistic::ProcessOneOutcome::Updated { new_best_block, .. }
-                | headers_optimistic::ProcessOneOutcome::Reset { new_best_block, .. } =
-                    &process_result
-                {
-                    if to_foreground
-                        .send(FromBackground::NewBest {
-                            scale_encoded_header: new_best_block.scale_encoding().fold(
-                                Vec::new(),
-                                |mut a, b| {
-                                    a.extend_from_slice(b.as_ref());
-                                    a
-                                },
-                            ),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
+                match sync.process_one(crate::ffi::unix_time()) {
+                    full_optimistic::ProcessOne::Idle { sync: s } => {
+                        sync = s;
+                        break;
                     }
-                }
+                    full_optimistic::ProcessOne::NewBest { sync: s, .. }
+                    | full_optimistic::ProcessOne::Reset { sync: s, .. } => {
+                        sync = s;
 
-                if let headers_optimistic::ProcessOneOutcome::Updated {
-                    finalized_block: Some(finalized_block),
-                    ..
-                } = &process_result
-                {
-                    if to_foreground
-                        .send(FromBackground::NewFinalized {
-                            scale_encoded_header: finalized_block.scale_encoding().fold(
-                                Vec::new(),
-                                |mut a, b| {
-                                    a.extend_from_slice(b.as_ref());
-                                    a
-                                },
-                            ),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
+                        let scale_encoded_header = sync.best_block_header().scale_encoding().fold(
+                            Vec::new(),
+                            |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            },
+                        );
+
+                        if to_foreground
+                            .send(FromBackground::NewBest {
+                                scale_encoded_header,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
+
+                    full_optimistic::ProcessOne::Finalized {
+                        sync: s,
+                        finalized_blocks,
+                        ..
+                    } => {
+                        sync = s;
+
+                        let scale_encoded_header = finalized_blocks
+                            .last()
+                            .unwrap()
+                            .header
+                            .scale_encoding()
+                            .fold(Vec::new(), |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            });
+
+                        if to_foreground
+                            .send(FromBackground::NewFinalized {
+                                scale_encoded_header,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+
+                    // Other variants can be produced if the sync state machine is configured for
+                    // syncing the storage, which is not the case here.
+                    _ => unreachable!(),
                 }
 
                 // Since `process_one` is a CPU-heavy operation, looping until it is done can
@@ -329,10 +346,11 @@ async fn start_sync(
                     // machine.
                     if let Ok(result) = result {
                         let result = result.map_err(|_| ()).and_then(|v| v);
-                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| headers_optimistic::RequestSuccessBlock {
+                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
-                        })).map_err(|()| headers_optimistic::RequestFail::BlocksUnavailable));
+                            scale_encoded_extrinsics: Vec::new(),
+                        })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
             }

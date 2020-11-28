@@ -262,6 +262,14 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
         self.chain.as_chain_information()
     }
 
+    /// Returns the header of the best block.
+    ///
+    /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
+    /// >           best block might be reverted in the future.
+    pub fn best_block_header(&self) -> header::HeaderRef {
+        self.chain.best_block_header()
+    }
+
     /// Returns the number of the best block.
     ///
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
