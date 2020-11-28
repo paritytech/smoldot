@@ -49,4 +49,4 @@
 //       the time of writing only one is implemented
 
 // TODO: pub mod full_all_forks;
-pub mod full_optimistic;
+pub mod optimistic;

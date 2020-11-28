@@ -26,7 +26,7 @@
 //! sending requests for blocks to a certain list of sources, aggregating the answers, and
 //! verifying them.
 //!
-//! The [`OptimisticFullSync`] struct holds a list of sources, a list of pending block requests,
+//! The [`OptimisticSync`] struct holds a list of sources, a list of pending block requests,
 //! a chain, and a list of blocks received as answers and waiting to be verified.
 //!
 //! The requests are emitted ahead of time, so that they can be answered asynchronously while
@@ -69,7 +69,7 @@ use core::{
 use hashbrown::{HashMap, HashSet};
 use rand::{seq::IteratorRandom as _, SeedableRng as _};
 
-/// Configuration for the [`OptimisticFullSync`].
+/// Configuration for the [`OptimisticSync`].
 #[derive(Debug)]
 pub struct Config {
     /// Information about the latest finalized block and its ancestors.
@@ -112,16 +112,16 @@ pub struct Config {
     pub full: bool,
 }
 
-/// Identifier for an ongoing request in the [`OptimisticFullSync`].
+/// Identifier for an ongoing request in the [`OptimisticSync`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(u64);
 
-/// Identifier for a source in the [`OptimisticFullSync`].
+/// Identifier for a source in the [`OptimisticSync`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(usize);
 
 /// Optimistic headers-only syncing.
-pub struct OptimisticFullSync<TRq, TSrc> {
+pub struct OptimisticSync<TRq, TSrc> {
     /// Data structure containing the blocks.
     ///
     /// The user data, [`Block`], isn't used internally but stores information later reported
@@ -129,11 +129,11 @@ pub struct OptimisticFullSync<TRq, TSrc> {
     chain: blocks_tree::NonFinalizedTree<Block>,
 
     /// Extra fields. In a separate structure in order to be moved around.
-    inner: OptimisticFullSyncInner<TRq, TSrc>,
+    inner: OptimisticSyncInner<TRq, TSrc>,
 }
 
 /// Extra fields. In a separate structure in order to be moved around.
-struct OptimisticFullSyncInner<TRq, TSrc> {
+struct OptimisticSyncInner<TRq, TSrc> {
     /// Configuration for the actual finalized block of the chain.
     /// Used if the `chain` field needs to be recreated.
     finalized_chain_information: blocks_tree::Config,
@@ -194,7 +194,7 @@ enum VerificationQueueEntryTy<TRq> {
         id: RequestId,
         /// User-chosen data for this request.
         user_data: TRq,
-        // Index of this source within [`OptimisticFullSyncInner::sources`].
+        // Index of this source within [`OptimisticSyncInner::sources`].
         source: usize,
     },
     Queued(VecDeque<RequestSuccessBlock>),
@@ -218,8 +218,8 @@ pub struct Block {
     pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
-impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
-    /// Builds a new [`OptimisticFullSync`].
+impl<TRq, TSrc> OptimisticSync<TRq, TSrc> {
+    /// Builds a new [`OptimisticSync`].
     pub fn new(config: Config) -> Self {
         let blocks_tree_config = blocks_tree::Config {
             chain_information: config.chain_information,
@@ -229,9 +229,9 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree_config.clone());
 
-        OptimisticFullSync {
+        OptimisticSync {
             chain,
-            inner: OptimisticFullSyncInner {
+            inner: OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
                 best_to_finalized_storage_diff: BTreeMap::new(),
                 runtime_code_cache: None,
@@ -286,7 +286,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
         self.chain.best_block_hash()
     }
 
-    /// Inform the [`OptimisticFullSync`] of a new potential source of blocks.
+    /// Inform the [`OptimisticSync`] of a new potential source of blocks.
     // TODO: pass best block
     pub fn add_source(&mut self, source: TSrc) -> SourceId {
         SourceId(self.inner.sources.insert(Source {
@@ -295,7 +295,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
         }))
     }
 
-    /// Inform the [`OptimisticFullSync`] that a source of blocks is no longer available.
+    /// Inform the [`OptimisticSync`] that a source of blocks is no longer available.
     ///
     /// This automatically cancels all the requests that have been emitted for this source.
     /// This list of requests is returned as part of this function.
@@ -416,7 +416,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
         None
     }
 
-    /// Update the [`OptimisticFullSync`] with the outcome of a request.
+    /// Update the [`OptimisticSync`] with the outcome of a request.
     ///
     /// Returns the user data that was associated to that request.
     ///
@@ -489,8 +489,8 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
 
     /// Process the next block in the queue of verification.
     ///
-    /// This method takes ownership of the [`OptimisticFullSync`] and starts a verification
-    /// process. The [`OptimisticFullSync`] is yielded back at the end of this process.
+    /// This method takes ownership of the [`OptimisticSync`] and starts a verification
+    /// process. The [`OptimisticSync`] is yielded back at the end of this process.
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
@@ -579,12 +579,12 @@ pub struct RequestSuccessBlock {
 pub enum ProcessOne<TRq, TSrc> {
     /// No processing is necessary.
     ///
-    /// Calling [`OptimisticFullSync::process_one`] again is unnecessary.
+    /// Calling [`OptimisticSync::process_one`] again is unnecessary.
     Idle {
         /// The state machine.
-        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
-        /// [`OptimisticFullSync`]. This field yields it back.
-        sync: OptimisticFullSync<TRq, TSrc>,
+        /// The [`OptimisticSync::process_one`] method takes ownership of the
+        /// [`OptimisticSync`]. This field yields it back.
+        sync: OptimisticSync<TRq, TSrc>,
     },
 
     /// An issue happened when verifying the block or its justification, resulting in resetting
@@ -594,9 +594,9 @@ pub enum ProcessOne<TRq, TSrc> {
     /// >           operation.
     Reset {
         /// The state machine.
-        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
-        /// [`OptimisticFullSync`]. This field yields it back.
-        sync: OptimisticFullSync<TRq, TSrc>,
+        /// The [`OptimisticSync::process_one`] method takes ownership of the
+        /// [`OptimisticSync`]. This field yields it back.
+        sync: OptimisticSync<TRq, TSrc>,
 
         /// Problem that happened and caused the reset.
         reason: ResetCause,
@@ -604,12 +604,12 @@ pub enum ProcessOne<TRq, TSrc> {
 
     /// Processing of the block is over.
     ///
-    /// There might be more blocks remaining. Call [`OptimisticFullSync::process_one`] again.
+    /// There might be more blocks remaining. Call [`OptimisticSync::process_one`] again.
     NewBest {
         /// The state machine.
-        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
-        /// [`OptimisticFullSync`]. This field yields it back.
-        sync: OptimisticFullSync<TRq, TSrc>,
+        /// The [`OptimisticSync::process_one`] method takes ownership of the
+        /// [`OptimisticSync`]. This field yields it back.
+        sync: OptimisticSync<TRq, TSrc>,
 
         new_best_number: u64,
         new_best_hash: [u8; 32],
@@ -617,12 +617,12 @@ pub enum ProcessOne<TRq, TSrc> {
 
     /// Processing of the block is over. The block has been finalized.
     ///
-    /// There might be more blocks remaining. Call [`OptimisticFullSync::process_one`] again.
+    /// There might be more blocks remaining. Call [`OptimisticSync::process_one`] again.
     Finalized {
         /// The state machine.
-        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
-        /// [`OptimisticFullSync`]. This field yields it back.
-        sync: OptimisticFullSync<TRq, TSrc>,
+        /// The [`OptimisticSync::process_one`] method takes ownership of the
+        /// [`OptimisticSync`]. This field yields it back.
+        sync: OptimisticSync<TRq, TSrc>,
 
         /// Blocks that have been finalized. Includes the block that has just been verified.
         finalized_blocks: Vec<Block>,
@@ -649,8 +649,8 @@ enum Inner {
 struct ProcessOneShared<TRq, TSrc> {
     pending_encoded_justification: Option<Vec<u8>>,
     expected_block_height: u64,
-    /// See [`OptimisticFullSync::inner`].
-    inner: OptimisticFullSyncInner<TRq, TSrc>,
+    /// See [`OptimisticSync::inner`].
+    inner: OptimisticSyncInner<TRq, TSrc>,
     now_from_unix_epoch: Duration,
 }
 
@@ -666,8 +666,8 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     println!("invalid header: {:?}", error); // TODO: remove
 
                     break ProcessOne::Reset {
-                        sync: OptimisticFullSync {
-                            inner: OptimisticFullSyncInner {
+                        sync: OptimisticSync {
+                            inner: OptimisticSyncInner {
                                 best_to_finalized_storage_diff: Default::default(),
                                 runtime_code_cache: None,
                                 top_trie_root_calculation_cache: None,
@@ -686,8 +686,8 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                 | Inner::Step1(blocks_tree::BodyVerifyStep1::BadParent { chain, .. }) => {
                     // TODO: DRY
                     break ProcessOne::Reset {
-                        sync: OptimisticFullSync {
-                            inner: OptimisticFullSyncInner {
+                        sync: OptimisticSync {
+                            inner: OptimisticSyncInner {
                                 best_to_finalized_storage_diff: Default::default(),
                                 runtime_code_cache: None,
                                 top_trie_root_calculation_cache: None,
@@ -848,7 +848,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         shared.inner.best_to_finalized_storage_diff.clear();
 
                         break ProcessOne::Finalized {
-                            sync: OptimisticFullSync {
+                            sync: OptimisticSync {
                                 chain,
                                 inner: shared.inner,
                             },
@@ -858,7 +858,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         let new_best_hash = chain.best_block_hash();
                         let new_best_number = chain.best_block_header().number;
                         break ProcessOne::NewBest {
-                            sync: OptimisticFullSync {
+                            sync: OptimisticSync {
                                 chain,
                                 inner: shared.inner,
                             },
@@ -876,7 +876,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     // The underlying verification process is asking for a storage entry in the
                     // parent block.
                     //
-                    // The [`OptimisticFullSync`] stores the difference between the best block's
+                    // The [`OptimisticSync`] stores the difference between the best block's
                     // storage and the finalized block's storage.
                     // As such, the requested value is either found in one of this diff, in which
                     // case it can be returned immediately to continue the verification, or in
@@ -1165,7 +1165,7 @@ pub enum RequestAction<'a, TRq, TSrc> {
     /// A request must be emitted for the given source.
     ///
     /// The request has **not** been acknowledged when this event is emitted. You **must** call
-    /// [`Start::start`] to notify the [`OptimisticFullSyncInner`] that the request has been sent
+    /// [`Start::start`] to notify the [`OptimisticSyncInner`] that the request has been sent
     /// out.
     Start {
         /// Source where to request blocks from.
@@ -1184,7 +1184,7 @@ pub enum RequestAction<'a, TRq, TSrc> {
     /// The given [`RequestId`] is no longer valid.
     ///
     /// > **Note**: The request can either be cancelled, or the request can be let through but
-    /// >           marked in a way that [`OptimisticFullSyncInner::finish_request`] isn't called.
+    /// >           marked in a way that [`OptimisticSyncInner::finish_request`] isn't called.
     Cancel {
         /// Identifier for the request. No longer valid.
         request_id: RequestId,
@@ -1208,9 +1208,9 @@ pub struct Start<'a, TRq, TSrc> {
 }
 
 impl<'a, TRq, TSrc> Start<'a, TRq, TSrc> {
-    /// Updates the [`OptimisticFullSyncInner`] with the fact that the request has actually been
+    /// Updates the [`OptimisticSyncInner`] with the fact that the request has actually been
     /// started. Returns the identifier for the request that must later be passed back to
-    /// [`OptimisticFullSyncInner::finish_request`].
+    /// [`OptimisticSyncInner::finish_request`].
     pub fn start(self, user_data: TRq) -> RequestId {
         let request_id = *self.next_request_id;
         self.next_request_id.0 += 1;

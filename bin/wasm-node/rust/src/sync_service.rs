@@ -21,7 +21,7 @@ use futures::{
     prelude::*,
 };
 use std::{collections::HashMap, num::NonZeroU32, pin::Pin};
-use substrate_lite::{chain, chain::sync::full_optimistic, network};
+use substrate_lite::{chain, chain::sync::optimistic, network};
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -168,34 +168,33 @@ async fn start_sync(
     mut from_foreground: mpsc::Receiver<ToBackground>,
     mut to_foreground: mpsc::Sender<FromBackground>,
 ) -> impl Future<Output = ()> {
-    let mut sync =
-        full_optimistic::OptimisticFullSync::<_, network::PeerId>::new(full_optimistic::Config {
-            chain_information,
-            sources_capacity: 32,
-            source_selection_randomness_seed: rand::random(),
-            blocks_request_granularity: NonZeroU32::new(128).unwrap(),
-            blocks_capacity: {
-                // This is the maximum number of blocks between two consecutive justifications.
-                1024
-            },
-            download_ahead_blocks: {
-                // Verifying a block mostly consists in:
-                //
-                // - Verifying a sr25519 signature for each block, plus a VRF output when the
-                // block is claiming a primary BABE slot.
-                // - Verifying one ed25519 signature per authority for every justification.
-                //
-                // At the time of writing, the speed of these operations hasn't been benchmarked.
-                // It is likely that it varies quite a bit between the various environments (the
-                // different browser engines, and NodeJS).
-                //
-                // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
-                // second, the number of blocks to download ahead of time in order to not block
-                // is 5k.
-                5000
-            },
-            full: false,
-        });
+    let mut sync = optimistic::OptimisticSync::<_, network::PeerId>::new(optimistic::Config {
+        chain_information,
+        sources_capacity: 32,
+        source_selection_randomness_seed: rand::random(),
+        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
+        blocks_capacity: {
+            // This is the maximum number of blocks between two consecutive justifications.
+            1024
+        },
+        download_ahead_blocks: {
+            // Verifying a block mostly consists in:
+            //
+            // - Verifying a sr25519 signature for each block, plus a VRF output when the
+            // block is claiming a primary BABE slot.
+            // - Verifying one ed25519 signature per authority for every justification.
+            //
+            // At the time of writing, the speed of these operations hasn't been benchmarked.
+            // It is likely that it varies quite a bit between the various environments (the
+            // different browser engines, and NodeJS).
+            //
+            // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
+            // second, the number of blocks to download ahead of time in order to not block
+            // is 5k.
+            5000
+        },
+        full: false,
+    });
 
     async move {
         let mut peers_source_id_map = HashMap::new();
@@ -204,7 +203,7 @@ async fn start_sync(
         loop {
             while let Some(action) = sync.next_request_action() {
                 match action {
-                    full_optimistic::RequestAction::Start {
+                    optimistic::RequestAction::Start {
                         start,
                         block_height,
                         source,
@@ -241,7 +240,7 @@ async fn start_sync(
                         let request_id = start.start(abort);
                         block_requests_finished.push(rx.map(move |r| (request_id, r)));
                     }
-                    full_optimistic::RequestAction::Cancel { user_data, .. } => {
+                    optimistic::RequestAction::Cancel { user_data, .. } => {
                         user_data.abort();
                     }
                 }
@@ -254,17 +253,17 @@ async fn start_sync(
             // TODO: tweak this mechanism of stopping sync from time to time
             while verified_blocks < 4096 {
                 match sync.process_one(crate::ffi::unix_time()) {
-                    full_optimistic::ProcessOne::Idle { sync: s } => {
+                    optimistic::ProcessOne::Idle { sync: s } => {
                         sync = s;
                         break;
                     }
-                    full_optimistic::ProcessOne::NewBest { sync: s, .. }
-                    | full_optimistic::ProcessOne::Reset { sync: s, .. } => {
+                    optimistic::ProcessOne::NewBest { sync: s, .. }
+                    | optimistic::ProcessOne::Reset { sync: s, .. } => {
                         sync = s;
                         verified_blocks += 1;
                     }
 
-                    full_optimistic::ProcessOne::Finalized {
+                    optimistic::ProcessOne::Finalized {
                         sync: s,
                         finalized_blocks,
                         ..
@@ -358,11 +357,11 @@ async fn start_sync(
                     // machine.
                     if let Ok(result) = result {
                         let result = result.map_err(|_| ()).and_then(|v| v);
-                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
+                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
                             scale_encoded_extrinsics: Vec::new(),
-                        })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
+                        })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
 
