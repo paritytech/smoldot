@@ -247,8 +247,12 @@ async fn start_sync(
                 }
             }
 
+            let mut verified_blocks = 0u64;
+            let mut new_finalized = None;
+
             // Verify blocks that have been fetched from queries.
-            loop {
+            // TODO: tweak this mechanism of stopping sync from time to time
+            while verified_blocks < 4096 {
                 match sync.process_one(crate::ffi::unix_time()) {
                     full_optimistic::ProcessOne::Idle { sync: s } => {
                         sync = s;
@@ -257,24 +261,7 @@ async fn start_sync(
                     full_optimistic::ProcessOne::NewBest { sync: s, .. }
                     | full_optimistic::ProcessOne::Reset { sync: s, .. } => {
                         sync = s;
-
-                        let scale_encoded_header = sync.best_block_header().scale_encoding().fold(
-                            Vec::new(),
-                            |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            },
-                        );
-
-                        if to_foreground
-                            .send(FromBackground::NewBest {
-                                scale_encoded_header,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
+                        verified_blocks += 1;
                     }
 
                     full_optimistic::ProcessOne::Finalized {
@@ -283,6 +270,7 @@ async fn start_sync(
                         ..
                     } => {
                         sync = s;
+                        verified_blocks += 1;
 
                         let scale_encoded_header = finalized_blocks
                             .last()
@@ -294,27 +282,51 @@ async fn start_sync(
                                 a
                             });
 
-                        if to_foreground
-                            .send(FromBackground::NewFinalized {
-                                scale_encoded_header,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
+                        new_finalized = Some(scale_encoded_header);
                     }
 
                     // Other variants can be produced if the sync state machine is configured for
                     // syncing the storage, which is not the case here.
                     _ => unreachable!(),
                 }
+            }
 
-                // Since `process_one` is a CPU-heavy operation, looping until it is done can
-                // take a long time. In order to avoid blocking the rest of the program in the
-                // meanwhile, the `yield_once` function interrupts the current task and gives a
-                // chance for other tasks to progress.
-                crate::yield_once().await;
+            // Since `process_one` is a CPU-heavy operation, looping until it is done can
+            // take a long time. In order to avoid blocking the rest of the program in the
+            // meanwhile, the `yield_once` function interrupts the current task and gives a
+            // chance for other tasks to progress.
+            crate::yield_once().await;
+
+            if verified_blocks != 0 {
+                let scale_encoded_header =
+                    sync.best_block_header()
+                        .scale_encoding()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
+                if to_foreground
+                    .send(FromBackground::NewBest {
+                        scale_encoded_header,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            if let Some(scale_encoded_header) = new_finalized {
+                debug_assert_ne!(verified_blocks, 0);
+                if to_foreground
+                    .send(FromBackground::NewFinalized {
+                        scale_encoded_header,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
 
             futures::select! {
@@ -353,6 +365,14 @@ async fn start_sync(
                         })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
+
+                _ = async move {
+                    if verified_blocks == 0 {
+                        loop {
+                            futures::pending!()
+                        }
+                    }
+                }.fuse() => {}
             }
         }
     }
