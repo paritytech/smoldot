@@ -90,6 +90,20 @@ pub struct OptimisticFullSync<TRq, TSrc> {
     /// to the user.
     chain: blocks_tree::NonFinalizedTree<Block>,
 
+    /// Extra fields. In a separate structure in order to be moved around.
+    inner: OptimisticFullSyncInner,
+
+    /// Underlying helper. Manages sources and requests.
+    /// Always `Some`, except during some temporary extractions.
+    sync: Option<optimistic::OptimisticSync<TRq, TSrc, RequestSuccessBlock>>,
+}
+
+/// Extra fields. In a separate structure in order to be moved around.
+struct OptimisticFullSyncInner {
+    /// Configuration for the actual finalized block of the chain.
+    /// Used if the `chain` field needs to be recreated.
+    finalized_chain_information: blocks_tree::Config,
+
     /// Changes in the storage of the best block compared to the finalized block.
     /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
     /// value has been erased from the storage.
@@ -103,10 +117,6 @@ pub struct OptimisticFullSync<TRq, TSrc> {
     /// Cache of calculation for the storage trie of the best block.
     /// Providing this value when verifying a block considerably speeds up the verification.
     top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
-    /// Underlying helper. Manages sources and requests.
-    /// Always `Some`, except during some temporary extractions.
-    sync: Option<optimistic::OptimisticSync<TRq, TSrc, RequestSuccessBlock>>,
 }
 
 // TODO: doc
@@ -130,18 +140,23 @@ pub struct Block {
 impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
     /// Builds a new [`OptimisticFullSync`].
     pub fn new(config: Config) -> Self {
-        let chain = blocks_tree::NonFinalizedTree::new(blocks_tree::Config {
+        let blocks_tree_config = blocks_tree::Config {
             chain_information: config.chain_information,
-            blocks_capacity: config.blocks_capacity,
-        });
+            blocks_capacity: usize::try_from(config.blocks_request_granularity.get())
+                .unwrap_or(usize::max_value()),
+        };
 
+        let chain = blocks_tree::NonFinalizedTree::new(blocks_tree_config.clone());
         let best_block_number = chain.best_block_header().number;
 
         OptimisticFullSync {
             chain,
-            best_to_finalized_storage_diff: BTreeMap::new(),
-            runtime_code_cache: None,
-            top_trie_root_calculation_cache: None,
+            inner: OptimisticFullSyncInner {
+                finalized_chain_information: blocks_tree_config,
+                best_to_finalized_storage_diff: BTreeMap::new(),
+                runtime_code_cache: None,
+                top_trie_root_calculation_cache: None,
+            },
             sync: Some(optimistic::OptimisticSync::new(optimistic::Config {
                 best_block_number,
                 sources_capacity: config.sources_capacity,
@@ -245,9 +260,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
             ProcessOneShared {
                 pending_encoded_justification: None,
                 to_process,
-                best_to_finalized_storage_diff: self.best_to_finalized_storage_diff,
-                runtime_code_cache: self.runtime_code_cache,
-                top_trie_root_calculation_cache: self.top_trie_root_calculation_cache,
+                inner: self.inner,
                 finalized_blocks: Vec::new(),
                 now_from_unix_epoch,
             },
@@ -314,9 +327,8 @@ enum Inner {
 struct ProcessOneShared<TRq, TSrc> {
     pending_encoded_justification: Option<Vec<u8>>,
     to_process: optimistic::ProcessOne<TRq, TSrc, RequestSuccessBlock>,
-    best_to_finalized_storage_diff: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    runtime_code_cache: Option<host::HostVmPrototype>,
-    top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+    /// See [`OptimisticFullSync::inner`].
+    inner: OptimisticFullSyncInner,
     // TODO: make sure we're not throwing this away in case of error
     finalized_blocks: Vec<Block>,
     now_from_unix_epoch: Duration,
@@ -354,11 +366,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         break ProcessOne::Finished {
                             sync: OptimisticFullSync {
                                 chain,
-                                best_to_finalized_storage_diff: shared
-                                    .best_to_finalized_storage_diff,
-                                runtime_code_cache: shared.runtime_code_cache,
-                                top_trie_root_calculation_cache: shared
-                                    .top_trie_root_calculation_cache,
+                                inner: shared.inner,
                                 sync: Some(sync),
                             },
                             finalized_blocks: shared.finalized_blocks,
@@ -376,9 +384,12 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     break ProcessOne::Finished {
                         sync: OptimisticFullSync {
                             chain,
-                            best_to_finalized_storage_diff: Default::default(),
-                            runtime_code_cache: None,
-                            top_trie_root_calculation_cache: None,
+                            inner: OptimisticFullSyncInner {
+                                best_to_finalized_storage_diff: Default::default(),
+                                runtime_code_cache: None,
+                                top_trie_root_calculation_cache: None,
+                                ..shared.inner
+                            },
                             sync: Some(sync),
                         },
                         finalized_blocks: shared.finalized_blocks,
@@ -394,9 +405,12 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     break ProcessOne::Finished {
                         sync: OptimisticFullSync {
                             chain,
-                            best_to_finalized_storage_diff: Default::default(),
-                            runtime_code_cache: None,
-                            top_trie_root_calculation_cache: None,
+                            inner: OptimisticFullSyncInner {
+                                best_to_finalized_storage_diff: Default::default(),
+                                runtime_code_cache: None,
+                                top_trie_root_calculation_cache: None,
+                                ..shared.inner
+                            },
                             sync: Some(sync),
                         },
                         finalized_blocks: shared.finalized_blocks,
@@ -412,9 +426,12 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     break ProcessOne::Finished {
                         sync: OptimisticFullSync {
                             chain,
-                            best_to_finalized_storage_diff: shared.best_to_finalized_storage_diff,
-                            runtime_code_cache: shared.runtime_code_cache,
-                            top_trie_root_calculation_cache: None,
+                            inner: OptimisticFullSyncInner {
+                                best_to_finalized_storage_diff: Default::default(),
+                                runtime_code_cache: None,
+                                top_trie_root_calculation_cache: None,
+                                ..shared.inner
+                            },
                             sync: Some(sync),
                         },
                         finalized_blocks: shared.finalized_blocks,
@@ -430,13 +447,17 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     //
                     // The code below extracts that re-usable virtual machine with the intention
                     // to store it back after the verification is over.
-                    let parent_runtime = match shared.runtime_code_cache.take() {
+                    let parent_runtime = match shared.inner.runtime_code_cache.take() {
                         Some(r) => r,
                         None => {
                             // TODO: simplify code below
                             match (
-                                shared.best_to_finalized_storage_diff.get(&b":code"[..]),
                                 shared
+                                    .inner
+                                    .best_to_finalized_storage_diff
+                                    .get(&b":code"[..]),
+                                shared
+                                    .inner
                                     .best_to_finalized_storage_diff
                                     .get(&b":heappages"[..]),
                             ) {
@@ -488,7 +509,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
 
                     inner = Inner::Step2(req.resume(
                         parent_runtime,
-                        shared.top_trie_root_calculation_cache.take(),
+                        shared.inner.top_trie_root_calculation_cache.take(),
                     ));
                 }
 
@@ -504,11 +525,13 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     if !storage_top_trie_changes.contains_key(&b":code"[..])
                         && !storage_top_trie_changes.contains_key(&b":heappages"[..])
                     {
-                        shared.runtime_code_cache = Some(parent_runtime);
+                        shared.inner.runtime_code_cache = Some(parent_runtime);
                     }
-                    shared.top_trie_root_calculation_cache = Some(top_trie_root_calculation_cache);
+                    shared.inner.top_trie_root_calculation_cache =
+                        Some(top_trie_root_calculation_cache);
                     for (key, value) in &storage_top_trie_changes {
                         shared
+                            .inner
                             .best_to_finalized_storage_diff
                             .insert(key.clone(), value.clone());
                     }
@@ -553,7 +576,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         // Since the best block is now the finalized block, reset the storage
                         // diff.
                         debug_assert!(chain.is_empty());
-                        shared.best_to_finalized_storage_diff.clear();
+                        shared.inner.best_to_finalized_storage_diff.clear();
 
                         // Since the verification process requires querying the finalized block
                         // storage from the user, we need to report changes to the finalized
@@ -565,11 +588,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         break ProcessOne::Finished {
                             sync: OptimisticFullSync {
                                 chain,
-                                best_to_finalized_storage_diff: shared
-                                    .best_to_finalized_storage_diff,
-                                runtime_code_cache: shared.runtime_code_cache,
-                                top_trie_root_calculation_cache: shared
-                                    .top_trie_root_calculation_cache,
+                                inner: shared.inner,
                                 sync: Some(sync),
                             },
                             finalized_blocks: shared.finalized_blocks,
@@ -593,7 +612,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     result: Err(err), ..
                 }) => todo!("verif failure"),
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(mut req)) => {
+                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)) => {
                     // The underlying verification process is asking for a storage entry in the
                     // parent block.
                     //
@@ -602,8 +621,10 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     // As such, the requested value is either found in one of this diff, in which
                     // case it can be returned immediately to continue the verification, or in
                     // the finalized block, in which case the user needs to be queried.
-                    if let Some(value) =
-                        shared.best_to_finalized_storage_diff.get(&req.key_as_vec())
+                    if let Some(value) = shared
+                        .inner
+                        .best_to_finalized_storage_diff
+                        .get(&req.key_as_vec())
                     {
                         inner = Inner::Step2(req.inject_value(value.as_ref().map(|v| &v[..])));
                         continue 'verif_steps;
@@ -722,8 +743,10 @@ impl<TRq, TBl> StorageGet<TRq, TBl> {
                     vm::ExecHint::CompileAheadOfTime,
                 )
                 .expect("invalid runtime code?!?!"); // TODO: ?!?!
-                let inner =
-                    inner.resume(wasm_vm, self.shared.top_trie_root_calculation_cache.take());
+                let inner = inner.resume(
+                    wasm_vm,
+                    self.shared.inner.top_trie_root_calculation_cache.take(),
+                );
                 ProcessOne::from(Inner::Step2(inner), self.shared)
             }
             StorageGetTarget::HeapPages(inner, wasm_code) => {
@@ -740,8 +763,10 @@ impl<TRq, TBl> StorageGet<TRq, TBl> {
                     vm::ExecHint::CompileAheadOfTime,
                 )
                 .expect("invalid runtime code?!?!"); // TODO: ?!?!
-                let inner =
-                    inner.resume(wasm_vm, self.shared.top_trie_root_calculation_cache.take());
+                let inner = inner.resume(
+                    wasm_vm,
+                    self.shared.inner.top_trie_root_calculation_cache.take(),
+                );
                 ProcessOne::from(Inner::Step2(inner), self.shared)
             }
         }
@@ -770,6 +795,7 @@ impl<TRq, TBl> StoragePrefixKeys<TRq, TBl> {
         let prefix = self.inner.prefix();
         for (k, v) in self
             .shared
+            .inner
             .best_to_finalized_storage_diff
             .range(prefix.to_owned()..)
             .take_while(|(k, _)| k.starts_with(prefix))
@@ -833,6 +859,7 @@ impl<TRq, TBl> StorageNextKey<TRq, TBl> {
 
         let in_diff = self
             .shared
+            .inner
             .best_to_finalized_storage_diff
             .range(requested_key.to_vec()..) // TODO: don't use to_vec()
             .map(|(k, v)| (k, v.is_some()))
