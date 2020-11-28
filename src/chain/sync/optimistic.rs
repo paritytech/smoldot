@@ -1165,7 +1165,7 @@ pub enum RequestAction<'a, TRq, TSrc> {
     /// A request must be emitted for the given source.
     ///
     /// The request has **not** been acknowledged when this event is emitted. You **must** call
-    /// [`Start::start`] to notify the [`OptimisticSyncInner`] that the request has been sent
+    /// [`Start::start`] to notify the [`OptimisticSync`] that the request has been sent
     /// out.
     Start {
         /// Source where to request blocks from.
@@ -1184,7 +1184,7 @@ pub enum RequestAction<'a, TRq, TSrc> {
     /// The given [`RequestId`] is no longer valid.
     ///
     /// > **Note**: The request can either be cancelled, or the request can be let through but
-    /// >           marked in a way that [`OptimisticSyncInner::finish_request`] isn't called.
+    /// >           marked in a way that [`OptimisticSync::finish_request`] isn't called.
     Cancel {
         /// Identifier for the request. No longer valid.
         request_id: RequestId,
@@ -1208,9 +1208,9 @@ pub struct Start<'a, TRq, TSrc> {
 }
 
 impl<'a, TRq, TSrc> Start<'a, TRq, TSrc> {
-    /// Updates the [`OptimisticSyncInner`] with the fact that the request has actually been
-    /// started. Returns the identifier for the request that must later be passed back to
-    /// [`OptimisticSyncInner::finish_request`].
+    /// Updates the [`OptimisticSync`] with the fact that the request has actually been started.
+    /// Returns the identifier for the request that must later be passed back to
+    /// [`OptimisticSync::finish_request`].
     pub fn start(self, user_data: TRq) -> RequestId {
         let request_id = *self.next_request_id;
         self.next_request_id.0 += 1;
