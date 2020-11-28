@@ -80,6 +80,9 @@ pub struct Config {
     /// You are encouraged to use something like `rand::random()` to fill this field, except in
     /// situations where determinism/reproducibility is desired.
     pub source_selection_randomness_seed: u64,
+
+    /// If true, the block bodies and storage are also synchronized.
+    pub full: bool,
 }
 
 /// Optimistic headers-only syncing.
@@ -117,6 +120,9 @@ struct OptimisticFullSyncInner {
     /// Cache of calculation for the storage trie of the best block.
     /// Providing this value when verifying a block considerably speeds up the verification.
     top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+
+    /// See [`Config::full`].
+    full: bool,
 }
 
 // TODO: doc
@@ -156,6 +162,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
                 best_to_finalized_storage_diff: BTreeMap::new(),
                 runtime_code_cache: None,
                 top_trie_root_calculation_cache: None,
+                full: config.full,
             },
             sync: Some(optimistic::OptimisticSync::new(optimistic::Config {
                 best_block_number,
@@ -235,7 +242,7 @@ impl<TRq, TSrc> OptimisticFullSync<TRq, TSrc> {
             .finish_request(request_id, outcome)
     }
 
-    /// Process a chunk of blocks in the queue of verification.
+    /// Process the next block in the queue of verification.
     ///
     /// This method takes ownership of the [`OptimisticFullSync`] and starts a verification
     /// process. The [`OptimisticFullSync`] is yielded back at the end of this process.
@@ -285,7 +292,23 @@ pub enum ProcessOne<TRq, TSrc> {
         /// [`OptimisticFullSync`]. This field yields it back.
         sync: OptimisticFullSync<TRq, TSrc>,
     },
-    /// Processing is over.
+
+    /// An issue happened when verifying the block or its justification, resulting in resetting
+    /// the chain to the latest finalized block.
+    ///
+    /// > **Note**: The latest finalized block might be a block imported during the same
+    /// >           operation.
+    Reset {
+        /// The state machine.
+        /// The [`OptimisticFullSync::process_one`] method takes ownership of the
+        /// [`OptimisticFullSync`]. This field yields it back.
+        sync: OptimisticFullSync<TRq, TSrc>,
+
+        /// Problem that happened and caused the reset.
+        reason: ResetCause,
+    },
+
+    /// Processing of the block is over.
     ///
     /// There might be more blocks remaining. Call [`OptimisticFullSync::process_one`] again.
     Finished {
@@ -293,26 +316,18 @@ pub enum ProcessOne<TRq, TSrc> {
         /// The [`OptimisticFullSync::process_one`] method takes ownership of the
         /// [`OptimisticFullSync`]. This field yields it back.
         sync: OptimisticFullSync<TRq, TSrc>,
-        /// Blocks that have been finalized after the verification.
-        /// Ordered by increasing block number.
-        // TODO: consider returning them one at a time?
-        finalized_blocks: Vec<Block>,
+
+        new_best_number: u64,
+        new_best_hash: [u8; 32],
     },
-    /// A step in the processing has been completed.
-    ///
-    /// This variant is returned periodically in order to report on the advancement of the
-    /// syncing. No action is required except call [`InProgress::resume`].
-    InProgress {
-        /// Object that resumes the processing.
-        resume: InProgress<TRq, TSrc>,
-        current_best_number: u64,
-        current_best_hash: [u8; 32],
-    },
+
     /// Loading a storage value of the finalized block is required in order to continue.
     FinalizedStorageGet(StorageGet<TRq, TSrc>),
+
     /// Fetching the list of keys of the finalized block with a given prefix is required in order
     /// to continue.
     FinalizedStoragePrefixKeys(StoragePrefixKeys<TRq, TSrc>),
+
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
     FinalizedStorageNextKey(StorageNextKey<TRq, TSrc>),
@@ -340,48 +355,44 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
         // `inner` is updated at each iteration until a state that cannot be resolved internally
         // is found.
         'verif_steps: loop {
-            match inner {
-                Inner::Start(chain) => {
-                    // Start of the verification process.
-                    // The next block needs to be picked.
-
+            match (inner, shared.inner.full) {
+                (Inner::Start(chain), false) => {
                     debug_assert!(shared.pending_encoded_justification.is_none());
 
-                    if !shared.to_process.blocks.as_slice().is_empty() {
-                        let next_block = shared.to_process.blocks.next().unwrap();
-                        if let Some(justification) = next_block.scale_encoded_justification {
-                            shared.pending_encoded_justification = Some(justification);
-                        }
-                        inner = Inner::Step1(chain.verify_body(
-                            next_block.scale_encoded_header,
-                            shared.now_from_unix_epoch,
-                            next_block.scale_encoded_extrinsics.into_iter(),
-                        ));
-                    } else {
-                        debug_assert!(shared.to_process.blocks.as_slice().is_empty());
-                        let sync = shared
-                            .to_process
-                            .report
-                            .update_block_height(chain.best_block_header().number);
-                        break ProcessOne::Finished {
-                            sync: OptimisticFullSync {
-                                chain,
-                                inner: shared.inner,
-                                sync: Some(sync),
-                            },
-                            finalized_blocks: shared.finalized_blocks,
-                        };
+                    let next_block = shared.to_process.blocks.next().unwrap();
+                    if let Some(justification) = next_block.scale_encoded_justification {
+                        shared.pending_encoded_justification = Some(justification);
                     }
+                    inner = Inner::Step1(chain.verify_header(
+                        next_block.scale_encoded_header,
+                        shared.now_from_unix_epoch,
+                    ));
                 }
 
-                Inner::Step1(blocks_tree::BodyVerifyStep1::InvalidHeader(chain, error)) => {
+                (Inner::Start(chain), true) => {
+                    // Start of the verification process.
+                    // The next block needs to be picked.
+                    debug_assert!(shared.pending_encoded_justification.is_none());
+
+                    let next_block = shared.to_process.blocks.next().unwrap();
+                    if let Some(justification) = next_block.scale_encoded_justification {
+                        shared.pending_encoded_justification = Some(justification);
+                    }
+                    inner = Inner::Step1(chain.verify_body(
+                        next_block.scale_encoded_header,
+                        shared.now_from_unix_epoch,
+                        next_block.scale_encoded_extrinsics.into_iter(),
+                    ));
+                }
+
+                (Inner::Step1(blocks_tree::BodyVerifyStep1::InvalidHeader(chain, error)), true) => {
                     // TODO: DRY
                     println!("invalid header: {:?}", error); // TODO: remove
                     let sync = shared
                         .to_process
                         .report
                         .reset_to_finalized(chain.finalized_block_header().number);
-                    break ProcessOne::Finished {
+                    break ProcessOne::Reset {
                         sync: OptimisticFullSync {
                             chain,
                             inner: OptimisticFullSyncInner {
@@ -392,17 +403,18 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                             },
                             sync: Some(sync),
                         },
-                        finalized_blocks: shared.finalized_blocks,
+                        reason: ResetCause::HeaderError(error),
                     };
                 }
 
-                Inner::Step1(blocks_tree::BodyVerifyStep1::Duplicate(chain)) => {
+                (Inner::Step1(blocks_tree::BodyVerifyStep1::Duplicate(chain)), true)
+                | (Inner::Step1(blocks_tree::BodyVerifyStep1::BadParent { chain, .. }), true) => {
                     // TODO: DRY
                     let sync = shared
                         .to_process
                         .report
                         .reset_to_finalized(chain.finalized_block_header().number);
-                    break ProcessOne::Finished {
+                    break ProcessOne::Reset {
                         sync: OptimisticFullSync {
                             chain,
                             inner: OptimisticFullSyncInner {
@@ -413,32 +425,11 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                             },
                             sync: Some(sync),
                         },
-                        finalized_blocks: shared.finalized_blocks,
+                        reason: ResetCause::NonCanonical,
                     };
                 }
 
-                Inner::Step1(blocks_tree::BodyVerifyStep1::BadParent { chain, .. }) => {
-                    // TODO: DRY
-                    let sync = shared
-                        .to_process
-                        .report
-                        .reset_to_finalized(chain.finalized_block_header().number);
-                    break ProcessOne::Finished {
-                        sync: OptimisticFullSync {
-                            chain,
-                            inner: OptimisticFullSyncInner {
-                                best_to_finalized_storage_diff: Default::default(),
-                                runtime_code_cache: None,
-                                top_trie_root_calculation_cache: None,
-                                ..shared.inner
-                            },
-                            sync: Some(sync),
-                        },
-                        finalized_blocks: shared.finalized_blocks,
-                    };
-                }
-
-                Inner::Step1(blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(req)) => {
+                (Inner::Step1(blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(req)), true) => {
                     // The verification process is asking for a Wasm virtual machine containing
                     // the parent block's runtime.
                     //
@@ -513,13 +504,16 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     ));
                 }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
-                    storage_top_trie_changes,
-                    offchain_storage_changes,
-                    top_trie_root_calculation_cache,
-                    parent_runtime,
-                    result: Ok(success),
-                }) => {
+                (
+                    Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
+                        storage_top_trie_changes,
+                        offchain_storage_changes,
+                        top_trie_root_calculation_cache,
+                        parent_runtime,
+                        result: Ok(success),
+                    }),
+                    true,
+                ) => {
                     // Successfully verified block!
                     // Inserting it into the chain and updated all the caches.
                     if !storage_top_trie_changes.contains_key(&b":code"[..])
@@ -548,7 +542,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         })
                     };
 
-                    // `pending_encoded_verification` contains the justification (if any)
+                    // `pending_encoded_justification` contains the justification (if any)
                     // corresponding to the block that has just been verified. Verifying the
                     // justification as well.
                     if let Some(justification) = shared.pending_encoded_justification.take() {
@@ -585,34 +579,30 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                             .to_process
                             .report
                             .update_block_height(chain.best_block_header().number);
-                        break ProcessOne::Finished {
-                            sync: OptimisticFullSync {
-                                chain,
-                                inner: shared.inner,
-                                sync: Some(sync),
-                            },
-                            finalized_blocks: shared.finalized_blocks,
-                        };
                     }
 
                     // Before looping again, report the progress to the user.
-                    let current_best_hash = chain.best_block_hash();
-                    let current_best_number = chain.best_block_header().number;
-                    break ProcessOne::InProgress {
-                        resume: InProgress {
-                            inner: Inner::Start(chain),
-                            shared,
+                    let new_best_hash = chain.best_block_hash();
+                    let new_best_number = chain.best_block_header().number;
+                    break ProcessOne::Finished {
+                        sync: OptimisticFullSync {
+                            chain,
+                            inner: shared.inner,
+                            sync: Some(sync),
                         },
-                        current_best_hash,
-                        current_best_number,
+                        new_best_hash,
+                        new_best_number,
                     };
                 }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
-                    result: Err(err), ..
-                }) => todo!("verif failure"),
+                (
+                    Inner::Step2(blocks_tree::BodyVerifyStep2::Finished {
+                        result: Err(err), ..
+                    }),
+                    true,
+                ) => todo!("verif failure"),
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)) => {
+                (Inner::Step2(blocks_tree::BodyVerifyStep2::StorageGet(req)), true) => {
                     // The underlying verification process is asking for a storage entry in the
                     // parent block.
                     //
@@ -639,7 +629,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     });
                 }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)) => {
+                (Inner::Step2(blocks_tree::BodyVerifyStep2::StorageNextKey(req)), true) => {
                     // The underlying verification process is asking for the key that follows
                     // the requested one.
                     break ProcessOne::FinalizedStorageNextKey(StorageNextKey {
@@ -649,7 +639,7 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                     });
                 }
 
-                Inner::Step2(blocks_tree::BodyVerifyStep2::StoragePrefixKeys(req)) => {
+                (Inner::Step2(blocks_tree::BodyVerifyStep2::StoragePrefixKeys(req)), true) => {
                     // The underlying verification process is asking for all the keys that start
                     // with a certain prefix.
                     // The first step is to ask the user for that information when it comes to
@@ -659,6 +649,8 @@ impl<TRq, TSrc> ProcessOne<TRq, TSrc> {
                         shared,
                     });
                 }
+
+                (_, false) => unreachable!(),
             }
         }
     }
@@ -911,4 +903,24 @@ impl<TRq, TBl> InProgress<TRq, TBl> {
     pub fn resume(self) -> ProcessOne<TRq, TBl> {
         ProcessOne::from(self.inner, self.shared)
     }
+}
+
+/// Problem that happened and caused the reset.
+#[derive(Debug, derive_more::Display)]
+pub enum ResetCause {
+    /// Error while verifying a justification.
+    JustificationError(blocks_tree::JustificationVerifyError),
+    /// Error while verifying a header.
+    HeaderError(blocks_tree::HeaderVerifyError),
+    /// Received block isn't a child of the current best block.
+    NonCanonical,
+    /// Received block number doesn't match expected number.
+    // TODO: unused?
+    #[display(fmt = "Received block height doesn't match expected number")]
+    UnexpectedBlockNumber {
+        /// Number of the block that was expected to be verified next.
+        expected: u64,
+        /// Number of the block that was verified.
+        actual: u64,
+    },
 }
