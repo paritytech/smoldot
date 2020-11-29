@@ -373,6 +373,7 @@ where
     ///
     /// Panics if `connection_id` isn't a valid connection.
     ///
+    // TODO: document the `write_close` thing
     pub async fn read_write<'a>(
         &self,
         connection_id: ConnectionId,
@@ -408,10 +409,12 @@ where
                             .remove_and_purge_address();
 
                         debug_assert_eq!(total_read, 0);
-                        // TODO: more appropriate error?
-                        return Err(ConnectionError::Established(
-                            connection::established::Error::ConnectionClosed,
-                        ));
+                        return Ok(ReadWrite {
+                            read_bytes: total_read,
+                            written_bytes: total_written,
+                            wake_up_after: None,
+                            write_close: true,
+                        });
                     }
                 };
 
@@ -542,7 +545,6 @@ where
 
                 match read_write.event {
                     None => {}
-                    Some(connection::established::Event::EndOfData) => todo!(),
                     Some(connection::established::Event::RequestIn {
                         id,
                         protocol,
@@ -561,7 +563,7 @@ where
                         handshake,
                     }) => {} // TODO:
                     Some(connection::established::Event::NotificationsIn { id, notifications }) => {
-                        //dbg!(notifications);
+                        dbg!(notifications);
                         //todo!()
                     }
                     Some(connection::established::Event::NotificationsOutAccept {

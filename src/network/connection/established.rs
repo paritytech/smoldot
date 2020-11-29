@@ -225,6 +225,7 @@ where
                 connection: self,
                 read_bytes: total_read,
                 written_bytes: total_written,
+                write_close: false,
                 wake_up_after,
                 event: Some(event),
             });
@@ -241,8 +242,14 @@ where
                 total_read += num_read;
                 *incoming_data = &incoming_data[num_read..];
             } else {
-                // TODO: must properly send a yamux close frame
-                return Err(Error::ConnectionClosed);
+                return Ok(ReadWrite {
+                    connection: self,
+                    read_bytes: total_read,
+                    written_bytes: total_written,
+                    write_close: true,
+                    wake_up_after: None,
+                    event: None,
+                });
             }
 
             // TODO: handle incoming_data being None
@@ -304,6 +311,7 @@ where
                             connection: self,
                             read_bytes: total_read,
                             written_bytes: total_written,
+                            write_close: false,
                             wake_up_after,
                             event: Some(event),
                         });
@@ -339,6 +347,7 @@ where
                                 connection: self,
                                 read_bytes: total_read,
                                 written_bytes: total_written,
+                                write_close: false,
                                 wake_up_after,
                                 event: Some(Event::Response {
                                     id: SubstreamId(substream_id),
@@ -514,6 +523,7 @@ where
                                     connection: self,
                                     read_bytes: total_read,
                                     written_bytes: total_written,
+                                    write_close: false,
                                     wake_up_after,
                                     event: Some(Event::NotificationsOutAccept {
                                         id: SubstreamId(substream_id),
@@ -593,6 +603,7 @@ where
                                     connection: self,
                                     read_bytes: total_read,
                                     written_bytes: total_written,
+                                    write_close: false,
                                     wake_up_after,
                                     event: Some(Event::Response {
                                         id: SubstreamId(substream_id),
@@ -611,6 +622,7 @@ where
                                     connection: self,
                                     read_bytes: total_read,
                                     written_bytes: total_written,
+                                    write_close: false,
                                     wake_up_after,
                                     event: Some(Event::Response {
                                         id: SubstreamId(substream_id),
@@ -639,6 +651,7 @@ where
                                     connection: self,
                                     read_bytes: total_read,
                                     written_bytes: total_written,
+                                    write_close: false,
                                     wake_up_after,
                                     event: Some(Event::Response {
                                         id: SubstreamId(substream_id),
@@ -665,6 +678,7 @@ where
                                     connection: self,
                                     read_bytes: total_read,
                                     written_bytes: total_written,
+                                    write_close: false,
                                     wake_up_after,
                                     event: Some(Event::Response {
                                         id: SubstreamId(substream_id),
@@ -718,6 +732,7 @@ where
                                 connection: self,
                                 read_bytes: total_read,
                                 written_bytes: total_written,
+                                write_close: false,
                                 wake_up_after,
                                 event: Some(Event::NotificationsInOpen {
                                     id: SubstreamId(substream_id),
@@ -778,6 +793,7 @@ where
                             connection: self,
                             read_bytes: total_read,
                             written_bytes: total_written,
+                            write_close: false,
                             wake_up_after,
                             event: Some(Event::NotificationsIn {
                                 id: SubstreamId(substream_id),
@@ -854,6 +870,7 @@ where
             connection: self,
             read_bytes: total_read,
             written_bytes: total_written,
+            write_close: false,
             wake_up_after,
             event: None,
         })
@@ -1187,6 +1204,14 @@ pub struct ReadWrite<TNow, TRqUd, TNotifUd> {
     /// remote. The rest of the outgoing buffer is left untouched.
     pub written_bytes: usize,
 
+    /// If `true`, the writing side the connection must be closed. Will always remain to `true`
+    /// after it has been set.
+    ///
+    /// If, after calling [`Established::read_write`], the returned [`ReadWrite`] contains `true`
+    /// here, and the inbound buffer is `None`, then the connection as a whole is useless and can
+    /// be closed.
+    pub write_close: bool,
+
     /// If `Some`, [`Established::read_write`] should be called again when the point in time
     /// reaches the value in the `Option`.
     pub wake_up_after: Option<TNow>,
@@ -1199,10 +1224,6 @@ pub struct ReadWrite<TNow, TRqUd, TNotifUd> {
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
-    /// No more outgoing data will be emitted. The local writing side of the connection should be
-    /// closed.
-    // TODO: remove?
-    EndOfData,
     /// Received a request in the context of a request-response protocol.
     RequestIn {
         /// Identifier of the request. Needs to be provided back when answering the request.
@@ -1269,8 +1290,6 @@ pub enum Event<TRqUd, TNotifUd> {
 /// Error during a connection. The connection should be shut down.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
-    /// Connection has been closed on both sides. There isn't anything to do anymore.
-    ConnectionClosed,
     /// Error in the noise cipher. Data has most likely been corrupted.
     Noise(noise::CipherError),
     /// Error in the yamux multiplexing protocol.
