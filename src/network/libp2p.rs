@@ -562,14 +562,14 @@ where
                         protocol,
                         handshake,
                     }) => {
-                        established
-                            .0
-                            .as_mut()
-                            .unwrap()
-                            .accept_in_notifications_substream(id, handshake); // TODO: wrong handshake
+                        // TODO:
+                        /*established
+                        .0
+                        .as_mut()
+                        .unwrap()
+                        .accept_in_notifications_substream(id, handshake); // TODO: wrong handshake*/
                     }
                     Some(connection::established::Event::NotificationsIn { id, notifications }) => {
-                        dbg!(notifications);
                         //todo!()
                     }
                     Some(connection::established::Event::NotificationsOutAccept {
@@ -703,6 +703,11 @@ pub enum Event {
         // TODO: there are multiple protocols
         overlay_network_index: usize,
     },
+    /*///
+    NotificationsInOpen {
+        id: ConnectionId,
+        protocol: String,
+    },*/
 }
 
 /// Outcome of calling [`Network::read_write`].

@@ -284,9 +284,9 @@ where
                 } => {
                     let chain_info = &self.chains[overlay_network_index];
                     let remote_handshake =
-                        protocol::decode_block_announces_handshake(&remote_handshake).unwrap(); // TODO: don't unwrap
+                        protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
+                    // TODO: don't unwrap
 
-                    dbg!(remote_handshake);
                     // TODO:
                 }
                 libp2p::Event::NotificationsOutReject {
