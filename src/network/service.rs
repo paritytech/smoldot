@@ -86,6 +86,14 @@ pub struct ChainConfig {
     pub in_slots: u32,
 
     pub out_slots: u32,
+
+    /// Hash of the best block according to the local node.
+    pub best_hash: [u8; 32],
+    /// Height of the best block according to the local node.
+    pub best_number: u64,
+    /// Hash of the genesis block (i.e. block number 0) according to the local node.
+    pub genesis_hash: [u8; 32],
+    pub role: protocol::Role,
 }
 
 /// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].

@@ -72,13 +72,15 @@ pub async fn start_client(chain_spec: String) {
     // Load the information about the chain from the chain specs. If a light sync state is
     // present in the chain specs, it is possible to start sync at the finalized block it
     // describes.
-    let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
-        light_sync_state.as_chain_information()
-    } else {
+    let genesis_chain_information =
         chain::chain_information::ChainInformation::from_genesis_storage(
             chain_spec.genesis_storage(),
         )
-        .unwrap()
+        .unwrap();
+    let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
+        light_sync_state.as_chain_information()
+    } else {
+        genesis_chain_information.clone()
     };
 
     // TODO: un-Arc-ify
@@ -97,6 +99,11 @@ pub async fn start_client(chain_spec: String) {
             }
             list
         },
+        genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
+        best_block: (
+            chain_information.finalized_block_header.number,
+            chain_information.finalized_block_header.hash(),
+        ),
         protocol_id: chain_spec.protocol_id().to_string(),
     })
     .await

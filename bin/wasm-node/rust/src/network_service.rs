@@ -48,6 +48,13 @@ pub struct Config {
     /// network.
     pub bootstrap_nodes: Vec<(PeerId, Multiaddr)>,
 
+    /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
+    /// the chains match.
+    pub genesis_block_hash: [u8; 32],
+
+    /// Number and hash of the current best block. Can later be updated with // TODO: which function?
+    pub best_block: (u64, [u8; 32]),
+
     /// Identifier of the chain to connect to.
     ///
     /// Each blockchain has (or should have) a different "protocol id". This value identifies the
@@ -82,6 +89,10 @@ impl NetworkService {
                     in_slots: 25,
                     out_slots: 25,
                     protocol_id: config.protocol_id,
+                    best_hash: config.best_block.1,
+                    best_number: config.best_block.0,
+                    genesis_hash: config.genesis_block_hash,
+                    role: protocol::Role::Full,
                 }],
                 known_nodes: config
                     .bootstrap_nodes

@@ -166,6 +166,10 @@ impl NetworkService {
                     in_slots: 25,
                     out_slots: 25,
                     protocol_id: config.protocol_id,
+                    best_hash: config.best_block.1,
+                    best_number: config.best_block.0,
+                    genesis_hash: config.genesis_block_hash,
+                    role: protocol::Role::Full,
                 }],
                 known_nodes: config
                     .bootstrap_nodes
