@@ -721,10 +721,7 @@ where
                         Ok((num_read, leb128::Framed::Finished(handshake))) => {
                             data = &data[num_read..];
                             let substream_id = substream.id();
-                            // TODO: should be NotificationsInWait instead
-                            *substream.user_data() = Substream::NotificationsIn {
-                                next_notification: leb128::FramedInProgress::new(1024 * 1024), // TODO:
-                            };
+                            *substream.user_data() = Substream::NotificationsInWait;
                             let wake_up_after = self.next_timeout.clone();
                             self.encryption
                                 .consume_inbound_data(yamux_decode.bytes_read);
@@ -1072,6 +1069,29 @@ where
         substream.write(out_buffer);
 
         SubstreamId(substream.id())
+    }
+
+    /// Accepts an inbound notifications protocol. Must be called in response to a
+    /// [`Event::NotificationsInOpen`].
+    // TODO: provide refuse as well
+    pub fn accept_in_notifications_substream(
+        &mut self,
+        substream_id: SubstreamId,
+        handshake: Vec<u8>,
+    ) {
+        let mut substream = self.yamux.substream_by_id(substream_id.0).unwrap();
+
+        match substream.user_data() {
+            Substream::NotificationsInWait => {
+                substream.write(leb128::encode_usize(handshake.len()).collect());
+                substream.write(handshake);
+
+                *substream.user_data() = Substream::NotificationsIn {
+                    next_notification: leb128::FramedInProgress::new(1024 * 1024), // TODO:
+                }
+            }
+            _ => panic!(),
+        }
     }
 
     /// Queues a notification to be written out on the given substream.

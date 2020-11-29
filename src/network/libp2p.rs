@@ -561,7 +561,13 @@ where
                         id,
                         protocol,
                         handshake,
-                    }) => {} // TODO:
+                    }) => {
+                        established
+                            .0
+                            .as_mut()
+                            .unwrap()
+                            .accept_in_notifications_substream(id, handshake); // TODO: wrong handshake
+                    }
                     Some(connection::established::Event::NotificationsIn { id, notifications }) => {
                         dbg!(notifications);
                         //todo!()
