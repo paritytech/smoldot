@@ -594,7 +594,7 @@ async fn storage_query(
 
     let mut result = Err(());
 
-    for target in client.peers.iter() {
+    for target in client.peers.iter().take(3) {
         if trie_root_hash.is_none() || result.is_ok() {
             break;
         }

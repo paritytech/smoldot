@@ -70,7 +70,7 @@ pub struct SyncService {
 
 impl SyncService {
     pub async fn new(mut config: Config) -> Self {
-        let (to_foreground, from_background) = mpsc::channel(16);
+        let (to_foreground, from_background) = mpsc::channel(1024);
         let (to_background, from_foreground) = mpsc::channel(16);
 
         (config.tasks_executor)(Box::pin(
