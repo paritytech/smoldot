@@ -213,6 +213,14 @@ impl NetworkService {
             .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
         }));
 
+        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+            let network_service = network_service.clone();
+            async move {
+                network_service.network.foo(Instant::now()).await;
+            }
+            .instrument(tracing::debug_span!(parent: None, "substreams-open"))
+        }));
+
         Ok(network_service)
     }
 

@@ -23,6 +23,7 @@ use core::{
     task::Context,
     time::Duration,
 };
+use futures::{channel::mpsc, lock::Mutex, prelude::*};
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config<TPeer> {
@@ -110,9 +111,11 @@ pub struct ChainNetwork<TNow, TPeer, TConn> {
     /// Underlying data structure that manages the state of the connections and substreams.
     libp2p: libp2p::Network<TNow, TPeer, TConn>,
 
-    /// For each chain passed in [`Config::chains`], contains the [`ChainConfig::protocol_id`].
-    /// Never modified.
-    protocol_ids: Vec<String>,
+    /// See [`Config::chains`].
+    chains: Vec<ChainConfig>,
+
+    substreams_open_tx: Mutex<mpsc::Sender<()>>,
+    substreams_open_rx: Mutex<mpsc::Receiver<()>>,
 }
 
 impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn>
@@ -141,6 +144,8 @@ where
             })
             .collect();
 
+        let (substreams_open_tx, substreams_open_rx) = mpsc::channel(0);
+
         ChainNetwork {
             libp2p: libp2p::Network::new(libp2p::Config {
                 known_nodes: config.known_nodes,
@@ -150,7 +155,9 @@ where
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 overlay_networks,
             }),
-            protocol_ids: config.chains.into_iter().map(|c| c.protocol_id).collect(),
+            chains: config.chains,
+            substreams_open_tx: Mutex::new(substreams_open_tx),
+            substreams_open_rx: Mutex::new(substreams_open_rx),
         }
     }
 
@@ -186,7 +193,7 @@ where
             a.extend_from_slice(b.as_ref());
             a
         });
-        let protocol = format!("/{}/sync/2", &self.protocol_ids[chain_index]);
+        let protocol = format!("/{}/sync/2", &self.chains[chain_index].protocol_id);
         let response = self
             .libp2p
             .request(now, target, protocol, request_data)
@@ -209,7 +216,7 @@ where
                 a.extend_from_slice(b.as_ref());
                 a
             });
-        let protocol = format!("/{}/light/2", &self.protocol_ids[chain_index]);
+        let protocol = format!("/{}/light/2", &self.chains[chain_index].protocol_id);
         let response = self
             .libp2p
             .request(now, target, protocol, request_data)
@@ -257,13 +264,38 @@ where
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
     pub async fn next_event(&self) -> Event {
-        match self.libp2p.next_event().await {
-            libp2p::Event::Connected(peer_id) => Event::Connected(peer_id),
-            libp2p::Event::Disconnected(peer_id) => Event::Disconnected(peer_id),
-            libp2p::Event::StartConnect { id, multiaddr } => Event::StartConnect {
-                id: PendingId(id),
-                multiaddr,
-            },
+        loop {
+            match self.libp2p.next_event().await {
+                libp2p::Event::Connected(peer_id) => {
+                    let _ = self.substreams_open_tx.lock().await.try_send(());
+                    return Event::Connected(peer_id);
+                }
+                libp2p::Event::Disconnected(peer_id) => return Event::Disconnected(peer_id),
+                libp2p::Event::StartConnect { id, multiaddr } => {
+                    return Event::StartConnect {
+                        id: PendingId(id),
+                        multiaddr,
+                    }
+                }
+                libp2p::Event::NotificationsOutAccept {
+                    id,
+                    overlay_network_index,
+                    remote_handshake,
+                } => {
+                    let chain_info = &self.chains[overlay_network_index];
+                    let remote_handshake =
+                        protocol::decode_block_announces_handshake(&remote_handshake).unwrap(); // TODO: don't unwrap
+
+                    dbg!(remote_handshake);
+                    // TODO:
+                }
+                libp2p::Event::NotificationsOutReject {
+                    id,
+                    overlay_network_index,
+                } => {
+                    // TODO:
+                }
+            }
         }
     }
 
@@ -283,7 +315,7 @@ where
         };
 
         let request_data = kademlia::build_find_node_request(random_peer_id.as_bytes());
-        let protocol = format!("/{}/kad", &self.protocol_ids[chain_index]);
+        let protocol = format!("/{}/kad", &self.chains[chain_index].protocol_id);
         if let Some(target) = self.libp2p.peers_list_lock().await.next() {
             // TODO: better selection
             let response = self
@@ -300,6 +332,35 @@ where
             })
         } else {
             Err(DiscoveryError::NoPeer)
+        }
+    }
+
+    pub async fn foo(&self, now: TNow) {
+        loop {
+            let open = match self.libp2p.open_next_substream().await {
+                Some(o) => o,
+                None => {
+                    self.substreams_open_rx.lock().await.next().await;
+                    continue;
+                }
+            };
+
+            let chain_config = &self.chains[open.overlay_network_index()];
+
+            let protocol = format!("/{}/block-announces/1", chain_config.protocol_id);
+            let handshake =
+                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
+                    best_hash: &chain_config.best_hash,
+                    best_number: chain_config.best_number,
+                    genesis_hash: &chain_config.genesis_hash,
+                    role: chain_config.role,
+                })
+                .fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                });
+
+            open.open(now.clone(), protocol, handshake).await; // TODO: now is wrong
         }
     }
 

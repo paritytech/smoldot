@@ -566,11 +566,34 @@ where
                     Some(connection::established::Event::NotificationsOutAccept {
                         id,
                         remote_handshake,
-                    }) => todo!(),
+                    }) => {
+                        let mut guarded = self.guarded.lock().await;
+                        // TODO: must update peerset
+                        guarded
+                            .events_tx
+                            .send(Event::NotificationsOutAccept {
+                                id: connection_id,
+                                overlay_network_index: 0, // TODO: incorrect
+                                remote_handshake,
+                            })
+                            .await
+                            .unwrap();
+                    }
                     Some(connection::established::Event::NotificationsOutReject {
                         id,
                         user_data,
-                    }) => todo!(),
+                    }) => {
+                        let mut guarded = self.guarded.lock().await;
+                        // TODO: must update peerset
+                        guarded
+                            .events_tx
+                            .send(Event::NotificationsOutReject {
+                                id: connection_id,
+                                overlay_network_index: 0, // TODO: incorrect
+                            })
+                            .await
+                            .unwrap();
+                    }
                     Some(connection::established::Event::NotificationsOutCloseDemanded { id }) => {
                         todo!()
                     }
@@ -584,6 +607,34 @@ where
             wake_up_after,
             write_close: false, // TODO:
         })
+    }
+
+    pub async fn open_next_substream(&'_ self) -> Option<SubstreamOpen<'_, TNow, TPeer, TConn>> {
+        let mut guarded = self.guarded.lock().await;
+
+        // TODO: limit number of slots
+
+        for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
+            // Grab node for which we have an established outgoing connections but haven't yet
+            // opened a substream to.
+            if let Some(node) = guarded
+                .peerset
+                .random_connected_closed_node(overlay_network_index)
+            {
+                let connection_id = node.connections().next().unwrap();
+                let mut peerset_entry = guarded.peerset.connection_mut(connection_id).unwrap();
+                peerset_entry.add_pending_substream(overlay_network_index, ());
+                return Some(SubstreamOpen {
+                    network: self,
+                    connection: peerset_entry.user_data_mut().clone(),
+                    connection_id,
+                    opened: false,
+                    overlay_network_index,
+                });
+            }
+        }
+
+        None
     }
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
@@ -600,37 +651,6 @@ where
         // TODO: limit number of slots
 
         for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
-            // Grab nodes for which we have an established outgoing connections but haven't yet
-            // opened a substream to.
-            /*while let Some(node) = guarded
-                .peerset
-                .random_connected_closed_node(overlay_network_index)
-            {
-                let connection_id = node.connections().next().unwrap();
-                let mut connection = guarded.peerset.connection_mut(connection_id).unwrap();
-                // It is possible for the channel to be closed if the task has shut down. This will
-                // be processed by `next_event` when detected.
-                let _ = connection
-                    .user_data_mut()
-                    .send(ToConnection::OpenOutNotifications {
-                        protocol: format!("/{}/block-announces/1", self.protocol_id),
-                        handshake: protocol::encode_block_announces_handshake(
-                            protocol::BlockAnnouncesHandshakeRef {
-                                best_hash: &self.best_block.1,
-                                best_number: self.best_block.0,
-                                genesis_hash: &self.genesis_block_hash,
-                                role: protocol::Role::Full, // TODO:
-                            },
-                        )
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        }),
-                    })
-                    .await;
-                connection.add_pending_substream(0, ());
-            }*/
-
             // TODO: very wip
             while let Some(mut node) = guarded.peerset.random_not_connected(overlay_network_index) {
                 let first_addr = node.known_addresses().cloned().next();
@@ -663,6 +683,19 @@ pub enum Event {
         id: PendingId,
         multiaddr: Multiaddr,
     },
+
+    NotificationsOutAccept {
+        id: ConnectionId,
+        // TODO: there are multiple protocols
+        overlay_network_index: usize,
+        remote_handshake: Vec<u8>,
+    },
+
+    NotificationsOutReject {
+        id: ConnectionId,
+        // TODO: there are multiple protocols
+        overlay_network_index: usize,
+    },
 }
 
 /// Outcome of calling [`Network::read_write`].
@@ -691,4 +724,69 @@ pub enum ConnectionError {
     Established(connection::established::Error),
     Handshake(connection::handshake::HandshakeError),
     PeerIdMismatch,
+}
+
+pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
+    network: &'a Network<TNow, TPeer, TConn>,
+    connection_id: peerset::ConnectionId,
+    connection: Arc<
+        Mutex<(
+            Option<
+                connection::established::Established<
+                    TNow,
+                    oneshot::Sender<Result<Vec<u8>, ()>>,
+                    (),
+                >,
+            >,
+            TConn,
+            Option<Waker>,
+        )>,
+    >,
+
+    /// True if the user called [`SubstreamOpen::open`].
+    opened: bool,
+
+    /// Index of the overlay network whose notifications substream to open.
+    overlay_network_index: usize,
+}
+
+impl<'a, TNow, TPeer, TConn> SubstreamOpen<'a, TNow, TPeer, TConn>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
+    /// Returns the index of the overlay network whose notifications substream to open.
+    pub fn overlay_network_index(&self) -> usize {
+        self.overlay_network_index
+    }
+
+    pub async fn open(
+        mut self,
+        now: TNow,
+        protocol: impl Into<String>,
+        handshake: impl Into<Vec<u8>>,
+    ) {
+        self.opened = true;
+
+        let mut connection = self.connection.lock().await;
+
+        if let Some(established) = connection.0.as_mut() {
+            established.open_notifications_substream(now, protocol.into(), handshake.into(), ());
+        }
+
+        if let Some(waker) = connection.2.take() {
+            waker.wake();
+        }
+    }
+}
+
+impl<'a, TNow, TPeer, TConn> Drop for SubstreamOpen<'a, TNow, TPeer, TConn> {
+    fn drop(&mut self) {
+        if self.opened {
+            return;
+        }
+
+        // TODO: must revert the changes in the peerset
+
+        todo!()
+    }
 }
