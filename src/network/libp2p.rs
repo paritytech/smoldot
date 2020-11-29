@@ -560,8 +560,9 @@ where
                         protocol,
                         handshake,
                     }) => {} // TODO:
-                    Some(connection::established::Event::NotificationIn { id, notification }) => {
-                        todo!()
+                    Some(connection::established::Event::NotificationsIn { id, notifications }) => {
+                        //dbg!(notifications);
+                        //todo!()
                     }
                     Some(connection::established::Event::NotificationsOutAccept {
                         id,
@@ -611,8 +612,6 @@ where
 
     pub async fn open_next_substream(&'_ self) -> Option<SubstreamOpen<'_, TNow, TPeer, TConn>> {
         let mut guarded = self.guarded.lock().await;
-
-        // TODO: limit number of slots
 
         for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
             // Grab node for which we have an established outgoing connections but haven't yet

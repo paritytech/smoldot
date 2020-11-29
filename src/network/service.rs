@@ -337,6 +337,8 @@ where
 
     pub async fn foo(&self, now: TNow) {
         loop {
+            // TODO: limit number of slots
+
             let open = match self.libp2p.open_next_substream().await {
                 Some(o) => o,
                 None => {
