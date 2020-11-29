@@ -70,7 +70,7 @@ pub struct SyncService {
 
 impl SyncService {
     pub async fn new(mut config: Config) -> Self {
-        let (to_foreground, from_background) = mpsc::channel(16);
+        let (to_foreground, from_background) = mpsc::channel(1024);
         let (to_background, from_foreground) = mpsc::channel(16);
 
         (config.tasks_executor)(Box::pin(
@@ -168,7 +168,7 @@ async fn start_sync(
     mut from_foreground: mpsc::Receiver<ToBackground>,
     mut to_foreground: mpsc::Sender<FromBackground>,
 ) -> impl Future<Output = ()> {
-    let mut sync = optimistic::OptimisticSync::<_, network::PeerId>::new(optimistic::Config {
+    let mut sync = optimistic::OptimisticSync::<_, network::PeerId, ()>::new(optimistic::Config {
         chain_information,
         sources_capacity: 32,
         source_selection_randomness_seed: rand::random(),
@@ -247,7 +247,6 @@ async fn start_sync(
             }
 
             let mut verified_blocks = 0u64;
-            let mut new_finalized = None;
 
             // Verify blocks that have been fetched from queries.
             // TODO: tweak this mechanism of stopping sync from time to time
@@ -260,7 +259,23 @@ async fn start_sync(
                     optimistic::ProcessOne::NewBest { sync: s, .. }
                     | optimistic::ProcessOne::Reset { sync: s, .. } => {
                         sync = s;
-                        verified_blocks += 1;
+
+                        let scale_encoded_header = sync.best_block_header().scale_encoding().fold(
+                            Vec::new(),
+                            |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            },
+                        );
+                        if to_foreground
+                            .send(FromBackground::NewBest {
+                                scale_encoded_header,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
 
                     optimistic::ProcessOne::Finalized {
@@ -281,7 +296,25 @@ async fn start_sync(
                                 a
                             });
 
-                        new_finalized = Some(scale_encoded_header);
+                        if to_foreground
+                            .send(FromBackground::NewBest {
+                                scale_encoded_header: scale_encoded_header.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+
+                        if to_foreground
+                            .send(FromBackground::NewFinalized {
+                                scale_encoded_header,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
 
                     // Other variants can be produced if the sync state machine is configured for
@@ -295,38 +328,6 @@ async fn start_sync(
             // meanwhile, the `yield_once` function interrupts the current task and gives a
             // chance for other tasks to progress.
             crate::yield_once().await;
-
-            if verified_blocks != 0 {
-                let scale_encoded_header =
-                    sync.best_block_header()
-                        .scale_encoding()
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        });
-                if to_foreground
-                    .send(FromBackground::NewBest {
-                        scale_encoded_header,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-
-            if let Some(scale_encoded_header) = new_finalized {
-                debug_assert_ne!(verified_blocks, 0);
-                if to_foreground
-                    .send(FromBackground::NewFinalized {
-                        scale_encoded_header,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
 
             futures::select! {
                 message = from_foreground.next() => {
@@ -361,6 +362,7 @@ async fn start_sync(
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
                             scale_encoded_extrinsics: Vec::new(),
+                            user_data: (),
                         })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
