@@ -335,34 +335,22 @@ where
         }
     }
 
-    pub async fn foo(&self, now: TNow) {
+    /// Waits until a connection is in a state in which a substream can be opened.
+    pub async fn next_substream<'a>(&'a self) -> SubstreamOpen<'a, TNow, TPeer, TConn> {
         loop {
             // TODO: limit number of slots
 
-            let open = match self.libp2p.open_next_substream().await {
-                Some(o) => o,
+            match self.libp2p.open_next_substream().await {
+                Some(inner) => {
+                    return SubstreamOpen {
+                        inner,
+                        chains: &self.chains,
+                    }
+                }
                 None => {
                     self.substreams_open_rx.lock().await.next().await;
-                    continue;
                 }
             };
-
-            let chain_config = &self.chains[open.overlay_network_index()];
-
-            let protocol = format!("/{}/block-announces/1", chain_config.protocol_id);
-            let handshake =
-                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
-                    best_hash: &chain_config.best_hash,
-                    best_number: chain_config.best_number,
-                    genesis_hash: &chain_config.genesis_hash,
-                    role: chain_config.role,
-                })
-                .fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                });
-
-            open.open(now.clone(), protocol, handshake).await; // TODO: now is wrong
         }
     }
 
@@ -465,4 +453,33 @@ pub struct ReadWrite<TNow> {
     /// If, after calling [`ChainNetwork::read_write`], the returned [`ReadWrite`] contains `true`
     /// here, and the inbound buffer is `None`, then the [`ConnectionId`] is now invalid.
     pub write_close: bool,
+}
+
+pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
+    inner: libp2p::SubstreamOpen<'a, TNow, TPeer, TConn>,
+    chains: &'a Vec<ChainConfig>,
+}
+
+impl<'a, TNow, TPeer, TConn> SubstreamOpen<'a, TNow, TPeer, TConn>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
+    pub async fn open(self, now: TNow) {
+        let chain_config = &self.chains[self.inner.overlay_network_index()];
+
+        let protocol = format!("/{}/block-announces/1", chain_config.protocol_id);
+        let handshake =
+            protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
+                best_hash: &chain_config.best_hash,
+                best_number: chain_config.best_number,
+                genesis_hash: &chain_config.genesis_hash,
+                role: chain_config.role,
+            })
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
+
+        self.inner.open(now, protocol, handshake).await;
+    }
 }
