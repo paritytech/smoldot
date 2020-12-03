@@ -109,12 +109,11 @@ impl NetworkService {
 
     /// Sends a blocks request to the given peer.
     // TODO: more docs
-    // TODO: proper error type
     pub async fn blocks_request(
         self: Arc<Self>,
         target: PeerId,
         config: protocol::BlocksRequestConfig,
-    ) -> Result<Vec<protocol::BlockData>, ()> {
+    ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
         self.network
             .blocks_request(ffi::Instant::now(), target, 0, config)
             .await // TODO: chain_index
@@ -122,12 +121,11 @@ impl NetworkService {
 
     /// Sends a storage proof request to the given peer.
     // TODO: more docs
-    // TODO: proper error type
     pub async fn storage_proof_request(
         self: Arc<Self>,
         target: PeerId,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> Result<Vec<Vec<u8>>, ()> {
+    ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
         self.network
             .storage_proof_request(ffi::Instant::now(), target, 0, config)
             .await // TODO: chain_index

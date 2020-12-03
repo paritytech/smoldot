@@ -144,7 +144,7 @@ struct Guarded<TNow, TPeer, TConn> {
                 Option<
                     connection::established::Established<
                         TNow,
-                        oneshot::Sender<Result<Vec<u8>, ()>>,
+                        oneshot::Sender<Result<Vec<u8>, RequestError>>,
                         (),
                     >,
                 >,
@@ -250,20 +250,21 @@ where
 
     /// Sends a request to the given peer.
     // TODO: more docs
-    // TODO: proper error type
     pub async fn request(
         &self,
         now: TNow,
         target: PeerId,
         protocol: String,
         request_data: Vec<u8>,
-    ) -> Result<Vec<u8>, ()> {
+    ) -> Result<Vec<u8>, RequestError> {
         let connection = {
             let mut guarded = self.guarded.lock().await;
 
             let connection = match guarded.peerset.node_mut(target) {
-                peerset::NodeMut::Known(n) => n.connections().next().ok_or(())?,
-                peerset::NodeMut::Unknown(_) => return Err(()),
+                peerset::NodeMut::Known(n) => {
+                    n.connections().next().ok_or(RequestError::NotConnected)?
+                }
+                peerset::NodeMut::Unknown(_) => return Err(RequestError::NotConnected),
             };
 
             guarded
@@ -280,7 +281,7 @@ where
         connection_lock
             .0
             .as_mut()
-            .ok_or(())?
+            .ok_or(RequestError::ConnectionClosed)?
             .add_request(now, protocol, request_data, send_back);
         if let Some(waker) = connection_lock.2.take() {
             waker.wake();
@@ -295,7 +296,7 @@ where
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
         match receive_result.await {
             Ok(r) => r,
-            Err(_) => Err(()),
+            Err(_) => Err(RequestError::ConnectionClosed),
         }
     }
 
@@ -555,7 +556,7 @@ where
                         user_data: send_back,
                         ..
                     }) => {
-                        let _ = send_back.send(response.map_err(|_| ()));
+                        let _ = send_back.send(response.map_err(RequestError::Connection));
                     }
                     Some(connection::established::Event::NotificationsInOpen {
                         id,
@@ -746,7 +747,7 @@ pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
             Option<
                 connection::established::Established<
                     TNow,
-                    oneshot::Sender<Result<Vec<u8>, ()>>,
+                    oneshot::Sender<Result<Vec<u8>, RequestError>>,
                     (),
                 >,
             >,
@@ -801,4 +802,14 @@ impl<'a, TNow, TPeer, TConn> Drop for SubstreamOpen<'a, TNow, TPeer, TConn> {
 
         todo!()
     }
+}
+
+#[derive(Debug, derive_more::Display)]
+pub enum RequestError {
+    /// Not connected to target.
+    NotConnected,
+    /// Connection has been unexpectedly closed by the remote during the request.
+    ConnectionClosed,
+    /// Error in the context of the connection.
+    Connection(connection::established::RequestError),
 }

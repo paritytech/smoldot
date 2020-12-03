@@ -294,7 +294,7 @@ async fn async_main() {
                             let sync_service = sync_service.clone();
                             async move {
                                 let result = block_request.await;
-                                sync_service.answer_blocks_request(id, result).await;
+                                sync_service.answer_blocks_request(id, result.map_err(|_| ())).await;
                             }
                         });
                     }
@@ -319,7 +319,7 @@ async fn async_main() {
                             let sync_service = sync_service.clone();
                             async move {
                                 let result = block_request.await;
-                                sync_service.answer_blocks_request(id, result).await;
+                                sync_service.answer_blocks_request(id, result.map_err(|_| ())).await;
                             }
                         });
                     }

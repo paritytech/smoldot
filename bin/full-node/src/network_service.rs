@@ -244,7 +244,7 @@ impl NetworkService {
         self: Arc<Self>,
         target: PeerId,
         config: protocol::BlocksRequestConfig,
-    ) -> Result<Vec<protocol::BlockData>, ()> {
+    ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
         self.network
             .blocks_request(Instant::now(), target, 0, config)
             .await // TODO: chain_index

@@ -181,14 +181,13 @@ where
 
     /// Sends a blocks request to the given peer.
     // TODO: more docs
-    // TODO: proper error type
     pub async fn blocks_request(
         &self,
         now: TNow,
         target: peer_id::PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
-    ) -> Result<Vec<protocol::BlockData>, ()> {
+    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let request_data = protocol::build_block_request(config).fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
@@ -197,20 +196,20 @@ where
         let response = self
             .libp2p
             .request(now, target, protocol, request_data)
+            .map_err(BlocksRequestError::Request)
             .await?;
-        protocol::decode_block_response(&response).map_err(|_| ())
+        protocol::decode_block_response(&response).map_err(BlocksRequestError::Decode)
     }
 
     /// Sends a storage request to the given peer.
     // TODO: more docs
-    // TODO: proper error type
     pub async fn storage_proof_request(
         &self,
         now: TNow,
         target: peer_id::PeerId,
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> Result<Vec<Vec<u8>>, ()> {
+    ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
         let request_data =
             protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
@@ -220,8 +219,9 @@ where
         let response = self
             .libp2p
             .request(now, target, protocol, request_data)
+            .map_err(StorageProofRequestError::Request)
             .await?;
-        protocol::decode_storage_proof_response(&response).map_err(|_| ())
+        protocol::decode_storage_proof_response(&response).map_err(StorageProofRequestError::Decode)
     }
 
     pub async fn announce_transaction(&self, transaction: Vec<u8>) {}
@@ -424,15 +424,6 @@ where
     }
 }
 
-/// Error during [`ChainNetwork::kademlia_discovery_round`].
-#[derive(Debug, derive_more::Display)]
-pub enum DiscoveryError {
-    NoPeer,
-    #[display(fmt = "Networking request failed")]
-    RequestFailed(()),
-    DecodeError(kademlia::DecodeFindNodeResponseError),
-}
-
 /// Outcome of calling [`ChainNetwork::read_write`].
 pub struct ReadWrite<TNow> {
     /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
@@ -482,4 +473,26 @@ where
 
         self.inner.open(now, protocol, handshake).await;
     }
+}
+
+/// Error during [`ChainNetwork::kademlia_discovery_round`].
+#[derive(Debug, derive_more::Display)]
+pub enum DiscoveryError {
+    NoPeer,
+    RequestFailed(libp2p::RequestError),
+    DecodeError(kademlia::DecodeFindNodeResponseError),
+}
+
+/// Error returned by [`ChainNetwork::blocks_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum BlocksRequestError {
+    Request(libp2p::RequestError),
+    Decode(protocol::DecodeBlockResponseError),
+}
+
+/// Error returned by [`ChainNetwork::storage_proof_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum StorageProofRequestError {
+    Request(libp2p::RequestError),
+    Decode(protocol::DecodeStorageProofResponseError),
 }
