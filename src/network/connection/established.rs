@@ -1029,6 +1029,21 @@ where
         SubstreamId(substream.id())
     }
 
+    /// Returns the user dat associated to a notifications substream.
+    ///
+    /// Returns `None` if the substream doesn't exist or isn't a notifications substream.
+    pub fn notifications_substream_user_data_mut(
+        &mut self,
+        id: SubstreamId,
+    ) -> Option<&mut TNotifUd> {
+        match self.yamux.substream_by_id(id.0)?.into_user_data() {
+            Substream::NotificationsOutNegotiating { user_data, .. } => Some(user_data),
+            Substream::NotificationsOutHandshakeRecv { user_data, .. } => Some(user_data),
+            Substream::NotificationsOut { user_data } => Some(user_data),
+            _ => None,
+        }
+    }
+
     /// Opens a outgoing substream with the given protocol, destined for a stream of
     /// notifications.
     ///

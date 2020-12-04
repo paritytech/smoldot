@@ -157,7 +157,7 @@ struct Guarded<TNow, TPeer, TConn> {
                     connection::established::Established<
                         TNow,
                         oneshot::Sender<Result<Vec<u8>, RequestError>>,
-                        (),
+                        usize,
                     >,
                 >,
                 TConn,
@@ -585,13 +585,20 @@ where
                         id,
                         remote_handshake,
                     }) => {
+                        let overlay_network_index = *established
+                            .0
+                            .as_mut()
+                            .unwrap()
+                            .notifications_substream_user_data_mut(id)
+                            .unwrap();
+
                         let mut guarded = self.guarded.lock().await;
                         // TODO: must update peerset
                         guarded
                             .events_tx
                             .send(Event::NotificationsOutAccept {
                                 id: connection_id,
-                                overlay_network_index: 0, // TODO: incorrect
+                                overlay_network_index,
                                 remote_handshake,
                             })
                             .await
@@ -599,7 +606,7 @@ where
                     }
                     Some(connection::established::Event::NotificationsOutReject {
                         id,
-                        user_data,
+                        user_data: overlay_network_index,
                     }) => {
                         let mut guarded = self.guarded.lock().await;
                         // TODO: must update peerset
@@ -607,7 +614,7 @@ where
                             .events_tx
                             .send(Event::NotificationsOutReject {
                                 id: connection_id,
-                                overlay_network_index: 0, // TODO: incorrect
+                                overlay_network_index,
                             })
                             .await
                             .unwrap();
@@ -726,14 +733,14 @@ pub enum Event {
 
     NotificationsOutAccept {
         id: ConnectionId,
-        // TODO: there are multiple protocols
+        // TODO: what if fallback?
         overlay_network_index: usize,
         remote_handshake: Vec<u8>,
     },
 
     NotificationsOutReject {
         id: ConnectionId,
-        // TODO: there are multiple protocols
+        // TODO: what if fallback?
         overlay_network_index: usize,
     },
 
@@ -782,7 +789,7 @@ pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
                 connection::established::Established<
                     TNow,
                     oneshot::Sender<Result<Vec<u8>, RequestError>>,
-                    (),
+                    usize,
                 >,
             >,
             TConn,
@@ -816,7 +823,7 @@ where
                 now,
                 self.overlay_network_index,
                 handshake.into(),
-                (),
+                self.overlay_network_index,
             );
         }
 

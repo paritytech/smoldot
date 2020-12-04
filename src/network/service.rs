@@ -322,10 +322,13 @@ where
                     overlay_network_index,
                     remote_handshake,
                 } => {
-                    let chain_info = &self.chains[overlay_network_index];
-                    //let remote_handshake =
-                    //protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
+                    let chain_info = &self.chains[overlay_network_index / 2];
+                    if overlay_network_index % 2 == 0 {
+                        let remote_handshake =
+                            protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
                     // TODO: don't unwrap
+                    } else {
+                    }
 
                     // TODO:
                 }
