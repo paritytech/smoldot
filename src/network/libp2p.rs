@@ -551,7 +551,7 @@ where
                     None => {}
                     Some(connection::established::Event::RequestIn {
                         id,
-                        protocol_index: protocol,
+                        protocol_index,
                         request,
                     }) => todo!(),
                     Some(connection::established::Event::Response {
