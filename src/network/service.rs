@@ -115,6 +115,8 @@ pub struct ChainNetwork<TNow, TPeer, TConn> {
     /// See [`Config::chains`].
     chains: Vec<ChainConfig>,
 
+    pending_in_accept: Mutex<Option<(libp2p::ConnectionId, usize, Vec<u8>)>>,
+
     substreams_open_tx: Mutex<mpsc::Sender<()>>,
     substreams_open_rx: Mutex<mpsc::Receiver<()>>,
 }
@@ -198,6 +200,7 @@ where
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
             }),
             chains: config.chains,
+            pending_in_accept: Mutex::new(None),
             substreams_open_tx: Mutex::new(substreams_open_tx),
             substreams_open_rx: Mutex::new(substreams_open_rx),
         }
@@ -304,7 +307,16 @@ where
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
     pub async fn next_event(&self) -> Event {
+        let mut pending_in_accept = self.pending_in_accept.lock().await;
+
         loop {
+            if let Some((id, overlay_network_index, handshake)) = &*pending_in_accept {
+                self.libp2p
+                    .accept_notifications_in(*id, *overlay_network_index, handshake.clone()) // TODO: clone :-/
+                    .await;
+                *pending_in_accept = None;
+            }
+
             match self.libp2p.next_event().await {
                 libp2p::Event::Connected(peer_id) => {
                     let _ = self.substreams_open_tx.lock().await.try_send(());
@@ -363,15 +375,13 @@ where
                             a
                         });
 
-                        // TODO: might be interrupted /!\
-                        self.libp2p
-                            .accept_notifications_in(id, overlay_network_index, handshake)
-                            .await;
+                        // Accepting the substream isn't done immediately because of
+                        // futures-cancellation-related concerns.
+                        *pending_in_accept = Some((id, overlay_network_index, handshake));
                     } else {
-                        // TODO: might be interrupted /!\
-                        self.libp2p
-                            .accept_notifications_in(id, overlay_network_index, Vec::new())
-                            .await;
+                        // Accepting the substream isn't done immediately because of
+                        // futures-cancellation-related concerns.
+                        *pending_in_accept = Some((id, overlay_network_index, Vec::new()));
                     }
                 }
                 libp2p::Event::NotificationsIn {
@@ -548,6 +558,7 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Insert the results in the [`ChainNetwork`].
+    // TODO: futures cancellation concerns T_T
     pub async fn insert(self, mut or_insert: impl FnMut(&peer_id::PeerId) -> TPeer) {
         for (peer_id, addrs) in self.outcome {
             self.service

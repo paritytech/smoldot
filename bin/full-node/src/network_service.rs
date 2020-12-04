@@ -80,7 +80,9 @@ pub enum Event {
 
 pub struct NetworkService {
     /// Fields behind a mutex.
-    guarded: Mutex<Guarded>,
+    ///
+    /// A regular `Mutex` is used in order to avoid futures cancellation issues.
+    guarded: parking_lot::Mutex<Guarded>,
 
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<Instant, (), ()>,
@@ -157,7 +159,7 @@ impl NetworkService {
 
         // Initialize the network service.
         let network_service = Arc::new(NetworkService {
-            guarded: Mutex::new(Guarded {
+            guarded: parking_lot::Mutex::new(Guarded {
                 tasks_executor: config.tasks_executor,
             }),
             network: service::ChainNetwork::new(service::Config {
@@ -281,7 +283,7 @@ impl NetworkService {
                         }
                     };
 
-                    let mut guarded = self.guarded.lock().await;
+                    let mut guarded = self.guarded.lock();
                     (guarded.tasks_executor)(Box::pin(
                         connection_task(socket, self.clone(), id).instrument(
                             tracing::trace_span!(parent: None, "connection", address = %multiaddr),

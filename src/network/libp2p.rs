@@ -362,6 +362,7 @@ where
             .remove_and_purge_address();
     }
 
+    // TODO: futures cancellation concerns T_T
     pub async fn accept_notifications_in(
         &self,
         id: ConnectionId,
@@ -385,6 +386,7 @@ where
 
         let connection_arc = connection.user_data_mut().clone();
         drop(connection);
+        drop(guarded);
 
         let mut connection = connection_arc.lock().await;
 
@@ -429,6 +431,7 @@ where
     /// Panics if `connection_id` isn't a valid connection.
     ///
     // TODO: document the `write_close` thing
+    // TODO: futures cancellation concerns T_T
     pub async fn read_write<'a>(
         &self,
         connection_id: ConnectionId,
@@ -902,6 +905,7 @@ where
         self.overlay_network_index
     }
 
+    // TODO: futures cancellation concerns T_T
     pub async fn open(self, now: TNow, handshake: impl Into<Vec<u8>>) {
         let mut connection = self.connection.lock().await;
 
