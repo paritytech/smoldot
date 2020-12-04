@@ -154,6 +154,11 @@ impl NetworkService {
                     let mut guarded = self.guarded.lock().await;
                     (guarded.tasks_executor)(Box::pin(connection_task(socket, self.clone(), id)));
                 }
+                service::Event::BlockAnnounce {
+                    chain_index,
+                    peer_id,
+                    announce,
+                } => {}
             }
         }
     }

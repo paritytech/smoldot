@@ -316,12 +316,28 @@ pub enum Role {
 }
 
 /// Decoded block announcement notification.
+#[derive(Debug)]
 pub struct BlockAnnounceRef<'a> {
     /// Header of the announced block.
     pub header: header::HeaderRef<'a>,
     /// True if the block is the new best block of the announcer.
     pub is_best: bool,
     // TODO: missing a `Vec<u8>` field that SCALE-decodes into this type: https://github.com/paritytech/polkadot/blob/fff4635925c12c80717a524367687fcc304bcb13/node%2Fprimitives%2Fsrc%2Flib.rs#L87
+}
+
+/// Turns a block announcement into its SCALE-encoding ready to be sent over the wire.
+///
+/// This function returns an iterator of buffers. The encoded message consists in the
+/// concatenation of the buffers.
+pub fn encode_block_announce<'a>(
+    announce: BlockAnnounceRef<'a>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    let is_best = if announce.is_best { [1u8] } else { [0u8] };
+    announce
+        .header
+        .scale_encoding()
+        .map(either::Left)
+        .chain(iter::once(either::Right(is_best)))
 }
 
 /// Decodes a block announcement.

@@ -288,6 +288,14 @@ impl NetworkService {
                         ),
                     ));
                 }
+                service::Event::BlockAnnounce {
+                    chain_index,
+                    peer_id,
+                    announce,
+                } => {
+                    tracing::debug!(%chain_index, %peer_id, ?announce, "block-announce");
+                    // TODO:
+                }
             }
         }
     }
