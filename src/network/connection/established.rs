@@ -764,14 +764,18 @@ where
                         mut next_notification,
                         user_data,
                     } => {
-                        let mut notifications = Vec::with_capacity(8); // TODO: arbitrary
+                        // TODO: rewrite this block to support sending one notification at a
+                        // time
+
+                        let mut notification = None;
 
                         loop {
                             match next_notification.update(&data) {
-                                Ok((num_read, leb128::Framed::Finished(notification))) => {
+                                Ok((num_read, leb128::Framed::Finished(notif))) => {
                                     data = &data[num_read..];
                                     next_notification = leb128::FramedInProgress::new(1024 * 1024);
-                                    notifications.push(notification);
+                                    assert!(notification.is_none()); // TODO: temporary because outside API doesn't support multiple notifications
+                                    notification = Some(notif);
                                 }
                                 Ok((num_read, leb128::Framed::InProgress(next))) => {
                                     debug_assert_eq!(num_read, data.len());
@@ -801,9 +805,9 @@ where
                             written_bytes: total_written,
                             write_close: false,
                             wake_up_after,
-                            event: Some(Event::NotificationsIn {
+                            event: Some(Event::NotificationIn {
                                 id: SubstreamId(substream_id),
-                                notifications,
+                                notification: notification.unwrap(),
                             }),
                         });
                     }
@@ -1312,14 +1316,14 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
-    /// Remote has sent one or more notifications on an inbound substream. Can only happen after
-    /// the substream has been accepted.
+    /// Remote has sent a notification on an inbound substream. Can only happen after the
+    /// substream has been accepted.
     // TODO: give a way to back-pressure notifications
-    NotificationsIn {
+    NotificationIn {
         /// Identifier of the substream.
         id: SubstreamId,
-        /// Notifications sent by the remote. Never empty.
-        notifications: Vec<Vec<u8>>,
+        /// Notification sent by the remote.
+        notification: Vec<u8>,
     },
     /// Remote has accepted a substream opened with [`Established::open_notifications_substream`].
     ///

@@ -578,7 +578,7 @@ where
                             .await
                             .unwrap();
                     }
-                    Some(connection::established::Event::NotificationsIn { id, notifications }) => {
+                    Some(connection::established::Event::NotificationIn { id, notification }) => {
                         let overlay_network_index = *established
                             .0
                             .as_mut()
@@ -592,7 +592,7 @@ where
                             .send(Event::NotificationsIn {
                                 id: connection_id,
                                 overlay_network_index,
-                                notifications,
+                                notification,
                             })
                             .await
                             .unwrap();
@@ -771,7 +771,7 @@ pub enum Event {
     NotificationsIn {
         id: ConnectionId,
         overlay_network_index: usize,
-        notifications: Vec<Vec<u8>>,
+        notification: Vec<u8>,
     },
 }
 

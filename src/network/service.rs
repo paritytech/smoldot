@@ -18,7 +18,7 @@
 use crate::network::{connection, discovery::kademlia, libp2p, multiaddr, peer_id, protocol};
 
 use core::{
-    iter,
+    fmt, iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
     task::Context,
@@ -352,9 +352,20 @@ where
                 libp2p::Event::NotificationsIn {
                     id,
                     overlay_network_index,
-                    notifications,
+                    notification,
                 } => {
-                    // TODO:
+                    let chain_index = overlay_network_index / 2;
+                    let chain_info = &self.chains[chain_index];
+                    if overlay_network_index % 2 == 0 {
+                        // TODO: don't unwrap
+                        let announce = protocol::decode_block_announce(&notification).unwrap();
+                        return Event::BlockAnnounce {
+                            chain_index,
+                            peer_id: todo!(), // TODO:
+                            announce: EncodedBlockAnnounce(notification),
+                        };
+                    } else {
+                    }
                 }
             }
         }
@@ -454,6 +465,32 @@ pub enum Event {
         id: PendingId,
         multiaddr: multiaddr::Multiaddr,
     },
+
+    BlockAnnounce {
+        chain_index: usize,
+        peer_id: peer_id::PeerId,
+        announce: EncodedBlockAnnounce,
+    },
+    /*Transactions {
+        peer_id: peer_id::PeerId,
+        transactions: EncodedTransactions,
+    }*/
+}
+
+/// Undecoded but valid block announce.
+pub struct EncodedBlockAnnounce(Vec<u8>);
+
+impl EncodedBlockAnnounce {
+    /// Returns the decoded version of the announcement.
+    pub fn decode(&self) -> protocol::BlockAnnounceRef {
+        protocol::decode_block_announce(&self.0).unwrap()
+    }
+}
+
+impl fmt::Debug for EncodedBlockAnnounce {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
 }
 
 /// Successfull outcome to [`ChainNetwork::kademlia_discovery_round`].
