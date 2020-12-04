@@ -143,6 +143,8 @@ enum Substream<TNow, TRqUd, TNotifUd> {
     NotificationsIn {
         /// Buffer for the next notification.
         next_notification: leb128::FramedInProgress,
+        /// Data passed by the user to [`Established::accept_in_notifications_substream`].
+        user_data: TNotifUd,
     },
 
     /// Negotiating a protocol for an outgoing request.
@@ -760,6 +762,7 @@ where
                     }
                     Substream::NotificationsIn {
                         mut next_notification,
+                        user_data,
                     } => {
                         let mut notifications = Vec::with_capacity(8); // TODO: arbitrary
 
@@ -783,7 +786,10 @@ where
                             }
                         }
 
-                        *substream.user_data() = Substream::NotificationsIn { next_notification };
+                        *substream.user_data() = Substream::NotificationsIn {
+                            next_notification,
+                            user_data,
+                        };
 
                         let substream_id = substream.id();
                         let wake_up_after = self.next_timeout.clone();
@@ -1040,6 +1046,7 @@ where
             Substream::NotificationsOutNegotiating { user_data, .. } => Some(user_data),
             Substream::NotificationsOutHandshakeRecv { user_data, .. } => Some(user_data),
             Substream::NotificationsOut { user_data } => Some(user_data),
+            Substream::NotificationsIn { user_data, .. } => Some(user_data),
             _ => None,
         }
     }
@@ -1106,6 +1113,7 @@ where
         &mut self,
         substream_id: SubstreamId,
         handshake: Vec<u8>,
+        user_data: TNotifUd,
     ) {
         let mut substream = self.yamux.substream_by_id(substream_id.0).unwrap();
 
@@ -1116,6 +1124,7 @@ where
 
                 *substream.user_data() = Substream::NotificationsIn {
                     next_notification: leb128::FramedInProgress::new(1024 * 1024), // TODO:
+                    user_data,
                 }
             }
             _ => panic!(),

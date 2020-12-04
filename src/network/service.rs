@@ -349,6 +349,13 @@ where
 
                     // TODO: finish
                 }
+                libp2p::Event::NotificationsIn {
+                    id,
+                    overlay_network_index,
+                    notifications,
+                } => {
+                    // TODO:
+                }
             }
         }
     }

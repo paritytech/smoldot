@@ -579,7 +579,23 @@ where
                             .unwrap();
                     }
                     Some(connection::established::Event::NotificationsIn { id, notifications }) => {
-                        //todo!()
+                        let overlay_network_index = *established
+                            .0
+                            .as_mut()
+                            .unwrap()
+                            .notifications_substream_user_data_mut(id)
+                            .unwrap();
+
+                        let mut guarded = self.guarded.lock().await;
+                        guarded
+                            .events_tx
+                            .send(Event::NotificationsIn {
+                                id: connection_id,
+                                overlay_network_index,
+                                notifications,
+                            })
+                            .await
+                            .unwrap();
                     }
                     Some(connection::established::Event::NotificationsOutAccept {
                         id,
@@ -749,6 +765,13 @@ pub enum Event {
         id: ConnectionId,
         overlay_network_index: usize,
         remote_handshake: Vec<u8>,
+    },
+
+    ///
+    NotificationsIn {
+        id: ConnectionId,
+        overlay_network_index: usize,
+        notifications: Vec<Vec<u8>>,
     },
 }
 
