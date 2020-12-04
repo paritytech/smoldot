@@ -193,6 +193,7 @@ impl SyncService {
                     request,
                     send_back,
                 } => {
+                    // TODO: might get interrupted /!\
                     let id = BlocksRequestId(self.blocks_requests.lock().await.insert(send_back));
                     return Event::BlocksRequest {
                         id,

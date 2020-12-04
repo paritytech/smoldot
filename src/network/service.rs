@@ -343,11 +343,36 @@ where
                     overlay_network_index,
                     remote_handshake,
                 } => {
-                    //let remote_handshake =
-                    //protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
-                    // TODO: don't unwrap
+                    if (overlay_network_index % 2) == 0 {
+                        let remote_handshake =
+                            protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
+                        // TODO: don't unwrap
 
-                    // TODO: finish
+                        let chain_config = &self.chains[overlay_network_index / 2];
+
+                        let handshake = protocol::encode_block_announces_handshake(
+                            protocol::BlockAnnouncesHandshakeRef {
+                                best_hash: &chain_config.best_hash,
+                                best_number: chain_config.best_number,
+                                genesis_hash: &chain_config.genesis_hash,
+                                role: chain_config.role,
+                            },
+                        )
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
+
+                        // TODO: might be interrupted /!\
+                        self.libp2p
+                            .accept_notifications_in(id, overlay_network_index, handshake)
+                            .await;
+                    } else {
+                        // TODO: might be interrupted /!\
+                        self.libp2p
+                            .accept_notifications_in(id, overlay_network_index, Vec::new())
+                            .await;
+                    }
                 }
                 libp2p::Event::NotificationsIn {
                     id,
@@ -359,6 +384,7 @@ where
                     if overlay_network_index % 2 == 0 {
                         // TODO: don't unwrap
                         let announce = protocol::decode_block_announce(&notification).unwrap();
+                        dbg!(announce);
                         return Event::BlockAnnounce {
                             chain_index,
                             peer_id: todo!(), // TODO:
@@ -475,6 +501,22 @@ pub enum Event {
         peer_id: peer_id::PeerId,
         transactions: EncodedTransactions,
     }*/
+}
+
+/// Undecoded but valid block announce handshake.
+pub struct EncodedBlockAnnounceHandshake(Vec<u8>);
+
+impl EncodedBlockAnnounceHandshake {
+    /// Returns the decoded version of the handshake.
+    pub fn decode(&self) -> protocol::BlockAnnouncesHandshakeRef {
+        protocol::decode_block_announces_handshake(&self.0).unwrap()
+    }
+}
+
+impl fmt::Debug for EncodedBlockAnnounceHandshake {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
 }
 
 /// Undecoded but valid block announce.

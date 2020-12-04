@@ -125,7 +125,7 @@ enum ConnectionTy<TConn, TPending> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-enum SubstreamDirection {
+pub enum SubstreamDirection {
     In,
     Out,
 }
@@ -135,6 +135,7 @@ enum SubstreamDirection {
 enum SubstreamState<TSub, TPendingSub> {
     Pending(TPendingSub),
     Open(TSub),
+    Poisoned,
 }
 
 impl<TPeer, TConn, TPending, TSub, TPendingSub> Peerset<TPeer, TConn, TPending, TSub, TPendingSub> {
@@ -413,13 +414,70 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
     }
 
     // TODO: uniqueness
-    pub fn add_pending_substream(&mut self, overlay_network: usize, user_data: TPendingSub) {
+    pub fn add_pending_substream(
+        &mut self,
+        overlay_network: usize,
+        direction: SubstreamDirection,
+        user_data: TPendingSub,
+    ) {
         assert!(overlay_network < self.peerset.num_overlay_networks);
 
         self.peerset.connection_overlays.insert(
-            (self.id.0, overlay_network, SubstreamDirection::Out),
+            (self.id.0, overlay_network, direction),
             SubstreamState::Pending(user_data),
         );
+    }
+
+    /// Turns a pending substream into an established substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if there is no pending substream with this overlay network and direction
+    /// combination.
+    pub fn confirm_substream(
+        &mut self,
+        overlay_network: usize,
+        direction: SubstreamDirection,
+        user_data: impl FnOnce(TPendingSub) -> TSub,
+    ) {
+        assert!(overlay_network < self.peerset.num_overlay_networks);
+
+        let entry = self
+            .peerset
+            .connection_overlays
+            .get_mut(&(self.id.0, overlay_network, direction))
+            .unwrap();
+        if let SubstreamState::Pending(ud) = mem::replace(entry, SubstreamState::Poisoned) {
+            *entry = SubstreamState::Open(user_data(ud));
+        } else {
+            panic!()
+        }
+    }
+
+    /// Removes a pending substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if there is no pending substream with this overlay network and direction
+    /// combination.
+    pub fn remove_pending_substream(
+        &mut self,
+        overlay_network: usize,
+        direction: SubstreamDirection,
+    ) -> TPendingSub {
+        assert!(overlay_network < self.peerset.num_overlay_networks);
+
+        let entry = self
+            .peerset
+            .connection_overlays
+            .remove(&(self.id.0, overlay_network, direction))
+            .unwrap();
+
+        if let SubstreamState::Pending(ud) = entry {
+            ud
+        } else {
+            panic!()
+        }
     }
 
     /// Gives access to the user data associated with the connection.

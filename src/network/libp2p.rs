@@ -165,8 +165,8 @@ struct Guarded<TNow, TPeer, TConn> {
             )>,
         >,
         Arc<Mutex<Option<(connection::handshake::HealthyHandshake, TConn)>>>,
-        (),
-        (),
+        connection::established::SubstreamId,
+        connection::established::SubstreamId,
     >,
 }
 
@@ -360,6 +360,47 @@ where
             .pending_mut(id.0)
             .unwrap()
             .remove_and_purge_address();
+    }
+
+    pub async fn accept_notifications_in(
+        &self,
+        id: ConnectionId,
+        overlay_network_index: usize,
+        handshake: Vec<u8>,
+    ) {
+        let mut guarded = self.guarded.lock().await;
+
+        let mut substream_id = None;
+
+        let mut connection = guarded.peerset.connection_mut(id.0).unwrap();
+
+        connection.confirm_substream(
+            overlay_network_index,
+            peerset::SubstreamDirection::In,
+            |id| {
+                substream_id = Some(id);
+                id
+            },
+        );
+
+        let connection_arc = connection.user_data_mut().clone();
+        drop(connection);
+
+        let mut connection = connection_arc.lock().await;
+
+        if let Some(waker) = connection.2.take() {
+            waker.wake();
+        }
+
+        connection
+            .0
+            .as_mut()
+            .unwrap()
+            .accept_in_notifications_substream(
+                substream_id.unwrap(),
+                handshake,
+                overlay_network_index,
+            );
     }
 
     /// Returns the next event produced by the service.
@@ -563,16 +604,26 @@ where
                     }
                     Some(connection::established::Event::NotificationsInOpen {
                         id,
-                        protocol_index,
+                        protocol_index: overlay_network_index,
                         handshake,
                     }) => {
-                        // TODO: merge together block announces and transactions?!
                         let mut guarded = self.guarded.lock().await;
+
+                        guarded
+                            .peerset
+                            .connection_mut(connection_id.0)
+                            .unwrap()
+                            .add_pending_substream(
+                                overlay_network_index,
+                                peerset::SubstreamDirection::In,
+                                id,
+                            );
+
                         guarded
                             .events_tx
                             .send(Event::NotificationsInOpen {
                                 id: connection_id,
-                                overlay_network_index: protocol_index / 2,
+                                overlay_network_index,
                                 remote_handshake: handshake,
                             })
                             .await
@@ -609,7 +660,17 @@ where
                             .unwrap();
 
                         let mut guarded = self.guarded.lock().await;
-                        // TODO: must update peerset
+
+                        guarded
+                            .peerset
+                            .connection_mut(connection_id.0)
+                            .unwrap()
+                            .confirm_substream(
+                                overlay_network_index,
+                                peerset::SubstreamDirection::Out,
+                                |id| id,
+                            );
+
                         guarded
                             .events_tx
                             .send(Event::NotificationsOutAccept {
@@ -625,7 +686,17 @@ where
                         user_data: overlay_network_index,
                     }) => {
                         let mut guarded = self.guarded.lock().await;
-                        // TODO: must update peerset
+
+                        let expected_id = guarded
+                            .peerset
+                            .connection_mut(connection_id.0)
+                            .unwrap()
+                            .remove_pending_substream(
+                                overlay_network_index,
+                                peerset::SubstreamDirection::Out,
+                            );
+                        debug_assert_eq!(id, expected_id);
+
                         guarded
                             .events_tx
                             .send(Event::NotificationsOutReject {
@@ -686,12 +757,10 @@ where
             {
                 let connection_id = node.connections().next().unwrap();
                 let mut peerset_entry = guarded.peerset.connection_mut(connection_id).unwrap();
-                peerset_entry.add_pending_substream(overlay_network_index, ());
                 return Some(SubstreamOpen {
                     network: self,
                     connection: peerset_entry.user_data_mut().clone(),
                     connection_id,
-                    opened: false,
                     overlay_network_index,
                 });
             }
@@ -820,9 +889,6 @@ pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
         )>,
     >,
 
-    /// True if the user called [`SubstreamOpen::open`].
-    opened: bool,
-
     /// Index of the overlay network whose notifications substream to open.
     overlay_network_index: usize,
 }
@@ -836,35 +902,35 @@ where
         self.overlay_network_index
     }
 
-    pub async fn open(mut self, now: TNow, handshake: impl Into<Vec<u8>>) {
-        self.opened = true;
-
+    pub async fn open(self, now: TNow, handshake: impl Into<Vec<u8>>) {
         let mut connection = self.connection.lock().await;
 
-        if let Some(established) = connection.0.as_mut() {
-            established.open_notifications_substream(
+        let substream_id = if let Some(established) = connection.0.as_mut() {
+            Some(established.open_notifications_substream(
                 now,
                 self.overlay_network_index,
                 handshake.into(),
                 self.overlay_network_index,
-            );
-        }
+            ))
+        } else {
+            None
+        };
 
         if let Some(waker) = connection.2.take() {
             waker.wake();
         }
-    }
-}
 
-impl<'a, TNow, TPeer, TConn> Drop for SubstreamOpen<'a, TNow, TPeer, TConn> {
-    fn drop(&mut self) {
-        if self.opened {
-            return;
+        drop(connection);
+
+        if let Some(substream_id) = substream_id {
+            let mut guarded = self.network.guarded.lock().await;
+            let mut peerset_entry = guarded.peerset.connection_mut(self.connection_id).unwrap();
+            peerset_entry.add_pending_substream(
+                self.overlay_network_index,
+                peerset::SubstreamDirection::Out,
+                substream_id,
+            );
         }
-
-        // TODO: must revert the changes in the peerset
-
-        todo!()
     }
 }
 
