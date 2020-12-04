@@ -18,6 +18,7 @@
 use crate::network::{connection, discovery::kademlia, libp2p, multiaddr, peer_id, protocol};
 
 use core::{
+    iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
     task::Context,
@@ -126,23 +127,62 @@ where
     pub fn new(config: Config<TPeer>) -> Self {
         // TODO: figure out the cloning situation here
 
+        // The order of protocols here is important, as it defines the values of `protocol_index`
+        // to pass to libp2p or that libp2p produces.
         let overlay_networks = config
             .chains
             .iter()
-            .map(|chain| libp2p::OverlayNetwork {
-                main_protocol: libp2p::ProtocolConfig {
-                    name: format!("/{}/block-announces/1", chain.protocol_id),
-                    fallback_names: Vec::new(),
-                },
-                optional_protocols: vec![libp2p::ProtocolConfig {
-                    name: format!("/{}/transactions/1", chain.protocol_id),
-                    fallback_names: Vec::new(),
-                }],
-                bootstrap_nodes: chain.bootstrap_nodes.clone(),
-                in_slots: chain.in_slots,
-                out_slots: chain.out_slots,
+            .flat_map(|chain| {
+                iter::once(libp2p::OverlayNetwork {
+                    protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
+                    fallback_protocol_names: Vec::new(),
+                    max_handshake_size: 256, // TODO: arbitrary
+                    bootstrap_nodes: chain.bootstrap_nodes.clone(),
+                    in_slots: chain.in_slots,
+                    out_slots: chain.out_slots,
+                })
+                .chain(iter::once(libp2p::OverlayNetwork {
+                    protocol_name: format!("/{}/transactions/1", chain.protocol_id),
+                    fallback_protocol_names: Vec::new(),
+                    max_handshake_size: 256, // TODO: arbitrary
+                    bootstrap_nodes: chain.bootstrap_nodes.clone(),
+                    in_slots: chain.in_slots,
+                    out_slots: chain.out_slots,
+                }))
             })
             .collect();
+
+        // The order of protocols here is important, as it defines the values of `protocol_index`
+        // to pass to libp2p or that libp2p produces.
+        let request_response_protocols = iter::once(libp2p::ConfigRequestResponse {
+            name: "/ipfs/id/1.0.0".into(),
+            max_request_size: 8,
+            max_response_size: 4096,
+            inbound_allowed: false, // TODO: not implemented; makes node panic if true at the moment
+        })
+        .chain(config.chains.iter().flat_map(|chain| {
+            // TODO: limits are arbitrary
+            iter::once(libp2p::ConfigRequestResponse {
+                name: format!("/{}/sync/2", chain.protocol_id),
+                max_request_size: 1024,
+                max_response_size: 10 * 1024 * 1024,
+                inbound_allowed: true,
+            })
+            .chain(iter::once(libp2p::ConfigRequestResponse {
+                name: format!("/{}/light/2", chain.protocol_id),
+                max_request_size: 1024 * 512,
+                max_response_size: 10 * 1024 * 1024,
+                inbound_allowed: true,
+            }))
+            .chain(iter::once(libp2p::ConfigRequestResponse {
+                name: format!("/{}/kad", chain.protocol_id),
+                max_request_size: 1024,
+                max_response_size: 1024 * 1024,
+                // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
+                inbound_allowed: false,
+            }))
+        }))
+        .collect();
 
         let (substreams_open_tx, substreams_open_rx) = mpsc::channel(0);
 
@@ -150,10 +190,12 @@ where
             libp2p: libp2p::Network::new(libp2p::Config {
                 known_nodes: config.known_nodes,
                 listen_addresses: config.listen_addresses,
+                request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: config.randomness_seed,
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 overlay_networks,
+                ping_protocol: "/ipfs/ping/1.0.0".into(),
             }),
             chains: config.chains,
             substreams_open_tx: Mutex::new(substreams_open_tx),
@@ -192,10 +234,9 @@ where
             a.extend_from_slice(b.as_ref());
             a
         });
-        let protocol = format!("/{}/sync/2", &self.chains[chain_index].protocol_id);
         let response = self
             .libp2p
-            .request(now, target, protocol, request_data)
+            .request(now, target, 1 + chain_index * 3, request_data)
             .map_err(BlocksRequestError::Request)
             .await?;
         protocol::decode_block_response(&response).map_err(BlocksRequestError::Decode)
@@ -215,10 +256,9 @@ where
                 a.extend_from_slice(b.as_ref());
                 a
             });
-        let protocol = format!("/{}/light/2", &self.chains[chain_index].protocol_id);
         let response = self
             .libp2p
-            .request(now, target, protocol, request_data)
+            .request(now, target, 1 + chain_index * 3 + 1, request_data)
             .map_err(StorageProofRequestError::Request)
             .await?;
         protocol::decode_storage_proof_response(&response).map_err(StorageProofRequestError::Decode)
@@ -283,8 +323,8 @@ where
                     remote_handshake,
                 } => {
                     let chain_info = &self.chains[overlay_network_index];
-                    let remote_handshake =
-                        protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
+                    //let remote_handshake =
+                    //protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
                     // TODO: don't unwrap
 
                     // TODO:
@@ -294,6 +334,17 @@ where
                     overlay_network_index,
                 } => {
                     // TODO:
+                }
+                libp2p::Event::NotificationsInOpen {
+                    id,
+                    overlay_network_index,
+                    remote_handshake,
+                } => {
+                    //let remote_handshake =
+                    //protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
+                    // TODO: don't unwrap
+
+                    // TODO: finish
                 }
             }
         }
@@ -315,12 +366,11 @@ where
         };
 
         let request_data = kademlia::build_find_node_request(random_peer_id.as_bytes());
-        let protocol = format!("/{}/kad", &self.chains[chain_index].protocol_id);
         if let Some(target) = self.libp2p.peers_list_lock().await.next() {
-            // TODO: better selection
+            // TODO: better peer selection
             let response = self
                 .libp2p
-                .request(now, target, protocol, request_data)
+                .request(now, target, 1 + chain_index * 3 + 2, request_data)
                 .await
                 .map_err(DiscoveryError::RequestFailed)?;
             let decoded = kademlia::decode_find_node_response(&response)
@@ -456,10 +506,9 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     pub async fn open(self, now: TNow) {
-        let chain_config = &self.chains[self.inner.overlay_network_index()];
+        let chain_config = &self.chains[self.inner.overlay_network_index() / 2];
 
-        let protocol = format!("/{}/block-announces/1", chain_config.protocol_id);
-        let handshake =
+        let handshake = if self.inner.overlay_network_index() % 2 == 0 {
             protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
                 best_hash: &chain_config.best_hash,
                 best_number: chain_config.best_number,
@@ -469,9 +518,12 @@ where
             .fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
-            });
+            })
+        } else {
+            Vec::new()
+        };
 
-        self.inner.open(now, protocol, handshake).await;
+        self.inner.open(now, handshake).await;
     }
 }
 

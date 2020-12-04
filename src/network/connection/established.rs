@@ -80,9 +80,9 @@ pub struct Established<TNow, TRqUd, TNotifUd> {
     next_timeout: Option<TNow>,
 
     /// See [`Config::in_request_protocols`].
-    in_request_protocols: Vec<ConfigRequestResponse>,
+    request_protocols: Vec<ConfigRequestResponse>,
     /// See [`Config::in_notifications_protocols`].
-    in_notifications_protocols: Vec<ConfigNotifications>,
+    notifications_protocols: Vec<ConfigNotifications>,
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
 }
@@ -133,7 +133,7 @@ enum Substream<TNow, TRqUd, TNotifUd> {
         /// Buffer for the incoming handshake.
         handshake: leb128::FramedInProgress,
         /// Protocol that was negotiated.
-        protocol: String,
+        protocol_index: usize,
     },
     /// A handshake on a notifications protocol has been received. Now waiting for an action from
     /// the API user.
@@ -173,7 +173,7 @@ enum Substream<TNow, TRqUd, TNotifUd> {
         /// Buffer for the incoming request.
         request: leb128::FramedInProgress,
         /// Protocol that was negotiated.
-        protocol: String,
+        protocol_index: usize,
     },
     RequestInSend,
 
@@ -280,14 +280,10 @@ where
                     let nego =
                         multistream_select::InProgress::new(multistream_select::Config::Listener {
                             supported_protocols: self
-                                .in_request_protocols
+                                .request_protocols
                                 .iter()
                                 .map(|p| p.name.clone())
-                                .chain(
-                                    self.in_notifications_protocols
-                                        .iter()
-                                        .map(|p| p.name.clone()),
-                                )
+                                .chain(self.notifications_protocols.iter().map(|p| p.name.clone()))
                                 .chain(iter::once(self.ping_protocol.clone()))
                                 .collect::<Vec<_>>()
                                 .into_iter(),
@@ -414,26 +410,27 @@ where
                             if protocol == self.ping_protocol {
                                 *substream.user_data() = Substream::PingIn(Default::default());
                             } else {
-                                if let Some(request_response) = self
-                                    .in_request_protocols
+                                if let Some(protocol_index) = self
+                                    .request_protocols
                                     .iter()
-                                    .find(|p| p.name == protocol)
+                                    .position(|p| p.name == protocol)
                                 {
                                     *substream.user_data() = Substream::RequestInRecv {
-                                        protocol,
+                                        protocol_index,
                                         request: leb128::FramedInProgress::new(
-                                            request_response.max_request_size,
+                                            self.request_protocols[protocol_index].max_request_size,
                                         ),
                                     };
-                                } else if let Some(notif) = self
-                                    .in_notifications_protocols
+                                } else if let Some(protocol_index) = self
+                                    .notifications_protocols
                                     .iter()
-                                    .find(|p| p.name == protocol)
+                                    .position(|p| p.name == protocol)
                                 {
                                     *substream.user_data() = Substream::NotificationsInHandshake {
-                                        protocol,
+                                        protocol_index,
                                         handshake: leb128::FramedInProgress::new(
-                                            notif.max_handshake_size,
+                                            self.notifications_protocols[protocol_index]
+                                                .max_handshake_size,
                                         ),
                                     };
                                 } else {
@@ -689,9 +686,15 @@ where
                             }
                         }
                     }
-                    Substream::RequestInRecv { request, protocol } => {
+                    Substream::RequestInRecv {
+                        request,
+                        protocol_index,
+                    } => {
                         data = &data[data.len()..];
-                        *substream.user_data() = Substream::RequestInRecv { request, protocol };
+                        *substream.user_data() = Substream::RequestInRecv {
+                            request,
+                            protocol_index,
+                        };
                         // TODO:
                         /*let num_read = request.inject_data(&data).unwrap(); // TODO: don't unwrap
                         if let Some(request) = request.take_frame() {
@@ -716,7 +719,7 @@ where
                     }
                     Substream::NotificationsInHandshake {
                         handshake,
-                        protocol,
+                        protocol_index,
                     } => match handshake.update(&data) {
                         Ok((num_read, leb128::Framed::Finished(handshake))) => {
                             data = &data[num_read..];
@@ -733,7 +736,7 @@ where
                                 wake_up_after,
                                 event: Some(Event::NotificationsInOpen {
                                     id: SubstreamId(substream_id),
-                                    protocol,
+                                    protocol_index,
                                     handshake,
                                 }),
                             });
@@ -742,7 +745,7 @@ where
                             data = &data[num_read..];
                             *substream.user_data() = Substream::NotificationsInHandshake {
                                 handshake,
-                                protocol,
+                                protocol_index,
                             };
                         }
                         Err(_) => {
@@ -977,6 +980,8 @@ where
 
     /// Sends a request to the remote.
     ///
+    /// Must pass the index of the protocol within [`Config::request_protocols`].
+    ///
     /// This method only inserts the request into the connection object. Use
     /// [`Established::read_write`] in order to actually send out the request.
     ///
@@ -988,14 +993,17 @@ where
     pub fn add_request(
         &mut self,
         now: TNow,
-        protocol: String,
+        protocol_index: usize,
         request: Vec<u8>,
         user_data: TRqUd,
     ) -> SubstreamId {
         let mut negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol: protocol,
+                requested_protocol: self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
             });
+
+        // TODO: turn this assert into something that can't panic?
+        assert!(request.len() <= self.request_protocols[protocol_index].max_request_size);
 
         let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
         match new_state {
@@ -1024,6 +1032,8 @@ where
     /// Opens a outgoing substream with the given protocol, destined for a stream of
     /// notifications.
     ///
+    /// Must pass the index of the protocol within [`Config::notifications_protocols`].
+    ///
     /// The remote must first accept (or reject) the substream before notifications can be sent
     /// on it.
     ///
@@ -1036,14 +1046,17 @@ where
     pub fn open_notifications_substream(
         &mut self,
         now: TNow,
-        protocol: String,
+        protocol_index: usize,
         handshake: Vec<u8>,
         user_data: TNotifUd,
     ) -> SubstreamId {
         let mut negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol: protocol,
+                requested_protocol: self.notifications_protocols[protocol_index].name.clone(), // TODO: clone :-/
             });
+
+        // TODO: turn this assert into something that can't panic?
+        assert!(handshake.len() <= self.notifications_protocols[protocol_index].max_handshake_size);
 
         let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
         match new_state {
@@ -1182,9 +1195,9 @@ where
             Substream::NotificationsOutClosed { .. } => {
                 f.debug_tuple("notifications-out-closed").finish()
             }
-            Substream::NotificationsInHandshake { protocol, .. } => f
+            Substream::NotificationsInHandshake { protocol_index, .. } => f
                 .debug_tuple("notifications-in-handshake")
-                .field(&AsRef::<str>::as_ref(protocol))
+                .field(protocol_index)
                 .finish(),
             Substream::NotificationsInWait => {
                 todo!() // TODO:
@@ -1194,10 +1207,9 @@ where
             | Substream::RequestOut { user_data, .. } => {
                 f.debug_tuple("request-out").field(&user_data).finish()
             }
-            Substream::RequestInRecv { protocol, .. } => f
-                .debug_tuple("request-in")
-                .field(&AsRef::<str>::as_ref(protocol))
-                .finish(),
+            Substream::RequestInRecv { protocol_index, .. } => {
+                f.debug_tuple("request-in").field(protocol_index).finish()
+            }
             Substream::RequestInSend => {
                 todo!() // TODO:
             }
@@ -1248,8 +1260,10 @@ pub enum Event<TRqUd, TNotifUd> {
     RequestIn {
         /// Identifier of the request. Needs to be provided back when answering the request.
         id: SubstreamId,
-        /// Protocol the request was sent on.
-        protocol: String,
+        /// Index of the request-response protocol the request was sent on.
+        ///
+        /// The index refers to the position of the protocol in [`Config::request_protocols`].
+        protocol_index: usize,
         /// Bytes of the request. Its interpretation is out of scope of this module.
         request: Vec<u8>,
     },
@@ -1266,8 +1280,11 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Identifier of the substream. Needs to be provided back when accept or rejecting the
         /// substream.
         id: SubstreamId,
-        /// Protocol concerned by the substream.
-        protocol: String,
+        /// Index of the notifications protocol concerned by the substream.
+        ///
+        /// The index refers to the position of the protocol in
+        /// [`Config::notifications_protocols`].
+        protocol_index: usize,
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
@@ -1360,8 +1377,8 @@ impl ConnectionPrototype {
             encryption: self.encryption,
             yamux,
             next_timeout: None,
-            in_request_protocols: config.in_request_protocols,
-            in_notifications_protocols: config.in_notifications_protocols,
+            request_protocols: config.request_protocols,
+            notifications_protocols: config.notifications_protocols,
             ping_protocol: config.ping_protocol,
         }
     }
@@ -1375,12 +1392,12 @@ impl fmt::Debug for ConnectionPrototype {
 
 /// Configuration to turn a [`ConnectionPrototype`] into a [`Established`].
 // TODO: this struct isn't zero-cost, but making it zero-cost is kind of hard and annoying
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// List of request-response protocols supported for incoming substreams.
-    pub in_request_protocols: Vec<ConfigRequestResponse>,
+    pub request_protocols: Vec<ConfigRequestResponse>,
     /// List of notifications protocols supported for incoming substreams.
-    pub in_notifications_protocols: Vec<ConfigNotifications>,
+    pub notifications_protocols: Vec<ConfigNotifications>,
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
     /// Seed used for the randomness specific to this connection.
@@ -1388,16 +1405,19 @@ pub struct Config {
 }
 
 /// Configuration for a request-response protocol.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigRequestResponse {
     /// Name of the protocol transferred on the wire.
     pub name: String,
     pub max_request_size: usize,
     pub max_response_size: usize,
+
+    /// If true, incoming substreams are allowed to negotiate this protocol.
+    pub inbound_allowed: bool,
 }
 
 /// Configuration for a notifications protocol.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigNotifications {
     /// Name of the protocol transferred on the wire.
     pub name: String,

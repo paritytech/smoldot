@@ -25,6 +25,7 @@ use crate::network::{connection, peerset, Multiaddr, PeerId};
 
 use alloc::sync::Arc;
 use core::{
+    iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
     task::{Context, Waker},
@@ -37,6 +38,8 @@ use futures::{
 }; // TODO: no_std-ize
 use rand::Rng as _;
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
+
+pub use connection::established::ConfigRequestResponse;
 
 /// Configuration for a [`Network`].
 pub struct Config<TPeer> {
@@ -52,6 +55,11 @@ pub struct Config<TPeer> {
     pub listen_addresses: Vec<Multiaddr>,
 
     pub overlay_networks: Vec<OverlayNetwork>,
+
+    pub request_response_protocols: Vec<ConfigRequestResponse>,
+
+    /// Name of the ping protocol on the network.
+    pub ping_protocol: String,
 
     pub known_nodes: Vec<(TPeer, PeerId, Multiaddr)>,
 
@@ -80,11 +88,16 @@ pub struct Config<TPeer> {
 ///
 /// See [`Config::overlay_networks`].
 pub struct OverlayNetwork {
-    /// Main protocol. A substream using this protocol is mandatory to be considered connected.
-    pub main_protocol: ProtocolConfig,
+    /// Name of the protocol negotiated on the wire.
+    pub protocol_name: String,
 
-    /// Additional protocols that might or might not be supported.
-    pub optional_protocols: Vec<ProtocolConfig>,
+    /// Optional alternative names for this protocol. Can represent different versions.
+    ///
+    /// Negotiated in order in which they are passed.
+    pub fallback_protocol_names: Vec<String>,
+
+    /// Maximum size, in bytes, of the handshake that can be received.
+    pub max_handshake_size: usize,
 
     /// List of node identities that are known to belong to this overlay network. The node
     /// identities are indices in [`Config::known_nodes`].
@@ -93,16 +106,6 @@ pub struct OverlayNetwork {
     pub in_slots: u32,
 
     pub out_slots: u32,
-}
-
-pub struct ProtocolConfig {
-    /// Name of the protocol negotiated on the wire.
-    pub name: String,
-
-    /// Optional alternative names for this protocol. Can represent different versions.
-    ///
-    /// Negotiated in order in which they are passed.
-    pub fallback_names: Vec<String>,
 }
 
 /// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].
@@ -121,6 +124,15 @@ pub struct Network<TNow, TPeer, TConn> {
 
     /// See [`Config::noise_key`].
     noise_key: connection::NoiseKey,
+
+    /// See [`Config::overlay_networks`].
+    overlay_networks: Vec<OverlayNetwork>,
+
+    /// See [`Config::request_response_protocols`].
+    request_response_protocols: Vec<ConfigRequestResponse>,
+
+    /// See [`Config::ping_protocol`].
+    ping_protocol: String,
 
     /// Generator for randomness seeds given to the established connections.
     // TODO: what if children use ChaCha20 as well? is that safe?
@@ -179,13 +191,11 @@ where
             node.add_known_address(multiaddr);
         }
 
-        for (overlay_network_index, overlay_network) in
-            config.overlay_networks.into_iter().enumerate()
-        {
-            for bootstrap_node in overlay_network.bootstrap_nodes {
+        for (overlay_network_index, overlay_network) in config.overlay_networks.iter().enumerate() {
+            for bootstrap_node in &overlay_network.bootstrap_nodes {
                 // TODO: cloning :(
                 peerset
-                    .node_mut(ids[bootstrap_node].clone())
+                    .node_mut(ids[*bootstrap_node].clone())
                     .into_known()
                     .unwrap()
                     .add_to_overlay(overlay_network_index);
@@ -194,6 +204,9 @@ where
 
         Network {
             noise_key: config.noise_key,
+            overlay_networks: config.overlay_networks,
+            request_response_protocols: config.request_response_protocols,
+            ping_protocol: config.ping_protocol,
             events_rx: Mutex::new(events_rx),
             guarded: Mutex::new(Guarded { peerset, events_tx }),
             randomness_seeds: Mutex::new(ChaCha20Rng::from_seed(config.randomness_seed)),
@@ -254,7 +267,7 @@ where
         &self,
         now: TNow,
         target: PeerId,
-        protocol: String,
+        protocol_index: usize,
         request_data: Vec<u8>,
     ) -> Result<Vec<u8>, RequestError> {
         let connection = {
@@ -282,7 +295,7 @@ where
             .0
             .as_mut()
             .ok_or(RequestError::ConnectionClosed)?
-            .add_request(now, protocol, request_data, send_back);
+            .add_request(now, protocol_index, request_data, send_back);
         if let Some(waker) = connection_lock.2.take() {
             waker.wake();
         }
@@ -449,8 +462,6 @@ where
                             remote_peer_id,
                             connection,
                         } => {
-                            let randomness_seed = self.randomness_seeds.lock().await.gen();
-
                             let mut guarded = self.guarded.lock().await;
                             let pending = guarded.peerset.pending_mut(connection_id.0).unwrap();
                             if *pending.peer_id() != remote_peer_id {
@@ -458,25 +469,17 @@ where
                                 return Err(ConnectionError::PeerIdMismatch);
                             }
 
-                            pending.into_established(|_| {
-                                let established =
-                                    connection.into_connection(connection::established::Config {
-                                        in_notifications_protocols: vec![
-                                            connection::established::ConfigNotifications {
-                                                name: "/dot/block-announces/1".to_string(), // TODO: correct protocolId
-                                                max_handshake_size: 1024 * 1024,
-                                            },
-                                        ],
-                                        in_request_protocols: vec![], // TODO:
-                                        randomness_seed,
-                                        ping_protocol: "/ipfs/ping/1.0.0".into(), // TODO: configurable
-                                    });
-
-                                Arc::new(Mutex::new((
-                                    Some(established),
-                                    user_data,
-                                    Some(cx.waker().clone()),
-                                )))
+                            pending.into_established({
+                                let config = self.build_connection_config().await;
+                                let waker = cx.waker().clone();
+                                move |_| {
+                                    let established = connection.into_connection(config);
+                                    Arc::new(Mutex::new((
+                                        Some(established),
+                                        user_data,
+                                        Some(waker),
+                                    )))
+                                }
                             });
 
                             guarded
@@ -548,7 +551,7 @@ where
                     None => {}
                     Some(connection::established::Event::RequestIn {
                         id,
-                        protocol,
+                        protocol_index: protocol,
                         request,
                     }) => todo!(),
                     Some(connection::established::Event::Response {
@@ -560,15 +563,20 @@ where
                     }
                     Some(connection::established::Event::NotificationsInOpen {
                         id,
-                        protocol,
+                        protocol_index,
                         handshake,
                     }) => {
-                        // TODO:
-                        /*established
-                        .0
-                        .as_mut()
-                        .unwrap()
-                        .accept_in_notifications_substream(id, handshake); // TODO: wrong handshake*/
+                        // TODO: merge together block announces and transactions?!
+                        let mut guarded = self.guarded.lock().await;
+                        guarded
+                            .events_tx
+                            .send(Event::NotificationsInOpen {
+                                id: connection_id,
+                                overlay_network_index: protocol_index / 2,
+                                remote_handshake: handshake,
+                            })
+                            .await
+                            .unwrap();
                     }
                     Some(connection::established::Event::NotificationsIn { id, notifications }) => {
                         //todo!()
@@ -617,6 +625,30 @@ where
             wake_up_after,
             write_close: false, // TODO:
         })
+    }
+
+    async fn build_connection_config(&self) -> connection::established::Config {
+        let randomness_seed = self.randomness_seeds.lock().await.gen();
+        connection::established::Config {
+            notifications_protocols: self
+                .overlay_networks
+                .iter()
+                .flat_map(|net| {
+                    let max_handshake_size = net.max_handshake_size;
+                    iter::once(&net.protocol_name)
+                        .chain(net.fallback_protocol_names.iter())
+                        .map(move |name| {
+                            connection::established::ConfigNotifications {
+                                name: name.clone(), // TODO: cloning :-/
+                                max_handshake_size,
+                            }
+                        })
+                })
+                .collect(),
+            request_protocols: self.request_response_protocols.clone(),
+            randomness_seed,
+            ping_protocol: self.ping_protocol.clone(), // TODO: cloning :-/
+        }
     }
 
     pub async fn open_next_substream(&'_ self) -> Option<SubstreamOpen<'_, TNow, TPeer, TConn>> {
@@ -704,11 +736,13 @@ pub enum Event {
         // TODO: there are multiple protocols
         overlay_network_index: usize,
     },
-    /*///
+
+    ///
     NotificationsInOpen {
         id: ConnectionId,
-        protocol: String,
-    },*/
+        overlay_network_index: usize,
+        remote_handshake: Vec<u8>,
+    },
 }
 
 /// Outcome of calling [`Network::read_write`].
@@ -772,18 +806,18 @@ where
         self.overlay_network_index
     }
 
-    pub async fn open(
-        mut self,
-        now: TNow,
-        protocol: impl Into<String>,
-        handshake: impl Into<Vec<u8>>,
-    ) {
+    pub async fn open(mut self, now: TNow, handshake: impl Into<Vec<u8>>) {
         self.opened = true;
 
         let mut connection = self.connection.lock().await;
 
         if let Some(established) = connection.0.as_mut() {
-            established.open_notifications_substream(now, protocol.into(), handshake.into(), ());
+            established.open_notifications_substream(
+                now,
+                self.overlay_network_index,
+                handshake.into(),
+                (),
+            );
         }
 
         if let Some(waker) = connection.2.take() {
