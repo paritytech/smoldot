@@ -267,7 +267,10 @@ impl NetworkService {
                 service::Event::Connected(peer_id) => {
                     tracing::debug!(%peer_id, "connected");
                 }
-                service::Event::Disconnected { peer_id, chain_indices } => {
+                service::Event::Disconnected {
+                    peer_id,
+                    chain_indices,
+                } => {
                     tracing::debug!(%peer_id, "disconnected");
                     if !chain_indices.is_empty() {
                         debug_assert_eq!(chain_indices.len(), 1);
@@ -303,16 +306,19 @@ impl NetworkService {
                     announce,
                 } => {
                     tracing::debug!(%chain_index, %peer_id, ?announce, "block-announce");
-                    return Event::BlockAnnounce {
-                        peer_id,
-                        announce,
-                    }
+                    return Event::BlockAnnounce { peer_id, announce };
                 }
-                service::Event::ChainConnected { peer_id, chain_index } => {
+                service::Event::ChainConnected {
+                    peer_id,
+                    chain_index,
+                } => {
                     debug_assert_eq!(chain_index, 0);
                     return Event::Connected(peer_id);
                 }
-                service::Event::ChainDisconnected { peer_id, chain_index } => {
+                service::Event::ChainDisconnected {
+                    peer_id,
+                    chain_index,
+                } => {
                     debug_assert_eq!(chain_index, 0);
                     return Event::Disconnected(peer_id);
                 }
@@ -414,15 +420,14 @@ async fn connection_task(
             );
         }
 
-        // TODO:
-        /*if read_write.write_close && !tcp_socket.is_closed() {
-            tcp_socket.close();
-        }*/
-
         if read_write.write_close && read_buffer.is_none() {
             // Make sure to finish closing the TCP socket.
             tcp_socket.flush_close().await;
             return;
+        }
+
+        if read_write.write_close && !tcp_socket.is_closed() {
+            tcp_socket.close();
         }
 
         if let Some(wake_up) = read_write.wake_up_after {

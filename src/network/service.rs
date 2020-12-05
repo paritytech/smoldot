@@ -322,7 +322,7 @@ where
                 return Event::ChainConnected {
                     peer_id,
                     chain_index,
-                }
+                };
             }
 
             match self.libp2p.next_event().await {
@@ -330,10 +330,12 @@ where
                     let _ = self.substreams_open_tx.lock().await.try_send(());
                     return Event::Connected(peer_id);
                 }
-                libp2p::Event::Disconnected(peer_id) => return Event::Disconnected {
-                    peer_id,
-                    chain_indices: Vec::new(), // TODO: /!\
-                },
+                libp2p::Event::Disconnected(peer_id) => {
+                    return Event::Disconnected {
+                        peer_id,
+                        chain_indices: Vec::new(), // TODO: /!\
+                    }
+                }
                 libp2p::Event::StartConnect { id, multiaddr } => {
                     return Event::StartConnect {
                         id: PendingId(id),

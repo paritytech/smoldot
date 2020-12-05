@@ -978,7 +978,8 @@ where
             .yamux
             .user_datas()
             .filter_map(|(_, substream)| match &substream {
-                Substream::RequestOutNegotiating { timeout, .. }
+                Substream::NotificationsOutNegotiating { timeout, .. }
+                | Substream::RequestOutNegotiating { timeout, .. }
                 | Substream::RequestOut { timeout, .. } => Some(timeout),
                 _ => None,
             })

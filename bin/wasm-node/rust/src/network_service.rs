@@ -139,7 +139,9 @@ impl NetworkService {
         loop {
             match self.network.next_event().await {
                 service::Event::Connected(peer_id) => return Event::Connected(peer_id),
-                service::Event::Disconnected { peer_id, .. } => return Event::Disconnected(peer_id),
+                service::Event::Disconnected { peer_id, .. } => {
+                    return Event::Disconnected(peer_id)
+                }
                 service::Event::StartConnect { id, multiaddr } => {
                     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
                     // into a `Future<dyn Output = Result<TcpStream, ...>>`.
@@ -159,10 +161,16 @@ impl NetworkService {
                     peer_id,
                     announce,
                 } => {}
-                service::Event::ChainConnected { peer_id, chain_index } => {
+                service::Event::ChainConnected {
+                    peer_id,
+                    chain_index,
+                } => {
                     todo!()
                 }
-                service::Event::ChainDisconnected { peer_id, chain_index } => {
+                service::Event::ChainDisconnected {
+                    peer_id,
+                    chain_index,
+                } => {
                     todo!()
                 }
             }
