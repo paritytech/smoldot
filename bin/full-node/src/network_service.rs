@@ -453,10 +453,6 @@ async fn connection_task(
 
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
-        if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
-            continue;
-        }
-
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {

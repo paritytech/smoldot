@@ -491,20 +491,26 @@ where
 
                 // TODO: check timeout
 
-                let (mut result, is_idle) = {
+                let mut result = {
                     let (result, num_read, num_written) =
                         match handshake.read_write(incoming_buffer, outgoing_buffer) {
                             Ok(rw) => rw,
                             Err(err) => {
                                 let mut guarded = self.guarded.lock().await;
-                                let pending = guarded.peerset.pending_mut(connection_id.0).unwrap();
-                                pending.remove_and_purge_address();
+                                guarded
+                                    .peerset
+                                    .pending_mut(connection_id.0)
+                                    .unwrap()
+                                    .remove_and_purge_address();
                                 return Err(ConnectionError::Handshake(err));
                             }
                         };
                     read_write.read_bytes += num_read;
                     read_write.written_bytes += num_written;
-                    (result, num_read == 0 && num_written == 0)
+                    if num_read != 0 || num_written != 0 {
+                        cx.waker().wake_by_ref();
+                    }
+                    result
                 };
 
                 loop {
@@ -601,6 +607,15 @@ where
                 read_write.wake_up_after = read_write_result.wake_up_after;
                 read_write.write_close = read_write_result.write_close;
                 established.0 = Some(read_write_result.connection);
+
+                if read_write_result.read_bytes != 0
+                    || read_write_result.written_bytes != 0
+                    || read_write_result.event.is_some()
+                {
+                    if let Some(waker) = established.2.take() {
+                        waker.wake();
+                    }
+                }
 
                 // TODO: finish here
 

@@ -267,10 +267,6 @@ async fn connection_task(
 
         websocket.advance_read_cursor(read_write.read_bytes);
 
-        if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
-            continue;
-        }
-
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {
