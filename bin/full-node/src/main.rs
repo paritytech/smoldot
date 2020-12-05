@@ -155,7 +155,7 @@ async fn async_main() {
         // TODO: add relay chain bootstrap nodes
         bootstrap_nodes: {
             let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-            for node in chain_spec.boot_nodes() {
+            for node in chain_spec.boot_nodes().iter().take(1) {
                 let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
                 if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
                     let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap

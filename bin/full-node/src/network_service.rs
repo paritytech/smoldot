@@ -190,7 +190,7 @@ impl NetworkService {
         });
 
         // Spawn tasks dedicated to the Kademlia discovery.
-        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+        /*(network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let network_service = network_service.clone();
             async move {
                 let mut next_discovery = Duration::from_secs(5);
@@ -217,7 +217,7 @@ impl NetworkService {
                 }
             }
             .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
-        }));
+        }));*/
 
         (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let network_service = network_service.clone();
@@ -409,25 +409,35 @@ async fn connection_task(
             .await
         {
             Ok(rw) => rw,
-            Err(_) => return,
+            Err(error) => {
+                tracing::info!(%error, "task-finished");
+                return;
+            }
         };
 
-        if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
+        if read_write.read_bytes != 0 || read_write.written_bytes != 0 || read_write.write_close {
             tracing::event!(
                 tracing::Level::TRACE,
                 read = read_write.read_bytes,
-                written = read_write.written_bytes
+                written = read_write.written_bytes,
+                "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
+                "write-close" = read_write.write_close,
             );
         }
 
         if read_write.write_close && read_buffer.is_none() {
             // Make sure to finish closing the TCP socket.
-            tcp_socket.flush_close().await;
+            tcp_socket
+                .flush_close()
+                .instrument(tracing::debug_span!("flush-close"))
+                .await;
+            tracing::info!("task-finished");
             return;
         }
 
         if read_write.write_close && !tcp_socket.is_closed() {
             tcp_socket.close();
+            tracing::info!("write-closed");
         }
 
         if let Some(wake_up) = read_write.wake_up_after {

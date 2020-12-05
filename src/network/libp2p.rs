@@ -139,13 +139,13 @@ pub struct Network<TNow, TPeer, TConn> {
     randomness_seeds: Mutex<ChaCha20Rng>,
 
     /// Receiver connected to [`Guarded::events_tx`].
-    events_rx: Mutex<mpsc::Receiver<Event>>,
+    events_rx: Mutex<mpsc::Receiver<Event<TConn>>>,
 }
 
 /// Fields of [`Network`] behind a mutex.
 struct Guarded<TNow, TPeer, TConn> {
     /// Sender connected to [`Network::events_rx`].
-    events_tx: mpsc::Sender<Event>,
+    events_tx: mpsc::Sender<Event<TConn>>,
 
     /// Holds the state of all the known nodes of the network, and of all the connections (pending
     /// or not).
@@ -160,7 +160,7 @@ struct Guarded<TNow, TPeer, TConn> {
                         usize,
                     >,
                 >,
-                TConn,
+                Option<TConn>,
                 Option<Waker>,
             )>,
         >,
@@ -428,7 +428,7 @@ where
     /// case the events will be distributed amongst the multiple calls in an unspecified way.
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
-    pub async fn next_event(&self) -> Event {
+    pub async fn next_event(&self) -> Event<TConn> {
         if let Some(event) = self.fill_out_slots(&mut self.guarded.lock().await).await {
             return event;
         }
@@ -452,9 +452,12 @@ where
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         cx: &mut Context<'_>,
     ) -> Result<ReadWrite<TNow>, ConnectionError> {
-        let mut total_read = 0;
-        let mut total_written = 0;
-        let mut wake_up_after = None;
+        let mut read_write = ReadWrite {
+            read_bytes: 0,
+            written_bytes: 0,
+            wake_up_after: None,
+            write_close: false,
+        };
 
         let mut guarded = self.guarded.lock().await;
         match guarded
@@ -478,13 +481,9 @@ where
                             .unwrap()
                             .remove_and_purge_address();
 
-                        debug_assert_eq!(total_read, 0);
-                        return Ok(ReadWrite {
-                            read_bytes: total_read,
-                            written_bytes: total_written,
-                            wake_up_after: None,
-                            write_close: true,
-                        });
+                        debug_assert_eq!(read_write.read_bytes, 0);
+                        read_write.write_close = true;
+                        return Ok(read_write);
                     }
                 };
 
@@ -503,8 +502,8 @@ where
                                 return Err(ConnectionError::Handshake(err));
                             }
                         };
-                    total_read += num_read;
-                    total_written += num_written;
+                    read_write.read_bytes += num_read;
+                    read_write.written_bytes += num_written;
                     (result, num_read == 0 && num_written == 0)
                 };
 
@@ -532,7 +531,7 @@ where
                                     let established = connection.into_connection(config);
                                     Arc::new(Mutex::new((
                                         Some(established),
-                                        user_data,
+                                        Some(user_data),
                                         Some(waker),
                                     )))
                                 }
@@ -573,21 +572,22 @@ where
                         .unwrap()
                         .read_write(now, incoming_buffer, outgoing_buffer);
 
-                let read_write = match read_write_result {
+                let read_write_result = match read_write_result {
                     Ok(rw) => rw,
                     Err(err) => {
                         let mut guarded = self.guarded.lock().await;
-                        let peer_id = {
+                        let (peer_id, user_data) = {
                             let c = guarded.peerset.connection_mut(connection_id.0).unwrap();
                             let peer_id = c.peer_id().clone();
-                            c.remove();
-                            peer_id
+                            let conn_arc = c.remove();
+                            let ud = conn_arc.lock().await.1.take().unwrap();
+                            (peer_id, ud)
                         };
 
                         // TODO: only send if last connection
                         guarded
                             .events_tx
-                            .send(Event::Disconnected(peer_id))
+                            .send(Event::Disconnected { peer_id, user_data })
                             .await
                             .unwrap();
 
@@ -595,15 +595,16 @@ where
                     }
                 };
 
-                total_read += read_write.read_bytes;
-                total_written += read_write.written_bytes;
-                debug_assert!(wake_up_after.is_none());
-                wake_up_after = read_write.wake_up_after;
-                established.0 = Some(read_write.connection);
+                read_write.read_bytes += read_write_result.read_bytes;
+                read_write.written_bytes += read_write_result.written_bytes;
+                debug_assert!(read_write.wake_up_after.is_none());
+                read_write.wake_up_after = read_write_result.wake_up_after;
+                read_write.write_close = read_write_result.write_close;
+                established.0 = Some(read_write_result.connection);
 
                 // TODO: finish here
 
-                match read_write.event {
+                match read_write_result.event {
                     None => {}
                     Some(connection::established::Event::RequestIn {
                         id,
@@ -725,15 +726,25 @@ where
                         todo!()
                     }
                 }
+
+                // Connetion is considered closed if `write_close` is `true` and `incoming_buffer`
+                // is `None`.
+                if read_write.write_close && incoming_buffer.is_none() {
+                    let mut guarded = self.guarded.lock().await;
+                    let connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                    let peer_id = connection.peer_id().clone(); // TODO: no
+                    let conn_arc = connection.remove();
+                    let user_data = conn_arc.lock().await.1.take().unwrap();
+                    guarded
+                        .events_tx
+                        .send(Event::Disconnected { peer_id, user_data })
+                        .await
+                        .unwrap();
+                }
             }
         }
 
-        Ok(ReadWrite {
-            read_bytes: total_read,
-            written_bytes: total_written,
-            wake_up_after,
-            write_close: false, // TODO:
-        })
+        Ok(read_write)
     }
 
     async fn build_connection_config(&self) -> connection::established::Config {
@@ -790,7 +801,7 @@ where
     async fn fill_out_slots<'a>(
         &self,
         guarded: &mut MutexGuard<'a, Guarded<TNow, TPeer, TConn>>,
-    ) -> Option<Event> {
+    ) -> Option<Event<TConn>> {
         // Solves borrow checking errors regarding the borrow of multiple different fields at the
         // same time.
         let guarded = &mut **guarded;
@@ -818,9 +829,12 @@ where
 
 /// Event generated by [`Network::next_event`].
 #[derive(Debug)]
-pub enum Event {
+pub enum Event<TConn> {
     Connected(PeerId),
-    Disconnected(PeerId),
+    Disconnected {
+        peer_id: PeerId,
+        user_data: TConn,
+    },
 
     /// User must start connecting to the given multiaddress.
     ///
@@ -881,6 +895,7 @@ pub struct ReadWrite<TNow> {
     pub write_close: bool,
 }
 
+#[derive(Debug, derive_more::Display)]
 pub enum ConnectionError {
     Established(connection::established::Error),
     Handshake(connection::handshake::HandshakeError),
@@ -899,7 +914,7 @@ pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
                     usize,
                 >,
             >,
-            TConn,
+            Option<TConn>,
             Option<Waker>,
         )>,
     >,

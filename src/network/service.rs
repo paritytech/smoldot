@@ -160,7 +160,7 @@ where
             name: "/ipfs/id/1.0.0".into(),
             max_request_size: 8,
             max_response_size: 4096,
-            inbound_allowed: false, // TODO: not implemented; makes node panic if true at the moment
+            inbound_allowed: true,
         })
         .chain(config.chains.iter().flat_map(|chain| {
             // TODO: limits are arbitrary
@@ -330,11 +330,11 @@ where
                     let _ = self.substreams_open_tx.lock().await.try_send(());
                     return Event::Connected(peer_id);
                 }
-                libp2p::Event::Disconnected(peer_id) => {
+                libp2p::Event::Disconnected { peer_id, user_data } => {
                     return Event::Disconnected {
                         peer_id,
                         chain_indices: Vec::new(), // TODO: /!\
-                    }
+                    };
                 }
                 libp2p::Event::StartConnect { id, multiaddr } => {
                     return Event::StartConnect {
