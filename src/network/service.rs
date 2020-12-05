@@ -314,7 +314,15 @@ where
                 self.libp2p
                     .accept_notifications_in(*id, *overlay_network_index, handshake.clone()) // TODO: clone :-/
                     .await;
+
+                let peer_id = self.libp2p.connection_peer_id(*id).await;
+                let chain_index = overlay_network_index / 2;
                 *pending_in_accept = None;
+
+                return Event::ChainConnected {
+                    peer_id,
+                    chain_index,
+                }
             }
 
             match self.libp2p.next_event().await {
@@ -322,7 +330,10 @@ where
                     let _ = self.substreams_open_tx.lock().await.try_send(());
                     return Event::Connected(peer_id);
                 }
-                libp2p::Event::Disconnected(peer_id) => return Event::Disconnected(peer_id),
+                libp2p::Event::Disconnected(peer_id) => return Event::Disconnected {
+                    peer_id,
+                    chain_indices: Vec::new(), // TODO: /!\
+                },
                 libp2p::Event::StartConnect { id, multiaddr } => {
                     return Event::StartConnect {
                         id: PendingId(id),
@@ -491,7 +502,10 @@ where
 #[derive(Debug)]
 pub enum Event {
     Connected(peer_id::PeerId),
-    Disconnected(peer_id::PeerId),
+    Disconnected {
+        peer_id: peer_id::PeerId,
+        chain_indices: Vec<usize>,
+    },
 
     /// User must start connecting to the given multiaddr::Multiaddress.
     ///
@@ -500,6 +514,15 @@ pub enum Event {
     StartConnect {
         id: PendingId,
         multiaddr: multiaddr::Multiaddr,
+    },
+
+    ChainConnected {
+        chain_index: usize,
+        peer_id: peer_id::PeerId,
+    },
+    ChainDisconnected {
+        chain_index: usize,
+        peer_id: peer_id::PeerId,
     },
 
     BlockAnnounce {

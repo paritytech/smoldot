@@ -76,6 +76,10 @@ pub struct Config {
 pub enum Event {
     Connected(PeerId),
     Disconnected(PeerId),
+    BlockAnnounce {
+        peer_id: PeerId,
+        announce: service::EncodedBlockAnnounce,
+    },
 }
 
 pub struct NetworkService {
@@ -262,11 +266,14 @@ impl NetworkService {
             match self.network.next_event().await {
                 service::Event::Connected(peer_id) => {
                     tracing::debug!(%peer_id, "connected");
-                    return Event::Connected(peer_id);
                 }
-                service::Event::Disconnected(peer_id) => {
+                service::Event::Disconnected { peer_id, chain_indices } => {
                     tracing::debug!(%peer_id, "disconnected");
-                    return Event::Disconnected(peer_id);
+                    if !chain_indices.is_empty() {
+                        debug_assert_eq!(chain_indices.len(), 1);
+                        debug_assert_eq!(chain_indices[0], 0);
+                        return Event::Disconnected(peer_id);
+                    }
                 }
                 service::Event::StartConnect { id, multiaddr } => {
                     let span = tracing::debug_span!("start-connect", ?id, %multiaddr);
@@ -296,7 +303,18 @@ impl NetworkService {
                     announce,
                 } => {
                     tracing::debug!(%chain_index, %peer_id, ?announce, "block-announce");
-                    // TODO:
+                    return Event::BlockAnnounce {
+                        peer_id,
+                        announce,
+                    }
+                }
+                service::Event::ChainConnected { peer_id, chain_index } => {
+                    debug_assert_eq!(chain_index, 0);
+                    return Event::Connected(peer_id);
+                }
+                service::Event::ChainDisconnected { peer_id, chain_index } => {
+                    debug_assert_eq!(chain_index, 0);
+                    return Event::Disconnected(peer_id);
                 }
             }
         }

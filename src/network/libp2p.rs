@@ -261,6 +261,11 @@ where
         todo!()
     }
 
+    pub async fn connection_peer_id(&self, id: ConnectionId) -> PeerId {
+        // TODO: cloning :-/
+        self.guarded.lock().await.peerset.connection_mut(id.0).unwrap().peer_id().clone()
+    }
+
     /// Sends a request to the given peer.
     // TODO: more docs
     pub async fn request(
