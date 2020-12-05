@@ -79,9 +79,9 @@ pub struct Established<TNow, TRqUd, TNotifUd> {
     /// this field might correspond to nothing (i.e. is now obsolete).
     next_timeout: Option<TNow>,
 
-    /// See [`Config::in_request_protocols`].
+    /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
-    /// See [`Config::in_notifications_protocols`].
+    /// See [`Config::notifications_protocols`].
     notifications_protocols: Vec<ConfigNotifications>,
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
