@@ -1162,7 +1162,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 data = &data[num_read..];
                                 next_notification =
                                     leb128::FramedInProgress::new(max_notification_size);
-                                assert!(notification.is_none()); // TODO: temporary because outside API doesn't support multiple notifications
+                                //assert!(notification.is_none()); // TODO: outside API doesn't support multiple notifications
                                 notification = Some(notif);
                             }
                             Ok((num_read, leb128::Framed::InProgress(next))) => {

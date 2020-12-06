@@ -332,10 +332,19 @@ where
                     let _ = self.substreams_open_tx.lock().await.try_send(());
                     return Event::Connected(peer_id);
                 }
-                libp2p::Event::Disconnected { peer_id, user_data } => {
+                libp2p::Event::Disconnected {
+                    peer_id,
+                    user_data,
+                    mut out_overlay_network_indices,
+                    ..
+                } => {
+                    out_overlay_network_indices.retain(|i| (i % 2) == 0);
+                    for elem in &mut out_overlay_network_indices {
+                        *elem /= 2;
+                    }
                     return Event::Disconnected {
                         peer_id,
-                        chain_indices: Vec::new(), // TODO: /!\
+                        chain_indices: out_overlay_network_indices,
                     };
                 }
                 libp2p::Event::StartConnect { id, multiaddr } => {

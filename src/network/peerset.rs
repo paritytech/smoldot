@@ -480,6 +480,27 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
         }
     }
 
+    /// Returns the list of open substreams.
+    pub fn open_substreams_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (usize, SubstreamDirection, &mut TSub)> {
+        self.peerset
+            .connection_overlays
+            .range_mut(
+                (self.id.0, 0, SubstreamDirection::In)
+                    ..=(self.id.0, usize::max_value(), SubstreamDirection::Out),
+            )
+            .filter_map(
+                move |(&(_, ref overlay_network_index, ref direction), &mut ref mut state)| {
+                    match state {
+                        SubstreamState::Open(ud) => Some((*overlay_network_index, *direction, ud)),
+                        SubstreamState::Pending(_) => None,
+                        SubstreamState::Poisoned => unreachable!(),
+                    }
+                },
+            )
+    }
+
     /// Gives access to the user data associated with the connection.
     pub fn user_data_mut(&mut self) -> &mut TConn {
         match &mut self.peerset.connections[self.id.0].ty {

@@ -585,8 +585,22 @@ where
                     Ok(rw) => rw,
                     Err(err) => {
                         let mut guarded = self.guarded.lock().await;
+                        let mut out_overlay_network_indices =
+                            Vec::with_capacity(guarded.peerset.num_overlay_networks());
+                        let mut in_overlay_network_indices =
+                            Vec::with_capacity(guarded.peerset.num_overlay_networks());
                         let (peer_id, user_data) = {
-                            let c = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                            let mut c = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                            for (overlay_network_index, direction, _) in c.open_substreams_mut() {
+                                match direction {
+                                    peerset::SubstreamDirection::In => {
+                                        in_overlay_network_indices.push(overlay_network_index)
+                                    }
+                                    peerset::SubstreamDirection::Out => {
+                                        out_overlay_network_indices.push(overlay_network_index)
+                                    }
+                                }
+                            }
                             let peer_id = c.peer_id().clone();
                             let conn_arc = c.remove();
                             let ud = conn_arc.lock().await.1.take().unwrap();
@@ -596,7 +610,12 @@ where
                         // TODO: only send if last connection
                         guarded
                             .events_tx
-                            .send(Event::Disconnected { peer_id, user_data })
+                            .send(Event::Disconnected {
+                                peer_id,
+                                user_data,
+                                in_overlay_network_indices,
+                                out_overlay_network_indices,
+                            })
                             .await
                             .unwrap();
 
@@ -760,13 +779,32 @@ where
                 // is `None`.
                 if read_write.write_close && incoming_buffer.is_none() {
                     let mut guarded = self.guarded.lock().await;
-                    let connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                    let mut out_overlay_network_indices =
+                        Vec::with_capacity(guarded.peerset.num_overlay_networks());
+                    let mut in_overlay_network_indices =
+                        Vec::with_capacity(guarded.peerset.num_overlay_networks());
+                    let mut connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
                     let peer_id = connection.peer_id().clone(); // TODO: no
+                    for (overlay_network_index, direction, _) in connection.open_substreams_mut() {
+                        match direction {
+                            peerset::SubstreamDirection::In => {
+                                in_overlay_network_indices.push(overlay_network_index)
+                            }
+                            peerset::SubstreamDirection::Out => {
+                                out_overlay_network_indices.push(overlay_network_index)
+                            }
+                        }
+                    }
                     let conn_arc = connection.remove();
                     let user_data = conn_arc.lock().await.1.take().unwrap();
                     guarded
                         .events_tx
-                        .send(Event::Disconnected { peer_id, user_data })
+                        .send(Event::Disconnected {
+                            peer_id,
+                            user_data,
+                            out_overlay_network_indices,
+                            in_overlay_network_indices,
+                        })
                         .await
                         .unwrap();
                 }
@@ -865,6 +903,8 @@ pub enum Event<TConn> {
     Disconnected {
         peer_id: PeerId,
         user_data: TConn,
+        out_overlay_network_indices: Vec<usize>,
+        in_overlay_network_indices: Vec<usize>,
     },
 
     /// User must start connecting to the given multiaddress.
