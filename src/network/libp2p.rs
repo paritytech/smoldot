@@ -388,7 +388,11 @@ where
 
         let mut substream_id = None;
 
-        let mut connection = guarded.peerset.connection_mut(id.0).unwrap();
+        // TODO: we use defensive programming here because the concurrency model is still blurry
+        let mut connection = match guarded.peerset.connection_mut(id.0) {
+            Some(c) => c,
+            None => return,
+        };
 
         connection.confirm_substream(
             overlay_network_index,
@@ -589,7 +593,7 @@ where
                             Vec::with_capacity(guarded.peerset.num_overlay_networks());
                         let mut in_overlay_network_indices =
                             Vec::with_capacity(guarded.peerset.num_overlay_networks());
-                        let (peer_id, user_data) = {
+                        let peer_id = {
                             let mut c = guarded.peerset.connection_mut(connection_id.0).unwrap();
                             for (overlay_network_index, direction, _) in c.open_substreams_mut() {
                                 match direction {
@@ -602,9 +606,8 @@ where
                                 }
                             }
                             let peer_id = c.peer_id().clone();
-                            let conn_arc = c.remove();
-                            let ud = conn_arc.lock().await.1.take().unwrap();
-                            (peer_id, ud)
+                            c.remove();
+                            peer_id
                         };
 
                         // TODO: only send if last connection
@@ -612,7 +615,7 @@ where
                             .events_tx
                             .send(Event::Disconnected {
                                 peer_id,
-                                user_data,
+                                user_data: established.1.take().unwrap(),
                                 in_overlay_network_indices,
                                 out_overlay_network_indices,
                             })
@@ -795,13 +798,12 @@ where
                             }
                         }
                     }
-                    let conn_arc = connection.remove();
-                    let user_data = conn_arc.lock().await.1.take().unwrap();
+                    connection.remove();
                     guarded
                         .events_tx
                         .send(Event::Disconnected {
                             peer_id,
-                            user_data,
+                            user_data: established.1.take().unwrap(),
                             out_overlay_network_indices,
                             in_overlay_network_indices,
                         })
