@@ -168,8 +168,8 @@ pub enum Error {
 }
 
 /// Verifies whether a block is valid.
-pub fn verify<'a>(
-    config: Config<'a, impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
+pub fn verify(
+    config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
     // Start the consensus engine verification process.
     let consensus_success = match config.consensus {
@@ -320,7 +320,7 @@ impl StorageGet {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<&[u8]>) -> Verify {
+    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Verify {
         VerifyInner {
             inner: self.inner.inject_value(value),
             consensus_success: self.consensus_success,

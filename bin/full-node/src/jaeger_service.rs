@@ -45,11 +45,11 @@
 // TODO: more documentation
 
 use async_std::net::UdpSocket;
-use substrate_lite::network::PeerId;
 use std::{
     convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZeroU128, pin::Pin,
     sync::Arc,
 };
+use substrate_lite::network::PeerId;
 
 /// Configuration for a [`JaegerService`].
 pub struct Config {

@@ -33,7 +33,8 @@ use futures::{
     prelude::*,
 };
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
-use substrate_lite::{chain::sync::full_optimistic, database::full_sled, network};
+use substrate_lite::{chain::sync::optimistic, database::full_sled, network};
+use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -82,16 +83,22 @@ pub struct SyncService {
     from_background: Mutex<mpsc::Receiver<FromBackground>>,
 
     /// For each emitted blocks request, an element is stored here.
-    blocks_requests:
-        Mutex<slab::Slab<oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>>>,
+    ///
+    /// A regular `Mutex` is used in order to avoid issues with futures cancellation.
+    blocks_requests: parking_lot::Mutex<
+        slab::Slab<oneshot::Sender<Result<Vec<network::protocol::BlockData>, ()>>>,
+    >,
 }
 
 impl SyncService {
     /// Initializes the [`SyncService`] with the given configuration.
+    #[tracing::instrument(skip(config))]
     pub async fn new(mut config: Config) -> Arc<Self> {
         let (to_foreground, from_background) = mpsc::channel(16);
         let (to_background, from_foreground) = mpsc::channel(16);
         let (to_database, messages_rx) = mpsc::channel(4);
+
+        let finalized_block_hash = config.database.finalized_block_hash().unwrap();
 
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_hash: [0; 32],      // TODO:
@@ -109,22 +116,30 @@ impl SyncService {
                 from_foreground,
                 to_database,
             )
+            .instrument(
+                tracing::debug_span!(parent: None, "sync-service", root = ?finalized_block_hash), // TDOO: better display
+            )
             .await,
         ));
 
-        (config.tasks_executor)(Box::pin(start_database_write(
-            config
-                .jaeger_service
-                .background_task_span("sync-database-write-task"),
-            config.database,
-            messages_rx,
-        )));
+        (config.tasks_executor)(Box::pin(
+            start_database_write(
+                config
+                    .jaeger_service
+                    .background_task_span("sync-database-write-task"),
+                config.database,
+                messages_rx,
+            )
+            .instrument(
+                tracing::debug_span!(parent: None, "database-write", root = ?finalized_block_hash), // TDOO: better display
+            ),
+        ));
 
         Arc::new(SyncService {
             sync_state,
             to_background: Mutex::new(to_background),
             from_background: Mutex::new(from_background),
-            blocks_requests: Mutex::new(slab::Slab::new()),
+            blocks_requests: parking_lot::Mutex::new(slab::Slab::new()),
         })
     }
 
@@ -132,11 +147,13 @@ impl SyncService {
     ///
     /// > **Important**: This doesn't represent the content of the database.
     // TODO: maybe remove this in favour of the database; seems like a better idea
+    #[tracing::instrument(skip(self))]
     pub async fn sync_state(&self) -> SyncState {
         self.sync_state.lock().await.clone()
     }
 
     /// Registers a new source for blocks.
+    #[tracing::instrument(skip(self))]
     pub async fn add_source(&self, peer_id: network::PeerId) {
         self.to_background
             .lock()
@@ -147,6 +164,7 @@ impl SyncService {
     }
 
     /// Removes a source of blocks.
+    #[tracing::instrument(skip(self))]
     pub async fn remove_source(&self, peer_id: network::PeerId) {
         self.to_background
             .lock()
@@ -164,23 +182,20 @@ impl SyncService {
     ///
     /// Panics if the `id` is invalid.
     ///
+    #[tracing::instrument(skip(self, response))]
     pub async fn answer_blocks_request(
         &self,
         id: BlocksRequestId,
         response: Result<Vec<network::protocol::BlockData>, ()>,
     ) {
-        let _ = self
-            .blocks_requests
-            .lock()
-            .await
-            .remove(id.0)
-            .send(response);
+        let _ = self.blocks_requests.lock().remove(id.0).send(response);
     }
 
     /// Returns the next event that happened in the sync service.
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
+    #[tracing::instrument(skip(self))]
     pub async fn next_event(&self) -> Event {
         loop {
             match self.from_background.lock().await.next().await.unwrap() {
@@ -189,7 +204,7 @@ impl SyncService {
                     request,
                     send_back,
                 } => {
-                    let id = BlocksRequestId(self.blocks_requests.lock().await.insert(send_back));
+                    let id = BlocksRequestId(self.blocks_requests.lock().insert(send_back));
                     return Event::BlocksRequest {
                         id,
                         target,
@@ -219,10 +234,18 @@ enum FromBackground {
 }
 
 enum ToDatabase {
-    FinalizedBlocks(Vec<full_optimistic::Block>),
+    FinalizedBlocks(Vec<optimistic::Block<()>>),
 }
 
 /// Returns the background task of the sync service.
+#[tracing::instrument(skip(
+    task_span,
+    database,
+    sync_state,
+    to_foreground,
+    from_foreground,
+    to_database
+))]
 async fn start_sync(
     mut task_span: mick_jaeger::Span,
     database: Arc<full_sled::SledFullDatabase>,
@@ -231,24 +254,24 @@ async fn start_sync(
     mut from_foreground: mpsc::Receiver<ToBackground>,
     mut to_database: mpsc::Sender<ToDatabase>,
 ) -> impl Future<Output = ()> {
-    let mut sync =
-        full_optimistic::OptimisticFullSync::<_, network::PeerId>::new(full_optimistic::Config {
-            chain_information: database
-                .to_chain_information(&database.finalized_block_hash().unwrap())
-                .unwrap(),
-            sources_capacity: 32,
-            blocks_capacity: {
-                // This is the maximum number of blocks between two consecutive justifications.
-                1024
-            },
-            source_selection_randomness_seed: rand::random(),
-            blocks_request_granularity: NonZeroU32::new(128).unwrap(),
-            download_ahead_blocks: {
-                // Assuming a verification speed of 1k blocks/sec and a 95% latency of one second,
-                // the number of blocks to download ahead of time in order to not block is 1000.
-                1024
-            },
-        });
+    let mut sync = optimistic::OptimisticSync::<_, network::PeerId, ()>::new(optimistic::Config {
+        chain_information: database
+            .to_chain_information(&database.finalized_block_hash().unwrap())
+            .unwrap(),
+        sources_capacity: 32,
+        blocks_capacity: {
+            // This is the maximum number of blocks between two consecutive justifications.
+            1024
+        },
+        source_selection_randomness_seed: rand::random(),
+        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
+        download_ahead_blocks: {
+            // Assuming a verification speed of 1k blocks/sec and a 95% latency of one second,
+            // the number of blocks to download ahead of time in order to not block is 1000.
+            1024
+        },
+        full: true,
+    });
 
     // Holds, in parallel of the database, the storage of the latest finalized block.
     // At the time of writing, this state is stable around ~3MiB for Polkadot, meaning that it is
@@ -312,11 +335,19 @@ async fn start_sync(
             let mut process = sync.process_one(unix_time);
             loop {
                 match process {
-                    full_optimistic::ProcessOne::Idle { sync: s } => {
+                    optimistic::ProcessOne::Idle { sync: s } => {
                         sync = s;
                         break;
                     }
-                    full_optimistic::ProcessOne::Finished {
+                    optimistic::ProcessOne::Reset {
+                        sync: s,
+                        previous_best_height,
+                        reason,
+                    } => {
+                        tracing::warn!(%reason, %previous_best_height, "failed-block-verification");
+                        process = s.process_one(unix_time);
+                    }
+                    optimistic::ProcessOne::Finalized {
                         sync: s,
                         finalized_blocks,
                     } => {
@@ -347,29 +378,29 @@ async fn start_sync(
                             .unwrap();
                     }
 
-                    full_optimistic::ProcessOne::InProgress {
-                        current_best_hash,
-                        current_best_number,
-                        resume,
+                    optimistic::ProcessOne::NewBest {
+                        sync: s,
+                        new_best_hash,
+                        new_best_number,
                     } => {
                         // Processing has made a step forward.
                         // There is nothing to do, but this is used to update to best block
                         // shown on the informant.
                         let mut lock = sync_state.lock().await;
-                        lock.best_block_hash = current_best_hash;
-                        lock.best_block_number = current_best_number;
+                        lock.best_block_hash = new_best_hash;
+                        lock.best_block_number = new_best_number;
                         drop(lock);
 
-                        process = resume.resume();
+                        process = s.process_one(unix_time);
                     }
 
-                    full_optimistic::ProcessOne::FinalizedStorageGet(req) => {
+                    optimistic::ProcessOne::FinalizedStorageGet(req) => {
                         let value = finalized_block_storage
                             .get(&req.key_as_vec())
                             .map(|v| &v[..]);
                         process = req.inject_value(value);
                     }
-                    full_optimistic::ProcessOne::FinalizedStorageNextKey(req) => {
+                    optimistic::ProcessOne::FinalizedStorageNextKey(req) => {
                         // TODO: to_vec() :-/
                         let req_key = req.key().to_vec();
                         // TODO: to_vec() :-/
@@ -380,7 +411,7 @@ async fn start_sync(
                             .map(|(k, _)| k);
                         process = req.inject_key(next_key);
                     }
-                    full_optimistic::ProcessOne::FinalizedStoragePrefixKeys(req) => {
+                    optimistic::ProcessOne::FinalizedStoragePrefixKeys(req) => {
                         // TODO: to_vec() :-/
                         let prefix = req.prefix().to_vec();
                         // TODO: to_vec() :-/
@@ -405,7 +436,7 @@ async fn start_sync(
             // blocks can result in new requests but not the contrary.
             while let Some(action) = sync.next_request_action() {
                 match action {
-                    full_optimistic::RequestAction::Start {
+                    optimistic::RequestAction::Start {
                         start,
                         block_height,
                         source,
@@ -442,7 +473,7 @@ async fn start_sync(
                         let request_id = start.start(abort);
                         block_requests_finished.push(rx.map(move |r| (request_id, r)));
                     }
-                    full_optimistic::RequestAction::Cancel { user_data, .. } => {
+                    optimistic::RequestAction::Cancel { user_data, .. } => {
                         user_data.abort();
                     }
                 }
@@ -479,11 +510,12 @@ async fn start_sync(
                     // TODO: clarify this piece of code
                     if let Ok(result) = result {
                         let result = result.map_err(|_| ()).and_then(|v| v);
-                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| full_optimistic::RequestSuccessBlock {
+                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
-                        })).map_err(|()| full_optimistic::RequestFail::BlocksUnavailable));
+                            user_data: (),
+                        })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
             }
@@ -492,6 +524,7 @@ async fn start_sync(
 }
 
 /// Starts the task that writes blocks to the database.
+#[tracing::instrument(skip(task_span, database, messages_rx))]
 async fn start_database_write(
     task_span: mick_jaeger::Span,
     database: Arc<full_sled::SledFullDatabase>,
@@ -501,6 +534,9 @@ async fn start_database_write(
         match messages_rx.next().await {
             None => break,
             Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
+                let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
+                let _enter = span.enter();
+
                 let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
                     Some(last_finalized.header.hash())
                 } else {

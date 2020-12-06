@@ -21,7 +21,8 @@
 
 use futures::{channel::oneshot, prelude::*};
 use std::{
-    borrow::Cow, convert::TryFrom as _, fs, iter, path::PathBuf, sync::Arc, thread, time::Duration,
+    borrow::Cow, convert::TryFrom as _, fs, io, iter, path::PathBuf, sync::Arc, thread,
+    time::Duration,
 };
 use structopt::StructOpt as _;
 use substrate_lite::{
@@ -29,6 +30,7 @@ use substrate_lite::{
     database::full_sled,
     network::{connection, multiaddr, peer_id::PeerId},
 };
+use tracing::Instrument as _;
 
 mod cli;
 mod jaeger_service;
@@ -41,6 +43,40 @@ fn main() {
 
 async fn async_main() {
     let cli_options = cli::CliOptions::from_args();
+
+    // Setup the logging system of the binary.
+    if matches!(
+        cli_options.output,
+        cli::Output::Informant | cli::Output::Logs | cli::Output::LogsJson
+    ) {
+        let builder = tracing_subscriber::fmt()
+            .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ACTIVE)
+            .with_max_level(if matches!(cli_options.output, cli::Output::Informant) {
+                tracing::Level::WARN // TODO: display warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+            } else {
+                tracing::Level::TRACE // TODO: configurable?
+            })
+            .with_writer(io::stdout);
+
+        // Because calling `builder.json()` changes the type of `builder`, we do it at the end
+        // and call `init()` at the same time.
+        //
+        // This registers a global process-wide subscriber.
+        // While this is poor programming practices and we would prefer using a crate that doesn't
+        // rely on global variables, the `tracing` crate is currently one of the best logging
+        // crates in the Rust ecosystem at the time of writing of this comment.
+        if matches!(cli_options.output, cli::Output::LogsJson) {
+            builder.json().init();
+        } else {
+            builder
+                .with_ansi(match cli_options.color {
+                    cli::ColorChoice::Always => true,
+                    cli::ColorChoice::Never => false,
+                })
+                .init();
+        }
+    }
 
     let chain_spec = {
         let json: Cow<[u8]> = match &cli_options.chain {
@@ -55,6 +91,12 @@ async fn async_main() {
         substrate_lite::chain_spec::ChainSpec::from_json_bytes(&json)
             .expect("Failed to decode chain specs")
     };
+
+    let genesis_chain_information =
+        chain::chain_information::ChainInformation::from_genesis_storage(
+            chain_spec.genesis_storage(),
+        )
+        .unwrap(); // TODO: don't unwrap?
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
     let (relay_chain_spec, parachain_id) =
@@ -85,14 +127,32 @@ async fn async_main() {
             (None, None)
         };
 
+    let relay_genesis_chain_information = if let Some(relay_chain_spec) = &relay_chain_spec {
+        Some(
+            chain::chain_information::ChainInformation::from_genesis_storage(
+                relay_chain_spec.genesis_storage(),
+            )
+            .unwrap(),
+        ) // TODO: don't unwrap?
+    } else {
+        None
+    };
+
     let threads_pool = futures::executor::ThreadPool::builder()
         .name_prefix("tasks-pool-")
         .create()
         .unwrap();
 
-    let database = open_database(&chain_spec, cli_options.tmp).await;
+    let database = open_database(&chain_spec, &genesis_chain_information, cli_options.tmp).await;
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
-        Some(open_database(&relay_chain_spec, cli_options.tmp).await)
+        Some(
+            open_database(
+                &relay_chain_spec,
+                relay_genesis_chain_information.as_ref().unwrap(),
+                cli_options.tmp,
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -117,7 +177,7 @@ async fn async_main() {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
-        service_name: env!("CARGO_PKG_NAME").to_string(),  // TODO: append the PeerId of the node
+        service_name: env!("CARGO_PKG_NAME").to_string(), // TODO: append the PeerId of the node
         jaeger_agent: cli_options.jaeger,
     })
     .await
@@ -127,12 +187,12 @@ async fn async_main() {
         listen_addresses: Vec::new(),
         jaeger_service: jaeger_service.clone(),
         protocol_id: chain_spec.protocol_id().to_owned(),
-        genesis_block_hash: database.finalized_block_hash().unwrap(),
+        genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
         best_block: (0, database.finalized_block_hash().unwrap()),
         // TODO: add relay chain bootstrap nodes
         bootstrap_nodes: {
             let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-            for node in chain_spec.boot_nodes() {
+            for node in chain_spec.boot_nodes().iter() {
                 let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
                 if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
                     let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
@@ -154,6 +214,7 @@ async fn async_main() {
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
     })
+    .instrument(tracing::debug_span!("network-service-init"))
     .await
     .unwrap();
 
@@ -165,6 +226,7 @@ async fn async_main() {
         database,
         jaeger_service: jaeger_service.clone(),
     })
+    .instrument(tracing::debug_span!("sync-service-init"))
     .await;
 
     let relay_chain_sync_service = if let Some(relay_chain_database) = relay_chain_database {
@@ -177,6 +239,7 @@ async fn async_main() {
                 database: relay_chain_database,
                 jaeger_service: jaeger_service.clone(),
             })
+            .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
             .await,
         )
     } else {
@@ -209,10 +272,12 @@ async fn async_main() {
     })
     .map(|_| ());
 
+    let mut network_known_best = None;
+
     loop {
         futures::select! {
             _ = informant_timer.next() => {
-                if !cli_options.quiet {
+                if matches!(cli_options.output, cli::Output::Informant) {
                     // We end the informant line with a `\r` so that it overwrites itself every time.
                     // If any other line gets printed, it will overwrite the informant, and the
                     // informant will then print itself below, which is a fine behaviour.
@@ -220,7 +285,6 @@ async fn async_main() {
                     eprint!("{}\r", substrate_lite::informant::InformantLine {
                         enable_colors: match cli_options.color {
                             cli::ColorChoice::Always => true,
-                            cli::ColorChoice::Auto => atty::is(atty::Stream::Stderr),
                             cli::ColorChoice::Never => false,
                         },
                         chain_name: chain_spec.name(),
@@ -240,10 +304,7 @@ async fn async_main() {
                         finalized_number: sync_state.finalized_block_number,
                         best_hash: &sync_state.best_block_hash,
                         finalized_hash: &sync_state.finalized_block_hash,
-                        network_known_best: None, /* TODO: match network_state.best_network_block_height.load(Ordering::Relaxed) {
-                            0 => None,
-                            n => Some(n)
-                        },*/
+                        network_known_best,
                     });
                 }
             },
@@ -256,6 +317,14 @@ async fn async_main() {
                     network_service::Event::Disconnected(peer_id) => {
                         sync_service.remove_source(peer_id).await;
                     }
+                    network_service::Event::BlockAnnounce { peer_id, announce } => {
+                        // TODO: report to sync
+                        let decoded = announce.decode();
+                        match network_known_best {
+                            Some(n) if n >= decoded.header.number => {},
+                            _ => network_known_best = Some(decoded.header.number),
+                        }
+                    }
                 }
             }
 
@@ -264,14 +333,14 @@ async fn async_main() {
                     sync_service::Event::BlocksRequest { id, target, request } => {
                         let block_request = network_service.clone().blocks_request(
                             target,
-                            request
+                            request,
                         );
 
                         threads_pool.spawn_ok({
                             let sync_service = sync_service.clone();
                             async move {
                                 let result = block_request.await;
-                                sync_service.answer_blocks_request(id, result).await;
+                                sync_service.answer_blocks_request(id, result.map_err(|_| ())).await;
                             }
                         });
                     }
@@ -296,7 +365,7 @@ async fn async_main() {
                             let sync_service = sync_service.clone();
                             async move {
                                 let result = block_request.await;
-                                sync_service.answer_blocks_request(id, result).await;
+                                sync_service.answer_blocks_request(id, result.map_err(|_| ())).await;
                             }
                         });
                     }
@@ -353,8 +422,10 @@ async fn async_main() {
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
+#[tracing::instrument(skip(chain_spec))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
+    genesis_chain_information: &chain::chain_information::ChainInformation,
     tmp: bool,
 ) -> Arc<full_sled::SledFullDatabase> {
     Arc::new({
@@ -383,19 +454,11 @@ async fn open_database(
 
             // The database doesn't exist or is empty.
             full_sled::DatabaseOpen::Empty(empty) => {
-                // Build information about state of the chain at the genesis block, and fill the
-                // database with it.
-                let genesis_chain_information =
-                    chain::chain_information::ChainInformation::from_genesis_storage(
-                        chain_spec.genesis_storage(),
-                    )
-                    .unwrap(); // TODO: don't unwrap?
-
                 // The finalized block is the genesis block. As such, it has an empty body and
                 // no justification.
                 empty
                     .initialize(
-                        &genesis_chain_information,
+                        genesis_chain_information,
                         iter::empty(),
                         None,
                         chain_spec.genesis_storage(),
@@ -410,6 +473,7 @@ async fn open_database(
 /// in the background while showing a small progress bar to the user.
 ///
 /// If `path` is `None`, the database is opened in memory.
+#[tracing::instrument]
 async fn background_open_database(
     path: Option<PathBuf>,
 ) -> Result<full_sled::DatabaseOpen, full_sled::SledError> {

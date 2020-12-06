@@ -29,7 +29,7 @@
 
 use crate::jaeger_service;
 
-use core::{pin::Pin, time::Duration};
+use core::{cmp, pin::Pin, time::Duration};
 use futures::{lock::Mutex, prelude::*};
 use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
 use substrate_lite::network::{
@@ -38,6 +38,7 @@ use substrate_lite::network::{
     peer_id::PeerId,
     protocol, service,
 };
+use tracing::Instrument as _;
 
 mod with_buffers;
 
@@ -80,11 +81,17 @@ pub struct Config {
 pub enum Event {
     Connected(PeerId),
     Disconnected(PeerId),
+    BlockAnnounce {
+        peer_id: PeerId,
+        announce: service::EncodedBlockAnnounce,
+    },
 }
 
 pub struct NetworkService {
     /// Fields behind a mutex.
-    guarded: Mutex<Guarded>,
+    ///
+    /// A regular `Mutex` is used in order to avoid futures cancellation issues.
+    guarded: parking_lot::Mutex<Guarded>,
 
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<Instant, (), ()>,
@@ -135,29 +142,35 @@ impl NetworkService {
             };
 
             // Spawn a background task dedicated to this listener.
-            (config.tasks_executor)(Box::pin(async move {
-                loop {
-                    // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
+            (config.tasks_executor)(Box::pin(
+                async move {
+                    loop {
+                        // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
 
-                    let (socket, _addr) = match tcp_listener.accept().await {
-                        Ok(v) => v,
-                        Err(_) => {
-                            // Errors here can happen if the accept failed, for example if no file
-                            // descriptor is available.
-                            // A wait is added in order to avoid having a busy-loop failing to
-                            // accept connections.
-                            futures_timer::Delay::new(Duration::from_secs(2)).await;
-                            continue;
-                        }
-                    };
+                        let (socket, _addr) = match tcp_listener.accept().await {
+                            Ok(v) => v,
+                            Err(_) => {
+                                // Errors here can happen if the accept failed, for example if no file
+                                // descriptor is available.
+                                // A wait is added in order to avoid having a busy-loop failing to
+                                // accept connections.
+                                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                                continue;
+                            }
+                        };
 
-                    todo!() // TODO: report new connection
+                        todo!() // TODO: report new connection
+                    }
                 }
-            }))
+                .instrument(
+                    tracing::debug_span!(parent: None, "listener", address = %listen_address),
+                ),
+            ))
         }
 
-        Ok(Arc::new(NetworkService {
-            guarded: Mutex::new(Guarded {
+        // Initialize the network service.
+        let network_service = Arc::new(NetworkService {
+            guarded: parking_lot::Mutex::new(Guarded {
                 tasks_executor: config.tasks_executor,
             }),
             network: service::ChainNetwork::new(service::Config {
@@ -166,6 +179,10 @@ impl NetworkService {
                     in_slots: 25,
                     out_slots: 25,
                     protocol_id: config.protocol_id,
+                    best_hash: config.best_block.1,
+                    best_number: config.best_block.0,
+                    genesis_hash: config.genesis_block_hash,
+                    role: protocol::Role::Full,
                 }],
                 known_nodes: config
                     .bootstrap_nodes
@@ -178,7 +195,63 @@ impl NetworkService {
                 randomness_seed: rand::random(),
             }),
             jaeger_service: config.jaeger_service,
-        }))
+        });
+
+        // Spawn tasks dedicated to the Kademlia discovery.
+        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+            let network_service = Arc::downgrade(&network_service);
+            async move {
+                let mut next_discovery = Duration::from_secs(5);
+
+                loop {
+                    futures_timer::Delay::new(next_discovery).await;
+                    next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
+
+                    let network_service = match network_service.upgrade() {
+                        Some(ns) => ns,
+                        None => {
+                            tracing::debug!("discovery-finish");
+                            return;
+                        }
+                    };
+
+                    match network_service
+                        .network
+                        .kademlia_discovery_round(Instant::now(), 0)
+                        .await
+                    {
+                        Ok(insert) => {
+                            insert
+                                .insert(|_| ())
+                                .instrument(tracing::debug_span!("insert"))
+                                .await
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "discovery-error")
+                        }
+                    }
+                }
+            }
+            .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
+        }));
+
+        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+            let network_service = network_service.clone();
+            async move {
+                // TODO: stop the task if the network service is destroyed
+                loop {
+                    network_service
+                        .network
+                        .next_substream()
+                        .await
+                        .open(Instant::now())
+                        .await;
+                }
+            }
+            .instrument(tracing::debug_span!(parent: None, "substreams-open"))
+        }));
+
+        Ok(network_service)
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
@@ -189,11 +262,12 @@ impl NetworkService {
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     // TODO: proper error type
+    #[tracing::instrument(skip(self))]
     pub async fn blocks_request(
         self: Arc<Self>,
         target: PeerId,
         config: protocol::BlocksRequestConfig,
-    ) -> Result<Vec<protocol::BlockData>, ()> {
+    ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
         self.network
             .blocks_request(Instant::now(), target, 0, config)
             .await // TODO: chain_index
@@ -203,24 +277,67 @@ impl NetworkService {
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
+    #[tracing::instrument(skip(self))]
     pub async fn next_event(self: &Arc<Self>) -> Event {
         loop {
             match self.network.next_event().await {
-                service::Event::Connected(peer_id) => return Event::Connected(peer_id),
-                service::Event::Disconnected(peer_id) => return Event::Disconnected(peer_id),
+                service::Event::Connected(peer_id) => {
+                    tracing::debug!(%peer_id, "connected");
+                }
+                service::Event::Disconnected {
+                    peer_id,
+                    chain_indices,
+                } => {
+                    tracing::debug!(%peer_id, "disconnected");
+                    if !chain_indices.is_empty() {
+                        debug_assert_eq!(chain_indices.len(), 1);
+                        debug_assert_eq!(chain_indices[0], 0);
+                        return Event::Disconnected(peer_id);
+                    }
+                }
                 service::Event::StartConnect { id, multiaddr } => {
+                    let span = tracing::debug_span!("start-connect", ?id, %multiaddr);
+                    let _enter = span.enter();
+
                     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
                     // a `Future<dyn Output = Result<TcpStream, ...>>`.
                     let socket = match multiaddr_to_socket(&multiaddr) {
                         Ok(socket) => socket,
                         Err(_) => {
+                            tracing::debug!(%multiaddr, "not-tcp");
                             self.network.pending_outcome_err(id).await;
                             continue;
                         }
                     };
 
-                    let mut guarded = self.guarded.lock().await;
-                    (guarded.tasks_executor)(Box::pin(connection_task(socket, self.clone(), id, self.jaeger_service.clone())));
+                    let mut guarded = self.guarded.lock();
+                    (guarded.tasks_executor)(Box::pin(
+                        connection_task(socket, self.clone(), id, self.jaeger_service.clone()).instrument(
+                            tracing::trace_span!(parent: None, "connection", address = %multiaddr),
+                        ),
+                    ));
+                }
+                service::Event::BlockAnnounce {
+                    chain_index,
+                    peer_id,
+                    announce,
+                } => {
+                    tracing::debug!(%chain_index, %peer_id, ?announce, "block-announce");
+                    return Event::BlockAnnounce { peer_id, announce };
+                }
+                service::Event::ChainConnected {
+                    peer_id,
+                    chain_index,
+                } => {
+                    debug_assert_eq!(chain_index, 0);
+                    return Event::Connected(peer_id);
+                }
+                service::Event::ChainDisconnected {
+                    peer_id,
+                    chain_index,
+                } => {
+                    debug_assert_eq!(chain_index, 0);
+                    return Event::Disconnected(peer_id);
                 }
             }
         }
@@ -238,6 +355,7 @@ pub enum InitError {
 }
 
 /// Asynchronous task managing a specific TCP connection.
+#[tracing::instrument(skip(tcp_socket, network_service, jaeger_service))]
 async fn connection_task(
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
     network_service: Arc<NetworkService>,
@@ -273,12 +391,13 @@ async fn connection_task(
     let mut poll_after: futures_timer::Delay;
 
     loop {
-        // TODO: 
+        // TODO:
         //let mut _process_data_span = jaeger_service.net_connection_span(&peer_id, &peer_id, "read-write");
-    
+
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
             Ok(b) => b,
-            Err(_) => {
+            Err(error) => {
+                tracing::info!(%error, "task-finished");
                 // TODO: report disconnect to service
                 return;
             }
@@ -312,18 +431,35 @@ async fn connection_task(
             .await
         {
             Ok(rw) => rw,
-            Err(_) => return,
+            Err(error) => {
+                tracing::info!(%error, "task-finished");
+                return;
+            }
         };
 
-        // TODO:
-        /*if read_write.write_close && !tcp_socket.is_closed() {
-            tcp_socket.close();
-        }*/
+        if read_write.read_bytes != 0 || read_write.written_bytes != 0 || read_write.write_close {
+            tracing::event!(
+                tracing::Level::TRACE,
+                read = read_write.read_bytes,
+                written = read_write.written_bytes,
+                "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
+                "write-close" = read_write.write_close,
+            );
+        }
 
         if read_write.write_close && read_buffer.is_none() {
             // Make sure to finish closing the TCP socket.
-            tcp_socket.flush_close().await;
+            tcp_socket
+                .flush_close()
+                .instrument(tracing::debug_span!("flush-close"))
+                .await;
+            tracing::info!("task-finished");
             return;
+        }
+
+        if read_write.write_close && !tcp_socket.is_closed() {
+            tcp_socket.close();
+            tracing::info!("write-closed");
         }
 
         if let Some(wake_up) = read_write.wake_up_after {
@@ -339,16 +475,17 @@ async fn connection_task(
 
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
 
-        if read_write.read_bytes != 0 || read_write.written_bytes != 0 {
-            continue;
-        }
-
         // TODO: drop(_process_data_span);
 
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
         futures::select! {
-            _ = tcp_socket.as_mut().process().fuse() => {},
+            _ = tcp_socket.as_mut().process().fuse() => {
+                tracing::event!(
+                    tracing::Level::TRACE,
+                    "socket-ready"
+                );
+            },
             _ = future::poll_fn(move |cx| {
                 let mut lock = waker.0.lock().unwrap();
                 if lock.0 {
@@ -362,6 +499,10 @@ async fn connection_task(
             }).fuse() => {}
             _ = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
                 // Nothing to do, but guarantees that we loop again.
+                tracing::event!(
+                    tracing::Level::TRACE,
+                    "timer-ready"
+                );
             }
         }
     }

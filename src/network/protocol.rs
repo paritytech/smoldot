@@ -22,6 +22,8 @@
 
 // TODO: expand docs
 
+use crate::header;
+
 use alloc::vec::Vec;
 use core::{
     convert::TryFrom,
@@ -32,7 +34,6 @@ use prost::Message as _;
 
 mod schema {
     include!(concat!(env!("OUT_DIR"), "/api.v1.rs"));
-    include!(concat!(env!("OUT_DIR"), "/api.v1.finality.rs"));
     include!(concat!(env!("OUT_DIR"), "/api.v1.light.rs"));
 }
 
@@ -138,14 +139,13 @@ pub fn decode_block_response(
         let mut body = Vec::with_capacity(block.body.len());
         for extrinsic in block.body {
             // TODO: this encoding really is a bit stupid
-            let ext = match <Vec<u8> as parity_scale_codec::DecodeAll>::decode_all(
-                &mut extrinsic.as_ref(),
-            ) {
-                Ok(e) => e,
-                Err(_) => {
-                    return Err(DecodeBlockResponseError::BodyDecodeError);
-                }
-            };
+            let ext =
+                match <Vec<u8> as parity_scale_codec::DecodeAll>::decode_all(extrinsic.as_ref()) {
+                    Ok(e) => e,
+                    Err(_) => {
+                        return Err(DecodeBlockResponseError::BodyDecodeError);
+                    }
+                };
 
             body.push(ext);
         }
@@ -204,6 +204,84 @@ pub enum DecodeBlockResponseError {
     BodyDecodeError,
 }
 
+/// Description of a storate proof request that can be sent to a peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageProofRequestConfig<TKeysIter> {
+    /// Hash of the block to request the storage of.
+    pub block_hash: [u8; 32],
+    /// List of storage keys to query.
+    pub keys: TKeysIter,
+}
+
+/// Builds the bytes corresponding to a storage proof request.
+pub fn build_storage_proof_request(
+    config: StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
+    let request = schema::Request {
+        request: Some(schema::request::Request::RemoteReadRequest(
+            schema::RemoteReadRequest {
+                block: config.block_hash.to_vec(),
+                keys: config.keys.map(|k| k.as_ref().to_vec()).collect(),
+            },
+        )),
+    };
+
+    let request_bytes = {
+        let mut buf = Vec::with_capacity(request.encoded_len());
+        request.encode(&mut buf).unwrap();
+        buf
+    };
+
+    iter::once(request_bytes)
+}
+
+/// Decodes a response to a storage proof request.
+// TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
+pub fn decode_storage_proof_response(
+    response_bytes: &[u8],
+) -> Result<Vec<Vec<u8>>, DecodeStorageProofResponseError> {
+    let response = schema::Response::decode(&response_bytes[..])
+        .map_err(ProtobufDecodeError)
+        .map_err(DecodeStorageProofResponseError::ProtobufDecode)?;
+
+    let proof = match response.response {
+        Some(schema::response::Response::RemoteReadResponse(rsp)) => rsp.proof,
+        _ => return Err(DecodeStorageProofResponseError::BadResponseTy),
+    };
+
+    // The proof itself is a SCALE-encoded `Vec<Vec<u8>>`.
+    // Each inner `Vec<u8>` is a node value in the storage trie.
+    let (_, decoded) = nom::combinator::all_consuming(nom::combinator::flat_map(
+        crate::util::nom_scale_compact_usize,
+        |num_elems| {
+            nom::multi::many_m_n(
+                num_elems,
+                num_elems,
+                nom::combinator::map(
+                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    |b| b.to_vec(),
+                ),
+            )
+        },
+    ))(&proof)
+    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
+        DecodeStorageProofResponseError::ProofDecodeError
+    })?;
+
+    Ok(decoded)
+}
+
+/// Error potentially returned by [`decode_storage_proof_response`].
+#[derive(Debug, derive_more::Display)]
+pub enum DecodeStorageProofResponseError {
+    /// Error while decoding the protobuf encoding.
+    ProtobufDecode(ProtobufDecodeError),
+    /// Response isn't a response to a storage proof request.
+    BadResponseTy,
+    /// Failed to decode response as a storage proof.
+    ProofDecodeError,
+}
+
 /// Error while decoding the protobuf encoding.
 #[derive(Debug, derive_more::Display)]
 #[display(fmt = "{}", _0)]
@@ -237,6 +315,56 @@ pub enum Role {
     Authority,
 }
 
+/// Decoded block announcement notification.
+#[derive(Debug)]
+pub struct BlockAnnounceRef<'a> {
+    /// Header of the announced block.
+    pub header: header::HeaderRef<'a>,
+    /// True if the block is the new best block of the announcer.
+    pub is_best: bool,
+    // TODO: missing a `Vec<u8>` field that SCALE-decodes into this type: https://github.com/paritytech/polkadot/blob/fff4635925c12c80717a524367687fcc304bcb13/node%2Fprimitives%2Fsrc%2Flib.rs#L87
+}
+
+/// Turns a block announcement into its SCALE-encoding ready to be sent over the wire.
+///
+/// This function returns an iterator of buffers. The encoded message consists in the
+/// concatenation of the buffers.
+pub fn encode_block_announce<'a>(
+    announce: BlockAnnounceRef<'a>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    let is_best = if announce.is_best { [1u8] } else { [0u8] };
+    announce
+        .header
+        .scale_encoding()
+        .map(either::Left)
+        .chain(iter::once(either::Right(is_best)))
+}
+
+/// Decodes a block announcement.
+pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
+    nom::combinator::all_consuming(nom::combinator::map(
+        nom::sequence::tuple((
+            |s| {
+                header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
+                    nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
+                })
+            },
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
+                nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| true),
+            )),
+            nom::multi::length_data(crate::util::nom_scale_compact_usize),
+        )),
+        |(header, is_best, _)| BlockAnnounceRef { header, is_best },
+    ))(&bytes)
+    .map(|(_, ann)| ann)
+    .map_err(DecodeBlockAnnounceError)
+}
+
+/// Error potentially returned by [`decode_block_announces_handshake`].
+#[derive(Debug, derive_more::Display)]
+pub struct DecodeBlockAnnounceError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+
 /// Turns a block announces handshake into its SCALE-encoding ready to be sent over the wire.
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
@@ -261,9 +389,9 @@ pub fn encode_block_announces_handshake<'a>(
 }
 
 /// Decodes a SCALE-encoded block announces handshake.
-pub fn decode_block_announces_handshake<'a>(
-    handshake: &'a [u8],
-) -> Result<BlockAnnouncesHandshakeRef<'a>, BlockAnnouncesDecodeError<'a>> {
+pub fn decode_block_announces_handshake(
+    handshake: &[u8],
+) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
     nom::combinator::all_consuming(nom::combinator::map(
         nom::sequence::tuple((
             nom::branch::alt((
@@ -283,9 +411,9 @@ pub fn decode_block_announces_handshake<'a>(
         },
     ))(handshake)
     .map(|(_, hs)| hs)
-    .map_err(BlockAnnouncesDecodeError)
+    .map_err(BlockAnnouncesHandshakeDecodeError)
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
 #[derive(Debug, derive_more::Display)]
-pub struct BlockAnnouncesDecodeError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+pub struct BlockAnnouncesHandshakeDecodeError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
