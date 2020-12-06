@@ -507,10 +507,9 @@ where
             }),
             Substream::RequestInRecv { .. } => None,
             Substream::NotificationsInHandshake { .. } => None,
-            Substream::NotificationsInWait { .. } => {
-                // TODO: report to user
-                None
-            }
+            Substream::NotificationsInWait { .. } => Some(Event::NotificationsInOpenCancel {
+                id: SubstreamId(substream_id),
+            }),
             Substream::NotificationsIn { .. } => {
                 // TODO: report to user
                 None
@@ -523,7 +522,9 @@ where
                 })
             }
             Substream::PingIn(_) => None,
-            _ => todo!("other substream kind"),
+            Substream::NotificationsOut { .. } => todo!(),
+            Substream::NotificationsOutClosed { .. } => None,
+            Substream::RequestInSend => None,
         }
     }
 
@@ -962,7 +963,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                     match handshake.update(&data) {
                         Ok((num_read, leb128::Framed::Finished(remote_handshake))) => {
                             if num_read != data.len() {
-                                // TODO:
+                                todo!() // TODO:
                             }
 
                             *substream.user_data() = Substream::NotificationsOut { user_data };
@@ -1054,7 +1055,6 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                 } => {
                     match response.update(&data) {
                         Ok((num_read, leb128::Framed::Finished(response))) => {
-                            data = &data[num_read..];
                             // TODO: proper state transition
                             *substream.user_data() = Substream::NegotiationFailed;
                             return Some(Event::Response {
@@ -1064,6 +1064,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                             });
                         }
                         Ok((num_read, leb128::Framed::InProgress(response))) => {
+                            debug_assert_eq!(num_read, data.len());
                             data = &data[num_read..];
                             *substream.user_data() = Substream::RequestOut {
                                 timeout,
@@ -1085,35 +1086,40 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                     request,
                     protocol_index,
                 } => {
-                    data = &data[data.len()..];
-                    *substream.user_data() = Substream::RequestInRecv {
-                        request,
-                        protocol_index,
-                    };
-                    // TODO:
-                    /*let num_read = request.inject_data(&data).unwrap(); // TODO: don't unwrap
-                    if let Some(request) = request.take_frame() {
-                        let substream_id = substream.id();
-                        // TODO: state transition
-                        let wake_up_after = self.next_timeout.clone();
-                        return Some(Event::RequestIn {
-                            id: substream_id,
-                            protocol,
-                            request: request.into(),
-                        });
+                    match request.update(&data) {
+                        Ok((num_read, leb128::Framed::Finished(request))) => {
+                            *substream.user_data() = Substream::RequestInSend;
+                            return Some(Event::RequestIn {
+                                id: substream_id,
+                                protocol_index,
+                                request,
+                            });
+                        }
+                        Ok((num_read, leb128::Framed::InProgress(request))) => {
+                            debug_assert_eq!(num_read, data.len());
+                            data = &data[num_read..];
+                            *substream.user_data() = Substream::RequestInRecv {
+                                request,
+                                protocol_index,
+                            };
+                        }
+                        Err(err) => {
+                            substream.reset();
+                            // TODO: report to user
+                            todo!()
+                        }
                     }
-                    todo!()*/
                 }
                 Substream::NotificationsInHandshake {
                     handshake,
                     protocol_index,
                 } => match handshake.update(&data) {
                     Ok((num_read, leb128::Framed::Finished(handshake))) => {
-                        data = &data[num_read..];
                         *substream.user_data() = Substream::NotificationsInWait {
                             max_notification_size: self.notifications_protocols[protocol_index]
                                 .max_notification_size,
                         };
+                        debug_assert_eq!(num_read, data.len());
                         return Some(Event::NotificationsInOpen {
                             id: substream_id,
                             protocol_index,
