@@ -363,11 +363,11 @@ where
                         Substream::NotificationsInHandshake { .. } => {}
                         Substream::NotificationsInWait { .. } => {
                             // TODO: report to user
-                            //todo!()
+                            todo!()
                         }
                         Substream::NotificationsIn { .. } => {
                             // TODO: report to user
-                            //todo!()
+                            todo!()
                         }
                         Substream::PingIn(_) => {}
                         _ => todo!("other substream kind"),
@@ -466,7 +466,7 @@ where
                         // protocol. The substream is expected to close soon, but the remote might
                         // have been eagerly sending data (assuming that the negotiation would
                         // succeed), which should be silently discarded.
-                        data = &data[data.len()..];
+                        data = &[];
                         *substream.user_data() = Substream::NegotiationFailed;
                     }
                     Substream::NotificationsOutNegotiating {
@@ -1129,7 +1129,6 @@ where
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
     /// [`Event::NotificationsInOpen`].
-    // TODO: provide refuse as well
     pub fn accept_in_notifications_substream(
         &mut self,
         substream_id: SubstreamId,
@@ -1155,6 +1154,12 @@ where
             }
             _ => panic!(),
         }
+    }
+
+    /// Rejects an inbound notifications protocol. Must be called in response to a
+    /// [`Event::NotificationsInOpen`].
+    pub fn reject_in_notifications_substream(&mut self, substream_id: SubstreamId) {
+        todo!() // TODO:
     }
 
     /// Queues a notification to be written out on the given substream.
@@ -1317,6 +1322,7 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Bytes of the request. Its interpretation is out of scope of this module.
         request: Vec<u8>,
     },
+
     /// Received a response to a previously emitted request on a request-response protocol.
     Response {
         /// Bytes of the response. Its interpretation is out of scope of this module.
@@ -1326,6 +1332,12 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Value that was passed to [`Established::add_request`].
         user_data: TRqUd,
     },
+
+    /// Remote has opened an inbound notifications substream.
+    ///
+    /// Either [`Established::accept_in_notifications_substream`] or
+    /// [`Established::reject_in_notifications_substream`] must be called in the near future in
+    /// order to accept or reject this substream.
     NotificationsInOpen {
         /// Identifier of the substream. Needs to be provided back when accept or rejecting the
         /// substream.
@@ -1338,8 +1350,19 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
-    /// Remote has sent a notification on an inbound substream. Can only happen after the
-    /// substream has been accepted.
+
+    /// Remote has canceled an inbound notifications substream opening.
+    ///
+    /// This can only happen after [`Event::NotificationsInOpen`].
+    /// [`Established::accept_in_notifications_substream`] or
+    /// [`Established::reject_in_notifications_substream`] should not be called on this substream.
+    NotificationsInOpenCancel {
+        /// Identifier of the substream.
+        id: SubstreamId,
+    },
+
+    /// Remote has sent a notification on an inbound notifications substream. Can only happen
+    /// after the substream has been accepted.
     // TODO: give a way to back-pressure notifications
     NotificationIn {
         /// Identifier of the substream.
@@ -1347,6 +1370,7 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Notification sent by the remote.
         notification: Vec<u8>,
     },
+
     /// Remote has accepted a substream opened with [`Established::open_notifications_substream`].
     ///
     /// It is now possible to send notifications on this substream.
@@ -1357,6 +1381,7 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Handshake sent back by the remote. Its interpretation is out of scope of this module.
         remote_handshake: Vec<u8>,
     },
+
     /// Remote has rejected a substream opened with [`Established::open_notifications_substream`].
     NotificationsOutReject {
         /// Identifier of the substream. Value that was returned by
@@ -1365,6 +1390,7 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Value that was passed to [`Established::open_notifications_substream`].
         user_data: TNotifUd,
     },
+
     /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
     /// of the substream.
     NotificationsOutCloseDemanded {

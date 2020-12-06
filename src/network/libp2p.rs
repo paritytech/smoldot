@@ -663,6 +663,9 @@ where
                             .await
                             .unwrap();
                     }
+                    Some(connection::established::Event::NotificationsInOpenCancel { id }) => {
+                        todo!() // TODO:
+                    }
                     Some(connection::established::Event::NotificationIn { id, notification }) => {
                         let overlay_network_index = *established
                             .0

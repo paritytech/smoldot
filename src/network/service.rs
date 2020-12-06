@@ -162,7 +162,7 @@ where
             name: "/ipfs/id/1.0.0".into(),
             max_request_size: 8,
             max_response_size: 4096,
-            inbound_allowed: true,
+            inbound_allowed: false,
         })
         .chain(config.chains.iter().flat_map(|chain| {
             // TODO: limits are arbitrary
