@@ -858,9 +858,9 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
             match mem::replace(substream.user_data(), Substream::Poisoned) {
                 Substream::Poisoned => unreachable!(),
                 Substream::InboundNegotiating(nego) => match nego.read_write_vec(data) {
-                    Ok((multistream_select::Negotiation::InProgress(nego), _read, out_buffer)) => {
-                        debug_assert_eq!(_read, data.len());
-                        data = &data[_read..];
+                    Ok((multistream_select::Negotiation::InProgress(nego), read, out_buffer)) => {
+                        debug_assert_eq!(read, data.len());
+                        data = &data[read..];
                         substream.write(out_buffer);
                         *substream.user_data() = Substream::InboundNegotiating(nego);
                     }

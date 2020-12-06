@@ -190,6 +190,7 @@ impl NetworkService {
         });
 
         // Spawn tasks dedicated to the Kademlia discovery.
+        // TODO: restore
         /*(network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let network_service = network_service.clone();
             async move {
