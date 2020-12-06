@@ -304,11 +304,11 @@ where
 
                 Some(yamux::IncomingDataDetail::StreamReset {
                     substream_id,
-                    user_data,
+                    user_data: substream_ty,
                 }) => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
-                    if let Some(event) = self.on_substream_reset(substream_id, user_data) {
+                    if let Some(event) = self.on_substream_reset(substream_id, substream_ty) {
                         let wake_up_after = self.next_timeout.clone();
                         return Ok(ReadWrite {
                             connection: self,
@@ -325,18 +325,33 @@ where
 
                 Some(yamux::IncomingDataDetail::StreamClosed {
                     substream_id,
-                    mut user_data,
+                    user_data,
                 }) => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
 
-                    let user_data = match &mut user_data {
+                    let user_data = match user_data {
                         Some(ud) => ud,
-                        None => self
-                            .yamux
-                            .substream_by_id(substream_id)
-                            .unwrap()
-                            .into_user_data(),
+                        None => {
+                            match self
+                                .yamux
+                                .substream_by_id(substream_id)
+                                .unwrap()
+                                .into_user_data()
+                            {
+                                Substream::NotificationsOut { .. } => {
+                                    // TODO: report to user
+                                    todo!()
+                                }
+                                _ => {}
+                            }
+
+                            self.yamux
+                                .substream_by_id(substream_id)
+                                .unwrap()
+                                .close()
+                                .unwrap()
+                        }
                     };
 
                     match user_data {
@@ -354,16 +369,25 @@ where
                                 wake_up_after,
                                 event: Some(Event::Response {
                                     id: SubstreamId(substream_id),
-                                    user_data: todo!(), // TODO:
-                                    response: Err(RequestError::SubstreamReset), // TODO: no
+                                    user_data,
+                                    response: Err(RequestError::SubstreamClosed),
                                 }),
                             });
                         }
                         Substream::RequestInRecv { .. } => {}
                         Substream::NotificationsInHandshake { .. } => {}
                         Substream::NotificationsInWait { .. } => {
-                            // TODO: report to user
-                            todo!()
+                            let wake_up_after = self.next_timeout.clone();
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                write_close: false,
+                                wake_up_after,
+                                event: Some(Event::NotificationsInOpenCancel {
+                                    id: SubstreamId(substream_id),
+                                }),
+                            });
                         }
                         Substream::NotificationsIn { .. } => {
                             // TODO: report to user
@@ -905,9 +929,9 @@ where
     fn on_substream_reset(
         &mut self,
         substream_id: yamux::SubstreamId,
-        user_data: Substream<TNow, TRqUd, TNotifUd>,
+        ty: Substream<TNow, TRqUd, TNotifUd>,
     ) -> Option<Event<TRqUd, TNotifUd>> {
-        match user_data {
+        match ty {
             Substream::Poisoned => unreachable!(),
             Substream::InboundNegotiating(_) => None,
             Substream::NegotiationFailed => None,
@@ -1416,6 +1440,9 @@ pub enum RequestError {
     Timeout,
     /// Remote doesn't support this protocol.
     ProtocolNotAvailable,
+    /// Remote has decided to close the substream. This most likely indicates that the remote
+    /// is unwilling the respond to the request.
+    SubstreamClosed,
     /// Remote has decided to RST the substream. This most likely indicates that the remote has
     /// detected a protocol error.
     SubstreamReset,
