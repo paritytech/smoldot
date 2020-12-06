@@ -675,10 +675,18 @@ where
                             .unwrap();
 
                         let mut guarded = self.guarded.lock().await;
+
+                        let peer_id = guarded
+                            .peerset
+                            .connection_mut(connection_id.0)
+                            .unwrap()
+                            .peer_id()
+                            .clone();
                         guarded
                             .events_tx
                             .send(Event::NotificationsIn {
                                 id: connection_id,
+                                peer_id,
                                 overlay_network_index,
                                 notification,
                             })
@@ -891,6 +899,7 @@ pub enum Event<TConn> {
     ///
     NotificationsIn {
         id: ConnectionId,
+        peer_id: PeerId, // TODO: is this field necessary? + cloning :-/
         overlay_network_index: usize,
         notification: Vec<u8>,
     },

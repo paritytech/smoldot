@@ -191,14 +191,22 @@ impl NetworkService {
 
         // Spawn tasks dedicated to the Kademlia discovery.
         // TODO: restore
-        /*(network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-            let network_service = network_service.clone();
+        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+            let network_service = Arc::downgrade(&network_service);
             async move {
                 let mut next_discovery = Duration::from_secs(5);
 
                 loop {
                     futures_timer::Delay::new(next_discovery).await;
                     next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
+
+                    let network_service = match network_service.upgrade() {
+                        Some(ns) => ns,
+                        None => {
+                            tracing::debug!("discovery-finish");
+                            return;
+                        }
+                    };
 
                     match network_service
                         .network
@@ -218,11 +226,12 @@ impl NetworkService {
                 }
             }
             .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
-        }));*/
+        }));
 
         (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let network_service = network_service.clone();
             async move {
+                // TODO: stop the task if the network service is destroyed
                 loop {
                     network_service
                         .network
@@ -376,7 +385,8 @@ async fn connection_task(
     loop {
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
             Ok(b) => b,
-            Err(_) => {
+            Err(error) => {
+                tracing::info!(%error, "task-finished");
                 // TODO: report disconnect to service
                 return;
             }

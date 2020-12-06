@@ -257,6 +257,8 @@ async fn async_main() {
     })
     .map(|_| ());
 
+    let mut network_known_best = None;
+
     loop {
         futures::select! {
             _ = informant_timer.next() => {
@@ -287,10 +289,7 @@ async fn async_main() {
                         finalized_number: sync_state.finalized_block_number,
                         best_hash: &sync_state.best_block_hash,
                         finalized_hash: &sync_state.finalized_block_hash,
-                        network_known_best: None, /* TODO: match network_state.best_network_block_height.load(Ordering::Relaxed) {
-                            0 => None,
-                            n => Some(n)
-                        },*/
+                        network_known_best,
                     });
                 }
             },
@@ -304,7 +303,12 @@ async fn async_main() {
                         sync_service.remove_source(peer_id).await;
                     }
                     network_service::Event::BlockAnnounce { peer_id, announce } => {
-                        println!("{:?}", announce);
+                        // TODO: report to sync
+                        let decoded = announce.decode();
+                        match network_known_best {
+                            Some(n) if n >= decoded.header.number => {},
+                            _ => network_known_best = Some(decoded.header.number),
+                        }
                     }
                 }
             }

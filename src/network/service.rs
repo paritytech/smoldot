@@ -401,21 +401,21 @@ where
                 }
                 libp2p::Event::NotificationsIn {
                     id,
+                    peer_id,
                     overlay_network_index,
                     notification,
                 } => {
                     let chain_index = overlay_network_index / 2;
-                    let chain_info = &self.chains[chain_index];
                     if overlay_network_index % 2 == 0 {
                         // TODO: don't unwrap
                         let announce = protocol::decode_block_announce(&notification).unwrap();
-                        dbg!(announce);
                         return Event::BlockAnnounce {
                             chain_index,
-                            peer_id: todo!(), // TODO:
+                            peer_id,
                             announce: EncodedBlockAnnounce(notification),
                         };
                     } else {
+                        // TODO: transaction announce
                     }
                 }
             }
