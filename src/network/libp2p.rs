@@ -690,8 +690,20 @@ where
                             .await
                             .unwrap();
                     }
-                    Some(connection::established::Event::NotificationsInOpenCancel { id }) => {
-                        todo!() // TODO:
+                    Some(connection::established::Event::NotificationsInOpenCancel {
+                        protocol_index,
+                        ..
+                    }) => {
+                        let mut guarded = self.guarded.lock().await;
+                        guarded
+                            .peerset
+                            .connection_mut(connection_id.0)
+                            .unwrap()
+                            .remove_pending_substream(
+                                protocol_index,
+                                peerset::SubstreamDirection::In,
+                            )
+                            .unwrap();
                     }
                     Some(connection::established::Event::NotificationIn { id, notification }) => {
                         let overlay_network_index = *established

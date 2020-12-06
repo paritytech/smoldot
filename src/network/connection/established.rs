@@ -145,16 +145,16 @@ enum Substream<TNow, TRqUd, TNotifUd> {
     /// A handshake on a notifications protocol has been received. Now waiting for an action from
     /// the API user.
     NotificationsInWait {
-        /// Maximum size of a notification on the negotiated protocol.
-        max_notification_size: usize,
+        /// Protocol that was negotiated.
+        protocol_index: usize,
     },
     /// A notifications protocol has been negotiated on a substream. Remote can now send
     /// notifications.
     NotificationsIn {
         /// Buffer for the next notification.
         next_notification: leb128::FramedInProgress,
-        /// Maximum size of a notification on the negotiated protocol.
-        max_notification_size: usize,
+        /// Protocol that was negotiated.
+        protocol_index: usize,
         /// Data passed by the user to [`Established::accept_in_notifications_substream`].
         user_data: TNotifUd,
     },
@@ -389,7 +389,7 @@ where
                         }
                         Substream::RequestInRecv { .. } => {}
                         Substream::NotificationsInHandshake { .. } => {}
-                        Substream::NotificationsInWait { .. } => {
+                        Substream::NotificationsInWait { protocol_index, .. } => {
                             let wake_up_after = self.inner.next_timeout.clone();
                             return Ok(ReadWrite {
                                 connection: self,
@@ -399,6 +399,7 @@ where
                                 wake_up_after,
                                 event: Some(Event::NotificationsInOpenCancel {
                                     id: SubstreamId(substream_id),
+                                    protocol_index,
                                 }),
                             });
                         }
@@ -507,9 +508,12 @@ where
             }),
             Substream::RequestInRecv { .. } => None,
             Substream::NotificationsInHandshake { .. } => None,
-            Substream::NotificationsInWait { .. } => Some(Event::NotificationsInOpenCancel {
-                id: SubstreamId(substream_id),
-            }),
+            Substream::NotificationsInWait { protocol_index, .. } => {
+                Some(Event::NotificationsInOpenCancel {
+                    id: SubstreamId(substream_id),
+                    protocol_index,
+                })
+            }
             Substream::NotificationsIn { .. } => {
                 // TODO: report to user
                 None
@@ -749,17 +753,17 @@ where
         let mut substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
 
         match substream.user_data() {
-            Substream::NotificationsInWait {
-                max_notification_size,
-            } => {
-                let max_notification_size = *max_notification_size;
+            Substream::NotificationsInWait { protocol_index } => {
+                let protocol_index = *protocol_index;
+                let max_notification_size =
+                    self.inner.notifications_protocols[protocol_index].max_notification_size;
 
                 substream.write(leb128::encode_usize(handshake.len()).collect());
                 substream.write(handshake);
 
                 *substream.user_data() = Substream::NotificationsIn {
                     next_notification: leb128::FramedInProgress::new(max_notification_size),
-                    max_notification_size,
+                    protocol_index,
                     user_data,
                 }
             }
@@ -1115,10 +1119,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                     protocol_index,
                 } => match handshake.update(&data) {
                     Ok((num_read, leb128::Framed::Finished(handshake))) => {
-                        *substream.user_data() = Substream::NotificationsInWait {
-                            max_notification_size: self.notifications_protocols[protocol_index]
-                                .max_notification_size,
-                        };
+                        *substream.user_data() = Substream::NotificationsInWait { protocol_index };
                         debug_assert_eq!(num_read, data.len());
                         return Some(Event::NotificationsInOpen {
                             id: substream_id,
@@ -1137,24 +1138,22 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                         substream.reset();
                     }
                 },
-                Substream::NotificationsInWait {
-                    max_notification_size,
-                } => {
+                Substream::NotificationsInWait { protocol_index } => {
                     // TODO: what to do with data?
                     data = &data[data.len()..];
-                    *substream.user_data() = Substream::NotificationsInWait {
-                        max_notification_size,
-                    };
+                    *substream.user_data() = Substream::NotificationsInWait { protocol_index };
                 }
                 Substream::NotificationsIn {
                     mut next_notification,
-                    max_notification_size,
+                    protocol_index,
                     user_data,
                 } => {
                     // TODO: rewrite this block to support sending one notification at a
                     // time
 
                     let mut notification = None;
+                    let max_notification_size =
+                        self.notifications_protocols[protocol_index].max_notification_size;
 
                     loop {
                         match next_notification.update(&data) {
@@ -1181,7 +1180,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
 
                     *substream.user_data() = Substream::NotificationsIn {
                         next_notification,
-                        max_notification_size,
+                        protocol_index,
                         user_data,
                     };
 
@@ -1344,6 +1343,11 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsInOpenCancel {
         /// Identifier of the substream.
         id: SubstreamId,
+        /// Index of the notifications protocol concerned by the substream.
+        ///
+        /// The index refers to the position of the protocol in
+        /// [`Config::notifications_protocols`].
+        protocol_index: usize,
     },
 
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
