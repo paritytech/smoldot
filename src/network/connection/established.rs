@@ -66,6 +66,13 @@ pub struct Established<TNow, TRqUd, TNotifUd> {
     /// decoded but yet to be parsed.
     // TODO: move this decoded-data buffer here
     encryption: noise::Noise,
+
+    /// Extra fields. Segregated in order to solve borrowing questions.
+    inner: Inner<TNow, TRqUd, TNotifUd>,
+}
+
+/// Extra fields. Segregated in order to solve borrowing questions.
+struct Inner<TNow, TRqUd, TNotifUd> {
     /// State of the various substreams of the connection.
     /// Consists in a collection of substreams, each of which holding a [`Substream`] object.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
@@ -227,7 +234,7 @@ where
         // response arrived after the timeout. It is the responsibility of the user to call
         // `read_write` in an appropriate way for this to not happen.
         if let Some(event) = self.update_now(now) {
-            let wake_up_after = self.next_timeout.clone();
+            let wake_up_after = self.inner.next_timeout.clone();
             return Ok(ReadWrite {
                 connection: self,
                 read_bytes: total_read,
@@ -263,21 +270,21 @@ where
 
             // Ask the Yamux state machine to decode the buffer present in `self.encryption`.
             let yamux_decode = self
+                .inner
                 .yamux
                 .incoming_data(self.encryption.decoded_inbound_data())
                 .map_err(Error::Yamux)?;
-            self.yamux = yamux_decode.yamux;
+            self.inner.yamux = yamux_decode.yamux;
 
             // TODO: it is possible that the yamux reading is blocked on writing
 
             // Analyze how Yamux has parsed the data.
             // This still contains references to the data in `self.encryption`.
-            let (mut data, mut substream) = match yamux_decode.detail {
+            match yamux_decode.detail {
                 None if yamux_decode.bytes_read == 0 => break,
                 None => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
-                    continue;
                 }
 
                 Some(yamux::IncomingDataDetail::IncomingSubstream) => {
@@ -287,19 +294,25 @@ where
                     let nego =
                         multistream_select::InProgress::new(multistream_select::Config::Listener {
                             supported_protocols: self
+                                .inner
                                 .request_protocols
                                 .iter()
                                 .map(|p| p.name.clone())
-                                .chain(self.notifications_protocols.iter().map(|p| p.name.clone()))
-                                .chain(iter::once(self.ping_protocol.clone()))
+                                .chain(
+                                    self.inner
+                                        .notifications_protocols
+                                        .iter()
+                                        .map(|p| p.name.clone()),
+                                )
+                                .chain(iter::once(self.inner.ping_protocol.clone()))
                                 .collect::<Vec<_>>()
                                 .into_iter(),
                         });
-                    self.yamux
+                    self.inner
+                        .yamux
                         .accept_pending_substream(Substream::InboundNegotiating(nego));
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
-                    continue;
                 }
 
                 Some(yamux::IncomingDataDetail::StreamReset {
@@ -309,7 +322,7 @@ where
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                     if let Some(event) = self.on_substream_reset(substream_id, substream_ty) {
-                        let wake_up_after = self.next_timeout.clone();
+                        let wake_up_after = self.inner.next_timeout.clone();
                         return Ok(ReadWrite {
                             connection: self,
                             read_bytes: total_read,
@@ -318,8 +331,6 @@ where
                             wake_up_after,
                             event: Some(event),
                         });
-                    } else {
-                        continue;
                     }
                 }
 
@@ -334,6 +345,7 @@ where
                         Some(ud) => ud,
                         None => {
                             match self
+                                .inner
                                 .yamux
                                 .substream_by_id(substream_id)
                                 .unwrap()
@@ -346,7 +358,8 @@ where
                                 _ => {}
                             }
 
-                            self.yamux
+                            self.inner
+                                .yamux
                                 .substream_by_id(substream_id)
                                 .unwrap()
                                 .close()
@@ -360,7 +373,7 @@ where
                         Substream::NegotiationFailed => {}
                         Substream::RequestOutNegotiating { user_data, .. }
                         | Substream::RequestOut { user_data, .. } => {
-                            let wake_up_after = self.next_timeout.clone();
+                            let wake_up_after = self.inner.next_timeout.clone();
                             return Ok(ReadWrite {
                                 connection: self,
                                 read_bytes: total_read,
@@ -377,7 +390,7 @@ where
                         Substream::RequestInRecv { .. } => {}
                         Substream::NotificationsInHandshake { .. } => {}
                         Substream::NotificationsInWait { .. } => {
-                            let wake_up_after = self.next_timeout.clone();
+                            let wake_up_after = self.inner.next_timeout.clone();
                             return Ok(ReadWrite {
                                 connection: self,
                                 read_bytes: total_read,
@@ -396,8 +409,6 @@ where
                         Substream::PingIn(_) => {}
                         _ => todo!("other substream kind"),
                     }
-
-                    continue;
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
@@ -407,480 +418,33 @@ where
                     // Data belonging to a substream has been decoded.
                     let data = &self.encryption.decoded_inbound_data()
                         [start_offset..yamux_decode.bytes_read];
-                    let substream = self.yamux.substream_by_id(substream_id).unwrap();
-                    (data, substream)
-                }
-            };
 
-            // This code is reached if data (`data` variable) has been received on a substream
-            // (`substream` variable).
-            while !data.is_empty() {
-                // In order to solve borrowing-related issues, the block below temporarily
-                // replaces the state of the substream with `Poisoned`, then later puts back a
-                // proper state.
-                match mem::replace(substream.user_data(), Substream::Poisoned) {
-                    Substream::Poisoned => unreachable!(),
-                    Substream::InboundNegotiating(nego) => match nego.read_write_vec(data) {
-                        Ok((
-                            multistream_select::Negotiation::InProgress(nego),
-                            _read,
-                            out_buffer,
-                        )) => {
-                            debug_assert_eq!(_read, data.len());
-                            data = &data[_read..];
-                            substream.write(out_buffer);
-                            *substream.user_data() = Substream::InboundNegotiating(nego);
-                        }
-                        Ok((
-                            multistream_select::Negotiation::Success(protocol),
-                            num_read,
-                            out_buffer,
-                        )) => {
-                            substream.write(out_buffer);
-                            data = &data[num_read..];
-                            if protocol == self.ping_protocol {
-                                *substream.user_data() = Substream::PingIn(Default::default());
-                            } else {
-                                if let Some(protocol_index) = self
-                                    .request_protocols
-                                    .iter()
-                                    .position(|p| p.name == protocol)
-                                {
-                                    *substream.user_data() = Substream::RequestInRecv {
-                                        protocol_index,
-                                        request: leb128::FramedInProgress::new(
-                                            self.request_protocols[protocol_index].max_request_size,
-                                        ),
-                                    };
-                                } else if let Some(protocol_index) = self
-                                    .notifications_protocols
-                                    .iter()
-                                    .position(|p| p.name == protocol)
-                                {
-                                    *substream.user_data() = Substream::NotificationsInHandshake {
-                                        protocol_index,
-                                        handshake: leb128::FramedInProgress::new(
-                                            self.notifications_protocols[protocol_index]
-                                                .max_handshake_size,
-                                        ),
-                                    };
-                                } else {
-                                    unreachable!()
-                                }
-                            }
-                        }
-                        Ok((
-                            multistream_select::Negotiation::NotAvailable,
-                            num_read,
-                            out_buffer,
-                        )) => {
-                            data = &data[num_read..];
-                            substream.write(out_buffer);
-                            *substream.user_data() = Substream::NegotiationFailed;
-                            substream.close();
-                            break;
-                        }
-                        Err(_) => {
-                            substream.reset();
-                            break;
-                        }
-                    },
-                    Substream::NegotiationFailed => {
-                        // Substream is an inbound substream that has failed to negotiate a
-                        // protocol. The substream is expected to close soon, but the remote might
-                        // have been eagerly sending data (assuming that the negotiation would
-                        // succeed), which should be silently discarded.
-                        data = &[];
-                        *substream.user_data() = Substream::NegotiationFailed;
-                    }
-                    Substream::NotificationsOutNegotiating {
-                        negotiation,
-                        timeout,
-                        handshake,
-                        user_data,
-                    } => {
-                        match negotiation.read_write_vec(data) {
-                            Ok((
-                                multistream_select::Negotiation::InProgress(nego),
-                                read,
-                                out_buffer,
-                            )) => {
-                                debug_assert_eq!(read, data.len());
-                                data = &data[read..];
-                                substream.write(out_buffer);
-                                *substream.user_data() = Substream::NotificationsOutNegotiating {
-                                    negotiation: nego,
-                                    timeout,
-                                    handshake,
-                                    user_data,
-                                };
-                            }
-                            Ok((
-                                multistream_select::Negotiation::Success(_),
-                                num_read,
-                                out_buffer,
-                            )) => {
-                                substream.write(out_buffer);
-                                data = &data[num_read..];
-                                substream.write(leb128::encode_usize(handshake.len()).collect());
-                                substream.write(handshake);
-                                *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
-                                    handshake: leb128::FramedInProgress::new(10 * 1024), // TODO: proper max size
-                                    user_data,
-                                };
-                            }
-                            _ => todo!(), // TODO:
-                        }
-                    }
-                    Substream::NotificationsOutHandshakeRecv {
-                        handshake,
-                        user_data,
-                    } => {
-                        match handshake.update(&data) {
-                            Ok((num_read, leb128::Framed::Finished(remote_handshake))) => {
-                                if num_read != data.len() {
-                                    // TODO:
-                                }
+                    let event = self
+                        .inner
+                        .inject_substream_data(SubstreamId(substream_id), data);
 
-                                let substream_id = substream.id();
-                                let wake_up_after = self.next_timeout.clone();
-                                *substream.user_data() = Substream::NotificationsOut { user_data };
-                                self.encryption
-                                    .consume_inbound_data(yamux_decode.bytes_read);
-                                return Ok(ReadWrite {
-                                    connection: self,
-                                    read_bytes: total_read,
-                                    written_bytes: total_written,
-                                    write_close: false,
-                                    wake_up_after,
-                                    event: Some(Event::NotificationsOutAccept {
-                                        id: SubstreamId(substream_id),
-                                        remote_handshake,
-                                    }),
-                                });
-                            }
-                            Ok((num_read, leb128::Framed::InProgress(handshake))) => {
-                                data = &data[num_read..];
-                                *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
-                                    handshake,
-                                    user_data,
-                                };
-                            }
-                            Err(_) => {
-                                todo!() // TODO: report to user and all
-                            }
-                        }
-                    }
-                    Substream::NotificationsOut { user_data } => {
-                        // Receiving data on an outgoing substream is forbidden by the protocol.
-                        data = &[];
-                        *substream.user_data() = Substream::NotificationsOut { user_data };
-                    }
-                    Substream::NotificationsOutClosed => {
-                        data = &[];
-                        *substream.user_data() = Substream::NotificationsOutClosed;
-                    }
-                    Substream::RequestOutNegotiating {
-                        negotiation,
-                        timeout,
-                        request,
-                        user_data,
-                    } => {
-                        match negotiation.read_write_vec(data) {
-                            Ok((
-                                multistream_select::Negotiation::InProgress(nego),
-                                _read,
-                                out_buffer,
-                            )) => {
-                                debug_assert_eq!(_read, data.len());
-                                data = &data[_read..];
-                                substream.write(out_buffer);
-                                *substream.user_data() = Substream::RequestOutNegotiating {
-                                    negotiation: nego,
-                                    timeout,
-                                    request,
-                                    user_data,
-                                };
-                            }
-                            Ok((
-                                multistream_select::Negotiation::Success(_),
-                                num_read,
-                                out_buffer,
-                            )) => {
-                                substream.write(out_buffer);
-                                data = &data[num_read..];
-                                substream.write(leb128::encode_usize(request.len()).collect());
-                                substream.write(request);
-                                *substream.user_data() = Substream::RequestOut {
-                                    timeout,
-                                    user_data,
-                                    response: leb128::FramedInProgress::new(10 * 1024 * 1024), // TODO: proper max size
-                                };
-                                let substream_id = substream.id();
-                                let _already_closed = substream.close();
-                                debug_assert!(_already_closed.is_none());
-                                substream = self.yamux.substream_by_id(substream_id).unwrap();
-                            }
-                            Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
-                                let substream_id = substream.id();
-                                substream.reset();
-                                let wake_up_after = self.next_timeout.clone();
-                                self.encryption
-                                    .consume_inbound_data(yamux_decode.bytes_read);
-                                return Ok(ReadWrite {
-                                    connection: self,
-                                    read_bytes: total_read,
-                                    written_bytes: total_written,
-                                    write_close: false,
-                                    wake_up_after,
-                                    event: Some(Event::Response {
-                                        id: SubstreamId(substream_id),
-                                        user_data,
-                                        response: Err(RequestError::ProtocolNotAvailable),
-                                    }),
-                                });
-                            }
-                            Err(err) => {
-                                let substream_id = substream.id();
-                                substream.reset();
-                                let wake_up_after = self.next_timeout.clone();
-                                self.encryption
-                                    .consume_inbound_data(yamux_decode.bytes_read);
-                                return Ok(ReadWrite {
-                                    connection: self,
-                                    read_bytes: total_read,
-                                    written_bytes: total_written,
-                                    write_close: false,
-                                    wake_up_after,
-                                    event: Some(Event::Response {
-                                        id: SubstreamId(substream_id),
-                                        user_data,
-                                        response: Err(RequestError::NegotiationError(err)),
-                                    }),
-                                });
-                            }
-                        }
-                    }
-                    Substream::RequestOut {
-                        timeout,
-                        user_data,
-                        response,
-                    } => {
-                        match response.update(&data) {
-                            Ok((num_read, leb128::Framed::Finished(response))) => {
-                                data = &data[num_read..];
-                                let substream_id = substream.id();
-                                // TODO: proper state transition
-                                *substream.user_data() = Substream::NegotiationFailed;
-                                let wake_up_after = self.next_timeout.clone();
-                                self.encryption
-                                    .consume_inbound_data(yamux_decode.bytes_read);
-                                return Ok(ReadWrite {
-                                    connection: self,
-                                    read_bytes: total_read,
-                                    written_bytes: total_written,
-                                    write_close: false,
-                                    wake_up_after,
-                                    event: Some(Event::Response {
-                                        id: SubstreamId(substream_id),
-                                        user_data,
-                                        response: Ok(response),
-                                    }),
-                                });
-                            }
-                            Ok((num_read, leb128::Framed::InProgress(response))) => {
-                                data = &data[num_read..];
-                                *substream.user_data() = Substream::RequestOut {
-                                    timeout,
-                                    user_data,
-                                    response,
-                                };
-                            }
-                            Err(err) => {
-                                let substream_id = substream.id();
-                                substream.reset();
-                                let wake_up_after = self.next_timeout.clone();
-                                self.encryption
-                                    .consume_inbound_data(yamux_decode.bytes_read);
-                                return Ok(ReadWrite {
-                                    connection: self,
-                                    read_bytes: total_read,
-                                    written_bytes: total_written,
-                                    write_close: false,
-                                    wake_up_after,
-                                    event: Some(Event::Response {
-                                        id: SubstreamId(substream_id),
-                                        user_data,
-                                        response: Err(RequestError::ResponseLebError(err)),
-                                    }),
-                                });
-                            }
-                        }
-                    }
-                    Substream::RequestInRecv {
-                        request,
-                        protocol_index,
-                    } => {
-                        data = &data[data.len()..];
-                        *substream.user_data() = Substream::RequestInRecv {
-                            request,
-                            protocol_index,
-                        };
-                        // TODO:
-                        /*let num_read = request.inject_data(&data).unwrap(); // TODO: don't unwrap
-                        if let Some(request) = request.take_frame() {
-                            let substream_id = substream.id();
-                            // TODO: state transition
-                            let wake_up_after = self.next_timeout.clone();
-                            self.encryption
-                                .consume_inbound_data(yamux_decode.bytes_read);
-                            return Ok(ReadWrite {
-                                connection: self,
-                                read_bytes: total_read,
-                                written_bytes: total_written,
-                                wake_up_after,
-                                event: Some(Event::RequestIn {
-                                    id: SubstreamId(substream_id),
-                                    protocol,
-                                    request: request.into(),
-                                }),
-                            });
-                        }
-                        todo!()*/
-                    }
-                    Substream::NotificationsInHandshake {
-                        handshake,
-                        protocol_index,
-                    } => match handshake.update(&data) {
-                        Ok((num_read, leb128::Framed::Finished(handshake))) => {
-                            data = &data[num_read..];
-                            let substream_id = substream.id();
-                            *substream.user_data() = Substream::NotificationsInWait {
-                                max_notification_size: self.notifications_protocols[protocol_index]
-                                    .max_notification_size,
-                            };
-                            let wake_up_after = self.next_timeout.clone();
-                            self.encryption
-                                .consume_inbound_data(yamux_decode.bytes_read);
-                            return Ok(ReadWrite {
-                                connection: self,
-                                read_bytes: total_read,
-                                written_bytes: total_written,
-                                write_close: false,
-                                wake_up_after,
-                                event: Some(Event::NotificationsInOpen {
-                                    id: SubstreamId(substream_id),
-                                    protocol_index,
-                                    handshake,
-                                }),
-                            });
-                        }
-                        Ok((num_read, leb128::Framed::InProgress(handshake))) => {
-                            data = &data[num_read..];
-                            *substream.user_data() = Substream::NotificationsInHandshake {
-                                handshake,
-                                protocol_index,
-                            };
-                        }
-                        Err(_) => {
-                            substream.reset();
-                            break;
-                        }
-                    },
-                    Substream::NotificationsInWait {
-                        max_notification_size,
-                    } => {
-                        // TODO: what to do with data?
-                        data = &data[data.len()..];
-                        *substream.user_data() = Substream::NotificationsInWait {
-                            max_notification_size,
-                        };
-                    }
-                    Substream::NotificationsIn {
-                        mut next_notification,
-                        max_notification_size,
-                        user_data,
-                    } => {
-                        // TODO: rewrite this block to support sending one notification at a
-                        // time
+                    // Now that the Yamux parsing has been processed, discard this data in
+                    // `self.encryption`.
+                    self.encryption
+                        .consume_inbound_data(yamux_decode.bytes_read);
 
-                        let mut notification = None;
-
-                        loop {
-                            match next_notification.update(&data) {
-                                Ok((num_read, leb128::Framed::Finished(notif))) => {
-                                    data = &data[num_read..];
-                                    next_notification =
-                                        leb128::FramedInProgress::new(max_notification_size);
-                                    assert!(notification.is_none()); // TODO: temporary because outside API doesn't support multiple notifications
-                                    notification = Some(notif);
-                                }
-                                Ok((num_read, leb128::Framed::InProgress(next))) => {
-                                    debug_assert_eq!(num_read, data.len());
-                                    next_notification = next;
-                                    break;
-                                }
-                                Err(_) => {
-                                    // TODO: report to user and all ; this is just a dummy
-                                    next_notification =
-                                        leb128::FramedInProgress::new(max_notification_size);
-                                    break;
-                                }
-                            }
-                        }
-
-                        *substream.user_data() = Substream::NotificationsIn {
-                            next_notification,
-                            max_notification_size,
-                            user_data,
-                        };
-
-                        let substream_id = substream.id();
-                        let wake_up_after = self.next_timeout.clone();
-                        self.encryption
-                            .consume_inbound_data(yamux_decode.bytes_read);
+                    if let Some(event) = event {
+                        let wake_up_after = self.inner.next_timeout.clone();
                         return Ok(ReadWrite {
                             connection: self,
                             read_bytes: total_read,
                             written_bytes: total_written,
                             write_close: false,
                             wake_up_after,
-                            event: Some(Event::NotificationIn {
-                                id: SubstreamId(substream_id),
-                                notification: notification.unwrap(),
-                            }),
+                            event: Some(event),
                         });
                     }
-                    Substream::PingIn(mut payload) => {
-                        // Inbound ping substream.
-                        // The ping protocol consists in sending 32 bytes of data, which the
-                        // remote has to send back.
-                        // The `payload` field contains these 32 bytes being received.
-                        while !data.is_empty() {
-                            debug_assert!(payload.len() < 32);
-                            payload.push(data[0]);
-                            data = &data[1..];
 
-                            if payload.len() == 32 {
-                                substream.write(payload.to_vec());
-                                payload.clear();
-                            }
-                        }
-
-                        *substream.user_data() = Substream::PingIn(payload);
+                    if yamux_decode.bytes_read == 0 {
+                        break;
                     }
-                    _ => todo!("other substream kind"),
                 }
-            }
-
-            // Now that the Yamux parsing has been processed, discard this data in
-            // `self.encryption` and loop again, or stop looping if no more data is decodable.
-            if yamux_decode.bytes_read == 0 {
-                break;
-            } else {
-                self.encryption
-                    .consume_inbound_data(yamux_decode.bytes_read);
-            }
+            };
         }
 
         // The yamux state machine contains the data that needs to be written out.
@@ -893,7 +457,7 @@ where
                 break;
             }
 
-            let mut buffers = self.yamux.extract_out(bytes_out);
+            let mut buffers = self.inner.yamux.extract_out(bytes_out);
             let mut buffers = buffers.buffers().peekable();
             if buffers.peek().is_none() {
                 break;
@@ -915,7 +479,7 @@ where
         }
 
         // Nothing more can be done.
-        let wake_up_after = self.next_timeout.clone();
+        let wake_up_after = self.inner.next_timeout.clone();
         Ok(ReadWrite {
             connection: self,
             read_bytes: total_read,
@@ -963,18 +527,19 @@ where
         }
     }
 
-    /// Updates the internal state machine, most notably `self.next_timeout`, with the passage of
+    /// Updates the internal state machine, most notably `self.inner.next_timeout`, with the passage of
     /// time.
     ///
     /// Optionally returns an event that happened as a result of the passage of time.
     fn update_now(&mut self, now: TNow) -> Option<Event<TRqUd, TNotifUd>> {
-        if self.next_timeout.as_ref().map_or(true, |t| *t > now) {
+        if self.inner.next_timeout.as_ref().map_or(true, |t| *t > now) {
             return None;
         }
 
         // Find which substream has timed out. This can be `None`, as the value in
-        // `self.next_timeout` can be obsolete.
+        // `self.inner.next_timeout` can be obsolete.
         let timed_out_substream = self
+            .inner
             .yamux
             .user_datas()
             .find(|(_, substream)| match &substream {
@@ -992,6 +557,7 @@ where
         // The timed out substream (if any) is being reset'ted.
         let event = if let Some(timed_out_substream) = timed_out_substream {
             let substream = self
+                .inner
                 .yamux
                 .substream_by_id(timed_out_substream)
                 .unwrap()
@@ -1010,11 +576,12 @@ where
             None
         };
 
-        // Update `next_timeout`. Note that some of the timeouts in `self.yamux` aren't
+        // Update `next_timeout`. Note that some of the timeouts in `self.inner.yamux` aren't
         // necessarily strictly superior to `now`. This is normal. As only one event can be
         // returned at a time, any further timeout will be handled the next time `update_now` is
         // called.
-        self.next_timeout = self
+        self.inner.next_timeout = self
+            .inner
             .yamux
             .user_datas()
             .filter_map(|(_, substream)| match &substream {
@@ -1050,11 +617,11 @@ where
     ) -> SubstreamId {
         let mut negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol: self.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                requested_protocol: self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
             });
 
         // TODO: turn this assert into something that can't panic?
-        assert!(request.len() <= self.request_protocols[protocol_index].max_request_size);
+        assert!(request.len() <= self.inner.request_protocols[protocol_index].max_request_size);
 
         let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
         match new_state {
@@ -1064,16 +631,24 @@ where
 
         let timeout = now + Duration::from_secs(20); // TODO:
 
-        if self.next_timeout.as_ref().map_or(true, |t| *t > timeout) {
-            self.next_timeout = Some(timeout.clone());
+        if self
+            .inner
+            .next_timeout
+            .as_ref()
+            .map_or(true, |t| *t > timeout)
+        {
+            self.inner.next_timeout = Some(timeout.clone());
         }
 
-        let mut substream = self.yamux.open_substream(Substream::RequestOutNegotiating {
-            timeout,
-            negotiation,
-            request,
-            user_data,
-        });
+        let mut substream = self
+            .inner
+            .yamux
+            .open_substream(Substream::RequestOutNegotiating {
+                timeout,
+                negotiation,
+                request,
+                user_data,
+            });
 
         substream.write(out_buffer);
 
@@ -1087,7 +662,7 @@ where
         &mut self,
         id: SubstreamId,
     ) -> Option<&mut TNotifUd> {
-        match self.yamux.substream_by_id(id.0)?.into_user_data() {
+        match self.inner.yamux.substream_by_id(id.0)?.into_user_data() {
             Substream::NotificationsOutNegotiating { user_data, .. } => Some(user_data),
             Substream::NotificationsOutHandshakeRecv { user_data, .. } => Some(user_data),
             Substream::NotificationsOut { user_data } => Some(user_data),
@@ -1119,11 +694,16 @@ where
     ) -> SubstreamId {
         let mut negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol: self.notifications_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                requested_protocol: self.inner.notifications_protocols[protocol_index]
+                    .name
+                    .clone(), // TODO: clone :-/
             });
 
         // TODO: turn this assert into something that can't panic?
-        assert!(handshake.len() <= self.notifications_protocols[protocol_index].max_handshake_size);
+        assert!(
+            handshake.len()
+                <= self.inner.notifications_protocols[protocol_index].max_handshake_size
+        );
 
         let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
         match new_state {
@@ -1133,18 +713,24 @@ where
 
         let timeout = now + Duration::from_secs(20); // TODO:
 
-        if self.next_timeout.as_ref().map_or(true, |t| *t > timeout) {
-            self.next_timeout = Some(timeout.clone());
+        if self
+            .inner
+            .next_timeout
+            .as_ref()
+            .map_or(true, |t| *t > timeout)
+        {
+            self.inner.next_timeout = Some(timeout.clone());
         }
 
-        let mut substream = self
-            .yamux
-            .open_substream(Substream::NotificationsOutNegotiating {
-                timeout,
-                negotiation,
-                handshake,
-                user_data,
-            });
+        let mut substream =
+            self.inner
+                .yamux
+                .open_substream(Substream::NotificationsOutNegotiating {
+                    timeout,
+                    negotiation,
+                    handshake,
+                    user_data,
+                });
 
         substream.write(out_buffer);
 
@@ -1159,7 +745,7 @@ where
         handshake: Vec<u8>,
         user_data: TNotifUd,
     ) {
-        let mut substream = self.yamux.substream_by_id(substream_id.0).unwrap();
+        let mut substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
 
         match substream.user_data() {
             Substream::NotificationsInWait {
@@ -1204,7 +790,7 @@ where
     /// notifications substream isn't in the appropriate state.
     ///
     pub fn write_notification_unbounded(&mut self, id: SubstreamId, notification: Vec<u8>) {
-        let mut substream = self.yamux.substream_by_id(id.0).unwrap();
+        let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
         if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
             panic!()
         }
@@ -1222,7 +808,7 @@ where
     ///
     // TODO: shouldn't require `&mut self`
     pub fn notification_substream_queued_bytes(&mut self, id: SubstreamId) -> usize {
-        let mut substream = self.yamux.substream_by_id(id.0).unwrap();
+        let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
         if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
             panic!()
         }
@@ -1237,7 +823,7 @@ where
     /// notifications substream isn't in the appropriate state.
     ///
     pub fn close_notifications_substream(&mut self, id: SubstreamId) {
-        let mut substream = self.yamux.substream_by_id(id.0).unwrap();
+        let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
         if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
             panic!()
         }
@@ -1251,7 +837,376 @@ where
     TRqUd: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_map().entries(self.yamux.user_datas()).finish()
+        f.debug_map()
+            .entries(self.inner.yamux.user_datas())
+            .finish()
+    }
+}
+
+impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
+    fn inject_substream_data(
+        &mut self,
+        substream_id: SubstreamId,
+        mut data: &[u8],
+    ) -> Option<Event<TRqUd, TNotifUd>> {
+        while !data.is_empty() {
+            let mut substream = self.yamux.substream_by_id(substream_id.0).unwrap();
+
+            // In order to solve borrowing-related issues, the block below temporarily
+            // replaces the state of the substream with `Poisoned`, then later puts back a
+            // proper state.
+            match mem::replace(substream.user_data(), Substream::Poisoned) {
+                Substream::Poisoned => unreachable!(),
+                Substream::InboundNegotiating(nego) => match nego.read_write_vec(data) {
+                    Ok((multistream_select::Negotiation::InProgress(nego), _read, out_buffer)) => {
+                        debug_assert_eq!(_read, data.len());
+                        data = &data[_read..];
+                        substream.write(out_buffer);
+                        *substream.user_data() = Substream::InboundNegotiating(nego);
+                    }
+                    Ok((
+                        multistream_select::Negotiation::Success(protocol),
+                        num_read,
+                        out_buffer,
+                    )) => {
+                        substream.write(out_buffer);
+                        data = &data[num_read..];
+                        if protocol == self.ping_protocol {
+                            *substream.user_data() = Substream::PingIn(Default::default());
+                        } else {
+                            if let Some(protocol_index) = self
+                                .request_protocols
+                                .iter()
+                                .position(|p| p.name == protocol)
+                            {
+                                *substream.user_data() = Substream::RequestInRecv {
+                                    protocol_index,
+                                    request: leb128::FramedInProgress::new(
+                                        self.request_protocols[protocol_index].max_request_size,
+                                    ),
+                                };
+                            } else if let Some(protocol_index) = self
+                                .notifications_protocols
+                                .iter()
+                                .position(|p| p.name == protocol)
+                            {
+                                *substream.user_data() = Substream::NotificationsInHandshake {
+                                    protocol_index,
+                                    handshake: leb128::FramedInProgress::new(
+                                        self.notifications_protocols[protocol_index]
+                                            .max_handshake_size,
+                                    ),
+                                };
+                            } else {
+                                unreachable!()
+                            }
+                        }
+                    }
+                    Ok((multistream_select::Negotiation::NotAvailable, num_read, out_buffer)) => {
+                        data = &data[num_read..];
+                        substream.write(out_buffer);
+                        *substream.user_data() = Substream::NegotiationFailed;
+                        substream.close();
+                    }
+                    Err(_) => {
+                        substream.reset();
+                    }
+                },
+                Substream::NegotiationFailed => {
+                    // Substream is an inbound substream that has failed to negotiate a
+                    // protocol. The substream is expected to close soon, but the remote might
+                    // have been eagerly sending data (assuming that the negotiation would
+                    // succeed), which should be silently discarded.
+                    data = &[];
+                    *substream.user_data() = Substream::NegotiationFailed;
+                }
+                Substream::NotificationsOutNegotiating {
+                    negotiation,
+                    timeout,
+                    handshake,
+                    user_data,
+                } => {
+                    match negotiation.read_write_vec(data) {
+                        Ok((
+                            multistream_select::Negotiation::InProgress(nego),
+                            read,
+                            out_buffer,
+                        )) => {
+                            debug_assert_eq!(read, data.len());
+                            data = &data[read..];
+                            substream.write(out_buffer);
+                            *substream.user_data() = Substream::NotificationsOutNegotiating {
+                                negotiation: nego,
+                                timeout,
+                                handshake,
+                                user_data,
+                            };
+                        }
+                        Ok((multistream_select::Negotiation::Success(_), num_read, out_buffer)) => {
+                            substream.write(out_buffer);
+                            data = &data[num_read..];
+                            substream.write(leb128::encode_usize(handshake.len()).collect());
+                            substream.write(handshake);
+                            *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
+                                handshake: leb128::FramedInProgress::new(10 * 1024), // TODO: proper max size
+                                user_data,
+                            };
+                        }
+                        _ => todo!(), // TODO:
+                    }
+                }
+                Substream::NotificationsOutHandshakeRecv {
+                    handshake,
+                    user_data,
+                } => {
+                    match handshake.update(&data) {
+                        Ok((num_read, leb128::Framed::Finished(remote_handshake))) => {
+                            if num_read != data.len() {
+                                // TODO:
+                            }
+
+                            *substream.user_data() = Substream::NotificationsOut { user_data };
+                            return Some(Event::NotificationsOutAccept {
+                                id: substream_id,
+                                remote_handshake,
+                            });
+                        }
+                        Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                            data = &data[num_read..];
+                            *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
+                                handshake,
+                                user_data,
+                            };
+                        }
+                        Err(_) => {
+                            todo!() // TODO: report to user and all
+                        }
+                    }
+                }
+                Substream::NotificationsOut { user_data } => {
+                    // Receiving data on an outgoing substream is forbidden by the protocol.
+                    data = &[];
+                    *substream.user_data() = Substream::NotificationsOut { user_data };
+                }
+                Substream::NotificationsOutClosed => {
+                    data = &[];
+                    *substream.user_data() = Substream::NotificationsOutClosed;
+                }
+                Substream::RequestOutNegotiating {
+                    negotiation,
+                    timeout,
+                    request,
+                    user_data,
+                } => {
+                    match negotiation.read_write_vec(data) {
+                        Ok((
+                            multistream_select::Negotiation::InProgress(nego),
+                            _read,
+                            out_buffer,
+                        )) => {
+                            debug_assert_eq!(_read, data.len());
+                            data = &data[_read..];
+                            substream.write(out_buffer);
+                            *substream.user_data() = Substream::RequestOutNegotiating {
+                                negotiation: nego,
+                                timeout,
+                                request,
+                                user_data,
+                            };
+                        }
+                        Ok((multistream_select::Negotiation::Success(_), num_read, out_buffer)) => {
+                            substream.write(out_buffer);
+                            data = &data[num_read..];
+                            substream.write(leb128::encode_usize(request.len()).collect());
+                            substream.write(request);
+                            *substream.user_data() = Substream::RequestOut {
+                                timeout,
+                                user_data,
+                                response: leb128::FramedInProgress::new(10 * 1024 * 1024), // TODO: proper max size
+                            };
+                            let substream_id = substream.id();
+                            let _already_closed = substream.close();
+                            debug_assert!(_already_closed.is_none());
+                            substream = self.yamux.substream_by_id(substream_id).unwrap();
+                        }
+                        Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
+                            substream.reset();
+                            return Some(Event::Response {
+                                id: substream_id,
+                                user_data,
+                                response: Err(RequestError::ProtocolNotAvailable),
+                            });
+                        }
+                        Err(err) => {
+                            substream.reset();
+                            return Some(Event::Response {
+                                id: substream_id,
+                                user_data,
+                                response: Err(RequestError::NegotiationError(err)),
+                            });
+                        }
+                    }
+                }
+                Substream::RequestOut {
+                    timeout,
+                    user_data,
+                    response,
+                } => {
+                    match response.update(&data) {
+                        Ok((num_read, leb128::Framed::Finished(response))) => {
+                            data = &data[num_read..];
+                            // TODO: proper state transition
+                            *substream.user_data() = Substream::NegotiationFailed;
+                            return Some(Event::Response {
+                                id: substream_id,
+                                user_data,
+                                response: Ok(response),
+                            });
+                        }
+                        Ok((num_read, leb128::Framed::InProgress(response))) => {
+                            data = &data[num_read..];
+                            *substream.user_data() = Substream::RequestOut {
+                                timeout,
+                                user_data,
+                                response,
+                            };
+                        }
+                        Err(err) => {
+                            substream.reset();
+                            return Some(Event::Response {
+                                id: substream_id,
+                                user_data,
+                                response: Err(RequestError::ResponseLebError(err)),
+                            });
+                        }
+                    }
+                }
+                Substream::RequestInRecv {
+                    request,
+                    protocol_index,
+                } => {
+                    data = &data[data.len()..];
+                    *substream.user_data() = Substream::RequestInRecv {
+                        request,
+                        protocol_index,
+                    };
+                    // TODO:
+                    /*let num_read = request.inject_data(&data).unwrap(); // TODO: don't unwrap
+                    if let Some(request) = request.take_frame() {
+                        let substream_id = substream.id();
+                        // TODO: state transition
+                        let wake_up_after = self.next_timeout.clone();
+                        return Some(Event::RequestIn {
+                            id: substream_id,
+                            protocol,
+                            request: request.into(),
+                        });
+                    }
+                    todo!()*/
+                }
+                Substream::NotificationsInHandshake {
+                    handshake,
+                    protocol_index,
+                } => match handshake.update(&data) {
+                    Ok((num_read, leb128::Framed::Finished(handshake))) => {
+                        data = &data[num_read..];
+                        *substream.user_data() = Substream::NotificationsInWait {
+                            max_notification_size: self.notifications_protocols[protocol_index]
+                                .max_notification_size,
+                        };
+                        return Some(Event::NotificationsInOpen {
+                            id: substream_id,
+                            protocol_index,
+                            handshake,
+                        });
+                    }
+                    Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                        data = &data[num_read..];
+                        *substream.user_data() = Substream::NotificationsInHandshake {
+                            handshake,
+                            protocol_index,
+                        };
+                    }
+                    Err(_) => {
+                        substream.reset();
+                    }
+                },
+                Substream::NotificationsInWait {
+                    max_notification_size,
+                } => {
+                    // TODO: what to do with data?
+                    data = &data[data.len()..];
+                    *substream.user_data() = Substream::NotificationsInWait {
+                        max_notification_size,
+                    };
+                }
+                Substream::NotificationsIn {
+                    mut next_notification,
+                    max_notification_size,
+                    user_data,
+                } => {
+                    // TODO: rewrite this block to support sending one notification at a
+                    // time
+
+                    let mut notification = None;
+
+                    loop {
+                        match next_notification.update(&data) {
+                            Ok((num_read, leb128::Framed::Finished(notif))) => {
+                                data = &data[num_read..];
+                                next_notification =
+                                    leb128::FramedInProgress::new(max_notification_size);
+                                assert!(notification.is_none()); // TODO: temporary because outside API doesn't support multiple notifications
+                                notification = Some(notif);
+                            }
+                            Ok((num_read, leb128::Framed::InProgress(next))) => {
+                                debug_assert_eq!(num_read, data.len());
+                                next_notification = next;
+                                break;
+                            }
+                            Err(_) => {
+                                // TODO: report to user and all ; this is just a dummy
+                                next_notification =
+                                    leb128::FramedInProgress::new(max_notification_size);
+                                break;
+                            }
+                        }
+                    }
+
+                    *substream.user_data() = Substream::NotificationsIn {
+                        next_notification,
+                        max_notification_size,
+                        user_data,
+                    };
+
+                    return Some(Event::NotificationIn {
+                        id: substream_id,
+                        notification: notification.unwrap(),
+                    });
+                }
+                Substream::PingIn(mut payload) => {
+                    // Inbound ping substream.
+                    // The ping protocol consists in sending 32 bytes of data, which the
+                    // remote has to send back.
+                    // The `payload` field contains these 32 bytes being received.
+                    while !data.is_empty() {
+                        debug_assert!(payload.len() < 32);
+                        payload.push(data[0]);
+                        data = &data[1..];
+
+                        if payload.len() == 32 {
+                            substream.write(payload.to_vec());
+                            payload.clear();
+                        }
+                    }
+
+                    *substream.user_data() = Substream::PingIn(payload);
+                }
+                _ => todo!("other substream kind"),
+            };
+        }
+
+        None
     }
 }
 
@@ -1478,11 +1433,13 @@ impl ConnectionPrototype {
 
         Established {
             encryption: self.encryption,
-            yamux,
-            next_timeout: None,
-            request_protocols: config.request_protocols,
-            notifications_protocols: config.notifications_protocols,
-            ping_protocol: config.ping_protocol,
+            inner: Inner {
+                yamux,
+                next_timeout: None,
+                request_protocols: config.request_protocols,
+                notifications_protocols: config.notifications_protocols,
+                ping_protocol: config.ping_protocol,
+            },
         }
     }
 }
