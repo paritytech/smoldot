@@ -761,7 +761,8 @@ where
                             .remove_pending_substream(
                                 overlay_network_index,
                                 peerset::SubstreamDirection::Out,
-                            );
+                            )
+                            .unwrap();
                         debug_assert_eq!(id, expected_id);
 
                         guarded
