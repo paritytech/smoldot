@@ -99,6 +99,9 @@ pub struct OverlayNetwork {
     /// Maximum size, in bytes, of the handshake that can be received.
     pub max_handshake_size: usize,
 
+    /// Maximum size, in bytes, of a notification that can be received.
+    pub max_notification_size: usize,
+
     /// List of node identities that are known to belong to this overlay network. The node
     /// identities are indices in [`Config::known_nodes`].
     pub bootstrap_nodes: Vec<usize>,
@@ -770,12 +773,14 @@ where
                 .iter()
                 .flat_map(|net| {
                     let max_handshake_size = net.max_handshake_size;
+                    let max_notification_size = net.max_notification_size;
                     iter::once(&net.protocol_name)
                         .chain(net.fallback_protocol_names.iter())
                         .map(move |name| {
                             connection::established::ConfigNotifications {
                                 name: name.clone(), // TODO: cloning :-/
                                 max_handshake_size,
+                                max_notification_size,
                             }
                         })
                 })

@@ -138,7 +138,8 @@ where
                 iter::once(libp2p::OverlayNetwork {
                     protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
-                    max_handshake_size: 256, // TODO: arbitrary
+                    max_handshake_size: 256,      // TODO: arbitrary
+                    max_notification_size: 32768, // TODO: arbitrary
                     bootstrap_nodes: chain.bootstrap_nodes.clone(),
                     in_slots: chain.in_slots,
                     out_slots: chain.out_slots,
@@ -146,7 +147,8 @@ where
                 .chain(iter::once(libp2p::OverlayNetwork {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
-                    max_handshake_size: 256, // TODO: arbitrary
+                    max_handshake_size: 256,      // TODO: arbitrary
+                    max_notification_size: 32768, // TODO: arbitrary
                     bootstrap_nodes: chain.bootstrap_nodes.clone(),
                     in_slots: chain.in_slots,
                     out_slots: chain.out_slots,

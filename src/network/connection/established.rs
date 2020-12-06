@@ -137,12 +137,17 @@ enum Substream<TNow, TRqUd, TNotifUd> {
     },
     /// A handshake on a notifications protocol has been received. Now waiting for an action from
     /// the API user.
-    NotificationsInWait,
+    NotificationsInWait {
+        /// Maximum size of a notification on the negotiated protocol.
+        max_notification_size: usize,
+    },
     /// A notifications protocol has been negotiated on a substream. Remote can now send
     /// notifications.
     NotificationsIn {
         /// Buffer for the next notification.
         next_notification: leb128::FramedInProgress,
+        /// Maximum size of a notification on the negotiated protocol.
+        max_notification_size: usize,
         /// Data passed by the user to [`Established::accept_in_notifications_substream`].
         user_data: TNotifUd,
     },
@@ -356,7 +361,7 @@ where
                         }
                         Substream::RequestInRecv { .. } => {}
                         Substream::NotificationsInHandshake { .. } => {}
-                        Substream::NotificationsInWait => {
+                        Substream::NotificationsInWait { .. } => {
                             // TODO: report to user
                             //todo!()
                         }
@@ -726,7 +731,10 @@ where
                         Ok((num_read, leb128::Framed::Finished(handshake))) => {
                             data = &data[num_read..];
                             let substream_id = substream.id();
-                            *substream.user_data() = Substream::NotificationsInWait;
+                            *substream.user_data() = Substream::NotificationsInWait {
+                                max_notification_size: self.notifications_protocols[protocol_index]
+                                    .max_notification_size,
+                            };
                             let wake_up_after = self.next_timeout.clone();
                             self.encryption
                                 .consume_inbound_data(yamux_decode.bytes_read);
@@ -755,13 +763,18 @@ where
                             break;
                         }
                     },
-                    Substream::NotificationsInWait => {
+                    Substream::NotificationsInWait {
+                        max_notification_size,
+                    } => {
                         // TODO: what to do with data?
                         data = &data[data.len()..];
-                        *substream.user_data() = Substream::NotificationsInWait;
+                        *substream.user_data() = Substream::NotificationsInWait {
+                            max_notification_size,
+                        };
                     }
                     Substream::NotificationsIn {
                         mut next_notification,
+                        max_notification_size,
                         user_data,
                     } => {
                         // TODO: rewrite this block to support sending one notification at a
@@ -773,7 +786,8 @@ where
                             match next_notification.update(&data) {
                                 Ok((num_read, leb128::Framed::Finished(notif))) => {
                                     data = &data[num_read..];
-                                    next_notification = leb128::FramedInProgress::new(1024 * 1024);
+                                    next_notification =
+                                        leb128::FramedInProgress::new(max_notification_size);
                                     assert!(notification.is_none()); // TODO: temporary because outside API doesn't support multiple notifications
                                     notification = Some(notif);
                                 }
@@ -784,7 +798,8 @@ where
                                 }
                                 Err(_) => {
                                     // TODO: report to user and all ; this is just a dummy
-                                    next_notification = leb128::FramedInProgress::new(1024 * 1024);
+                                    next_notification =
+                                        leb128::FramedInProgress::new(max_notification_size);
                                     break;
                                 }
                             }
@@ -792,6 +807,7 @@ where
 
                         *substream.user_data() = Substream::NotificationsIn {
                             next_notification,
+                            max_notification_size,
                             user_data,
                         };
 
@@ -903,7 +919,7 @@ where
             }),
             Substream::RequestInRecv { .. } => None,
             Substream::NotificationsInHandshake { .. } => None,
-            Substream::NotificationsInWait => {
+            Substream::NotificationsInWait { .. } => {
                 // TODO: report to user
                 None
             }
@@ -1123,12 +1139,17 @@ where
         let mut substream = self.yamux.substream_by_id(substream_id.0).unwrap();
 
         match substream.user_data() {
-            Substream::NotificationsInWait => {
+            Substream::NotificationsInWait {
+                max_notification_size,
+            } => {
+                let max_notification_size = *max_notification_size;
+
                 substream.write(leb128::encode_usize(handshake.len()).collect());
                 substream.write(handshake);
 
                 *substream.user_data() = Substream::NotificationsIn {
-                    next_notification: leb128::FramedInProgress::new(1024 * 1024), // TODO:
+                    next_notification: leb128::FramedInProgress::new(max_notification_size),
+                    max_notification_size,
                     user_data,
                 }
             }
@@ -1228,7 +1249,7 @@ where
                 .debug_tuple("notifications-in-handshake")
                 .field(protocol_index)
                 .finish(),
-            Substream::NotificationsInWait => {
+            Substream::NotificationsInWait { .. } => {
                 todo!() // TODO:
             }
             Substream::NotificationsIn { .. } => f.debug_tuple("notifications-in").finish(),
@@ -1450,5 +1471,10 @@ pub struct ConfigRequestResponse {
 pub struct ConfigNotifications {
     /// Name of the protocol transferred on the wire.
     pub name: String,
+
+    /// Maximum size, in bytes, of the handshake that can be received.
     pub max_handshake_size: usize,
+
+    /// Maximum size, in bytes, of a notification that can be received.
+    pub max_notification_size: usize,
 }
