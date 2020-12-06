@@ -394,14 +394,19 @@ where
             None => return,
         };
 
-        connection.confirm_substream(
-            overlay_network_index,
-            peerset::SubstreamDirection::In,
-            |id| {
-                substream_id = Some(id);
-                id
-            },
-        );
+        if connection
+            .confirm_substream(
+                overlay_network_index,
+                peerset::SubstreamDirection::In,
+                |id| {
+                    substream_id = Some(id);
+                    id
+                },
+            )
+            .is_err()
+        {
+            return;
+        };
 
         let connection_arc = connection.user_data_mut().clone();
         drop(connection);

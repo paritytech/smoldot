@@ -522,6 +522,18 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
             .peer_connections
             .remove(&(connection.peer_index, self.id.0));
         debug_assert!(_was_in);
+        let overlays = self
+            .peerset
+            .connection_overlays
+            .range_mut(
+                (self.id.0, 0, SubstreamDirection::In)
+                    ..=(self.id.0, usize::max_value(), SubstreamDirection::Out),
+            )
+            .map(|(k, _)| k.clone())
+            .collect::<Vec<_>>();
+        for k in overlays {
+            self.peerset.connection_overlays.remove(&k).unwrap();
+        }
         match connection.ty {
             ConnectionTy::Connected { user_data, .. } => user_data,
             _ => unreachable!(),
