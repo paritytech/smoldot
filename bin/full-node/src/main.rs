@@ -34,6 +34,7 @@ use substrate_lite::{
 use tracing::Instrument as _;
 
 mod cli;
+mod jaeger_service;
 mod network_service;
 mod sync_service;
 
@@ -172,8 +173,20 @@ async fn async_main() {
         substrate_lite::metadata::decode(&metadata).unwrap()
     );*/
 
+    let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
+        tasks_executor: {
+            let threads_pool = threads_pool.clone();
+            Box::new(move |task| threads_pool.spawn_ok(task))
+        },
+        service_name: env!("CARGO_PKG_NAME").to_string(), // TODO: append the PeerId of the node
+        jaeger_agent: cli_options.jaeger,
+    })
+    .await
+    .unwrap();
+
     let network_service = network_service::NetworkService::new(network_service::Config {
         listen_addresses: Vec::new(),
+        jaeger_service: jaeger_service.clone(),
         protocol_id: chain_spec.protocol_id().to_owned(),
         genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
         best_block: {
@@ -217,6 +230,7 @@ async fn async_main() {
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
         database,
+        jaeger_service: jaeger_service.clone(),
     })
     .instrument(tracing::debug_span!("sync-service-init"))
     .await;
@@ -229,6 +243,7 @@ async fn async_main() {
                     Box::new(move |task| threads_pool.spawn_ok(task))
                 },
                 database: relay_chain_database,
+                jaeger_service: jaeger_service.clone(),
             })
             .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
             .await,

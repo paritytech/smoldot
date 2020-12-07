@@ -30,7 +30,7 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 /// Information about the binary for the `app_dirs` library.
 pub const APP_INFO: app_dirs::AppInfo = app_dirs::AppInfo {
@@ -52,6 +52,9 @@ pub struct CliOptions {
     /// Coloring: auto, always, never
     #[structopt(long, default_value = "auto")]
     pub color: ColorChoice,
+    /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
+    #[structopt(long)]
+    pub jaeger: Option<SocketAddr>,
     /// Ed25519 private key of network identity (32 bytes hexadecimal).
     #[structopt(long)]
     pub node_key: Option<NodeKey>,

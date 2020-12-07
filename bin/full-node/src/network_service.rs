@@ -27,6 +27,8 @@
 // TODO: doc
 // TODO: re-review this once finished
 
+use crate::jaeger_service;
+
 use core::{cmp, pin::Pin, time::Duration};
 use futures::prelude::*;
 use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
@@ -44,6 +46,9 @@ mod with_buffers;
 pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+
+    /// Service to use to report traces.
+    pub jaeger_service: Arc<jaeger_service::JaegerService>,
 
     /// Addresses to listen for incoming connections.
     pub listen_addresses: Vec<Multiaddr>,
@@ -93,6 +98,8 @@ pub struct NetworkService {
 
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<Instant, (), ()>,
+
+    jaeger_service: Arc<jaeger_service::JaegerService>,
 }
 
 /// Fields of [`NetworkService`] behind a mutex.
@@ -190,6 +197,7 @@ impl NetworkService {
                 pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
                 randomness_seed: rand::random(),
             }),
+            jaeger_service: config.jaeger_service,
         });
 
         // Spawn tasks dedicated to the Kademlia discovery.
@@ -307,7 +315,7 @@ impl NetworkService {
 
                     let mut guarded = self.guarded.lock();
                     (guarded.tasks_executor)(Box::pin(
-                        connection_task(socket, self.clone(), id).instrument(
+                        connection_task(socket, self.clone(), id, self.jaeger_service.clone()).instrument(
                             tracing::trace_span!(parent: None, "connection", address = %multiaddr),
                         ),
                     ));
@@ -355,11 +363,12 @@ pub enum InitError {
 }
 
 /// Asynchronous task managing a specific TCP connection.
-#[tracing::instrument(skip(tcp_socket, network_service))]
+#[tracing::instrument(skip(tcp_socket, network_service, jaeger_service))]
 async fn connection_task(
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
     network_service: Arc<NetworkService>,
     id: service::PendingId,
+    jaeger_service: Arc<jaeger_service::JaegerService>,
 ) {
     // Finishing ongoing connection process.
     let tcp_socket = match tcp_socket.await {
@@ -390,6 +399,9 @@ async fn connection_task(
     let mut poll_after: futures_timer::Delay;
 
     loop {
+        // TODO:
+        //let mut _process_data_span = jaeger_service.net_connection_span(&peer_id, &peer_id, "read-write");
+
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
             Ok(b) => b,
             Err(error) => {
@@ -470,6 +482,8 @@ async fn connection_task(
         }
 
         tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
+
+        // TODO: drop(_process_data_span);
 
         // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
 
