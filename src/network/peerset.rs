@@ -181,6 +181,14 @@ impl<TPeer, TConn, TPending, TSub, TPendingSub> Peerset<TPeer, TConn, TPending, 
 
     /// Returns the number of established connections in the peerset.
     pub fn num_established_connections(&self) -> usize {
+        debug_assert_eq!(
+            self.connections
+                .iter()
+                .filter(|(_, c)| matches!(c.ty, ConnectionTy::Connected { .. }))
+                .count(),
+            self.num_established_connections
+        );
+
         self.num_established_connections
     }
 
