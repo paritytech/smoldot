@@ -79,7 +79,7 @@ struct Guarded {
 impl NetworkService {
     /// Initializes the network service with the given configuration.
     pub async fn new(config: Config) -> Result<Arc<Self>, InitError> {
-        Ok(Arc::new(NetworkService {
+        let network_service = Arc::new(NetworkService {
             guarded: Mutex::new(Guarded {
                 tasks_executor: config.tasks_executor,
             }),
@@ -104,7 +104,24 @@ impl NetworkService {
                 pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
                 randomness_seed: rand::random(),
             }),
-        }))
+        });
+
+        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+            let network_service = network_service.clone();
+            async move {
+                // TODO: stop the task if the network service is destroyed
+                loop {
+                    network_service
+                        .network
+                        .next_substream()
+                        .await
+                        .open(ffi::Instant::now())
+                        .await;
+                }
+            }
+        }));
+
+        Ok(network_service)
     }
 
     /// Sends a blocks request to the given peer.
