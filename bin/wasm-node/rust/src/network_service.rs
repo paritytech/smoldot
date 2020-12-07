@@ -138,7 +138,7 @@ impl NetworkService {
     pub async fn next_event(self: &Arc<Self>) -> Event {
         loop {
             match self.network.next_event().await {
-                service::Event::Connected(peer_id) => return Event::Connected(peer_id),
+                service::Event::Connected(_peer_id) => {}
                 service::Event::Disconnected {
                     peer_id,
                     chain_indices,
@@ -165,14 +165,22 @@ impl NetworkService {
                     chain_index,
                     peer_id,
                     announce,
-                } => {}
+                } => {
+                    debug_assert_eq!(chain_index, 0);
+                    // TODO: we don't report block announces at the moment because the networking stack might report announces before we received a ChainConnected
+                    //return Event::BlockAnnounce { peer_id, announce };
+                }
                 service::Event::ChainConnected {
                     peer_id,
                     chain_index,
+                    best_number,
                     ..
                 } => {
                     debug_assert_eq!(chain_index, 0);
-                    return Event::Connected(peer_id);
+                    return Event::Connected {
+                        peer_id,
+                        best_block_number: best_number,
+                    };
                 }
                 service::Event::ChainDisconnected {
                     peer_id,
@@ -188,8 +196,15 @@ impl NetworkService {
 
 /// Event that can happen on the network service.
 pub enum Event {
-    Connected(PeerId),
+    Connected {
+        peer_id: PeerId,
+        best_block_number: u64,
+    },
     Disconnected(PeerId),
+    BlockAnnounce {
+        peer_id: PeerId,
+        announce: service::EncodedBlockAnnounce,
+    },
 }
 
 /// Error when initializing the network service.
