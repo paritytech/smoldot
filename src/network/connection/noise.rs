@@ -106,7 +106,7 @@ pub struct NoiseKey {
 impl NoiseKey {
     /// Generates a new private and public key pair signed with the given libp2p ed25519 key.
     pub fn new(libp2p_ed25519_private_key: &[u8; 32]) -> Self {
-        let unsigned = UnsignedNoiseKey::new();
+        let unsigned = UnsignedNoiseKey::random();
 
         let (libp2p_public_key, signature) = {
             // Creating a `SecretKey` can fail only if the length isn't 32 bytes.
@@ -134,7 +134,7 @@ pub struct UnsignedNoiseKey {
 
 impl UnsignedNoiseKey {
     /// Generates a new private and public key pair.
-    pub fn new() -> Self {
+    pub fn random() -> Self {
         UnsignedNoiseKey {
             // TODO: can panic if there's no RNG
             key: snow::Builder::new(noise_params())
@@ -145,7 +145,7 @@ impl UnsignedNoiseKey {
 
     /// Returns the data that has to be signed.
     pub fn payload_to_sign<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
-        iter::once("noise-libp2p-static-key:".as_bytes()).chain(iter::once(&self.key.public[..]))
+        iter::once(&b"noise-libp2p-static-key:"[..]).chain(iter::once(&self.key.public[..]))
     }
 
     /// Returns the data that has to be signed.
@@ -761,7 +761,7 @@ impl HandshakeInProgress {
                 // TODO: don't use concat() in order to not allocate a Vec
                 if remote_public_key
                     .verify(
-                        &["noise-libp2p-static-key:".as_bytes(), remote_noise_static].concat(),
+                        &[b"noise-libp2p-static-key:", remote_noise_static].concat(),
                         &handshake_payload.identity_sig,
                     )
                     .is_err()

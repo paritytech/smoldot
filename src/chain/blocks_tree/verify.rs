@@ -41,19 +41,14 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
-    #[must_use]
     pub fn verify_header(
         &mut self,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
     ) -> Result<HeaderVerifySuccess<T>, HeaderVerifyError> {
         let self_inner = self.inner.take().unwrap();
-        match self_inner.verify(
-            scale_encoded_header,
-            now_from_unix_epoch,
-            None::<iter::Empty<Vec<u8>>>,
-        ) {
-            VerifyOut::Header(Err(err)) => return Err(err),
+        match self_inner.verify(scale_encoded_header, now_from_unix_epoch, false) {
+            VerifyOut::Header(Err(err)) => Err(err),
             VerifyOut::Header(Ok((context, is_new_best, consensus))) => {
                 let hash = context.header.hash();
                 Ok(HeaderVerifySuccess::Insert {
@@ -86,20 +81,15 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
-    pub fn verify_body<I, E>(
+    pub fn verify_body(
         self,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
-        body: I,
-    ) -> BodyVerifyStep1<T, I>
-    where
-        I: ExactSizeIterator<Item = E> + Clone,
-        E: AsRef<[u8]> + Clone,
-    {
+    ) -> BodyVerifyStep1<T> {
         match self
             .inner
             .unwrap()
-            .verify(scale_encoded_header, now_from_unix_epoch, Some(body))
+            .verify(scale_encoded_header, now_from_unix_epoch, true)
         {
             VerifyOut::Body(step) => step,
             _ => unreachable!(),
@@ -110,20 +100,16 @@ impl<T> NonFinalizedTree<T> {
 impl<T> NonFinalizedTreeInner<T> {
     /// Common implementation for both [`NonFinalizedTree::verify_header`] and
     /// [`NonFinalizedTree::verify_body`].
-    fn verify<I, E>(
+    fn verify(
         self,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
-        body: Option<I>,
-    ) -> VerifyOut<T, I>
-    where
-        I: ExactSizeIterator<Item = E> + Clone,
-        E: AsRef<[u8]> + Clone,
-    {
+        full: bool,
+    ) -> VerifyOut<T> {
         let decoded_header = match header::decode(&scale_encoded_header) {
             Ok(h) => h,
             Err(err) => {
-                return if body.is_some() {
+                return if full {
                     VerifyOut::Body(BodyVerifyStep1::InvalidHeader(
                         NonFinalizedTree { inner: Some(self) },
                         err,
@@ -137,7 +123,7 @@ impl<T> NonFinalizedTreeInner<T> {
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
         if self.blocks.find(|b| b.hash == hash).is_some() {
-            return if body.is_some() {
+            return if full {
                 VerifyOut::Body(BodyVerifyStep1::Duplicate(NonFinalizedTree {
                     inner: Some(self),
                 }))
@@ -152,26 +138,26 @@ impl<T> NonFinalizedTreeInner<T> {
         //
         // The parent hash is first checked against `self.current_best`, as it is most likely
         // that new blocks are built on top of the current best.
-        let parent_tree_index = if self.current_best.map_or(false, |best| {
-            *decoded_header.parent_hash == self.blocks.get(best).unwrap().hash
-        }) {
-            Some(self.current_best.unwrap())
-        } else if *decoded_header.parent_hash == self.finalized_block_hash {
-            None
-        } else {
+        let parent_tree_index = {
             let parent_hash = *decoded_header.parent_hash;
-            match self.blocks.find(|b| b.hash == parent_hash) {
-                Some(parent) => Some(parent),
-                None => {
-                    return if body.is_some() {
-                        VerifyOut::Body(BodyVerifyStep1::BadParent {
-                            chain: NonFinalizedTree { inner: Some(self) },
-                            parent_hash,
-                        })
-                    } else {
-                        VerifyOut::Header(Err(HeaderVerifyError::BadParent { parent_hash }))
-                    }
+            match self.current_best {
+                Some(best) if parent_hash == self.blocks.get(best).unwrap().hash => {
+                    Some(self.current_best.unwrap())
                 }
+                _ if parent_hash == self.finalized_block_hash => None,
+                _ => match self.blocks.find(|b| b.hash == parent_hash) {
+                    Some(parent) => Some(parent),
+                    None => {
+                        return if full {
+                            VerifyOut::Body(BodyVerifyStep1::BadParent {
+                                chain: NonFinalizedTree { inner: Some(self) },
+                                parent_hash,
+                            })
+                        } else {
+                            VerifyOut::Header(Err(HeaderVerifyError::BadParent { parent_hash }))
+                        }
+                    }
+                },
             }
         };
 
@@ -217,11 +203,10 @@ impl<T> NonFinalizedTreeInner<T> {
             consensus,
         };
 
-        if let Some(body) = body {
+        if full {
             VerifyOut::Body(BodyVerifyStep1::ParentRuntimeRequired(
                 BodyVerifyRuntimeRequired {
                     context,
-                    body,
                     now_from_unix_epoch,
                 },
             ))
@@ -277,10 +262,10 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 }
 
-enum VerifyOut<T, I> {
+enum VerifyOut<T> {
     Header(Result<(VerifyContext<T>, bool, BlockConsensus), HeaderVerifyError>),
     Duplicate,
-    Body(BodyVerifyStep1<T, I>),
+    Body(BodyVerifyStep1<T>),
 }
 
 struct VerifyContext<T> {
@@ -419,8 +404,8 @@ impl<T> VerifyContext<T> {
                 },
                 None,
             ) => BlockConsensus::Babe {
-                current_epoch: block_epoch_information.clone(),
-                next_epoch: next_epoch_transition.clone(),
+                current_epoch: block_epoch_information,
+                next_epoch: next_epoch_transition,
             },
 
             // Any mismatch between consensus algorithms should have been detected by the
@@ -446,15 +431,22 @@ impl<T> VerifyContext<T> {
                         storage_top_trie_changes: success.storage_top_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
                         top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
-                        result: Ok(BodyInsert {
+                        insert: BodyInsert {
                             context: self,
                             is_new_best,
                             hash,
                             consensus,
-                        }),
+                        },
                     };
                 }
-                verify::header_body::Verify::Finished(Err(err)) => todo!("verify err: {:?}", err),
+                verify::header_body::Verify::Finished(Err(error)) => {
+                    return BodyVerifyStep2::Error {
+                        chain: NonFinalizedTree {
+                            inner: Some(self.chain),
+                        },
+                        error,
+                    }
+                }
                 verify::header_body::Verify::StorageGet(inner) => {
                     return BodyVerifyStep2::StorageGet(StorageGet {
                         context: self,
@@ -483,7 +475,7 @@ impl<T> VerifyContext<T> {
 /// Holds ownership of both the block to verify and the [`NonFinalizedTree`].
 #[must_use]
 #[derive(Debug)]
-pub enum BodyVerifyStep1<T, I> {
+pub enum BodyVerifyStep1<T> {
     /// Block is already known.
     Duplicate(NonFinalizedTree<T>),
 
@@ -499,7 +491,7 @@ pub enum BodyVerifyStep1<T, I> {
 
     /// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the
     /// runtime of the parent block must be provided.
-    ParentRuntimeRequired(BodyVerifyRuntimeRequired<T, I>),
+    ParentRuntimeRequired(BodyVerifyRuntimeRequired<T>),
 }
 
 #[derive(Debug)]
@@ -517,17 +509,12 @@ enum VerifyConsensusSpecific {
 /// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the runtime
 /// of the parent block must be provided.
 #[must_use]
-pub struct BodyVerifyRuntimeRequired<T, I> {
+pub struct BodyVerifyRuntimeRequired<T> {
     context: VerifyContext<T>,
-    body: I,
     now_from_unix_epoch: Duration,
 }
 
-impl<T, I, E> BodyVerifyRuntimeRequired<T, I>
-where
-    I: ExactSizeIterator<Item = E> + Clone,
-    E: AsRef<[u8]> + Clone,
-{
+impl<T> BodyVerifyRuntimeRequired<T> {
     /// Access to the parent block's information and hierarchy. Returns `None` if the parent is
     /// the finalized block.
     pub fn parent_block(&mut self) -> Option<BlockAccess<T>> {
@@ -587,6 +574,7 @@ where
     pub fn resume(
         self,
         parent_runtime: host::HostVmPrototype,
+        block_body: impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
         top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
     ) -> BodyVerifyStep2<T> {
         let parent_block_header = if let Some(parent_tree_index) = self.context.parent_tree_index {
@@ -640,7 +628,7 @@ where
             },
             block_header: (&self.context.header).into(),
             parent_block_header: parent_block_header.into(),
-            block_body: self.body,
+            block_body: block_body,
             top_trie_root_calculation_cache,
         });
 
@@ -655,7 +643,7 @@ where
     }
 }
 
-impl<T, I> fmt::Debug for BodyVerifyRuntimeRequired<T, I> {
+impl<T> fmt::Debug for BodyVerifyRuntimeRequired<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("BodyVerifyRuntimeRequired").finish()
     }
@@ -680,8 +668,15 @@ pub enum BodyVerifyStep2<T> {
         /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
         /// this block in order to considerably speed up the verification.
         top_trie_root_calculation_cache: calculate_root::CalculationCache,
-        /// Outcome of the verification.
-        result: Result<BodyInsert<T>, HeaderVerifyError>, // TODO: BodyVerifyError, or rename the error to be common
+        /// Use to insert the block in the chain.
+        insert: BodyInsert<T>,
+    },
+    /// Verification has failed. The block is invalid.
+    Error {
+        /// Chain yielded back.
+        chain: NonFinalizedTree<T>,
+        /// Error that happened during the verification.
+        error: verify::header_body::Error, // TODO: BodyVerifyError, or rename the error to be common
     },
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet<T>),
@@ -748,8 +743,10 @@ impl<T> StorageGet<T> {
     }
 
     /// Injects the corresponding storage value.
-    // TODO: change API, see execute_block::StorageGet
-    pub fn inject_value(self, value: Option<&[u8]>) -> BodyVerifyStep2<T> {
+    pub fn inject_value(
+        self,
+        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+    ) -> BodyVerifyStep2<T> {
         let inner = self.inner.inject_value(value);
         self.context.with_body_verify(inner)
     }
@@ -917,6 +914,11 @@ impl<'c, T> HeaderInsert<'c, T> {
         }
 
         self.chain.inner = Some(self.context.chain);
+    }
+
+    /// Returns the block header about to be inserted.
+    pub fn header(&self) -> header::HeaderRef {
+        From::from(&self.context.header)
     }
 
     /// Destroys the object without inserting the block in the chain. Returns the block header.

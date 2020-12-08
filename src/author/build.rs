@@ -239,7 +239,7 @@ impl InherentExtrinsics {
     ///
     /// This method is a more weakly-typed equivalent to [`InherentExtrinsics::inject_inherents`].
     /// Only use this method if you know what you're doing.
-    pub fn inject_raw_inherents_list<'a>(
+    pub fn inject_raw_inherents_list(
         self,
         list: impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone)> + Clone,
     ) -> Builder {
@@ -288,8 +288,7 @@ impl StorageGet {
     }
 
     /// Injects the corresponding storage value.
-    // TODO: `value` parameter should be something like `Iterator<Item = impl AsRef<[u8]>`
-    pub fn inject_value(self, value: Option<&[u8]>) -> Builder {
+    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Builder {
         self.1.with_runtime_inner(self.0.inject_value(value))
     }
 }

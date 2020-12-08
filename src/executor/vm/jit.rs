@@ -69,12 +69,21 @@ impl JitPrototype {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
                         // TODO: don't panic below
-                        let function_index = symbols(
+                        let function_index = match symbols(
                             import.module(),
                             import.name(),
                             &TryFrom::try_from(&f).unwrap(),
-                        )
-                        .unwrap();
+                        ) {
+                            Ok(idx) => idx,
+                            Err(()) => {
+                                return Err(NewErr::ModuleError(ModuleError(format!(
+                                    "unresolved import: `{}`:`{}`",
+                                    import.module(),
+                                    import.name()
+                                ))));
+                            }
+                        };
+
                         let interrupter = builder.interrupter();
                         imports.push(wasmtime::Extern::Func(wasmtime::Func::new(
                             &store,
@@ -141,7 +150,7 @@ impl JitPrototype {
             if let Some(mem) = mem.into_memory() {
                 // TODO: do this properly
                 mem.grow(u32::try_from(heap_pages).unwrap()).unwrap();
-                Some(mem.clone())
+                Some(mem)
             } else {
                 return Err(NewErr::MemoryIsntMemory);
             }
@@ -158,7 +167,7 @@ impl JitPrototype {
 
         let indirect_table = if let Some(tbl) = instance.get_export("__indirect_function_table") {
             if let Some(tbl) = tbl.into_table() {
-                Some(tbl.clone())
+                Some(tbl)
             } else {
                 return Err(NewErr::IndirectTableIsntTable);
             }
