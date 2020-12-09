@@ -176,7 +176,7 @@ impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
 pub struct Error(nom::error::ErrorKind);
 
 /// Nom combinator that parses a justification.
-fn justification(bytes: &[u8]) -> nom::IResult<&[u8], JustificationRef> {
+pub fn justification(bytes: &[u8]) -> nom::IResult<&[u8], JustificationRef> {
     nom::error::context(
         "justification",
         nom::combinator::map(

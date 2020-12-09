@@ -172,6 +172,8 @@ async fn async_main() {
         substrate_lite::metadata::decode(&metadata).unwrap()
     );*/
 
+    let use_me = database.finalized_block_hash().unwrap();
+
     let network_service = network_service::NetworkService::new(network_service::Config {
         listen_addresses: Vec::new(),
         chains: iter::once(network_service::ChainConfig {
@@ -338,7 +340,7 @@ async fn async_main() {
                 }
             },
 
-            network_message = network_service.next_event().fuse() => {
+            network_message = network_service.next_event(use_me).fuse() => {
                 match network_message {
                     network_service::Event::Connected { chain_index: 0, peer_id, best_block_number } => {
                         sync_service.add_source(peer_id, best_block_number).await;

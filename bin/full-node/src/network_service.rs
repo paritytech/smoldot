@@ -213,6 +213,7 @@ impl NetworkService {
             }),
         });
 
+        /*
         // Spawn tasks dedicated to the Kademlia discovery.
         (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let network_service = Arc::downgrade(&network_service);
@@ -242,14 +243,13 @@ impl NetworkService {
                                 .instrument(tracing::debug_span!("insert"))
                                 .await
                         }
-                        Err(error) => {
-                            tracing::debug!(%error, "discovery-error")
-                        }
+                        Err(error) => tracing::debug!(%error, "discovery-error"),
                     }
                 }
             }
             .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
         }));
+        */
 
         (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let network_service = network_service.clone();
@@ -295,11 +295,19 @@ impl NetworkService {
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
     #[tracing::instrument(skip(self))]
-    pub async fn next_event(self: &Arc<Self>) -> Event {
+    pub async fn next_event(self: &Arc<Self>, use_me: [u8; 32]) -> Event {
         loop {
             match self.network.next_event().await {
                 service::Event::Connected(peer_id) => {
                     tracing::debug!(%peer_id, "connected");
+                    let r = self
+                        .network
+                        .grandpa_warp_sync_request(Instant::now(), peer_id, 0, use_me)
+                        .await;
+                    println!("response:");
+                    for a in &r.unwrap() {
+                        println!("{:?}", a);
+                    }
                 }
                 service::Event::Disconnected {
                     peer_id,

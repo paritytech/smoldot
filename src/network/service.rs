@@ -125,6 +125,9 @@ impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
+    // Update this when a new request response protocol is added.
+    const PROTOCOLS_PER_CHAIN: usize = 4;
+
     /// Initializes a new [`ChainNetwork`].
     pub fn new(config: Config<TPeer>) -> Self {
         // TODO: figure out the cloning situation here
@@ -185,6 +188,13 @@ where
                 // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
                 inbound_allowed: false,
             }))
+            .chain(iter::once(libp2p::ConfigRequestResponse {
+                name: format!("/{}/sync/warp", chain.protocol_id),
+                max_request_size: 1024 * 1024,
+                max_response_size: 16 * 1024 * 1024,
+                // We don't handle inbound warp sync requests.
+                inbound_allowed: false,
+            }))
         }))
         .collect();
 
@@ -206,6 +216,10 @@ where
             substreams_open_tx: Mutex::new(substreams_open_tx),
             substreams_open_rx: Mutex::new(substreams_open_rx),
         }
+    }
+
+    fn protocol_index(&self, chain_index: usize, protocol: usize) -> usize {
+        1 + chain_index * Self::PROTOCOLS_PER_CHAIN + protocol
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
@@ -241,10 +255,39 @@ where
         });
         let response = self
             .libp2p
-            .request(now, target, 1 + chain_index * 3, request_data)
+            .request(
+                now,
+                target,
+                self.protocol_index(chain_index, 0),
+                request_data,
+            )
             .map_err(BlocksRequestError::Request)
             .await?;
         protocol::decode_block_response(&response).map_err(BlocksRequestError::Decode)
+    }
+
+    pub async fn grandpa_warp_sync_request(
+        &self,
+        now: TNow,
+        target: peer_id::PeerId,
+        chain_index: usize,
+        begin_hash: [u8; 32],
+    ) -> Result<Vec<GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {
+        use parity_scale_codec::{Compact, Decode, Encode};
+        let request_data = GrandpaWarpSyncRequest { begin: begin_hash }.encode();
+
+        let response = self
+            .libp2p
+            .request(
+                now,
+                target,
+                self.protocol_index(chain_index, 3),
+                request_data,
+            )
+            .map_err(GrandpaWarpSyncRequestError::Request)
+            .await?;
+
+        decode_grandpa_warp_sync_response(&response)
     }
 
     /// Sends a storage request to the given peer.
@@ -263,7 +306,12 @@ where
             });
         let response = self
             .libp2p
-            .request(now, target, 1 + chain_index * 3 + 1, request_data)
+            .request(
+                now,
+                target,
+                self.protocol_index(chain_index, 1),
+                request_data,
+            )
             .map_err(StorageProofRequestError::Request)
             .await?;
         protocol::decode_storage_proof_response(&response).map_err(StorageProofRequestError::Decode)
@@ -473,7 +521,12 @@ where
             // TODO: better peer selection
             let response = self
                 .libp2p
-                .request(now, target, 1 + chain_index * 3 + 2, request_data)
+                .request(
+                    now,
+                    target,
+                    self.protocol_index(chain_index, 2),
+                    request_data,
+                )
                 .await
                 .map_err(DiscoveryError::RequestFailed)?;
             let decoded = kademlia::decode_find_node_response(&response)
@@ -711,4 +764,64 @@ pub enum BlocksRequestError {
 pub enum StorageProofRequestError {
     Request(libp2p::RequestError),
     Decode(protocol::DecodeStorageProofResponseError),
+}
+
+/// Error returned by [`ChainNetwork::grandpa_warp_sync_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum GrandpaWarpSyncRequestError {
+    Request(libp2p::RequestError),
+    BadResponse,
+}
+
+#[derive(parity_scale_codec::Encode)]
+pub struct GrandpaWarpSyncRequest {
+    begin: [u8; 32],
+}
+
+#[derive(Debug)]
+pub struct GrandpaWarpSyncResponseFragment {
+    header: crate::header::Header,
+    justification: crate::finality::justification::decode::Justification,
+}
+
+fn decode_grandpa_warp_sync_response(
+    bytes: &[u8],
+) -> Result<Vec<GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {
+    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+        println!("{}", num_elems);
+        nom::multi::many_m_n(
+            num_elems,
+            num_elems,
+            nom::combinator::map(
+                nom::sequence::tuple((
+                    |s| {
+                        crate::header::decode_partial(s)
+                            .map(|(a, b)| (b, a))
+                            .map_err(|_| {
+                                nom::Err::Failure(nom::error::make_error(
+                                    s,
+                                    nom::error::ErrorKind::Verify,
+                                ))
+                            })
+                    },
+                    crate::util::nom_scale_compact_usize,
+                    |s| {
+                        crate::finality::justification::decode::justification(s)
+                            .map_err(|_| {
+                                nom::Err::Failure(nom::error::make_error(
+                                    s,
+                                    nom::error::ErrorKind::Verify,
+                                ))
+                            })
+                    },
+                )),
+                move |(header, _, justification)| GrandpaWarpSyncResponseFragment {
+                    header: header.into(),
+                    justification: justification.into(),
+                },
+            ),
+        )
+    })(bytes)
+    .map(|(_, parse_result)| parse_result)
+    .map_err(|e: nom::Err<(&[u8], nom::error::ErrorKind)>| GrandpaWarpSyncRequestError::BadResponse)
 }
