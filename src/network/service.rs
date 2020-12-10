@@ -780,8 +780,8 @@ pub struct GrandpaWarpSyncRequest {
 
 #[derive(Debug)]
 pub struct GrandpaWarpSyncResponseFragment {
-    header: crate::header::Header,
-    justification: crate::finality::justification::decode::Justification,
+    pub header: crate::header::Header,
+    pub justification: crate::finality::justification::decode::Justification,
 }
 
 fn decode_grandpa_warp_sync_response(
@@ -806,13 +806,12 @@ fn decode_grandpa_warp_sync_response(
                     },
                     crate::util::nom_scale_compact_usize,
                     |s| {
-                        crate::finality::justification::decode::justification(s)
-                            .map_err(|_| {
-                                nom::Err::Failure(nom::error::make_error(
-                                    s,
-                                    nom::error::ErrorKind::Verify,
-                                ))
-                            })
+                        crate::finality::justification::decode::justification(s).map_err(|_| {
+                            nom::Err::Failure(nom::error::make_error(
+                                s,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })
                     },
                 )),
                 move |(header, _, justification)| GrandpaWarpSyncResponseFragment {
