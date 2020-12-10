@@ -788,7 +788,6 @@ fn decode_grandpa_warp_sync_response(
     bytes: &[u8],
 ) -> Result<Vec<GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {
     nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-        println!("{}", num_elems);
         nom::multi::many_m_n(
             num_elems,
             num_elems,

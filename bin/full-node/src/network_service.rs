@@ -295,18 +295,51 @@ impl NetworkService {
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
     #[tracing::instrument(skip(self))]
-    pub async fn next_event(self: &Arc<Self>, use_me: [u8; 32]) -> Event {
+    pub async fn next_event(
+        self: &Arc<Self>,
+        use_me: [u8; 32],
+        genesis_chain_infomation: &substrate_lite::chain::chain_information::ChainInformation,
+    ) -> Event {
         loop {
             match self.network.next_event().await {
                 service::Event::Connected(peer_id) => {
                     tracing::debug!(%peer_id, "connected");
-                    let r = self
+                    let warp_sync_response = self
                         .network
                         .grandpa_warp_sync_request(Instant::now(), peer_id, 0, use_me)
-                        .await;
-                    println!("response:");
-                    for a in &r.unwrap() {
-                        println!("{:?}", a);
+                        .await
+                        .unwrap();
+
+                    let mut authorities_list: Vec<[u8; 32]> = match &genesis_chain_infomation.finality {
+                        substrate_lite::chain::chain_information::ChainInformationFinality::Grandpa {
+                            finalized_triggered_authorities, ..
+                        } => {
+                            finalized_triggered_authorities.iter().map(|auth| auth.public_key).collect()
+                        },
+                        _ => unimplemented!()
+                    };
+
+                    for (i, fragment) in warp_sync_response.iter().enumerate() {
+                        let authorities_set_id = i as u64;
+
+                        let config = substrate_lite::finality::justification::verify::Config {
+                            justification: (&fragment.justification).into(),
+                            authorities_list: authorities_list.iter(),
+                            authorities_set_id,
+                        };
+
+                        println!(
+                            "{}: {:?}",
+                            i,
+                            substrate_lite::finality::justification::verify::verify(config)
+                        );
+
+                        authorities_list = fragment
+                            .justification
+                            .precommits
+                            .iter()
+                            .map(|precommit| precommit.authority_public_key)
+                            .collect();
                     }
                 }
                 service::Event::Disconnected {

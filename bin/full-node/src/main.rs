@@ -340,7 +340,7 @@ async fn async_main() {
                 }
             },
 
-            network_message = network_service.next_event(use_me).fuse() => {
+            network_message = network_service.next_event(use_me, &genesis_chain_information).fuse() => {
                 match network_message {
                     network_service::Event::Connected { chain_index: 0, peer_id, best_block_number } => {
                         sync_service.add_source(peer_id, best_block_number).await;
