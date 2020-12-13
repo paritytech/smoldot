@@ -111,7 +111,7 @@ pub struct OverlayNetwork {
     pub out_slots: u32,
 }
 
-/// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].
+/// Identifier of a pending connection requested by the network through a [`StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(peerset::ConnectionId);
 
@@ -328,8 +328,8 @@ where
         }
     }
 
-    /// After a [`Event::StartConnect`], notifies the [`Network`] of the success of the dialing
-    /// attempt.
+    /// After calling [`Network::fill_out_slots`], notifies the [`Network`] of the success of the
+    /// dialing attempt.
     ///
     /// See also [`Network::pending_outcome_err`].
     ///
@@ -358,8 +358,8 @@ where
         ConnectionId(id.0)
     }
 
-    /// After a [`Event::StartConnect`], notifies the [`Network`] of the failure of the dialing
-    /// attempt.
+    /// After calling [`Network::fill_out_slots`], notifies the [`Network`] of the failure of the
+    /// dialing attempt.
     ///
     /// See also [`Network::pending_outcome_ok`].
     ///

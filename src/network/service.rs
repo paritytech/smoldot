@@ -98,7 +98,7 @@ pub struct ChainConfig {
     pub role: protocol::Role,
 }
 
-/// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].
+/// Identifier of a pending connection requested by the network through a [`StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(libp2p::PendingId);
 
@@ -276,8 +276,8 @@ where
 
     pub async fn announce_transaction(&self, transaction: Vec<u8>) {}
 
-    /// After a [`Event::StartConnect`], notifies the [`ChainNetwork`] of the success of the
-    /// dialing attempt.
+    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// success of the dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
@@ -289,8 +289,8 @@ where
         ConnectionId(self.libp2p.pending_outcome_ok(id.0, user_data).await)
     }
 
-    /// After a [`Event::StartConnect`], notifies the [`ChainNetwork`] of the failure of the
-    /// dialing attempt.
+    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// failure of the dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_ok`].
     ///
@@ -544,8 +544,8 @@ where
 
 /// User must start connecting to the given multiaddress.
 ///
-/// Either [`Network::pending_outcome_ok`] or [`Network::pending_outcome_err`] must later be
-/// called in order to inform of the outcome of the connection.
+/// Either [`ChainNetwork::pending_outcome_ok`] or [`ChainNetwork::pending_outcome_err`] must
+/// later be called in order to inform of the outcome of the connection.
 #[derive(Debug)]
 #[must_use]
 pub struct StartConnect {
