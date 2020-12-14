@@ -334,11 +334,23 @@ impl NetworkService {
                             substrate_lite::finality::justification::verify::verify(config)
                         );
 
-                        authorities_list = fragment
-                            .justification
-                            .precommits
-                            .iter()
-                            .map(|precommit| precommit.authority_public_key)
+                        authorities_list = fragment.header.digest.logs()
+                            .filter_map(|log_item| {
+                                match log_item {
+                                    substrate_lite::header::DigestItemRef::GrandpaConsensus(grandpa_log_item) => {
+                                        match grandpa_log_item {
+                                            substrate_lite::header::GrandpaConsensusLogRef::ScheduledChange(change)
+                                            | substrate_lite::header::GrandpaConsensusLogRef::ForcedChange { change, .. } => {
+                                                Some(change.next_authorities)
+                                            },
+                                            _ => None
+                                        }
+                                    },
+                                    _ => None
+                                }
+                            })
+                            .flat_map(|next_authorities| next_authorities)
+                            .map(|authority| *authority.public_key)
                             .collect();
                     }
                 }
