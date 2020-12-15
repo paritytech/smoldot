@@ -437,9 +437,10 @@ where
                 } => {
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: think about possible race conditions regarding missing block
-                    // announcements, as the remote will think we know it's a certain block while
-                    // we ignored its announcement ; it isn't problematic as long as blocks are
-                    // generated continuously, as announcements are generated periodically
+                    // announcements, as the remote will think we know it's at a certain block
+                    // while we ignored its announcement ; it isn't problematic as long as blocks
+                    // are generated continuously, as announcements will be generated periodically
+                    // as well and the state will no longer mismatch
                     if !has_symmetric_substream {
                         continue;
                     }

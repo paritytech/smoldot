@@ -986,7 +986,8 @@ pub enum Event<TConn> {
     NotificationsIn {
         id: ConnectionId,
         peer_id: PeerId, // TODO: is this field necessary? + cloning :-/
-        /// `true` if the exists an outbound substream.
+        /// `true` if the exists an open outbound substream with this peer on the same overlay
+        /// network.
         has_symmetric_substream: bool,
         overlay_network_index: usize,
         notification: Vec<u8>,
