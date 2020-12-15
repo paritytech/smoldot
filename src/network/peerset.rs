@@ -519,6 +519,9 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
     /// Returns `true` if there exists an open substream on this overlay network and this
     /// direction.
     ///
+    /// This only returns `true` if the substream is open. If there exists a pending substream,
+    /// `false` is returned.
+    ///
     /// # Panic
     ///
     /// Panics if `overlay_network_index` is out of range.
