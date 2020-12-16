@@ -532,9 +532,14 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
         direction: SubstreamDirection,
     ) -> bool {
         assert!(overlay_network < self.peerset.num_overlay_networks);
-        self.peerset
+        match self
+            .peerset
             .connection_overlays
-            .contains_key(&(self.id.0, overlay_network, direction))
+            .get(&(self.id.0, overlay_network, direction))
+        {
+            Some(SubstreamState::Open(_)) => true,
+            _ => false,
+        }
     }
 
     /// Returns the list of open substreams of this connection.
