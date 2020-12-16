@@ -290,6 +290,63 @@ impl NetworkService {
             .await
     }
 
+    async fn warp_sync(
+        &self,
+        peer_id: PeerId,
+        hash: [u8; 32],
+        genesis_chain_infomation: &substrate_lite::chain::chain_information::ChainInformation,
+    ) -> Result<(), substrate_lite::finality::justification::verify::Error> {
+        let warp_sync_response = self
+            .network
+            .grandpa_warp_sync_request(Instant::now(), peer_id, 0, hash)
+            .await
+            .unwrap();
+
+        let mut authorities_list: Vec<[u8; 32]> = match &genesis_chain_infomation.finality {
+            substrate_lite::chain::chain_information::ChainInformationFinality::Grandpa {
+                finalized_triggered_authorities, ..
+            } => {
+                finalized_triggered_authorities.iter().map(|auth| auth.public_key).collect()
+            },
+            _ => unimplemented!()
+        };
+
+        for (i, fragment) in warp_sync_response.iter().enumerate() {
+            let authorities_set_id = i as u64;
+
+            let config = substrate_lite::finality::justification::verify::Config {
+                justification: (&fragment.justification).into(),
+                authorities_list: authorities_list.iter(),
+                authorities_set_id,
+            };
+
+            substrate_lite::finality::justification::verify::verify(config)?;
+
+            authorities_list = fragment.header.digest.logs()
+                .filter_map(|log_item| {
+                    match log_item {
+                        substrate_lite::header::DigestItemRef::GrandpaConsensus(grandpa_log_item) => {
+                            match grandpa_log_item {
+                                substrate_lite::header::GrandpaConsensusLogRef::ScheduledChange(change)
+                                | substrate_lite::header::GrandpaConsensusLogRef::ForcedChange { change, .. } => {
+                                    Some(change.next_authorities)
+                                },
+                                _ => None
+                            }
+                        },
+                        _ => None
+                    }
+                })
+                .flat_map(|next_authorities| next_authorities)
+                .map(|authority| *authority.public_key)
+                .collect();
+        }
+
+        println!("Verified {} warp sync fragments", warp_sync_response.len());
+
+        Ok(())
+    }
+
     /// Returns the next event that happens in the network service.
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed
@@ -304,55 +361,7 @@ impl NetworkService {
             match self.network.next_event().await {
                 service::Event::Connected(peer_id) => {
                     tracing::debug!(%peer_id, "connected");
-                    let warp_sync_response = self
-                        .network
-                        .grandpa_warp_sync_request(Instant::now(), peer_id, 0, use_me)
-                        .await
-                        .unwrap();
-
-                    let mut authorities_list: Vec<[u8; 32]> = match &genesis_chain_infomation.finality {
-                        substrate_lite::chain::chain_information::ChainInformationFinality::Grandpa {
-                            finalized_triggered_authorities, ..
-                        } => {
-                            finalized_triggered_authorities.iter().map(|auth| auth.public_key).collect()
-                        },
-                        _ => unimplemented!()
-                    };
-
-                    for (i, fragment) in warp_sync_response.iter().enumerate() {
-                        let authorities_set_id = i as u64;
-
-                        let config = substrate_lite::finality::justification::verify::Config {
-                            justification: (&fragment.justification).into(),
-                            authorities_list: authorities_list.iter(),
-                            authorities_set_id,
-                        };
-
-                        println!(
-                            "{}: {:?}",
-                            i,
-                            substrate_lite::finality::justification::verify::verify(config)
-                        );
-
-                        authorities_list = fragment.header.digest.logs()
-                            .filter_map(|log_item| {
-                                match log_item {
-                                    substrate_lite::header::DigestItemRef::GrandpaConsensus(grandpa_log_item) => {
-                                        match grandpa_log_item {
-                                            substrate_lite::header::GrandpaConsensusLogRef::ScheduledChange(change)
-                                            | substrate_lite::header::GrandpaConsensusLogRef::ForcedChange { change, .. } => {
-                                                Some(change.next_authorities)
-                                            },
-                                            _ => None
-                                        }
-                                    },
-                                    _ => None
-                                }
-                            })
-                            .flat_map(|next_authorities| next_authorities)
-                            .map(|authority| *authority.public_key)
-                            .collect();
-                    }
+                    self.warp_sync(peer_id, use_me, genesis_chain_infomation).await.unwrap();
                 }
                 service::Event::Disconnected {
                     peer_id,
