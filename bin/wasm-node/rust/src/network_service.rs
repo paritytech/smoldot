@@ -198,6 +198,18 @@ impl NetworkService {
             .await // TODO: chain_index
     }
 
+    /// Sends a storage proof request to the given peer.
+    // TODO: more docs
+    pub async fn announce_transaction(
+        self: Arc<Self>,
+		target: PeerId,
+        transaction: Vec<u8>,
+    ) -> Result<Vec<u8>, service::AnnounceTransactionRequestError> {
+        self.network
+            .announce_transaction(ffi::Instant::now(), target, 0, transaction)
+            .await // TODO: chain_index
+    }
+
     /// Returns the next event that happens in the network service.
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed

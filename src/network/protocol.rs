@@ -292,6 +292,11 @@ pub enum DecodeStorageProofResponseError {
 #[display(fmt = "{}", _0)]
 pub struct ProtobufDecodeError(prost::DecodeError);
 
+/// Error while decoding [`author_submitExtrinsic`] response`.
+#[derive(Debug, derive_more::Display)]
+#[display(fmt = "{}", _0)]
+pub struct AnnounceTransactionDecodeError(prost::DecodeError);
+
 /// Decoded handshake sent or received when opening a block announces notifications substream.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct BlockAnnouncesHandshakeRef<'a> {

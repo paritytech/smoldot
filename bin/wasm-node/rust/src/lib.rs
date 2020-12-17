@@ -296,6 +296,17 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                 .to_json_response(request_id);
             (response, None)
         }
+        methods::MethodCall::author_submitExtrinsic { transaction } => {
+			let response = match announce_transaction(client, transaction.0).await {
+				Ok(tx_hash) => {
+					methods::Response::author_submitExtrinsic(
+						methods::HexString(tx_hash)
+					).to_json_response(request_id)
+				},
+				Err(()) => todo!(), //TODO:
+			};
+            (response, None)
+        }
         methods::MethodCall::chain_getBlockHash { height } => {
             // TODO: implement correctly
             let response = if height.is_some() {
@@ -590,6 +601,19 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             panic!(); // TODO:
         }
     }
+}
+
+async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<Vec<u8>, ()> {
+    let mut result = Err(());
+    for target in client.peers.iter().take(3) {
+		result = client
+			.network_service
+			.clone()
+			.announce_transaction(target.clone(), transaction.clone())
+			.await
+			.map_err(|_| ());
+	}
+	result
 }
 
 async fn storage_query(

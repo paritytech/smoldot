@@ -274,7 +274,19 @@ where
         protocol::decode_storage_proof_response(&response).map_err(StorageProofRequestError::Decode)
     }
 
-    pub async fn announce_transaction(&self, transaction: Vec<u8>) {}
+    pub async fn announce_transaction(
+		&self,
+		now: TNow,
+		target: peer_id::PeerId,
+		chain_index: usize,
+		transaction: Vec<u8>,
+	) -> Result<Vec<u8>, AnnounceTransactionRequestError> {
+        Ok(self
+            .libp2p
+            .request(now, target, 1 + chain_index * 3 + 1, transaction)
+            .map_err(AnnounceTransactionRequestError::Request)
+            .await?)
+	}
 
     /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
     /// success of the dialing attempt.
@@ -732,4 +744,11 @@ pub enum BlocksRequestError {
 pub enum StorageProofRequestError {
     Request(libp2p::RequestError),
     Decode(protocol::DecodeStorageProofResponseError),
+}
+
+/// Error returned by [`ChainNetwork::author_submitextrinsic`].
+#[derive(Debug, derive_more::Display)]
+pub enum AnnounceTransactionRequestError {
+    Request(libp2p::RequestError),
+    Decode(protocol::AnnounceTransactionDecodeError),
 }
