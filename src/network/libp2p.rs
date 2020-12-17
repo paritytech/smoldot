@@ -328,6 +328,67 @@ where
         }
     }
 
+    /// Adds a notification to the queue of notifications to send to the given peer.
+    ///
+    ///
+    pub async fn queue_notification(
+        self,
+        target: &PeerId,
+        protocol_index: usize,
+        notification: impl Into<Vec<u8>>,
+    ) -> Result<(), QueueNotificationError> {
+        let (connection, substream_id) = {
+            let mut guarded = self.guarded.lock().await;
+
+            let connection = match guarded.peerset.node_mut(target.clone()) {
+                peerset::NodeMut::Known(n) => n
+                    .connections()
+                    .next()
+                    .ok_or(QueueNotificationError::NotConnected)?,
+                peerset::NodeMut::Unknown(_) => return Err(QueueNotificationError::NotConnected),
+            };
+
+            let substream = *guarded
+                .peerset
+                .connection_mut(connection)
+                .unwrap()
+                .open_substreams_mut()
+                .find(|(protocol, dir, _)| {
+                    *protocol == protocol_index && *dir == peerset::SubstreamDirection::Out
+                })
+                .ok_or(QueueNotificationError::NoSubstream)?
+                .2;
+
+            let connection_arc = guarded
+                .peerset
+                .connection_mut(connection)
+                .unwrap()
+                .into_user_data()
+                .clone();
+
+            (connection_arc, substream)
+        };
+
+        let mut connection_lock = connection.lock().await;
+
+        let waker = connection_lock.2.take();
+
+        // TODO: check if substream is still open to avoid a panic in `write_notification_unbounded`
+        connection_lock
+            .0
+            .as_mut()
+            .ok_or(QueueNotificationError::NotConnected)?
+            .write_notification_unbounded(substream_id, notification.into());
+
+        drop(connection_lock);
+
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+
+        Ok(())
+    }
+
     /// After calling [`Network::fill_out_slots`], notifies the [`Network`] of the success of the
     /// dialing attempt.
     ///
@@ -1094,4 +1155,14 @@ pub enum RequestError {
     ConnectionClosed,
     /// Error in the context of the connection.
     Connection(connection::established::RequestError),
+}
+
+#[derive(Debug, derive_more::Display)]
+pub enum QueueNotificationError {
+    /// Not connected to target.
+    NotConnected,
+    /// No substream with the given target of the given protocol.
+    NoSubstream,
+    /// Queue of notifications with that peer is full.
+    QueueFull,
 }
