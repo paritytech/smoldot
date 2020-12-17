@@ -30,10 +30,15 @@ use std::{
     sync::Arc,
 };
 use substrate_lite::{
-    chain, chain_spec,
-    json_rpc::{self, methods},
-    network::{multiaddr, peer_id::PeerId, protocol},
-    trie::proof_verify,
+	chain, chain_spec,
+	json_rpc::{self, methods},
+	network::{
+		multiaddr,
+		peer_id::PeerId,
+		protocol,
+		service::AnnounceTransactionRequestError
+	},
+	trie::proof_verify
 };
 
 pub mod ffi;
@@ -303,7 +308,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
 						methods::HexString(tx_hash)
 					).to_json_response(request_id)
 				},
-				Err(()) => todo!(), //TODO:
+				Err(e) => todo!("{:?}", e), //TODO:
 			};
             (response, None)
         }
@@ -603,15 +608,15 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
     }
 }
 
-async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<Vec<u8>, ()> {
-    let mut result = Err(());
+async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<Vec<u8>, AnnounceTransactionRequestError> {
+    let mut result = Ok(vec![]);
     for target in client.peers.iter().take(3) {
 		result = client
 			.network_service
 			.clone()
 			.announce_transaction(target.clone(), transaction.clone())
-			.await
-			.map_err(|_| ());
+			.await;
+			// .map_err(|_| ());
 	}
 	result
 }
