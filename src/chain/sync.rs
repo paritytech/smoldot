@@ -45,8 +45,5 @@
 //! nodes and not only rely on incoming connections, as there is otherwise the possibility of a
 //! single actor controlling all said incoming connections.
 
-// TODO: this doc ^ is correct but assumes that there exist multiple syncing strategies, while at
-//       the time of writing only one is implemented
-
-// TODO: pub mod full_all_forks;
+pub mod all_forks;
 pub mod optimistic;
