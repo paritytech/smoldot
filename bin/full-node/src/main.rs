@@ -99,7 +99,7 @@ async fn async_main() {
         .unwrap(); // TODO: don't unwrap?
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
-    let (relay_chain_spec, _parachain_id) =
+    let (relay_chain_spec, parachain_id) =
         if let Some((relay_chain_name, parachain_id)) = chain_spec.relay_chain() {
             let json: Cow<[u8]> = match &cli_options.chain {
                 cli::CliChain::Custom(parachain_path) => {
@@ -156,21 +156,6 @@ async fn async_main() {
     } else {
         None
     };
-
-    // TODO: remove; just for testing
-    /*let metadata = substrate_lite::metadata::metadata_from_runtime_code(
-        chain_spec
-            .genesis_storage()
-            .clone()
-            .find(|(k, _)| *k == b":code")
-            .unwrap().1,
-            1024,
-    )
-    .unwrap();
-    println!(
-        "{:#?}",
-        substrate_lite::metadata::decode(&metadata).unwrap()
-    );*/
 
     let network_service = network_service::NetworkService::new(network_service::Config {
         listen_addresses: Vec::new(),

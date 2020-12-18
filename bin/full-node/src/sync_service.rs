@@ -291,6 +291,12 @@ async fn start_sync(
         }
     }
 
+    let mut metadata = substrate_lite::metadata::metadata_from_runtime_code(
+        finalized_block_storage.get(&b":code"[..]).unwrap(),
+        1024,
+    )
+    .unwrap();
+
     async move {
         let mut peers_source_id_map = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
         let mut block_requests_finished = stream::FuturesUnordered::new();
@@ -330,6 +336,14 @@ async fn start_sync(
 
                         // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
                         for block in &finalized_blocks {
+                            if let Some(code) = block.storage_top_trie_changes.get(&b":code"[..]) {
+                                metadata = substrate_lite::metadata::metadata_from_runtime_code(
+                                    &code.as_ref().unwrap(),
+                                    1024,
+                                )
+                                .unwrap();
+                            }
+
                             for (key, value) in &block.storage_top_trie_changes {
                                 if let Some(value) = value {
                                     finalized_block_storage.insert(key.clone(), value.clone());
@@ -339,6 +353,18 @@ async fn start_sync(
                                     // assert!(_was_there.is_some());
                                 }
                             }
+
+                            // TODO: remove; just for testing
+                            let decoded = substrate_lite::metadata::decode(&metadata).unwrap();
+                            let storage_key =
+                                substrate_lite::events::events_storage_key(decoded).unwrap();
+                            let events_encoded =
+                                finalized_block_storage.get(&storage_key[..]).unwrap();
+
+                            let events =
+                                substrate_lite::events::decode_events(decoded, events_encoded)
+                                    .unwrap();
+                            //dbg!(events);
                         }
 
                         to_database

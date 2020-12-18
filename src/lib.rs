@@ -197,6 +197,7 @@ pub mod author;
 pub mod chain;
 pub mod chain_spec;
 pub mod database;
+pub mod events;
 pub mod executor;
 pub mod finality;
 pub mod header;
