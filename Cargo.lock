@@ -2270,7 +2270,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rand 0.8.0",
- "rand_chacha 0.2.2",
+ "rand_chacha 0.3.0",
  "schnorrkel",
  "serde",
  "serde_json",
