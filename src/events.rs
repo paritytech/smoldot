@@ -40,7 +40,7 @@
 //!
 //! - Obtain the *metadata* of the runtime used by the desired block. This is out of scope of this
 //! module. See the [metadata](crate::metadata) module for more information.
-//! - Call [`events_storage_key`] in order to obtain a key where to find the list of events in
+//! - Call [`events_storage_key`] in order to obtain a key where to find the list of events in the
 //! storage. If [`events_storage_key`] returns an error, the runtime most likely doesn't support
 //! events.
 //! - Obtain the storage value corresponding to the key obtained at the previous step. This is out
@@ -53,14 +53,15 @@
 //!
 //! In the SCALE codec, each field is put one behind the other in an unstructured way. The start
 //! of a new field is known by adding the length of all the preceding fields, and the length of
-//! a field depends on the type of data it contains.
+//! a field depends on the type of data it contains. The type of data is not explicitly laid out
+//! and is only known through context.
 //!
 //! The list of events (encoded using SCALE) contains, amongst other things, the values of the
-//! parameters of said event. As explained in the previous paragraph, in order to be able decode
-//! this list of events, one has to know the type of these parameter values. This information is
-//! found in the metadata, in the form of a string representing the type as laid out in the
-//! original Rust source code. This type could be anything, from a primitive type to a type alias
-//! (`type Foo = ...;`) or a locally-defined struct.
+//! parameters of said event. In order to be able decode this list of events, one has to know the
+//! types of these parameter values. This information is found in the metadata, in the form of a
+//! string representing the type as written out in the original Rust source code. This type could
+//! be anything, from a primitive type (e.g. `u32`) to a type alias (`type Foo = ...;`), or a
+//! locally-defined struct.
 //!
 //! For this module to function properly, it has to parse these strings representing Rust types
 //! and hard-code a list of types known to be used in the runtime code. This ranges from `u32` to
@@ -71,9 +72,9 @@
 //! From the point of view of substrate-lite, however, there is simply no way to prevent this
 //! from happening.
 //!
-//! Additionally, the types hard-coded in this module obviously cannot cover the situation of a
-//! person creating their custom blockchain and trying to run it with substrate-lite. The module
-//! in this module cannot fulfill substrate-lite's promise of being compatible with most Substrate
+//! Additionally, the types hard-coded in this module cannot cover the situation of a person
+//! creating their custom blockchain and trying to run it with substrate-lite. The code in this
+//! module cannot fulfill substrate-lite's promise of being compatible with most Substrate
 //! chains.
 //!
 
