@@ -1,5 +1,20 @@
 # Coding guide
 
+## Repository organization
+
+The code in this repository is split in two parts:
+
+- A library part, whose `Cargo.toml` is found at the root of the repository and whose source code is in `src`.
+- Binaries, found in the `bin` directory.
+
+The coding rules of these two parts differ.
+The code in the library part provides a set of unopinionated tools (more information below), while the binaries take an opinionated approach as to how a node should behave.
+
+Most of the rules below only apply to the library part, which also contains the vast majority of the code.
+The code in the binaries mostly consists in gluing together pieces of code found in the library part.
+
+In general, the binaries should be seen more as examples of how to use the library part, rather than actual projects on their own.
+
 ## General philosophy
 
 The source code of the substrate-lite library offers a set of **tools**. Each Rust module provides one specific feature, documented in the module-level documentation, and does *not*, in particular, attempt to play a specific role in a binary.
