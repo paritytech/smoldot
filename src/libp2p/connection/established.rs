@@ -776,7 +776,7 @@ where
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
     /// [`Event::NotificationsInOpen`].
-    pub fn reject_in_notifications_substream(&mut self, substream_id: SubstreamId) {
+    pub fn reject_in_notifications_substream(&mut self, _substream_id: SubstreamId) {
         todo!() // TODO:
     }
 
@@ -802,6 +802,7 @@ where
         if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
             panic!()
         }
+        substream.write(leb128::encode_usize(notification.len()).collect());
         substream.write(notification)
     }
 
@@ -1061,7 +1062,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                     response,
                 } => {
                     match response.update(&data) {
-                        Ok((num_read, leb128::Framed::Finished(response))) => {
+                        Ok((_num_read, leb128::Framed::Finished(response))) => {
                             // TODO: proper state transition
                             *substream.user_data() = Substream::NegotiationFailed;
                             return Some(Event::Response {
@@ -1094,7 +1095,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                     protocol_index,
                 } => {
                     match request.update(&data) {
-                        Ok((num_read, leb128::Framed::Finished(request))) => {
+                        Ok((_num_read, leb128::Framed::Finished(request))) => {
                             *substream.user_data() = Substream::RequestInSend;
                             return Some(Event::RequestIn {
                                 id: substream_id,
@@ -1110,7 +1111,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 protocol_index,
                             };
                         }
-                        Err(err) => {
+                        Err(_err) => {
                             substream.reset();
                             // TODO: report to user
                             todo!()

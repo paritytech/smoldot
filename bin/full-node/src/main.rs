@@ -29,7 +29,7 @@ use substrate_lite::{
     chain, chain_spec,
     database::full_sled,
     header,
-    network::{connection, multiaddr, peer_id::PeerId},
+    libp2p::{connection, multiaddr, peer_id::PeerId},
 };
 use tracing::Instrument as _;
 
@@ -99,7 +99,7 @@ async fn async_main() {
         .unwrap(); // TODO: don't unwrap?
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
-    let (relay_chain_spec, parachain_id) =
+    let (relay_chain_spec, _parachain_id) =
         if let Some((relay_chain_name, parachain_id)) = chain_spec.relay_chain() {
             let json: Cow<[u8]> = match &cli_options.chain {
                 cli::CliChain::Custom(parachain_path) => {

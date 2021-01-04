@@ -32,9 +32,8 @@ use std::{
 use substrate_lite::{
 	chain, chain_spec,
 	json_rpc::{self, methods},
+    libp2p::{multiaddr, peer_id::PeerId},
 	network::{
-		multiaddr,
-		peer_id::PeerId,
 		protocol,
 		service::AnnounceTransactionRequestError
 	},
