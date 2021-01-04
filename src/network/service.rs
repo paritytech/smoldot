@@ -281,10 +281,10 @@ where
 		target: peer_id::PeerId,
 		chain_index: usize,
 		transaction: Vec<u8>,
-	) -> Result<Vec<u8>, AnnounceTransactionRequestError> {
+	) -> Result<(), AnnounceTransactionRequestError> {
         Ok(self
             .libp2p
-            .request(now, target, 1 + chain_index * 3 + 1, transaction)
+		    .queue_notification(&target, 1 + chain_index * 3 + 1, transaction)
             .map_err(AnnounceTransactionRequestError::Request)
             .await?)
 	}
@@ -750,6 +750,6 @@ pub enum StorageProofRequestError {
 /// Error returned by [`ChainNetwork::author_submitextrinsic`].
 #[derive(Debug, derive_more::Display)]
 pub enum AnnounceTransactionRequestError {
-    Request(libp2p::RequestError),
+    Request(libp2p::QueueNotificationError),
     Decode(protocol::AnnounceTransactionDecodeError),
 }
