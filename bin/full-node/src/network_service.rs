@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -29,12 +29,14 @@
 
 use core::{cmp, pin::Pin, time::Duration};
 use futures::prelude::*;
-use std::{collections::HashMap, io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
-use substrate_lite::network::{
-    connection,
-    multiaddr::{Multiaddr, Protocol},
-    peer_id::PeerId,
-    protocol, service,
+use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
+use substrate_lite::{
+    libp2p::{
+        connection,
+        multiaddr::{Multiaddr, Protocol},
+        peer_id::PeerId,
+    },
+    network::{protocol, service},
 };
 use tracing::Instrument as _;
 
@@ -154,7 +156,7 @@ impl NetworkService {
                     loop {
                         // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
 
-                        let (socket, _addr) = match tcp_listener.accept().await {
+                        let (_socket, _addr) = match tcp_listener.accept().await {
                             Ok(v) => v,
                             Err(_) => {
                                 // Errors here can happen if the accept failed, for example if no file

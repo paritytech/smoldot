@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -32,11 +32,13 @@ use crate::ffi;
 use core::{num::NonZeroUsize, pin::Pin, time::Duration};
 use futures::{lock::Mutex, prelude::*};
 use std::sync::Arc;
-use substrate_lite::network::{
-    connection,
-    multiaddr::{Multiaddr, Protocol},
-    peer_id::PeerId,
-    protocol, service,
+use substrate_lite::{
+    libp2p::{
+        connection,
+        multiaddr::{Multiaddr, Protocol},
+        peer_id::PeerId,
+    },
+    network::{protocol, service},
 };
 
 /// Configuration for a [`NetworkService`].
