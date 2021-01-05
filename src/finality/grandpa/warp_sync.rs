@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -21,10 +21,12 @@ use crate::finality::justification::verify::{
 };
 use crate::header::{DigestItemRef, GrandpaConsensusLogRef};
 use crate::network::protocol::GrandpaWarpSyncResponseFragment;
-use std::convert::TryFrom;
+use std::convert::TryFrom as _;
 
+#[derive(Debug)]
 pub struct Verifier {
     index: usize,
+    authorities_set_id: u64,
     authorities_list: Vec<[u8; 32]>,
     fragments: Vec<GrandpaWarpSyncResponseFragment>,
 }
@@ -34,32 +36,38 @@ impl Verifier {
         genesis_chain_infomation: &ChainInformation,
         warp_sync_response_fragments: Vec<GrandpaWarpSyncResponseFragment>,
     ) -> Self {
-        let authorities_list = match &genesis_chain_infomation.finality {
+        let (authorities_list, authorities_set_id) = match &genesis_chain_infomation.finality {
             ChainInformationFinality::Grandpa {
                 finalized_triggered_authorities,
+                after_finalized_block_authorities_set_id,
                 ..
-            } => finalized_triggered_authorities
-                .iter()
-                .map(|auth| auth.public_key)
-                .collect(),
+            } => {
+                let authorities_list = finalized_triggered_authorities
+                    .iter()
+                    .map(|auth| auth.public_key)
+                    .collect();
+
+                (authorities_list, *after_finalized_block_authorities_set_id)
+            }
+            // TODO:
             _ => unimplemented!(),
         };
 
         Self {
             index: 0,
+            authorities_set_id,
             authorities_list,
             fragments: warp_sync_response_fragments,
         }
     }
 
     pub fn next(mut self) -> Result<Next, VerifyError> {
-        let authorities_set_id = u64::try_from(self.index).unwrap();
         let fragment = &self.fragments[self.index];
 
         verify(VerifyConfig {
             justification: (&fragment.justification).into(),
             authorities_list: self.authorities_list.iter(),
-            authorities_set_id,
+            authorities_set_id: self.authorities_set_id,
         })?;
 
         self.authorities_list = fragment
@@ -81,6 +89,7 @@ impl Verifier {
             .collect();
 
         self.index += 1;
+        self.authorities_set_id += 1;
 
         if self.index == self.fragments.len() {
             Ok(Next::Success)

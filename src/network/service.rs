@@ -279,7 +279,6 @@ where
         chain_index: usize,
         begin_hash: [u8; 32],
     ) -> Result<Vec<protocol::GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {
-        use parity_scale_codec::{Compact, Decode, Encode};
         let request_data = begin_hash.to_vec();
 
         let response = self
