@@ -429,7 +429,7 @@ pub struct GrandpaWarpSyncResponseFragment {
     pub justification: crate::finality::justification::decode::Justification,
 }
 
-/// Error returned by [`ChainNetwork::grandpa_warp_sync_request`].
+/// Error returned by [`decode_grandpa_warp_sync_response`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeGrandpaWarpSyncResponseError {
     BadResponse,
