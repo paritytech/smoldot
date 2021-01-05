@@ -21,7 +21,6 @@ use crate::finality::justification::verify::{
 };
 use crate::header::{DigestItemRef, GrandpaConsensusLogRef};
 use crate::network::protocol::GrandpaWarpSyncResponseFragment;
-use std::convert::TryFrom as _;
 
 #[derive(Debug)]
 pub struct Verifier {
