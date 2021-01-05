@@ -457,12 +457,14 @@ pub fn decode_grandpa_warp_sync_response(
                     },
                     crate::util::nom_scale_compact_usize,
                     |s| {
-                        crate::finality::justification::decode::justification(s).map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                s,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
+                        crate::finality::justification::decode::decode_partial(s)
+                            .map(|(a, b)| (b, a))
+                            .map_err(|_| {
+                                nom::Err::Failure(nom::error::make_error(
+                                    s,
+                                    nom::error::ErrorKind::Verify,
+                                ))
+                            })
                     },
                 )),
                 move |(header, _, justification)| GrandpaWarpSyncResponseFragment {

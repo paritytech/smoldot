@@ -30,6 +30,18 @@ pub fn decode(scale_encoded: &[u8]) -> Result<JustificationRef, Error> {
     }
 }
 
+/// Attempt to decode the given SCALE-encoded justification.
+///
+/// Contrary to [`decode`], doesn't return an error if the slice is too long but returns the
+/// remainder.
+pub fn decode_partial(scale_encoded: &[u8]) -> Result<(JustificationRef, &[u8]), Error> {
+    match justification(scale_encoded) {
+        Ok((remainder, justification)) => Ok((justification, remainder)),
+        Err(nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(_) => unreachable!(),
+    }
+}
+
 const PRECOMMIT_ENCODED_LEN: usize = 32 + 4 + 64 + 32;
 
 /// Decoded justification.
@@ -265,7 +277,7 @@ impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
 pub struct Error(nom::error::ErrorKind);
 
 /// Nom combinator that parses a justification.
-pub fn justification(bytes: &[u8]) -> nom::IResult<&[u8], JustificationRef> {
+fn justification(bytes: &[u8]) -> nom::IResult<&[u8], JustificationRef> {
     nom::error::context(
         "justification",
         nom::combinator::map(
