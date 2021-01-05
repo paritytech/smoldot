@@ -302,47 +302,18 @@ impl NetworkService {
             .await
             .unwrap();
 
-        let mut authorities_list: Vec<[u8; 32]> = match &genesis_chain_infomation.finality {
-            substrate_lite::chain::chain_information::ChainInformationFinality::Grandpa {
-                finalized_triggered_authorities, ..
-            } => {
-                finalized_triggered_authorities.iter().map(|auth| auth.public_key).collect()
-            },
-            _ => unimplemented!()
-        };
+        let mut verifier = substrate_lite::finality::grandpa::warp_sync::Verifier::new(
+            genesis_chain_infomation,
+            warp_sync_response,
+        );
 
-        for (i, fragment) in warp_sync_response.iter().enumerate() {
-            let authorities_set_id = i as u64;
-
-            let config = substrate_lite::finality::justification::verify::Config {
-                justification: (&fragment.justification).into(),
-                authorities_list: authorities_list.iter(),
-                authorities_set_id,
-            };
-
-            substrate_lite::finality::justification::verify::verify(config)?;
-
-            authorities_list = fragment.header.digest.logs()
-                .filter_map(|log_item| {
-                    match log_item {
-                        substrate_lite::header::DigestItemRef::GrandpaConsensus(grandpa_log_item) => {
-                            match grandpa_log_item {
-                                substrate_lite::header::GrandpaConsensusLogRef::ScheduledChange(change)
-                                | substrate_lite::header::GrandpaConsensusLogRef::ForcedChange { change, .. } => {
-                                    Some(change.next_authorities)
-                                },
-                                _ => None
-                            }
-                        },
-                        _ => None
-                    }
-                })
-                .flat_map(|next_authorities| next_authorities)
-                .map(|authority| *authority.public_key)
-                .collect();
+        while let substrate_lite::finality::grandpa::warp_sync::Next::NotFinished(next_verifier) =
+            verifier.next()?
+        {
+            verifier = next_verifier;
         }
 
-        println!("Verified {} warp sync fragments", warp_sync_response.len());
+        println!("Verified warp sync fragments");
 
         Ok(())
     }
@@ -361,7 +332,9 @@ impl NetworkService {
             match self.network.next_event().await {
                 service::Event::Connected(peer_id) => {
                     tracing::debug!(%peer_id, "connected");
-                    self.warp_sync(peer_id, use_me, genesis_chain_infomation).await.unwrap();
+                    self.warp_sync(peer_id, use_me, genesis_chain_infomation)
+                        .await
+                        .unwrap();
                 }
                 service::Event::Disconnected {
                     peer_id,
