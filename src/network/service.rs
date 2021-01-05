@@ -191,9 +191,9 @@ where
             }))
             .chain(iter::once(libp2p::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
-                max_request_size: 1024 * 1024,
+                max_request_size: 32,
                 max_response_size: 16 * 1024 * 1024,
-                // We don't handle inbound warp sync requests.
+                // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
             }))
         }))
@@ -806,6 +806,7 @@ pub struct GrandpaWarpSyncResponseFragment {
     pub justification: crate::finality::justification::decode::Justification,
 }
 
+// TODO: make this a zero-cost API
 fn decode_grandpa_warp_sync_response(
     bytes: &[u8],
 ) -> Result<Vec<GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {

@@ -61,7 +61,7 @@ impl<'a> From<&'a Justification> for JustificationRef<'a> {
             target_hash: &j.target_hash,
             target_number: j.target_number,
             precommits: PrecommitsRef::Decoded(&j.precommits),
-            // todo
+            // TODO:
             votes_ancestries: VotesAncestriesIter { slice: &[], num: 0 },
         }
     }

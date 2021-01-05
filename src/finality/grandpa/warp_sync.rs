@@ -35,7 +35,7 @@ impl Verifier {
     }
 
     pub fn next(mut self) -> Result<Next, VerifyError> {
-        let authorities_set_id = self.index as u64;
+        let authorities_set_id = u64::try_from(self.index).unwrap();
         let fragment = &self.fragments[self.index];
 
         verify(VerifyConfig {
