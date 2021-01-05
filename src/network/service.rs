@@ -278,9 +278,9 @@ where
         target: peer_id::PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
-    ) -> Result<Vec<GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {
+    ) -> Result<Vec<protocol::GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {
         use parity_scale_codec::{Compact, Decode, Encode};
-        let request_data = GrandpaWarpSyncRequest { begin: begin_hash }.encode();
+        let request_data = begin_hash.to_vec();
 
         let response = self
             .libp2p
@@ -293,7 +293,8 @@ where
             .map_err(GrandpaWarpSyncRequestError::Request)
             .await?;
 
-        decode_grandpa_warp_sync_response(&response)
+        protocol::decode_grandpa_warp_sync_response(&response)
+            .map_err(GrandpaWarpSyncRequestError::Decode)
     }
 
     /// Sends a storage request to the given peer.
@@ -792,57 +793,5 @@ pub enum StorageProofRequestError {
 #[derive(Debug, derive_more::Display)]
 pub enum GrandpaWarpSyncRequestError {
     Request(libp2p::RequestError),
-    BadResponse,
-}
-
-#[derive(parity_scale_codec::Encode)]
-pub struct GrandpaWarpSyncRequest {
-    begin: [u8; 32],
-}
-
-#[derive(Debug)]
-pub struct GrandpaWarpSyncResponseFragment {
-    pub header: crate::header::Header,
-    pub justification: crate::finality::justification::decode::Justification,
-}
-
-// TODO: make this a zero-cost API
-fn decode_grandpa_warp_sync_response(
-    bytes: &[u8],
-) -> Result<Vec<GrandpaWarpSyncResponseFragment>, GrandpaWarpSyncRequestError> {
-    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-        nom::multi::many_m_n(
-            num_elems,
-            num_elems,
-            nom::combinator::map(
-                nom::sequence::tuple((
-                    |s| {
-                        crate::header::decode_partial(s)
-                            .map(|(a, b)| (b, a))
-                            .map_err(|_| {
-                                nom::Err::Failure(nom::error::make_error(
-                                    s,
-                                    nom::error::ErrorKind::Verify,
-                                ))
-                            })
-                    },
-                    crate::util::nom_scale_compact_usize,
-                    |s| {
-                        crate::finality::justification::decode::justification(s).map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                s,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
-                    },
-                )),
-                move |(header, _, justification)| GrandpaWarpSyncResponseFragment {
-                    header: header.into(),
-                    justification: justification.into(),
-                },
-            ),
-        )
-    })(bytes)
-    .map(|(_, parse_result)| parse_result)
-    .map_err(|e: nom::Err<(&[u8], nom::error::ErrorKind)>| GrandpaWarpSyncRequestError::BadResponse)
+    Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }

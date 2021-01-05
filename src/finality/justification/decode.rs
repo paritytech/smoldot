@@ -60,7 +60,9 @@ impl<'a> From<&'a Justification> for JustificationRef<'a> {
             round: j.round,
             target_hash: &j.target_hash,
             target_number: j.target_number,
-            precommits: PrecommitsRef::Decoded(&j.precommits),
+            precommits: PrecommitsRef {
+                inner: PrecommitsRefInner::Decoded(&j.precommits),
+            },
             // TODO:
             votes_ancestries: VotesAncestriesIter { slice: &[], num: 0 },
         }
@@ -79,24 +81,8 @@ impl<'a> From<JustificationRef<'a>> for Justification {
 }
 
 #[derive(Copy, Clone)]
-pub enum PrecommitsRef<'a> {
-    Undecoded(&'a [u8]),
-    Decoded(&'a [Precommit]),
-}
-
-impl<'a> PrecommitsRef<'a> {
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + 'a {
-        match self {
-            Self::Undecoded(slice) => {
-                debug_assert_eq!(slice.len() % PRECOMMIT_ENCODED_LEN, 0);
-                PrecommitsRefIter::Undecoded {
-                    remaining_len: slice.len() / PRECOMMIT_ENCODED_LEN,
-                    pointer: slice,
-                }
-            }
-            Self::Decoded(slice) => PrecommitsRefIter::Decoded(slice.iter()),
-        }
-    }
+pub struct PrecommitsRef<'a> {
+    inner: PrecommitsRefInner<'a>,
 }
 
 impl<'a> fmt::Debug for PrecommitsRef<'a> {
@@ -105,7 +91,36 @@ impl<'a> fmt::Debug for PrecommitsRef<'a> {
     }
 }
 
-pub enum PrecommitsRefIter<'a> {
+#[derive(Copy, Clone)]
+enum PrecommitsRefInner<'a> {
+    Undecoded(&'a [u8]),
+    Decoded(&'a [Precommit]),
+}
+
+impl<'a> PrecommitsRef<'a> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = PrecommitRef<'a>> + 'a {
+        match self.inner {
+            PrecommitsRefInner::Undecoded(slice) => {
+                debug_assert_eq!(slice.len() % PRECOMMIT_ENCODED_LEN, 0);
+                PrecommitsRefIter {
+                    inner: PrecommitsRefIterInner::Undecoded {
+                        remaining_len: slice.len() / PRECOMMIT_ENCODED_LEN,
+                        pointer: slice,
+                    },
+                }
+            }
+            PrecommitsRefInner::Decoded(slice) => PrecommitsRefIter {
+                inner: PrecommitsRefIterInner::Decoded(slice.iter()),
+            },
+        }
+    }
+}
+
+pub struct PrecommitsRefIter<'a> {
+    inner: PrecommitsRefIterInner<'a>,
+}
+
+enum PrecommitsRefIterInner<'a> {
     Decoded(std::slice::Iter<'a, Precommit>),
     Undecoded {
         remaining_len: usize,
@@ -117,9 +132,9 @@ impl<'a> Iterator for PrecommitsRefIter<'a> {
     type Item = PrecommitRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Decoded(iter) => iter.next().map(Into::into),
-            Self::Undecoded {
+        match &mut self.inner {
+            PrecommitsRefIterInner::Decoded(iter) => iter.next().map(Into::into),
+            PrecommitsRefIterInner::Undecoded {
                 pointer,
                 remaining_len,
             } => {
@@ -137,9 +152,11 @@ impl<'a> Iterator for PrecommitsRefIter<'a> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            Self::Decoded(iter) => iter.size_hint(),
-            Self::Undecoded { remaining_len, .. } => (*remaining_len, Some(*remaining_len)),
+        match &self.inner {
+            PrecommitsRefIterInner::Decoded(iter) => iter.size_hint(),
+            PrecommitsRefIterInner::Undecoded { remaining_len, .. } => {
+                (*remaining_len, Some(*remaining_len))
+            }
         }
     }
 }
@@ -282,7 +299,9 @@ fn precommits(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitsRef> {
                 |(), _| (),
             ))
         }),
-        |inner| PrecommitsRef::Undecoded(inner),
+        |inner| PrecommitsRef {
+            inner: PrecommitsRefInner::Undecoded(inner),
+        },
     )(bytes)
 }
 
