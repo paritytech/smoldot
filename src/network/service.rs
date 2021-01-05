@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,7 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::network::{connection, discovery::kademlia, libp2p, multiaddr, peer_id, protocol};
+use crate::libp2p::{self, connection, discovery::kademlia, multiaddr, peer_id};
+use crate::network::protocol;
 
 use core::{
     fmt, iter,
@@ -98,7 +99,7 @@ pub struct ChainConfig {
     pub role: protocol::Role,
 }
 
-/// Identifier of a pending connection requested by the network through a [`Event::StartConnect`].
+/// Identifier of a pending connection requested by the network through a [`StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(libp2p::PendingId);
 
@@ -227,6 +228,11 @@ where
         self.libp2p.num_established_connections().await
     }
 
+    /// Returns the number of chains. Always equal to the length of [`Config::chains`].
+    pub fn num_chains(&self) -> usize {
+        self.chains.len()
+    }
+
     pub fn add_incoming_connection(
         &self,
         local_listen_address: &multiaddr::Multiaddr,
@@ -319,8 +325,8 @@ where
 
     pub async fn announce_transaction(&self, transaction: Vec<u8>) {}
 
-    /// After a [`Event::StartConnect`], notifies the [`ChainNetwork`] of the success of the
-    /// dialing attempt.
+    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// success of the dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
@@ -332,8 +338,8 @@ where
         ConnectionId(self.libp2p.pending_outcome_ok(id.0, user_data).await)
     }
 
-    /// After a [`Event::StartConnect`], notifies the [`ChainNetwork`] of the failure of the
-    /// dialing attempt.
+    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// failure of the dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_ok`].
     ///
@@ -389,12 +395,6 @@ where
                         peer_id,
                         chain_indices: out_overlay_network_indices,
                     };
-                }
-                libp2p::Event::StartConnect { id, multiaddr } => {
-                    return Event::StartConnect {
-                        id: PendingId(id),
-                        multiaddr,
-                    }
                 }
                 libp2p::Event::NotificationsOutAccept {
                     id,
@@ -480,10 +480,20 @@ where
                 libp2p::Event::NotificationsIn {
                     id,
                     peer_id,
+                    has_symmetric_substream,
                     overlay_network_index,
                     notification,
                 } => {
-                    // TODO: we shouldn't report events about nodes we don't have an outbound substream with
+                    // Don't report events about nodes we don't have an outbound substream with.
+                    // TODO: think about possible race conditions regarding missing block
+                    // announcements, as the remote will think we know it's at a certain block
+                    // while we ignored its announcement ; it isn't problematic as long as blocks
+                    // are generated continuously, as announcements will be generated periodically
+                    // as well and the state will no longer mismatch
+                    if !has_symmetric_substream {
+                        continue;
+                    }
+
                     let chain_index = overlay_network_index / 2;
                     if overlay_network_index % 2 == 0 {
                         // TODO: don't unwrap
@@ -560,6 +570,16 @@ where
         }
     }
 
+    /// Spawns new outgoing connections in order to fill empty outgoing slots.
+    // TODO: give more control, with number of slots and node choice
+    pub async fn fill_out_slots<'a>(&self, overlay_network_index: usize) -> Option<StartConnect> {
+        let inner = self.libp2p.fill_out_slots(overlay_network_index).await?;
+        Some(StartConnect {
+            id: PendingId(inner.id),
+            multiaddr: inner.multiaddr,
+        })
+    }
+
     ///
     /// # Panic
     ///
@@ -586,6 +606,17 @@ where
     }
 }
 
+/// User must start connecting to the given multiaddress.
+///
+/// Either [`ChainNetwork::pending_outcome_ok`] or [`ChainNetwork::pending_outcome_err`] must
+/// later be called in order to inform of the outcome of the connection.
+#[derive(Debug)]
+#[must_use]
+pub struct StartConnect {
+    pub id: PendingId,
+    pub multiaddr: multiaddr::Multiaddr,
+}
+
 /// Event generated by [`ChainNetwork::next_event`].
 #[derive(Debug)]
 pub enum Event {
@@ -593,15 +624,6 @@ pub enum Event {
     Disconnected {
         peer_id: peer_id::PeerId,
         chain_indices: Vec<usize>,
-    },
-
-    /// User must start connecting to the given multiaddr::Multiaddress.
-    ///
-    /// Either [`ChainNetwork::pending_outcome_ok`] or [`ChainNetwork::pending_outcome_err`] must
-    /// later be called in order to inform of the outcome of the connection.
-    StartConnect {
-        id: PendingId,
-        multiaddr: multiaddr::Multiaddr,
     },
 
     ChainConnected {

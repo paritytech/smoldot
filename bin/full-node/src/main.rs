@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -29,7 +29,7 @@ use substrate_lite::{
     chain, chain_spec,
     database::full_sled,
     header,
-    network::{connection, multiaddr, peer_id::PeerId},
+    libp2p::{connection, multiaddr, peer_id::PeerId},
 };
 use tracing::Instrument as _;
 
@@ -99,7 +99,7 @@ async fn async_main() {
         .unwrap(); // TODO: don't unwrap?
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
-    let (relay_chain_spec, parachain_id) =
+    let (relay_chain_spec, _parachain_id) =
         if let Some((relay_chain_name, parachain_id)) = chain_spec.relay_chain() {
             let json: Cow<[u8]> = match &cli_options.chain {
                 cli::CliChain::Custom(parachain_path) => {
@@ -171,8 +171,6 @@ async fn async_main() {
         "{:#?}",
         substrate_lite::metadata::decode(&metadata).unwrap()
     );*/
-
-    let use_me = database.finalized_block_hash().unwrap();
 
     let network_service = network_service::NetworkService::new(network_service::Config {
         listen_addresses: Vec::new(),
@@ -340,7 +338,7 @@ async fn async_main() {
                 }
             },
 
-            network_message = network_service.next_event(use_me, &genesis_chain_information).fuse() => {
+            network_message = network_service.next_event().fuse() => {
                 match network_message {
                     network_service::Event::Connected { chain_index: 0, peer_id, best_block_number } => {
                         sync_service.add_source(peer_id, best_block_number).await;

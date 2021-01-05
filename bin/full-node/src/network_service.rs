@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -29,12 +29,14 @@
 
 use core::{cmp, pin::Pin, time::Duration};
 use futures::prelude::*;
-use std::{collections::HashMap, io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
-use substrate_lite::network::{
-    connection,
-    multiaddr::{Multiaddr, Protocol},
-    peer_id::PeerId,
-    protocol, service,
+use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
+use substrate_lite::{
+    libp2p::{
+        connection,
+        multiaddr::{Multiaddr, Protocol},
+        peer_id::PeerId,
+    },
+    network::{protocol, service},
 };
 use tracing::Instrument as _;
 
@@ -154,7 +156,7 @@ impl NetworkService {
                     loop {
                         // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
 
-                        let (socket, _addr) = match tcp_listener.accept().await {
+                        let (_socket, _addr) = match tcp_listener.accept().await {
                             Ok(v) => v,
                             Err(_) => {
                                 // Errors here can happen if the accept failed, for example if no file
@@ -213,43 +215,96 @@ impl NetworkService {
             }),
         });
 
-        /*
         // Spawn tasks dedicated to the Kademlia discovery.
-        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-            let network_service = Arc::downgrade(&network_service);
-            async move {
-                let mut next_discovery = Duration::from_secs(5);
+        for chain_index in 0..network_service.network.num_chains() {
+            (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+                let network_service = Arc::downgrade(&network_service);
+                async move {
+                    let mut next_discovery = Duration::from_secs(5);
 
-                loop {
-                    futures_timer::Delay::new(next_discovery).await;
-                    next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
+                    loop {
+                        futures_timer::Delay::new(next_discovery).await;
+                        next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
-                    let network_service = match network_service.upgrade() {
-                        Some(ns) => ns,
-                        None => {
-                            tracing::debug!("discovery-finish");
-                            return;
+                        let network_service = match network_service.upgrade() {
+                            Some(ns) => ns,
+                            None => {
+                                tracing::debug!("discovery-finish");
+                                return;
+                            }
+                        };
+
+                        match network_service
+                            .network
+                            .kademlia_discovery_round(Instant::now(), chain_index)
+                            .await
+                        {
+                            Ok(insert) => {
+                                insert
+                                    .insert(|_| ())
+                                    .instrument(tracing::debug_span!("insert"))
+                                    .await
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "discovery-error")
+                            }
                         }
-                    };
-
-                    match network_service
-                        .network
-                        .kademlia_discovery_round(Instant::now(), 0)
-                        .await
-                    {
-                        Ok(insert) => {
-                            insert
-                                .insert(|_| ())
-                                .instrument(tracing::debug_span!("insert"))
-                                .await
-                        }
-                        Err(error) => tracing::debug!(%error, "discovery-error"),
                     }
                 }
-            }
-            .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
-        }));
-        */
+                .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
+            }));
+        }
+
+        // Spawn tasks dedicated to opening connections.
+        // TODO: spawn several, or do things asynchronously, so that we try open multiple connections simultaneously
+        for chain_index in 0..network_service.network.num_chains() {
+            (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+                let network_service = Arc::downgrade(&network_service);
+                async move {
+                    loop {
+                        // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
+                        futures_timer::Delay::new(Duration::from_secs(1)).await;
+
+                        let network_service = match network_service.upgrade() {
+                            Some(ns) => ns,
+                            None => {
+                                tracing::debug!("task-finish");
+                                return;
+                            }
+                        };
+
+                        let start_connect = match network_service.network.fill_out_slots(chain_index).await {
+                            Some(sc) => sc,
+                            None => continue,
+                        };
+
+                        let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
+                        let _enter = span.enter();
+
+                        // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
+                        // a `Future<dyn Output = Result<TcpStream, ...>>`.
+                        let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
+                            Ok(socket) => socket,
+                            Err(_) => {
+                                tracing::debug!(%start_connect.multiaddr, "not-tcp");
+                                network_service.network.pending_outcome_err(start_connect.id).await;
+                                continue;
+                            }
+                        };
+
+                        // TODO: handle dialing timeout here
+
+                        let network_service2 = network_service.clone();
+                        (network_service.guarded.lock().tasks_executor)(Box::pin({
+                            connection_task(socket, network_service2, start_connect.id).instrument(
+                                tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
+                            )
+                        }));
+                    }
+                }
+                .instrument(tracing::debug_span!(parent: None, "tcp-dial"))
+            }))
+        }
 
         (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
             let network_service = network_service.clone();
@@ -290,51 +345,16 @@ impl NetworkService {
             .await
     }
 
-    async fn warp_sync(
-        &self,
-        peer_id: PeerId,
-        hash: [u8; 32],
-        genesis_chain_infomation: &substrate_lite::chain::chain_information::ChainInformation,
-    ) -> Result<(), substrate_lite::finality::justification::verify::Error> {
-        let warp_sync_response = self
-            .network
-            .grandpa_warp_sync_request(Instant::now(), peer_id, 0, hash)
-            .await
-            .unwrap();
-
-        let mut verifier = substrate_lite::finality::grandpa::warp_sync::Verifier::new(
-            genesis_chain_infomation,
-            warp_sync_response,
-        );
-
-        while let substrate_lite::finality::grandpa::warp_sync::Next::NotFinished(next_verifier) =
-            verifier.next()?
-        {
-            verifier = next_verifier;
-        }
-
-        println!("Verified warp sync fragments");
-
-        Ok(())
-    }
-
     /// Returns the next event that happens in the network service.
     ///
     /// If this method is called multiple times simultaneously, the events will be distributed
     /// amongst the different calls in an unpredictable way.
     #[tracing::instrument(skip(self))]
-    pub async fn next_event(
-        self: &Arc<Self>,
-        use_me: [u8; 32],
-        genesis_chain_infomation: &substrate_lite::chain::chain_information::ChainInformation,
-    ) -> Event {
+    pub async fn next_event(self: &Arc<Self>) -> Event {
         loop {
             match self.network.next_event().await {
                 service::Event::Connected(peer_id) => {
                     tracing::debug!(%peer_id, "connected");
-                    self.warp_sync(peer_id, use_me, genesis_chain_infomation)
-                        .await
-                        .unwrap();
                 }
                 service::Event::Disconnected {
                     peer_id,
@@ -348,28 +368,6 @@ impl NetworkService {
                             peer_id,
                         };
                     }
-                }
-                service::Event::StartConnect { id, multiaddr } => {
-                    let span = tracing::debug_span!("start-connect", ?id, %multiaddr);
-                    let _enter = span.enter();
-
-                    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-                    // a `Future<dyn Output = Result<TcpStream, ...>>`.
-                    let socket = match multiaddr_to_socket(&multiaddr) {
-                        Ok(socket) => socket,
-                        Err(_) => {
-                            tracing::debug!(%multiaddr, "not-tcp");
-                            self.network.pending_outcome_err(id).await;
-                            continue;
-                        }
-                    };
-
-                    let mut guarded = self.guarded.lock();
-                    (guarded.tasks_executor)(Box::pin(
-                        connection_task(socket, self.clone(), id).instrument(
-                            tracing::trace_span!(parent: None, "connection", address = %multiaddr),
-                        ),
-                    ));
                 }
                 service::Event::BlockAnnounce {
                     chain_index,
