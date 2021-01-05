@@ -50,9 +50,11 @@
 //!
 //! In full mode, .
 
+// TODO: finish ^
+
 use crate::{
     chain::{blocks_tree, chain_information},
-    header,
+    header, verify,
 };
 
 use alloc::collections::BTreeSet;
@@ -78,10 +80,7 @@ pub struct Config {
 }
 
 pub struct AllForksSync<TSrc, TBl> {
-    /// Data structure containing the blocks.
-    ///
-    /// The user data, [`Block`], isn't used internally but stores information later reported
-    /// to the user.
+    /// Data structure containing the non-finalized blocks.
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 
     /// Extra fields. In a separate structure in order to be moved around.
@@ -94,7 +93,7 @@ struct Inner<TSrc> {
     full: bool,
 
     /// List of sources. Controlled by the API user.
-    sources: hashbrown::HashMap<SourceId, Source<TSrc>>,
+    sources: hashbrown::HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
 
     /// Identifier to allocate to the next source. Identifiers are never reused, which allows
     /// keeping obsolete identifiers in the internal state.
@@ -102,18 +101,20 @@ struct Inner<TSrc> {
 
     /// List of blocks whose body is currently being downloaded from a source.
     ///
+    /// Contains a value the SCALE-encoded header and source the block is currently being
+    /// downloaded from.
+    ///
     /// Always empty if `full` is `false`.
-    pending_downloads: hashbrown::HashMap<[u8; 32], Option<SourceId>, fnv::FnvBuildHasher>,
+    pending_body_downloads:
+        hashbrown::HashMap<[u8; 32], (header::Header, Option<SourceId>), fnv::FnvBuildHasher>,
 
     /// Stores `(source, block hash)` tuples. Each tuple is an information about the fact that
     /// this source knows about the given block. Only contains blocks whose height is higher than
     /// the height of the local finalized block.
-    known_blocks1: BTreeSet<(SourceId, [u8; 32])>,
+    known_blocks1: BTreeSet<(SourceId, [u8; 32])>, // TODO: move to standalone container
 
     /// Contains the same entries as [`Inner::known_blocks1`], but in reverse.
-    known_blocks2: BTreeSet<([u8; 32], SourceId)>,
-
-    block_hashes_by_height: Vec<(u64, [u8; 32])>,
+    known_blocks2: BTreeSet<([u8; 32], SourceId)>, // TODO: move to standalone container
 }
 
 struct Block<TBl> {
@@ -127,6 +128,7 @@ struct Source<TSrc> {
 }
 
 impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
+    /// Initializes a new [`AllForksSync`].
     pub fn new(config: Config) -> Self {
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree::Config {
             chain_information: config.chain_information,
@@ -139,7 +141,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 full: config.full,
                 sources: Default::default(),
                 next_source_id: SourceId(0),
-                pending_downloads: Default::default(),
+                pending_body_downloads: Default::default(),
                 known_blocks1: Default::default(),
                 known_blocks2: Default::default(),
             },
@@ -194,12 +196,59 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         }
     }
 
-    pub fn blocks_response(self, source_id: SourceId) {}
+    /// Call in response to a [`BlockAnnounceOutcome::BlockBodyDownloadStart`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the source wasn't known locally as downloading something.
+    ///
+    pub fn block_body_response(
+        mut self,
+        now_from_unix_epoch: Duration,
+        source_id: SourceId,
+        block_body: impl Iterator<Item = impl AsRef<[u8]>>,
+    ) -> BlockBodyVerify<TSrc, TBl> {
+        // Removes traces of the request from the state machine.
+        let block_header_hash = if let Some((h, _)) = self
+            .inner
+            .pending_body_downloads
+            .iter_mut()
+            .find(|(_, (_, s))| *s == Some(source_id))
+        {
+            let hash = *h;
+            let header = self.inner.pending_body_downloads.remove(&hash).unwrap().0;
+            (header, hash)
+        } else {
+            panic!()
+        };
+
+        // Sanity check.
+        debug_assert_eq!(block_header_hash.1, block_header_hash.0.hash());
+
+        // If not full, there shouldn't be any block body download happening in the first place.
+        debug_assert!(self.inner.full);
+
+        match self
+            .chain
+            .verify_body(
+                block_header_hash.0.scale_encoding()
+                    .fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a }), now_from_unix_epoch) // TODO: stupid extra allocation
+        {
+            blocks_tree::BodyVerifyStep1::BadParent { .. }
+            | blocks_tree::BodyVerifyStep1::InvalidHeader(..)
+            | blocks_tree::BodyVerifyStep1::Duplicate(_) => unreachable!(),
+            blocks_tree::BodyVerifyStep1::ParentRuntimeRequired(_runtime_req) => {
+                todo!()
+            }
+        }
+    }
 }
 
 /// Access to a source in a [`AllForksSync`]. Obtained through [`AllForksSync::source_mut`].
 pub struct SourceMutAccess<'a, TSrc, TBl> {
     parent: &'a mut AllForksSync<TSrc, TBl>,
+
+    /// Guaranteed to be a valid entry in [`AllForksSync::sources`].
     source_id: SourceId,
 }
 
@@ -209,11 +258,45 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
         self.source_id
     }
 
+    /// Returns true if the source has earlier announced the block passed as parameter or one of
+    /// its descendants.
+    // TODO: document precisely what it means
+    pub fn knows_block(&self, hash: &[u8; 32]) -> bool {
+        if self
+            .parent
+            .inner
+            .known_blocks1
+            .contains(&(self.source_id, *hash))
+        {
+            return true;
+        }
+
+        let source = self.parent.inner.sources.get(&self.source_id).unwrap();
+
+        // TODO: finish
+        false
+    }
+
     /// Removes the source from the [`AllForksSync`].
     ///
-    /// Removing the source cancels the request that is associated to it (if any).
-    pub fn remove(self) -> TSrc {
-        let source = self.parent.inner.sources.remove(&self.source_id).unwrap();
+    /// Returns the user data that was originally passed to [`AllForksSync::add_source`].
+    ///
+    /// Removing the source implicitly cancels the request that is associated to it (if any).
+    pub fn remove(mut self) -> TSrc {
+        let source_id = self.source_id;
+        let source = self.parent.inner.sources.remove(&source_id).unwrap();
+
+        if let Some((_, (_, src))) = self
+            .parent
+            .inner
+            .pending_body_downloads
+            .iter_mut()
+            .find(|(_, (_, s))| *s == Some(source_id))
+        {
+            // TODO: redirect download to other source
+            *src = None;
+        }
+
         source.user_data
     }
 
@@ -232,13 +315,13 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
     ) -> BlockAnnounceOutcome {
         let announced_header = match header::decode(&announced_scale_encoded_header) {
             Ok(h) => h,
-            Err(err) => return BlockAnnounceOutcome::InvalidHeader(err), // TODO: punish?
+            Err(err) => return BlockAnnounceOutcome::InvalidHeader(err),
         };
 
         let announced_header_hash = announced_header.hash();
 
-        // No matter what is done below, start by updating the "best block" according to this
-        // source.
+        // No matter what is done below, start by updating the view the local state machine
+        // maintains for this source.
         if is_best {
             let source = self.parent.inner.sources.get_mut(&self.source_id).unwrap();
             source.best_block_number = announced_header.number;
@@ -252,6 +335,14 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
         if announced_header.number <= self.parent.chain.finalized_block_header().number {
             return BlockAnnounceOutcome::TooOld;
         }
+
+        // Calculate the height of the parent of the announced block.
+        let parent_header_number = match announced_header.number.checked_sub(1) {
+            Some(n) => n,
+            // The code right above verifies that `announced_header.number <= finalized_number`,
+            // which is always true if `announced_header.number` is 0.
+            None => unreachable!(),
+        };
 
         // Now that it is known that the block height.  TODO:
         debug_assert_eq!(
@@ -277,58 +368,73 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             return BlockAnnounceOutcome::AlreadyVerified;
         }
 
-        // Determine whether if the parent of the announced block is in the `NonFinalizedTree`.
+        // Determine whether the parent of the announced block is in the `NonFinalizedTree`.
         let parent_is_in_chain = {
             let local_finalized_block_hash = self.parent.chain.finalized_block_hash();
-            self.parent
-                .chain
-                .non_finalized_block_by_hash(announced_header.parent_hash)
-                .is_some()
-                || *announced_header.parent_hash == local_finalized_block_hash
+            *announced_header.parent_hash == local_finalized_block_hash
+                || self
+                    .parent
+                    .chain
+                    .non_finalized_block_by_hash(announced_header.parent_hash)
+                    .is_some()
         };
 
         if let Some(pending) = self
             .parent
             .inner
-            .pending_downloads
+            .pending_body_downloads
             .get_mut(&announced_header_hash)
         {
-            // This block header has already been received in the past.
-            if pending.is_none() {
-                // If no source is currently downloading this block, add the source that has
-                // just announced it.
-                *pending = Some(self.source_id);
+            debug_assert!(self.parent.inner.full);
+
+            // The parent block header has already been announced in the past.
+            // If `pending` is `Some`, it is currently being downloaded.
+            if pending.1.is_some() {
+                return BlockAnnounceOutcome::Queued;
+            } else {
+                // No source is currently downloading this block. Add the source that has just
+                // announced it.
+                pending.1 = Some(self.source_id);
             }
+            todo!() // TODO:
         } else if parent_is_in_chain {
             // Parent is in the `NonFinalizedTree`, meaning it is possible to verify it.
 
             // Start by verifying the header alone.
-            match self
+            let header = match self
                 .parent
                 .chain
                 .verify_header(announced_scale_encoded_header, now_from_unix_epoch)
             {
                 Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => unreachable!(),
-                Ok(blocks_tree::HeaderVerifySuccess::Insert { .. }) if self.parent.inner.full => {}
+                Ok(blocks_tree::HeaderVerifySuccess::Insert { insert, .. })
+                    if self.parent.inner.full =>
+                {
+                    insert.into_header()
+                }
                 Ok(blocks_tree::HeaderVerifySuccess::Insert {
                     insert,
                     is_new_best,
                     ..
                 }) => {
-                    insert.insert(());
-                    return;
+                    // insert.insert(());
+                    todo!(); // TODO: ^
+                    return BlockAnnounceOutcome::HeaderImported;
                 }
-                Err(_) => {
-                    return;
+                Err(blocks_tree::HeaderVerifyError::BadParent { .. })
+                | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
+                Err(blocks_tree::HeaderVerifyError::VerificationFailed(err)) => {
+                    return BlockAnnounceOutcome::HeaderVerifyError(err);
                 }
-            }
+            };
 
             // Header if valid, and config is in full mode. Request the block body.
+            // TODO: must make sure that source isn't busy
             self.parent
                 .inner
-                .pending_downloads
-                .insert(announced_header_hash, Some(self.source_id));
-            return;
+                .pending_body_downloads
+                .insert(announced_header_hash, (header, Some(self.source_id)));
+            return BlockAnnounceOutcome::BlockBodyDownloadStart;
         } else if announced_header.number == self.parent.chain.finalized_block_header().number + 1 {
             debug_assert_ne!(
                 *announced_header.parent_hash,
@@ -339,6 +445,11 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             return BlockAnnounceOutcome::NotFinalizedChain;
         } else {
             // Parent is not in the `NonFinalizedTree`.
+            /*self.parent
+            .inner
+            .unverified
+            .insert(parent_header_number, *announced_header.parent_hash);*/
+            todo!() // TODO:
         }
     }
 
@@ -357,17 +468,67 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
     }
 }
 
+/// Outcome of calling [`SourceMutAccess::block_announce`].
 #[derive(Debug)]
 pub enum BlockAnnounceOutcome {
-    /// Failed to decode announced header.
-    InvalidHeader(header::Error),
+    /// Announced header has been successfully added to the local tree of headers.
+    ///
+    /// Can only happen when in non-full mode.
+    // TODO: should contain an object that lets user pass user data of block
+    HeaderImported,
+
+    /// Announced header has been successfully verified and added to the local tree of
+    /// non-finalized blocks.
+    ///
+    /// Can only happen when in full mode.
+    ///
+    /// A block request should be start towards this source for the block header that has just
+    /// been announced.
+    ///
+    /// The [`AllForksSync::block_body_response`] method must later be called.
+    // TODO: should contain an object that lets user pass user data of block
+    BlockBodyDownloadStart,
+
+    /// Parent of the block being announced is completely unknown to the local state machine. An
+    /// ancestry search must be started towards the source.
+    ///
+    /// > **Note**: This situation can happen for instance after a network split (also called
+    /// >           *netsplit*) ends. During the split, some nodes have produced one chain, while
+    /// >           some other nodes have produced a different chain.
+    ///
+    /// An ancestry search consists in asking the source for its block headers  in the range
+    /// `first_block_height ..= last_block_height`. The answer will make it possible for the local
+    /// state machine to determine how the chain is connected.
+    AncestrySearchStart {
+        /// Height of the first block header the source should return.
+        first_block_height: u64,
+
+        /// Height of the last block header the source should return.
+        ///
+        /// Always inferior to `first_block_height`.
+        last_block_height: u64,
+    },
+
     /// Announced block is too old to be part of the finalized chain.
+    ///
+    /// It is assumed that all sources will eventually agree on the same finalized chain. Blocks
+    /// whose height is inferior to the height of the latest known finalized block should simply
+    /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
+    /// verified, and it is assumed that the source is simply late.
     TooOld,
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
     AlreadyVerified,
     /// Announced block is known to not be a descendant of the finalized block.
     NotFinalizedChain,
+    /// Header has been queued for verification. Verifying the header is waiting for an ongoing
+    /// download to finish.
+    Queued,
+
+    /// Failed to decode announced header.
+    InvalidHeader(header::Error),
+    /// Error while verifying validity of header.
+    HeaderVerifyError(verify::header_only::Error),
 }
 
 /// Identifier for a source in the [`AllForksSync`].
@@ -378,36 +539,11 @@ pub enum BlockAnnounceOutcome {
 pub struct SourceId(u64);
 
 /// State of the processing of blocks.
-pub enum ProcessOne<TSrc, TBl> {
-    /// No processing is necessary.
-    ///
-    /// Calling [`AllForksSync::process_one`] again is unnecessary.
-    Idle {
-        /// The state machine.
-        /// The [`AllForksSync::process_one`] method takes ownership of the
-        /// [`AllForksSync`]. This field yields it back.
-        sync: AllForksSync<TSrc, TBl>,
-    },
-
-    /// An issue happened when verifying the block or its justification, resulting in resetting
-    /// the chain to the latest finalized block.
-    ///
-    /// > **Note**: The latest finalized block might be a block imported during the same
-    /// >           operation.
-    Reset {
-        /// The state machine.
-        /// The [`AllForksSync::process_one`] method takes ownership of the
-        /// [`AllForksSync`]. This field yields it back.
-        sync: AllForksSync<TSrc, TBl>,
-
-        /// Height of the best block before the reset.
-        previous_best_height: u64,
-
-        /// Problem that happened and caused the reset.
-        reason: ResetCause,
-    },
-
-    /// Processing of the block is over.
+pub enum BlockBodyVerify<TSrc, TBl> {
+    #[doc(hidden)]
+    Foo(core::marker::PhantomData<(TSrc, TBl)>),
+    // TODO: finish
+    /*/// Processing of the block is over.
     ///
     /// There might be more blocks remaining. Call [`AllForksSync::process_one`] again.
     NewBest {
@@ -442,5 +578,5 @@ pub enum ProcessOne<TSrc, TBl> {
 
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
-    FinalizedStorageNextKey(StorageNextKey<TSrc, TBl>),
+    FinalizedStorageNextKey(StorageNextKey<TSrc, TBl>),*/
 }
