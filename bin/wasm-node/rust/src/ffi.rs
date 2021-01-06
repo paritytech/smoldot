@@ -112,10 +112,8 @@ pub(crate) fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
 fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
     let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
-    let milliseconds = u64::try_from(duration.as_millis())
-        .unwrap_or(u64::max_value())
-        .saturating_add(1);
-    unsafe { bindings::start_timer(timer_id, milliseconds as f64) }
+    let milliseconds = u64::try_from(duration.as_millis()).unwrap_or(u64::max_value());
+    unsafe { bindings::start_timer(timer_id, (milliseconds as f64).ceil()) }
 }
 
 // TODO: cancel the timer if the `Delay` is destroyed? we create and destroy a lot of `Delay`s
