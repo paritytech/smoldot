@@ -73,9 +73,9 @@ export async function start(config) {
 
       // Must call `timer_finished` after the given number of milliseconds has elapsed.
       start_timer: (id, ms) => {
-        // In the browser, `setTimeout` works when `ms` equals 0. However, NodeJS accepts a
-        // minimum of 1 milliseconds (if `0` is passed, it is replaced with `1`) and wants you to
-        // use `setImmediate` instead.
+        // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS
+        // requires a minimum of 1 millisecond (if `0` is passed, it is automatically replaced
+        // with `1`) and wants you to use `setImmediate` instead.
         if (ms == 0 && typeof setImmediate === "function") {
           setImmediate(() => {
             module.exports.timer_finished(id);
