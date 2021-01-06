@@ -77,8 +77,7 @@ pub(crate) fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
             }
 
             let arc_self = arc_self.clone();
-            // TODO: this extra 1ms is quite bad/annoying
-            start_timer_wrap(Duration::from_millis(1), move || {
+            start_timer_wrap(Duration::new(0, 0), move || {
                 if arc_self.done.load(atomic::Ordering::SeqCst) {
                     return;
                 }
