@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -1105,7 +1105,7 @@ pub enum Remove<'a, TUd> {
     /// The node that got removed had one single child. This child's parent becomes the parent
     /// that the former node had.
     ///
-    /// ```ignore
+    /// ```text
     ///
     ///
     ///                +-+                                         +-+
@@ -1141,7 +1141,7 @@ pub enum Remove<'a, TUd> {
     ///
     /// The node that got removed didn't have any children.
     ///
-    /// ```ignore
+    /// ```text
     ///
     ///       Before                                       After
     ///
@@ -1176,7 +1176,7 @@ pub enum Remove<'a, TUd> {
     ///
     /// This can only happen if the removed node had no children and only one sibling.
     ///
-    /// ```ignore
+    /// ```text
     ///
     ///             Before                        After
     ///

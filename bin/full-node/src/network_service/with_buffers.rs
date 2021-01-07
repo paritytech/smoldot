@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -149,12 +149,6 @@ impl<T> WithBuffers<T> {
         };
 
         Ok((read_buffer, write_buffer))
-    }
-
-    /// After [`WithBuffers::buffers`] has returned an error, this method can be used in order to
-    /// obtain it.
-    pub fn into_error(mut self) -> Option<io::Error> {
-        self.error.take()
     }
 
     /// Advances the cursors of the buffers.
