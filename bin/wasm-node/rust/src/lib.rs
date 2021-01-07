@@ -239,6 +239,10 @@ pub async fn start_client(chain_spec: String) {
 
                         client.finalized_block = decoded.hash();
                         client.known_blocks.put(client.finalized_block, decoded.into());
+
+                        // Load the entry of the finalized block in order to guarantee that it
+                        // remains in the LRU cache.
+                        let _ = client.known_blocks.get(&client.finalized_block).unwrap();
                     },
                 }
             },
