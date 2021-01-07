@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::libp2p::{self, connection, discovery::kademlia, multiaddr, peer_id};
+use crate::libp2p::{self, connection, discovery::kademlia, multiaddr, peer_id, QueueNotificationError};
 use crate::network::protocol;
 
 use core::{
@@ -277,15 +277,13 @@ where
 
     pub async fn announce_transaction(
 		&self,
-		now: TNow,
-		target: peer_id::PeerId,
+		target: &peer_id::PeerId,
 		chain_index: usize,
 		transaction: Vec<u8>,
-	) -> Result<(), AnnounceTransactionRequestError> {
+	) -> Result<(), QueueNotificationError> {
         Ok(self
             .libp2p
 		    .queue_notification(&target, 1 + chain_index * 3 + 1, transaction)
-            .map_err(AnnounceTransactionRequestError::Request)
             .await?)
 	}
 
@@ -745,11 +743,4 @@ pub enum BlocksRequestError {
 pub enum StorageProofRequestError {
     Request(libp2p::RequestError),
     Decode(protocol::DecodeStorageProofResponseError),
-}
-
-/// Error returned by [`ChainNetwork::author_submitextrinsic`].
-#[derive(Debug, derive_more::Display)]
-pub enum AnnounceTransactionRequestError {
-    Request(libp2p::QueueNotificationError),
-    Decode(protocol::AnnounceTransactionDecodeError),
 }

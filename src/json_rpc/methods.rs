@@ -157,7 +157,7 @@ define_methods! {
     author_removeExtrinsic() -> (), // TODO:
     author_rotateKeys() -> HexString,
     author_submitAndWatchExtrinsic() -> (), // TODO:
-    author_submitExtrinsic(transaction: HexString) -> HexString,
+    author_submitExtrinsic(transaction: HexString) -> (),
     author_unwatchExtrinsic() -> (), // TODO:
     babe_epochAuthorship() -> (), // TODO:
     chain_getBlock(hash: Option<HashHexString>) -> Block,

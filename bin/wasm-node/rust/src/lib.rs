@@ -32,11 +32,8 @@ use std::{
 use substrate_lite::{
 	chain, chain_spec,
 	json_rpc::{self, methods},
-    libp2p::{multiaddr, peer_id::PeerId},
-	network::{
-		protocol,
-		service::AnnounceTransactionRequestError
-	},
+    libp2p::{multiaddr, peer_id::PeerId, QueueNotificationError},
+	network::protocol,
 	trie::proof_verify
 };
 
@@ -302,10 +299,8 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
         }
         methods::MethodCall::author_submitExtrinsic { transaction } => {
 			let response = match announce_transaction(client, transaction.0).await {
-				Ok(tx_hash) => {
-					methods::Response::author_submitExtrinsic(
-						methods::HexString(tx_hash)
-					).to_json_response(request_id)
+				Ok(()) => {
+					methods::Response::author_submitExtrinsic(()).to_json_response(request_id)
 				},
 				Err(e) => todo!("{:?}", e), //TODO:
 			};
@@ -607,9 +602,9 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
     }
 }
 
-async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<Vec<u8>, AnnounceTransactionRequestError> {
-    let mut result = Ok(vec![]);
-    for target in client.peers.iter().take(3) {
+async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<(), QueueNotificationError> {
+    let mut result = Ok(());
+    for target in client.peers.iter() {
 		result = client
 			.network_service
 			.clone()
