@@ -63,7 +63,7 @@ The objective of the wasm-node is to do two things:
 - Synchronizing the chain(s).
 - Answer JSON-RPC queries made by the user.
 
---- 
+---
 
 Synchronizing the chain(s) consists in:
 
@@ -118,7 +118,7 @@ runtime code (see the `metadata` module), which is itself the storage item whose
 storage item is modified. This should also be implemented by sending, for each block we receive,
 a storage proof requesting the value of every single storage item being watched, and comparing the
 result with the one of the previous block. Note that "has changed" means "has changed compared to
-the previous best block", and the "previous best block" can have the same height as the current 
+the previous best block", and the "previous best block" can have the same height as the current
 best block, notably in case of a reorg.
 - Watching for changes in the runtime version. The runtime version is also a piece of information
 that can be obtained from the runtime code. In order to watch for changes in the runtime version,
