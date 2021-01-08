@@ -33,7 +33,7 @@ use core::{cmp, convert::TryFrom as _, mem};
 /// # Example
 ///
 /// ```
-/// use substrate_lite::network::leb128;
+/// use substrate_lite::util::leb128;
 ///
 /// assert_eq!(leb128::encode(0u64).collect::<Vec<_>>(), &[0]);
 /// assert_eq!(
@@ -87,7 +87,7 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 /// # Example
 ///
 /// ```
-/// use substrate_lite::network::leb128;
+/// use substrate_lite::util::leb128;
 ///
 /// assert_eq!(leb128::encode_usize(0).collect::<Vec<_>>(), &[0]);
 /// assert_eq!(
