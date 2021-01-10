@@ -27,10 +27,14 @@ pub struct Config<'a, TLocAuth> {
     /// Duration, in milliseconds, of an Aura slot.
     pub slot_duration: NonZeroU64,
 
-    /// List of the Aura authorities of the current best block.
-    pub best_block_authorities: header::AuraAuthoritiesIter<'a>,
+    /// List of the Aura authorities allowed to produce a block. This is either the same as the
+    /// ones of the current best block, or a new list if the current best block contains an
+    /// authorities list change digest item.
+    pub current_authorities: header::AuraAuthoritiesIter<'a>,
 
     /// Iterator to the list of sr25519 public keys available locally.
+    ///
+    /// Must implement `Iterator<Item = &[u8; 32]>`.
     pub local_authorities: TLocAuth,
 }
 
@@ -44,17 +48,17 @@ pub struct Config<'a, TLocAuth> {
 /// [`SlotClaim::slot_end_from_unix_epoch`].
 ///
 /// However, keep in mind that, as the best block changes, the list of authorities
-/// ([`Config::best_block_authorities`]) might change, in which case this function should be
+/// ([`Config::current_authorities`]) might change, in which case this function should be
 /// called again.
 pub fn next_slot_claim<'a>(
     config: Config<'a, impl Iterator<Item = &'a [u8; 32]>>,
 ) -> Option<SlotClaim> {
-    let num_best_block_authorities = config.best_block_authorities.clone().count();
+    let num_current_authorities = config.current_authorities.clone().count();
 
     let current_slot = config.now_from_unix_epoch.as_secs() / config.slot_duration.get();
 
     let current_slot_index = usize::try_from(
-        current_slot.checked_div(u64::try_from(num_best_block_authorities).unwrap())?,
+        current_slot.checked_div(u64::try_from(num_current_authorities).unwrap())?,
     )
     .unwrap();
 
@@ -63,7 +67,7 @@ pub fn next_slot_claim<'a>(
     for (pub_key_index, local_pub_key) in config.local_authorities.enumerate() {
         // TODO: O(n) complexity
         let mut index = match config
-            .best_block_authorities
+            .current_authorities
             .clone()
             .position(|pk| pk.public_key == local_pub_key)
         {
@@ -72,7 +76,7 @@ pub fn next_slot_claim<'a>(
         };
 
         if index < current_slot_index {
-            index += num_best_block_authorities;
+            index += num_current_authorities;
         }
 
         let claimable_slot = current_slot + u64::try_from(index - current_slot_index).unwrap();

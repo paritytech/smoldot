@@ -22,42 +22,20 @@ use crate::{
     executor::host,
     header,
     trie::calculate_root,
-    util,
 };
 
-use alloc::{string::String, vec::Vec};
-use core::{iter, num::NonZeroU64, time::Duration};
-use hashbrown::HashMap;
-
-pub use runtime::{InherentData, InherentDataConsensus};
+use alloc::vec::Vec;
+use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
 
 /// Configuration for a block generation.
-pub struct Config<'a> {
-    /// Hash of the parent of the block to generate.
-    ///
-    /// Used to populate the header of the new block.
-    pub parent_hash: &'a [u8; 32],
-
-    /// Height of the parent of the block to generate.
-    ///
-    /// Used to populate the header of the new block.
-    pub parent_number: u64,
-
-    /// Runtime used to check the new block. Must be built using the Wasm code found at the
-    /// `:code` key of the parent block storage.
-    pub parent_runtime: host::HostVmPrototype,
-
-    /// Consensus-specific item to put in the digest of the header prototype.
-    ///
-    /// > **Note**: In the case of Aura and Babe, contains the slot being claimed.
-    pub consensus_digest_log_item: ConfigPreRuntime<'a>,
-
-    /// Optional cache corresponding to the storage trie root hash calculation coming from the
-    /// parent block verification.
-    pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+pub struct Config<'a, TLocAuth> {
+    /// Consensus-specific configuration.
+    pub consensus: ConfigConsensus<'a, TLocAuth>,
 }
 
+/// Extension to [`Config`].
 pub enum ConfigConsensus<'a, TLocAuth> {
+    /// Chain is using the Aura consensus algorithm.
     Aura {
         /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
         /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
@@ -66,45 +44,82 @@ pub enum ConfigConsensus<'a, TLocAuth> {
         /// Duration, in milliseconds, of an Aura slot.
         slot_duration: NonZeroU64,
 
-        /// List of the Aura authorities of the current best block.
-        best_block_authorities: header::AuraAuthoritiesIter<'a>,
+        /// List of the Aura authorities allowed to produce a block. This is either the same as
+        /// the ones of the current best block, or a new list if the current best block contains
+        /// an authorities list change digest item.
+        current_authorities: header::AuraAuthoritiesIter<'a>,
 
         /// Iterator to the list of sr25519 public keys available locally.
+        ///
+        /// Must implement `Iterator<Item = &[u8; 32]>`.
         local_authorities: TLocAuth,
     },
+    // TODO: Babe isn't supported yet
 }
 
 /// Current state of the block building process.
 #[must_use]
 pub enum Builder {
+    /// None of the authorities available locally are allowed to produce a block.
+    Idle,
+
     /// Block production is idle, waiting for a slot.
     WaitSlot(WaitSlot),
 
-    /// Block generation finished.
-    Produced {
-        block: Result<Success, runtime::Error>,
-        next_slot: WaitSlot,
-    },
+    /// Block production is ready to start.
+    Ready(AuthoringStart),
 
     /// Currently authoring a block.
     Authoring(BuilderAuthoring),
 }
 
 impl Builder {
-    pub fn new(config: Config) -> Self {}
+    /// Initializes a new builder.
+    ///
+    /// Returns `None` if none of the local authorities are allowed to produce blocks.
+    ///
+    /// Keep in mind that the builder should be reconstructed every time the best block changes.
+    pub fn new<'a>(config: Config<'a, impl Iterator<Item = &'a [u8; 32]>>) -> Self {
+        let (slot, ready): (WaitSlotConsensus, bool) = match config.consensus {
+            ConfigConsensus::Aura {
+                current_authorities,
+                local_authorities,
+                now_from_unix_epoch,
+                slot_duration,
+            } => {
+                let consensus = match aura::next_slot_claim(aura::Config {
+                    current_authorities,
+                    local_authorities,
+                    now_from_unix_epoch,
+                    slot_duration,
+                }) {
+                    Some(c) => c,
+                    None => return Builder::Idle,
+                };
+
+                debug_assert!(now_from_unix_epoch < consensus.slot_end_from_unix_epoch);
+                let ready = now_from_unix_epoch >= consensus.slot_start_from_unix_epoch;
+
+                (WaitSlotConsensus::Aura(consensus), ready)
+            }
+        };
+
+        if ready {
+            Builder::Ready(AuthoringStart { consensus: slot })
+        } else {
+            Builder::WaitSlot(WaitSlot { consensus: slot })
+        }
+    }
 }
 
 /// Current state of the block building process.
 #[must_use]
 pub enum BuilderAuthoring {
-    /// The inherent extrinsics are required in order to continue.
-    ///
-    /// [`BlockBuild::InherentExtrinsics`] is guaranteed to only be emitted once per block
-    /// building process.
-    ///
-    /// The extrinsics returned by the call to `BlockBuilder_inherent_extrinsics` are
-    /// automatically pushed to the runtime.
-    InherentExtrinsics(InherentExtrinsics),
+    /// Block generation finished.
+    Produced(runtime::Success),
+
+    /// Error happened during the generation.
+    Error(runtime::Error),
 
     /// Block building is ready to accept extrinsics.
     ///
@@ -113,16 +128,14 @@ pub enum BuilderAuthoring {
     ///
     /// > **Note**: These extrinsics are generally coming from a transactions pool, but this is
     /// >           out of scope of this module.
-    // TODO: change it to be only a documentation of what we do, instead of asking the user
     ApplyExtrinsic(ApplyExtrinsic),
 
     /// Result of the previous call to [`ApplyExtrinsic::add_extrinsic`].
     ///
     /// An [`ApplyExtrinsic`] object is provided in order to continue the operation.
-    // TODO: change it to be only a documentation of what we do, instead of asking the user
     ApplyExtrinsicResult {
         /// Result of the previous call to [`ApplyExtrinsic::add_extrinsic`].
-        result: Result<Result<(), DispatchError>, TransactionValidityError>,
+        result: Result<Result<(), runtime::DispatchError>, runtime::TransactionValidityError>,
         /// Object to use to continue trying to push other transactions or finish the block.
         resume: ApplyExtrinsic,
     },
@@ -143,7 +156,10 @@ pub enum BuilderAuthoring {
 #[must_use]
 pub struct WaitSlot {
     consensus: WaitSlotConsensus,
-    shared: Shared,
+}
+
+enum WaitSlotConsensus {
+    Aura(aura::SlotClaim),
 }
 
 impl WaitSlot {
@@ -158,20 +174,19 @@ impl WaitSlot {
 
     /// Start the block production.
     ///
-    /// Shouldn't be called before the timestamp returned by [`WaitSlot::when`].
+    /// Shouldn't be called before the timestamp returned by [`WaitSlot::when`]. Blocks that are
+    /// authored and sent to other nodes before the proper timestamp will be considered as
+    /// invalid.
     pub fn start(self) -> AuthoringStart {
-        todo!()
+        AuthoringStart {
+            consensus: self.consensus,
+        }
     }
-}
-
-enum WaitSlotConsensus {
-    Aura(aura::SlotClaim),
 }
 
 /// Ready to start producing blocks.
 pub struct AuthoringStart {
     consensus: WaitSlotConsensus,
-    shared: Shared,
 }
 
 impl AuthoringStart {
@@ -191,14 +206,24 @@ impl AuthoringStart {
             },
         });
 
-        match self.shared.with_runtime_inner(inner_block_build) {
-            Builder::Authoring(a) => a,
-            _ => unreachable!(),
-        }
+        let inherent_data = runtime::InherentData {
+            timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
+                .unwrap_or(u64::max_value()),
+            consensus: match self.consensus {
+                WaitSlotConsensus::Aura(slot) => runtime::InherentDataConsensus::Aura {
+                    slot_number: slot.slot_number,
+                },
+            },
+        };
+
+        (Shared {
+            inherent_data: Some(inherent_data),
+        })
+        .with_runtime_inner(inner_block_build)
     }
 }
 
-/// Configuration for a block generation.
+/// Configuration to pass when the actual block authoring is started.
 pub struct AuthoringStartConfig<'a> {
     /// Hash of the parent of the block to generate.
     ///
@@ -210,6 +235,10 @@ pub struct AuthoringStartConfig<'a> {
     /// Used to populate the header of the new block.
     pub parent_number: u64,
 
+    /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
+    /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
+    pub now_from_unix_epoch: Duration,
+
     /// Runtime used to check the new block. Must be built using the Wasm code found at the
     /// `:code` key of the parent block storage.
     pub parent_runtime: host::HostVmPrototype,
@@ -217,35 +246,6 @@ pub struct AuthoringStartConfig<'a> {
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-}
-
-/// The list of inherent extrinsics are needed in order to continue.
-#[must_use]
-pub struct InherentExtrinsics {
-    inner: runtime::InherentExtrinsics,
-    shared: Shared,
-}
-
-impl InherentExtrinsics {
-    /// Injects the inherents extrinsics and resumes execution.
-    ///
-    /// See the module-level documentation for more information.
-    pub fn inject_inherents<'a>(self, inherents: InherentData) -> Builder {
-        self.shared
-            .with_runtime_inner(self.inner.inject_inherents(inherents))
-    }
-
-    /// Injects a raw list of inherents and resumes execution.
-    ///
-    /// This method is a more weakly-typed equivalent to [`InherentExtrinsics::inject_inherents`].
-    /// Only use this method if you know what you're doing.
-    pub fn inject_raw_inherents_list(
-        self,
-        list: impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone)> + Clone,
-    ) -> Builder {
-        self.shared
-            .with_runtime_inner(self.inner.inject_raw_inherents_list(list))
-    }
 }
 
 /// More transactions can be added.
@@ -259,13 +259,13 @@ impl ApplyExtrinsic {
     /// Adds a SCALE-encoded extrinsic and resumes execution.
     ///
     /// See the module-level documentation for more information.
-    pub fn add_extrinsic(mut self, extrinsic: Vec<u8>) -> Builder {
+    pub fn add_extrinsic(self, extrinsic: Vec<u8>) -> BuilderAuthoring {
         self.shared
             .with_runtime_inner(self.inner.add_extrinsic(extrinsic))
     }
 
     /// Indicate that no more extrinsics will be added, and resume execution.
-    pub fn finish(mut self) -> Builder {
+    pub fn finish(self) -> BuilderAuthoring {
         self.shared.with_runtime_inner(self.inner.finish())
     }
 }
@@ -288,7 +288,10 @@ impl StorageGet {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Builder {
+    pub fn inject_value(
+        self,
+        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
+    ) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_value(value))
     }
 }
@@ -305,7 +308,7 @@ impl PrefixKeys {
     }
 
     /// Injects the list of keys.
-    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Builder {
+    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_keys(keys))
     }
 }
@@ -327,46 +330,51 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Builder {
+    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BuilderAuthoring {
         self.1.with_runtime_inner(self.0.inject_key(key))
     }
 }
 
 /// Extra information maintained in all variants of the [`Builder`].
 #[derive(Debug)]
-struct Shared {}
+struct Shared {
+    /// Inherent data waiting to be injected. Will be extracted from its `Option` when the inner
+    /// block builder requests it.
+    inherent_data: Option<runtime::InherentData>,
+}
 
 impl Shared {
-    fn with_runtime_inner(self, mut inner: runtime::BlockBuild) -> Builder {
+    fn with_runtime_inner(mut self, mut inner: runtime::BlockBuild) -> BuilderAuthoring {
         loop {
             match inner {
-                runtime::BlockBuild::Finished(result) => todo!(),
-                runtime::BlockBuild::InherentExtrinsics(inner) => {
-                    break Builder::Authoring(BuilderAuthoring::InherentExtrinsics(InherentExtrinsics {
-                        shared: self,
-                        inner,
-                    }))
+                runtime::BlockBuild::Finished(Ok(block)) => {
+                    break BuilderAuthoring::Produced(block)
+                }
+                runtime::BlockBuild::Finished(Err(error)) => break BuilderAuthoring::Error(error),
+                runtime::BlockBuild::InherentExtrinsics(a) => {
+                    // Injecting the inherent is guaranteed to be done only once per block.
+                    inner = a.inject_inherents(self.inherent_data.take().unwrap());
                 }
                 runtime::BlockBuild::ApplyExtrinsic(a) => {
                     inner = a.finish();
                 }
                 runtime::BlockBuild::ApplyExtrinsicResult { result, resume } => {
-                    break Builder::Authoring(BuilderAuthoring::ApplyExtrinsicResult {
+                    break BuilderAuthoring::ApplyExtrinsicResult {
                         result,
                         resume: ApplyExtrinsic {
                             inner: resume,
                             shared: self,
                         },
-                    })
+                    }
                 }
                 runtime::BlockBuild::StorageGet(inner) => {
-                    break Builder::Authoring(BuilderAuthoring::StorageGet(StorageGet(inner, self)))
+                    break BuilderAuthoring::StorageGet(StorageGet(inner, self))
                 }
                 runtime::BlockBuild::PrefixKeys(inner) => {
-                    break Builder::Authoring(BuilderAuthoring::PrefixKeys(PrefixKeys(inner, self)))
+                    break BuilderAuthoring::PrefixKeys(PrefixKeys(inner, self))
                 }
                 runtime::BlockBuild::NextKey(inner) => {
-                    break Builder::Authoring(BuilderAuthoring::NextKey(NextKey(inner, self)))
+                    break BuilderAuthoring::NextKey(NextKey(inner, self))
                 }
             }
         }
