@@ -364,7 +364,7 @@ impl Seal {
     /// Injects the sr25519 signature of the SCALE-encoded header from the given authority.
     ///
     /// The method then returns the finished block.
-    pub fn inject_signature(mut self, signature: [u8; 64]) -> runtime::Success {
+    pub fn inject_sr25519_signature(mut self, signature: [u8; 64]) -> runtime::Success {
         // TODO: optimize?
         let mut header: header::Header = header::decode(&self.block.scale_encoded_header)
             .unwrap()
