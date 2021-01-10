@@ -123,8 +123,8 @@ pub enum BuilderAuthoring {
 
     /// Block building is ready to accept extrinsics.
     ///
-    /// If [`ApplyExtrinsic::add_extrinsic`] is used, then a [`BlockBuild::ApplyExtrinsicResult`]
-    /// stage will be emitted later.
+    /// If [`ApplyExtrinsic::add_extrinsic`] is used, then a
+    /// [`BuilderAuthoring::ApplyExtrinsicResult`] stage will be emitted later.
     ///
     /// > **Note**: These extrinsics are generally coming from a transactions pool, but this is
     /// >           out of scope of this module.

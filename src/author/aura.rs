@@ -57,10 +57,9 @@ pub fn next_slot_claim<'a>(
 
     let current_slot = config.now_from_unix_epoch.as_secs() / config.slot_duration.get();
 
-    let current_slot_index = usize::try_from(
-        current_slot.checked_div(u64::try_from(num_current_authorities).unwrap())?,
-    )
-    .unwrap();
+    let current_slot_index =
+        usize::try_from(current_slot.checked_div(u64::try_from(num_current_authorities).unwrap())?)
+            .unwrap();
 
     let mut claim = None;
 
