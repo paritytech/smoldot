@@ -115,11 +115,8 @@ impl Builder {
 /// Current state of the block building process.
 #[must_use]
 pub enum BuilderAuthoring {
-    /// Block generation finished.
-    Produced(runtime::Success),
-
     /// Error happened during the generation.
-    Error(runtime::Error),
+    Error(Error),
 
     /// Block building is ready to accept extrinsics.
     ///
@@ -150,14 +147,19 @@ pub enum BuilderAuthoring {
     /// Fetching the key that follows a given one in the parent storage is required in order to
     /// continue.
     NextKey(NextKey),
+
+    /// Block has been produced by the runtime and must now be sealed.
+    Seal(Seal),
 }
 
 /// Block production is idle, waiting for a slot.
 #[must_use]
+#[derive(Debug)]
 pub struct WaitSlot {
     consensus: WaitSlotConsensus,
 }
 
+#[derive(Debug)]
 enum WaitSlotConsensus {
     Aura(aura::SlotClaim),
 }
@@ -218,6 +220,7 @@ impl AuthoringStart {
 
         (Shared {
             inherent_data: Some(inherent_data),
+            slot_claim: self.consensus,
         })
         .with_runtime_inner(inner_block_build)
     }
@@ -335,12 +338,71 @@ impl NextKey {
     }
 }
 
+/// Block has been produced and must now be sealed.
+#[must_use]
+pub struct Seal {
+    shared: Shared,
+    block: runtime::Success,
+}
+
+impl Seal {
+    /// Returns the SCALE-encoded header that must be signed.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        &self.block.scale_encoded_header
+    }
+
+    /// Returns the index within the list of authorities of the authority that must sign the
+    /// block.
+    ///
+    /// See [`ConfigConsensus::Aura::local_authorities`].
+    pub fn authority_index(&self) -> usize {
+        match self.shared.slot_claim {
+            WaitSlotConsensus::Aura(slot) => slot.local_authorities_index,
+        }
+    }
+
+    /// Injects the sr25519 signature of the SCALE-encoded header from the given authority.
+    ///
+    /// The method then returns the finished block.
+    pub fn inject_signature(mut self, signature: [u8; 64]) -> runtime::Success {
+        // TODO: optimize?
+        let mut header: header::Header = header::decode(&self.block.scale_encoded_header)
+            .unwrap()
+            .into();
+
+        // `push_aura_seal` error if there is already an Aura seal, indicating that the runtime
+        // code is misbehaving. This condition is already verified when the `Seal` is created.
+        header.digest.push_aura_seal(signature).unwrap();
+
+        self.block.scale_encoded_header = header.scale_encoding().fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        self.block
+    }
+}
+
+/// Error that can happen during the block production.
+#[derive(Debug, derive_more::Display, derive_more::From)]
+pub enum Error {
+    /// Error while producing the block in the runtime.
+    #[display(fmt = "{}", _0)]
+    Runtime(runtime::Error),
+    /// Runtime has generated an invalid block header.
+    #[from(ignore)]
+    InvalidHeaderGenerated,
+}
+
 /// Extra information maintained in all variants of the [`Builder`].
 #[derive(Debug)]
 struct Shared {
     /// Inherent data waiting to be injected. Will be extracted from its `Option` when the inner
     /// block builder requests it.
     inherent_data: Option<runtime::InherentData>,
+
+    /// Slot that has been claimed.
+    slot_claim: WaitSlotConsensus,
 }
 
 impl Shared {
@@ -348,9 +410,29 @@ impl Shared {
         loop {
             match inner {
                 runtime::BlockBuild::Finished(Ok(block)) => {
-                    break BuilderAuthoring::Produced(block)
+                    // After the runtime has produced a block, the last step is to seal it.
+
+                    // Verify the correctness of the header. If not, the runtime is misbehaving.
+                    let decoded_header = match header::decode(&block.scale_encoded_header) {
+                        Ok(h) => h,
+                        Err(_) => break BuilderAuthoring::Error(Error::InvalidHeaderGenerated),
+                    };
+
+                    // The `Seal` object created below assumes that there is no existing seal.
+                    if decoded_header.digest.aura_seal().is_some()
+                        || decoded_header.digest.babe_seal().is_some()
+                    {
+                        break BuilderAuthoring::Error(Error::InvalidHeaderGenerated);
+                    }
+
+                    break BuilderAuthoring::Seal(Seal {
+                        shared: self,
+                        block,
+                    });
                 }
-                runtime::BlockBuild::Finished(Err(error)) => break BuilderAuthoring::Error(error),
+                runtime::BlockBuild::Finished(Err(error)) => {
+                    break BuilderAuthoring::Error(Error::Runtime(error))
+                }
                 runtime::BlockBuild::InherentExtrinsics(a) => {
                     // Injecting the inherent is guaranteed to be done only once per block.
                     inner = a.inject_inherents(self.inherent_data.take().unwrap());

@@ -111,7 +111,7 @@ pub struct Success {
     pub logs: String,
 }
 
-/// Error that can happen during the verification.
+/// Error that can happen during the block production.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error while executing the Wasm virtual machine.
