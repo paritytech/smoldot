@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -125,7 +125,7 @@ pub fn decode(scale_encoded: &[u8]) -> Result<HeaderRef, Error> {
 /// Attempt to decode the given SCALE-encoded header.
 ///
 /// Contrary to [`decode`], doesn't return an error if the slice is too long but returns the
-/// remainer.
+/// remainder.
 pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Error> {
     if scale_encoded.len() < 32 + 1 {
         return Err(Error::TooShort);

@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -29,7 +29,7 @@ use substrate_lite::{
     chain, chain_spec,
     database::full_sled,
     header,
-    network::{connection, multiaddr, peer_id::PeerId},
+    libp2p::{connection, multiaddr, peer_id::PeerId},
 };
 use tracing::Instrument as _;
 
@@ -99,7 +99,7 @@ async fn async_main() {
         .unwrap(); // TODO: don't unwrap?
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
-    let (relay_chain_spec, parachain_id) =
+    let (relay_chain_spec, _parachain_id) =
         if let Some((relay_chain_name, parachain_id)) = chain_spec.relay_chain() {
             let json: Cow<[u8]> = match &cli_options.chain {
                 cli::CliChain::Custom(parachain_path) => {
@@ -291,15 +291,37 @@ async fn async_main() {
         })
     };*/
 
-    let mut informant_timer = stream::unfold((), move |_| {
-        futures_timer::Delay::new(Duration::from_secs(1)).map(|_| Some(((), ())))
-    })
-    .map(|_| ());
+    // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
+    // a message will be sent on `ctrlc_rx`.
+    // This should be performed after all the expensive initialization is done, as otherwise the
+    // fact that initialization isn't interrupted by Ctrl+C could be frustrating for the user, but
+    // also as soon as possible, as we want as many parts as possible to be cleanly destroyed on
+    // Ctrl+C.
+    let mut ctrlc_rx = {
+        let (tx, rx) = oneshot::channel();
+        let mut tx = Some(tx);
+        ctrlc::set_handler(move || {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+        })
+        .expect("Error setting Ctrl-C handler");
+        rx.fuse()
+    };
 
-    let mut telemetry_timer = stream::unfold((), move |_| {
-        futures_timer::Delay::new(Duration::from_secs(5)).map(|_| Some(((), ())))
-    })
-    .map(|_| ());
+    let mut informant_timer = stream::once(future::ready(())).chain(
+        stream::unfold((), move |_| {
+            futures_timer::Delay::new(Duration::from_secs(1)).map(|_| Some(((), ())))
+        })
+        .map(|_| ()),
+    );
+
+    let mut telemetry_timer = stream::once(future::ready(())).chain(
+        stream::unfold((), move |_| {
+            futures_timer::Delay::new(Duration::from_secs(5)).map(|_| Some(((), ())))
+        })
+        .map(|_| ()),
+    );
 
     let mut network_known_best = None;
 
@@ -451,6 +473,8 @@ async fn async_main() {
                     disk_write_per_sec: None,
                 }));*/
             },
+
+            _ = ctrlc_rx => return,
         }
     }
 }
