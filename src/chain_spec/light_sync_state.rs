@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -16,21 +16,19 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::header::BabeNextConfig;
+
 use alloc::{collections::BTreeMap, vec::Vec};
 use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct StorageData(#[serde(with = "impl_serde::serialize")] pub(super) Vec<u8>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub(super) struct LightSyncState {
-    babe_epoch_changes: StorageData,
+    babe_epoch_changes: HexString,
     babe_finalized_block_weight: u32,
-    finalized_block_header: StorageData,
-    grandpa_authority_set: StorageData,
+    finalized_block_header: HexString,
+    grandpa_authority_set: HexString,
 }
 
 impl LightSyncState {
@@ -56,16 +54,16 @@ impl LightSyncState {
 
 #[derive(Debug)]
 pub(super) struct DecodedLightSyncState {
-    babe_epoch_changes: EpochChanges,
+    pub(super) babe_epoch_changes: EpochChanges,
     babe_finalized_block_weight: u32,
-    finalized_block_header: crate::header::Header,
-    grandpa_authority_set: AuthoritySet,
+    pub(super) finalized_block_header: crate::header::Header,
+    pub(super) grandpa_authority_set: AuthoritySet,
 }
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct EpochChanges {
     inner: ForkTree<PersistedEpochHeader>,
-    epochs: BTreeMap<([u8; 32], u32), PersistedEpoch>,
+    pub(super) epochs: BTreeMap<([u8; 32], u32), PersistedEpoch>,
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -88,12 +86,12 @@ pub(super) enum PersistedEpoch {
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct BabeEpoch {
-    epoch_index: u64,
-    slot_number: u64,
-    duration: u64,
-    authorities: Vec<BabeAuthority>,
-    randomness: [u8; 32],
-    config: BabeNextConfig,
+    pub(super) epoch_index: u64,
+    pub(super) slot_number: u64,
+    pub(super) duration: u64,
+    pub(super) authorities: Vec<BabeAuthority>,
+    pub(super) randomness: [u8; 32],
+    pub(super) config: BabeNextConfig,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Encode, Decode)]
@@ -109,8 +107,8 @@ pub struct BabeAuthority {
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct AuthoritySet {
-    current_authorities: Vec<GrandpaAuthority>,
-    set_id: u64,
+    pub(super) current_authorities: Vec<GrandpaAuthority>,
+    pub(super) set_id: u64,
     pending_standard_changes: ForkTree<PendingChange>,
     pending_forced_changes: Vec<PendingChange>,
 }
@@ -154,4 +152,34 @@ pub(super) struct ForkTreeNode<T> {
     number: u32,
     data: T,
     children: Vec<Self>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct HexString(pub(super) Vec<u8>);
+
+impl serde::Serialize for HexString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        format!("0x{}", hex::encode(&self.0[..])).serialize(serializer)
+    }
+}
+
+impl<'a> serde::Deserialize<'a> for HexString {
+    fn deserialize<D>(deserializer: D) -> Result<HexString, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let string = String::deserialize(deserializer)?;
+
+        if !string.starts_with("0x") {
+            return Err(serde::de::Error::custom(
+                "hexadecimal string doesn't start with 0x",
+            ));
+        }
+
+        let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
+        Ok(HexString(bytes))
+    }
 }

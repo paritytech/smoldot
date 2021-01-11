@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -186,12 +186,14 @@
 
 // TODO: for `no_std`, fix all the compilation errors caused by the copy-pasted code
 //#![cfg_attr(not(any(test, feature = "std")), no_std)]
-#![recursion_limit = "1024"]
+#![deny(broken_intra_doc_links)]
+#![deny(unused_crate_dependencies)]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
+pub mod author;
 pub mod chain;
 pub mod chain_spec;
 pub mod database;
@@ -200,6 +202,7 @@ pub mod finality;
 pub mod header;
 pub mod informant;
 pub mod json_rpc;
+pub mod libp2p;
 pub mod metadata;
 pub mod network;
 pub mod trie;

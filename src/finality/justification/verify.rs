@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -38,22 +38,40 @@ pub struct Config<'a, I> {
 // TODO: rewrite as a generator-style process?
 
 /// Verifies that a justification is valid.
-pub fn verify<'a>(
-    config: Config<'a, impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
-) -> Result<(), Error> {
+pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) -> Result<(), Error> {
+    // Check that justification contains a number of signatures equal to at least 2/3rd of the
+    // number of authorities.
+    // Duplicate signatures are checked below.
+    // The check is `actual >= (expected + 2) * 2 / 3` in order to round up.
+    if config.justification.precommits.iter().count()
+        < (config.authorities_list.clone().count() + 2) * 2 / 3
+    {
+        return Err(Error::NotEnoughSignatures);
+    }
+
     // Verifying all the signatures together brings better performances than verifying them one
     // by one.
     let mut messages = Vec::with_capacity(config.justification.precommits.iter().len());
     let mut signatures = Vec::with_capacity(config.justification.precommits.iter().len());
     let mut public_keys = Vec::with_capacity(config.justification.precommits.iter().len());
 
-    for precommit in config.justification.precommits.iter() {
+    for (precommit_num, precommit) in config.justification.precommits.iter().enumerate() {
         if !config
             .authorities_list
             .clone()
             .any(|a| a.as_ref() == precommit.authority_public_key)
         {
             return Err(Error::NotAuthority(*precommit.authority_public_key));
+        }
+
+        if config
+            .justification
+            .precommits
+            .iter()
+            .skip(precommit_num.saturating_add(1))
+            .any(|pc| pc.authority_public_key == precommit.authority_public_key)
+        {
+            return Err(Error::DuplicateSignature(*precommit.authority_public_key));
         }
 
         // TODO: must check signed block ancestry using `votes_ancestries`
@@ -105,7 +123,12 @@ pub enum Error {
     BadPublicKey,
     /// One of the signatures can't be verified.
     BadSignature,
+    /// One authority has produced two signatures.
+    #[display(fmt = "One authority has produced two signatures")]
+    DuplicateSignature([u8; 32]),
     /// One of the public keys isn't in the list of authorities.
     #[display(fmt = "One of the public keys isn't in the list of authorities")]
     NotAuthority([u8; 32]),
+    /// Justification doesn't contain enough authorities signatures to be valid.
+    NotEnoughSignatures,
 }

@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,10 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{executor, header};
+use crate::{
+    executor::{host, vm},
+    header,
+};
 
 use alloc::vec::Vec;
-use core::convert::TryFrom as _;
+use core::{convert::TryFrom as _, num::NonZeroU64};
 use parity_scale_codec::DecodeAll as _;
 
 /// Grandpa configuration of a chain, as extracted from the genesis block.
@@ -66,9 +69,8 @@ impl GrandpaGenesisConfiguration {
             } else {
                 1024 // TODO: default heap pages
             };
-            let vm = executor::WasmVmPrototype::new(&wasm_code, heap_pages)
-                .map_err(FromVmPrototypeError::VmInitialization)
-                .map_err(FromGenesisStorageError::VmError)?;
+            let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
+                .map_err(FromGenesisStorageError::VmInitialization)?;
             Self::from_virtual_machine_prototype(vm, genesis_storage_access)
                 .map_err(FromGenesisStorageError::VmError)?
         };
@@ -89,31 +91,31 @@ impl GrandpaGenesisConfiguration {
     }
 
     fn from_virtual_machine_prototype(
-        vm: executor::WasmVmPrototype,
+        vm: host::HostVmPrototype,
         mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
     ) -> Result<Vec<u8>, FromVmPrototypeError> {
         // TODO: DRY with the babe config; put a helper in the executor module
-        let mut vm: executor::WasmVm = vm
+        let mut vm: host::HostVm = vm
             .run_no_param("GrandpaApi_grandpa_authorities")
-            .map_err(FromVmPrototypeError::VmInitialization)?
+            .map_err(FromVmPrototypeError::VmStart)?
             .into();
 
         Ok(loop {
             match vm {
-                executor::WasmVm::ReadyToRun(r) => vm = r.run(),
-                executor::WasmVm::Finished(data) => {
+                host::HostVm::ReadyToRun(r) => vm = r.run(),
+                host::HostVm::Finished(data) => {
                     break data.value().to_owned();
                 }
-                executor::WasmVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
-                executor::WasmVm::ExternalStorageGet(rq) => {
+                host::HostVm::ExternalStorageGet(rq) => {
                     let value = genesis_storage_access(rq.key());
                     vm = rq.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
-                executor::WasmVm::LogEmit(rq) => vm = rq.resume(),
+                host::HostVm::LogEmit(rq) => vm = rq.resume(),
 
-                _ => return Err(FromVmPrototypeError::ExternalityNotAllowed),
+                _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
             }
         })
     }
@@ -132,19 +134,46 @@ pub enum FromGenesisStorageError {
     UnknownEncodingVersionNumber,
     /// Error while decoding the SCALE-encoded list.
     OutputDecode(parity_scale_codec::Error),
+    /// Error when initializing the virtual machine.
+    VmInitialization(host::NewErr),
     /// Error while executing the runtime.
     VmError(FromVmPrototypeError),
+}
+
+impl FromGenesisStorageError {
+    /// Returns `true` if this error is about an invalid function.
+    pub fn is_function_not_found(&self) -> bool {
+        match self {
+            FromGenesisStorageError::VmError(err) => err.is_function_not_found(),
+            _ => false,
+        }
+    }
 }
 
 /// Error when retrieving the Grandpa configuration.
 #[derive(Debug, derive_more::Display)]
 pub enum FromVmPrototypeError {
     /// Error when initializing the virtual machine.
-    VmInitialization(executor::NewErr),
+    VmStart(host::StartErr),
     /// Crash while running the virtual machine.
     Trapped,
-    /// Virtual machine tried to call an externality that isn't valid in this context.
-    ExternalityNotAllowed,
+    /// Virtual machine tried to call a host function that isn't valid in this context.
+    HostFunctionNotAllowed,
 }
 
-type ConfigScaleEncoding = Vec<([u8; 32], u64)>;
+impl FromVmPrototypeError {
+    /// Returns `true` if this error is about an invalid function.
+    pub fn is_function_not_found(&self) -> bool {
+        match self {
+            FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+                vm::StartErr::FunctionNotFound,
+            ))
+            | FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+                vm::StartErr::NotAFunction,
+            )) => true,
+            _ => false,
+        }
+    }
+}
+
+type ConfigScaleEncoding = Vec<([u8; 32], NonZeroU64)>;

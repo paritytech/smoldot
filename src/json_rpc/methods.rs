@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -160,8 +160,8 @@ define_methods! {
     author_submitExtrinsic() -> (), // TODO:
     author_unwatchExtrinsic() -> (), // TODO:
     babe_epochAuthorship() -> (), // TODO:
-    chain_getBlock(hash: Option<HashHexString>) -> (), // TODO: bad return type
-    chain_getBlockHash(height: u64) -> HashHexString [chain_getHead], // TODO: wrong param
+    chain_getBlock(hash: Option<HashHexString>) -> Block,
+    chain_getBlockHash(height: Option<u64>) -> HashHexString [chain_getHead],
     chain_getFinalizedHead() -> HashHexString [chain_getFinalisedHead],
     chain_getHeader(hash: Option<HashHexString>) -> Header, // TODO: return type is guessed
     chain_subscribeAllHeads() -> &'a str,
@@ -264,6 +264,13 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct Block {
+    pub extrinsics: Vec<HexString>,
+    pub header: Header,
+    pub justification: HexString, // TODO: unsure of the type
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Header {
     #[serde(rename = "parentHash")]
     pub parent_hash: HashHexString,
@@ -271,6 +278,7 @@ pub struct Header {
     pub extrinsics_root: HashHexString,
     #[serde(rename = "stateRoot")]
     pub state_root: HashHexString,
+    #[serde(serialize_with = "hex_num")]
     pub number: u64,
     pub digest: HeaderDigest,
 }
@@ -313,8 +321,8 @@ pub struct SystemHealth {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SystemPeer {
     #[serde(rename = "peerId")]
-    pub peer_id: String,
-    pub roles: String,
+    pub peer_id: String, // Example: "12D3KooWHEQXbvCzLYvc87obHV6HY4rruHz8BJ9Lw1Gg2csVfR6Z"
+    pub roles: String, // "AUTHORITY", "FULL", or "LIGHT"
     #[serde(rename = "bestHash")]
     pub best_hash: HashHexString,
     #[serde(rename = "bestNumber")]
@@ -407,4 +415,11 @@ impl serde::Serialize for SystemHealth {
         }
         .serialize(serializer)
     }
+}
+
+fn hex_num<S>(num: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serde::Serialize::serialize(&format!("0x{:x}", *num), serializer)
 }

@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -101,7 +101,7 @@ pub fn verify_proof<'a>(
     // Find the expected trie root in the proof. This is the start point of the verification.
     let mut proof_iter = merkle_values
         .iter()
-        .position(|v| &v[..] == &config.trie_root_hash[..])
+        .position(|v| v[..] == config.trie_root_hash[..])
         .ok_or(Error::TrieRootNotFound)?;
 
     // The verification consists in iterating using `expected_nibbles_iter` and `proof_iter`.
@@ -192,9 +192,7 @@ pub fn verify_proof<'a>(
 
                 // Find the Merkle value of that child in `node_value`.
                 let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                    .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| {
-                        Error::InvalidNodeValue
-                    })?;
+                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue)?;
                 node_value = node_value_update;
                 if node_value.len() < len {
                     return Err(Error::InvalidNodeValue);
@@ -206,7 +204,7 @@ pub fn verify_proof<'a>(
                     // `proof_iter`.
                     proof_iter = merkle_values
                         .iter()
-                        .position(|v| &v[..] == &node_value[..len])
+                        .position(|v| v[..] == node_value[..len])
                         .ok_or(Error::MissingProofEntry)?;
                     break;
                 }
@@ -220,9 +218,7 @@ pub fn verify_proof<'a>(
             // Skip over the Merkle values of the children.
             for _ in 0..children_bitmap.count_ones() {
                 let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                    .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| {
-                        Error::InvalidNodeValue
-                    })?;
+                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue)?;
                 node_value = node_value_update;
                 if node_value.len() < len {
                     return Err(Error::InvalidNodeValue);
@@ -232,7 +228,7 @@ pub fn verify_proof<'a>(
 
             // Now at the value that interests us.
             let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| Error::InvalidNodeValue)?;
+                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue)?;
             node_value = node_value_update;
             if node_value.len() != len {
                 return Err(Error::InvalidNodeValue);

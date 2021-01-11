@@ -1,5 +1,5 @@
 # Substrate-lite
-# Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+# Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 #
 # This program is free software: you can redistribute it and/or modify
@@ -36,10 +36,10 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - name: Run tests, with all features
-      run: cargo test --locked --workspace #--all-features  # TODO: restore --all-features after it works
+      run: cargo test --locked --workspace --all-features
 
-  browser-node-check:
-    name: Check browser node compilation
+  wasm-node-check:
+    name: Check javascript node
     runs-on: ubuntu-latest
     container:
       image: rust
@@ -52,13 +52,17 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - run: rustup target add wasm32-unknown-unknown
-    # TODO: figure why `--no-default-features` is needed
-    - run: cargo build --locked --package substrate-lite-js --release --target wasm32-unknown-unknown --no-default-features
+    - uses: actions/setup-node@v2.1.4
+      with:
+        node-version: '12'
+    - run: apt-get update && apt install -y binaryen # For `wasm-opt`
+      # The Rust version used for compiling the Wasm node is pinned.
+    - run: rustup install --profile=minimal 1.48.0
+    - run: rustup target add --toolchain=1.48.0 wasm32-wasi
+    - run: cd bin/wasm-node/javascript && npm install && npm start
 
   check-features:
     name: Check that combination of features compiles
-    needs: test
     runs-on: ubuntu-latest
     container:
       image: rust
@@ -72,10 +76,9 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - run: cargo check --package substrate-lite --locked --no-default-features
+    - run: cargo check --package substrate-lite --locked --no-default-features --features database-sled
     - run: cargo check --package substrate-lite --locked --no-default-features --features std
-    - run: cargo check --package substrate-lite --locked --no-default-features --features std --features wasm-bindings
-    - run: cargo check --package substrate-lite --locked --no-default-features --features wasm-bindings
-    # TODO: finish here
+    - run: cargo check --package substrate-lite --locked --no-default-features --features database-sled --features std
 
   check-rustdoc-links:
     name: Check rustdoc intra-doc links
@@ -84,12 +87,8 @@ jobs:
       image: rust
     steps:
     - uses: actions/checkout@v2
-    - name: Install nightly Rust
-      # TODO: intra-doc links are available on nightly only
-      # see https://doc.rust-lang.org/nightly/rustdoc/lints.html#broken_intra_doc_links
-      run: rustup default nightly
     - name: Check rustdoc links
-      run: RUSTDOCFLAGS="--deny broken_intra_doc_links" cargo +nightly doc --verbose --workspace --no-deps --document-private-items
+      run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
     name: Rustfmt

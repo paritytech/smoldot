@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -20,16 +20,7 @@
 **   Not ready yet                                      **
 *********************************************************/
 
-pub mod connection;
-pub mod discovery;
-pub mod leb128;
-#[doc(inline)]
-pub use parity_multiaddr as multiaddr;
-pub mod peer_id;
-pub mod peerset;
 pub mod protocol;
-pub mod wasm_websocket;
-pub mod with_buffers;
+pub mod service;
 
 pub use parity_multiaddr::Multiaddr;
-pub use peer_id::PeerId;

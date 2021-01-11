@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -306,6 +306,11 @@ impl<T> WsServer<T> {
         let _ = self.pending_incoming.take().expect("no pending socket");
     }
 
+    /// Returns `true` if there isn't any active healthy connection.
+    pub fn is_empty(&self) -> bool {
+        self.connections.is_empty()
+    }
+
     /// Returns the number of active healthy connections.
     pub fn len(&self) -> usize {
         self.connections.len()
@@ -359,7 +364,7 @@ impl<T> WsServer<T> {
     }
 
     /// Returns the next event happening on the server.
-    pub async fn next_event<'a>(&'a mut self) -> Event<'a, T> {
+    pub async fn next_event(&'_ mut self) -> Event<'_, T> {
         loop {
             futures::select! {
                 // Only try to fetch a new incoming connection if none is pending.

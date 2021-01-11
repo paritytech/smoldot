@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,19 +15,23 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{executor, header};
+use crate::{
+    executor::{host, vm},
+    header,
+};
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, fmt};
+use core::{convert::TryFrom as _, num::NonZeroU64};
 use parity_scale_codec::DecodeAll as _;
 
 /// BABE configuration of a chain, as extracted from the genesis block.
 ///
 /// The way a chain configures BABE is stored in its runtime.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BabeGenesisConfiguration {
-    inner: OwnedGenesisConfiguration,
-    epoch0_information: header::BabeNextEpoch,
+    pub slots_per_epoch: NonZeroU64,
+    pub epoch0_configuration: header::BabeNextConfig,
+    pub epoch0_information: header::BabeNextEpoch,
 }
 
 impl BabeGenesisConfiguration {
@@ -48,9 +52,8 @@ impl BabeGenesisConfiguration {
         } else {
             1024 // TODO: default heap pages
         };
-        let vm = executor::WasmVmPrototype::new(&wasm_code, heap_pages)
-            .map_err(FromVmPrototypeError::VmInitialization)
-            .map_err(FromGenesisStorageError::VmError)?;
+        let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
+            .map_err(FromGenesisStorageError::VmInitialization)?;
         let (cfg, _) = Self::from_virtual_machine_prototype(vm, genesis_storage_access)
             .map_err(FromGenesisStorageError::VmError)?;
         Ok(cfg)
@@ -63,33 +66,33 @@ impl BabeGenesisConfiguration {
     ///
     /// Returns back the same virtual machine prototype as was passed as parameter.
     pub fn from_virtual_machine_prototype(
-        vm: executor::WasmVmPrototype,
+        vm: host::HostVmPrototype,
         mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<(Self, executor::WasmVmPrototype), FromVmPrototypeError> {
-        let mut vm: executor::WasmVm = vm
+    ) -> Result<(Self, host::HostVmPrototype), FromVmPrototypeError> {
+        let mut vm: host::HostVm = vm
             .run_no_param("BabeApi_configuration")
-            .map_err(FromVmPrototypeError::VmInitialization)?
+            .map_err(FromVmPrototypeError::VmStart)?
             .into();
 
         let (inner, vm_prototype) = loop {
             match vm {
-                executor::WasmVm::ReadyToRun(r) => vm = r.run(),
-                executor::WasmVm::Finished(finished) => {
+                host::HostVm::ReadyToRun(r) => vm = r.run(),
+                host::HostVm::Finished(finished) => {
                     break match OwnedGenesisConfiguration::decode_all(finished.value()) {
                         Ok(cfg) => (cfg, finished.into_prototype()),
                         Err(err) => return Err(FromVmPrototypeError::OutputDecode(err)),
                     };
                 }
-                executor::WasmVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
-                executor::WasmVm::ExternalStorageGet(req) => {
+                host::HostVm::ExternalStorageGet(req) => {
                     let value = genesis_storage_access(req.key());
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
-                executor::WasmVm::LogEmit(req) => vm = req.resume(),
+                host::HostVm::LogEmit(req) => vm = req.resume(),
 
-                _ => return Err(FromVmPrototypeError::ExternalityNotAllowed),
+                _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
             }
         };
 
@@ -105,37 +108,18 @@ impl BabeGenesisConfiguration {
                 .collect(),
         };
 
+        let epoch0_configuration = header::BabeNextConfig {
+            c: inner.c,
+            allowed_slots: inner.allowed_slots,
+        };
+
         let outcome = BabeGenesisConfiguration {
-            inner,
+            slots_per_epoch: inner.epoch_length,
+            epoch0_configuration,
             epoch0_information,
         };
 
         Ok((outcome, vm_prototype))
-    }
-
-    /// Returns the number of slots contained in each epoch.
-    pub fn slots_per_epoch(&self) -> u64 {
-        self.inner.epoch_length
-    }
-
-    /// Returns the configuration of epoch number 0.
-    pub fn epoch0_configuration(&self) -> header::BabeNextConfig {
-        header::BabeNextConfig {
-            c: self.inner.c,
-            allowed_slots: self.inner.allowed_slots,
-        }
-    }
-
-    /// Returns the information about epoch number 0.
-    pub fn epoch0_information(&self) -> header::BabeNextEpochRef {
-        From::from(&self.epoch0_information)
-    }
-}
-
-impl fmt::Debug for BabeGenesisConfiguration {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: better
-        f.debug_struct("BabeGenesisConfiguration").finish()
     }
 }
 
@@ -148,27 +132,55 @@ pub enum FromGenesisStorageError {
     HeapPagesNotFound,
     /// Failed to decode heap pages from the genesis storage.
     HeapPagesDecode(core::array::TryFromSliceError),
+    /// Error when initializing the virtual machine.
+    VmInitialization(host::NewErr),
     /// Error while executing the runtime.
     VmError(FromVmPrototypeError),
+}
+
+impl FromGenesisStorageError {
+    /// Returns `true` if this error is about an invalid function.
+    pub fn is_function_not_found(&self) -> bool {
+        match self {
+            FromGenesisStorageError::VmError(err) => err.is_function_not_found(),
+            _ => false,
+        }
+    }
 }
 
 /// Error when retrieving the BABE configuration.
 #[derive(Debug, derive_more::Display)]
 pub enum FromVmPrototypeError {
-    /// Error when initializing the virtual machine.
-    VmInitialization(executor::NewErr),
+    /// Error when starting the virtual machine.
+    VmStart(host::StartErr),
     /// Crash while running the virtual machine.
     Trapped,
-    /// Virtual machine tried to call an externality that isn't valid in this context.
-    ExternalityNotAllowed,
+    /// Virtual machine tried to call a host function that isn't valid in this context.
+    HostFunctionNotAllowed,
     /// Error while decoding the output of the virtual machine.
     OutputDecode(parity_scale_codec::Error),
 }
 
+impl FromVmPrototypeError {
+    /// Returns `true` if this error is about an invalid function.
+    pub fn is_function_not_found(&self) -> bool {
+        match self {
+            FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+                vm::StartErr::FunctionNotFound,
+            ))
+            | FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+                vm::StartErr::NotAFunction,
+            )) => true,
+            _ => false,
+        }
+    }
+}
+
+// TODO: don't use scale_codec?
 #[derive(Debug, Clone, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode)]
 struct OwnedGenesisConfiguration {
     slot_duration: u64,
-    epoch_length: u64,
+    epoch_length: NonZeroU64,
     c: (u64, u64),
     genesis_authorities: Vec<([u8; 32], u64)>,
     randomness: [u8; 32],

@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -20,10 +20,12 @@
 
 use core::convert::TryFrom as _;
 
+pub(crate) mod leb128;
+
 /// Decodes a SCALE-encoded `Option`.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
-/// >           the type of `E`. Use `nom::Err<(&[u8], nom::error::ErrorKind)>`.
+/// >           the type of `E`. Use `nom::Err<nom::error::Error>`.
 pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
     inner_decode: impl Fn(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
@@ -40,7 +42,7 @@ pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
 /// Decodes a SCALE-compact-encoded usize.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
-/// >           the type of `E`. Use `nom::Err<(&[u8], nom::error::ErrorKind)>`.
+/// >           the type of `E`. Use `nom::Err<nom::error::Error>`.
 pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], usize, E> {

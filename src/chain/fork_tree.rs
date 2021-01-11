@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -327,7 +327,7 @@ impl<T> ForkTree<T> {
     ///
     pub fn insert(&mut self, parent: Option<NodeIndex>, child: T) -> NodeIndex {
         if let Some(parent) = parent {
-            let next_sibling = self.nodes.get_mut(parent.0).unwrap().first_child.clone();
+            let next_sibling = self.nodes.get_mut(parent.0).unwrap().first_child;
 
             let new_node_index = self.nodes.insert(Node {
                 parent: Some(parent.0),

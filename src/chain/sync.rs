@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -49,7 +49,4 @@
 //       the time of writing only one is implemented
 
 // TODO: pub mod full_all_forks;
-pub mod full_optimistic;
-pub mod headers_optimistic;
-// TODO: maybe shouldn't be pub, but creates doc-link errors if private
 pub mod optimistic;

@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,6 +18,8 @@
 // TODO: documentation
 
 use core::{fmt, str};
+
+mod tests;
 
 /// Decodes the given SCALE-encoded metadata.
 pub(super) fn decode(scale_encoded_metadata: &[u8]) -> Result<MetadataRef, DecodeError> {
@@ -154,7 +156,7 @@ pub struct DecodeError<'a>(nom::Err<NomError<'a>>);
 /// a lightweight enum is used by default . When debugging decoding problems, replace this type
 /// with `nom::error::VerboseError<&'a [u8]>` and use `nom::error::convert_error` for more
 /// verbose error messages.
-type NomError<'a> = (&'a [u8], nom::error::ErrorKind);
+type NomError<'a> = nom::error::Error<&'a [u8]>;
 
 pub struct UndecodedIter<'a, T> {
     bytes: &'a [u8],
@@ -211,8 +213,8 @@ where
     T: PartialEq,
 {
     fn eq(&self, other: &Self) -> bool {
-        let mut iter1 = self.clone();
-        let mut iter2 = other.clone();
+        let mut iter1 = *self;
+        let mut iter2 = *other;
         loop {
             match (iter1.next(), iter2.next()) {
                 (None, None) => return true,
