@@ -22,9 +22,9 @@ The full client is a binary similar to the official Polkadot client, and can be 
 
 ### Wasm light node
 
-The wasm light node can be tested with `cd wasm-node/javascript` and `npm start`. This will start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
+The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm start`. This will start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
 
-> Note: The WebSocket server started with `npm start` is hardcoded to connect to the Westend chain. The wasm light node, however, can connect to a variety of different chains, and not just Westend. The WebSocket server is started from some JavaScript shim on top of the wasm light node. The wasm light node itself doesn't start any server.
+> Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hardcodes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
 
 # Objectives
 
