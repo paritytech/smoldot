@@ -1,5 +1,5 @@
 # Substrate-lite
-# Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+# Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 #
 # This program is free software: you can redistribute it and/or modify
@@ -39,7 +39,7 @@ jobs:
         registry: docker.pkg.github.com
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v2.2.1
+    - uses: docker/build-push-action@v2.2.2
       with:
         load: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         tags: docker.pkg.github.com/paritytech/substrate-lite/node:main

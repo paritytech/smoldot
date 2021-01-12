@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -47,7 +47,7 @@
 
 use super::super::{blocks_tree, chain_information};
 use crate::{
-    executor::{host, vm},
+    executor::{self, host, vm},
     header,
     trie::calculate_root,
     verify,
@@ -592,7 +592,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 },
             )
         } else {
-            match self
+            let error = match self
                 .chain
                 .verify_header(block.scale_encoded_header, now_from_unix_epoch)
             {
@@ -611,17 +611,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                         offchain_storage_changes: Default::default(),
                         user_data: block.user_data,
                     });
-                    ProcessOne::from(
-                        Inner::JustificationVerif(self.chain),
-                        ProcessOneShared {
-                            pending_encoded_justification: block.scale_encoded_justification,
-                            expected_block_height,
-                            inner: self.inner,
-                            block_body: Vec::new(),
-                            block_user_data: None,
-                            source_id,
-                        },
-                    )
+                    None
                 }
                 Err(err) => {
                     if let Some(src) = self.inner.sources.get_mut(&source_id) {
@@ -631,13 +621,29 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                     self.inner.best_to_finalized_storage_diff = Default::default();
                     self.inner.runtime_code_cache = None;
                     self.inner.top_trie_root_calculation_cache = None;
-                    let previous_best_height = self.chain.best_block_header().number;
-                    ProcessOne::Reset {
-                        sync: self,
-                        previous_best_height,
-                        reason: ResetCause::HeaderError(err),
-                    }
+                    Some(err)
                 }
+            };
+
+            if let Some(error) = error {
+                let previous_best_height = self.chain.best_block_header().number;
+                ProcessOne::Reset {
+                    sync: self,
+                    previous_best_height,
+                    reason: ResetCause::HeaderError(error),
+                }
+            } else {
+                ProcessOne::from(
+                    Inner::JustificationVerif(self.chain),
+                    ProcessOneShared {
+                        pending_encoded_justification: block.scale_encoded_justification,
+                        expected_block_height,
+                        inner: self.inner,
+                        block_body: Vec::new(),
+                        block_user_data: None,
+                        source_id,
+                    },
+                )
             }
         }
     }
@@ -825,6 +831,7 @@ impl<TRq, TSrc, TBl> ProcessOne<TRq, TSrc, TBl> {
                     offchain_storage_changes,
                     top_trie_root_calculation_cache,
                     parent_runtime,
+                    new_runtime, // TODO: make use of this
                     insert,
                 }) => {
                     // Successfully verified block!
@@ -962,6 +969,12 @@ impl<TRq, TSrc, TBl> ProcessOne<TRq, TSrc, TBl> {
                         inner: req,
                         shared,
                     });
+                }
+
+                Inner::Step2(blocks_tree::BodyVerifyStep2::RuntimeCompilation(c)) => {
+                    // The underlying verification process requires compiling a runtime code.
+                    inner = Inner::Step2(c.build());
+                    continue 'verif_steps;
                 }
 
                 // The three variants below correspond to problems during the verification.
@@ -1103,7 +1116,7 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
                         <[u8; 8]>::try_from(&value[..]).unwrap(), // TODO: don't unwrap
                     )
                 } else {
-                    1024 // TODO: default heap pages
+                    executor::DEFAULT_HEAP_PAGES
                 };
                 ProcessOne::FinalizedStorageGet(StorageGet {
                     inner: StorageGetTarget::Runtime(inner, heap_pages),
@@ -1131,7 +1144,7 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
                         <[u8; 8]>::try_from(&value[..]).unwrap(), // TODO: don't unwrap
                     )
                 } else {
-                    1024 // TODO: default heap pages
+                    executor::DEFAULT_HEAP_PAGES
                 };
                 let wasm_vm = host::HostVmPrototype::new(
                     &wasm_code,

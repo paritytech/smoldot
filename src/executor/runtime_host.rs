@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2020  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -38,7 +38,7 @@
 // TODO: more docs
 
 use crate::{
-    executor::{host, vm},
+    executor::{self, host, vm},
     trie::calculate_root,
 };
 
@@ -598,16 +598,17 @@ impl Inner {
                 }
 
                 host::HostVm::CallRuntimeVersion(req) => {
+                    // TODO: make the user execute this ; see https://github.com/paritytech/substrate-lite/issues/144
                     // The code below compiles the provided WebAssembly runtime code, which is a
                     // relatively expensive operation (in the order of milliseconds).
                     // While it could be tempting to use a system cache, this function is expected
                     // to be called only right before runtime upgrades. Considering that runtime
                     // upgrades are quite uncommon and that a caching system is rather non-trivial
                     // to set up, the approach of recompiling every single time is preferred here.
-                    // TODO: number of heap pages?! 1024 is default, but not sure whether that's correct or if we have to take the current heap pages
+                    // TODO: number of heap pages?! we use the default here, but not sure whether that's correct or if we have to take the current heap pages
                     let vm_prototype = match host::HostVmPrototype::new(
                         req.wasm_code(),
-                        1024,
+                        executor::DEFAULT_HEAP_PAGES,
                         vm::ExecHint::Oneshot,
                     ) {
                         Ok(w) => w,
