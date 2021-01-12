@@ -207,7 +207,7 @@ impl NetworkService {
         self: Arc<Self>,
 		target: PeerId,
         transaction: Vec<u8>,
-    ) -> Result<(), QueueNotificationError> {
+    ) -> Result<Vec<u8>, QueueNotificationError> {
         self.network
             .announce_transaction(&target, 0, transaction)
             .await // TODO: chain_index

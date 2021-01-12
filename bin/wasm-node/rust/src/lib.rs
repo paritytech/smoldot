@@ -36,6 +36,7 @@ use substrate_lite::{
 	network::protocol,
 	trie::proof_verify
 };
+use hex::ToHex;
 
 pub mod ffi;
 
@@ -145,6 +146,7 @@ pub async fn start_client(chain_spec: String) {
             network_service: network_service.clone(),
             peers: Vec::new(),
             known_blocks,
+			known_blocks_log: vec![],
             best_block: finalized_block_hash,
             finalized_block: finalized_block_hash,
             genesis_storage,
@@ -217,6 +219,7 @@ pub async fn start_client(chain_spec: String) {
                         }
 
                         client.best_block = decoded.hash();
+						// client.known_blocks_log.push(client.best_block.clone());
                         client.known_blocks.put(client.best_block, decoded.into());
 
                         // Load the entry of the finalized block in order to guarantee that it
@@ -239,6 +242,7 @@ pub async fn start_client(chain_spec: String) {
                         }
 
                         client.finalized_block = decoded.hash();
+						// client.known_blocks_log.push(client.finalized_block.clone());
                         client.known_blocks.put(client.finalized_block, decoded.into());
                     },
                 }
@@ -266,7 +270,7 @@ struct Client {
     ///
     /// Always contains `best_block` and `finalized_block`.
     known_blocks: lru::LruCache<[u8; 32], substrate_lite::header::Header>,
-
+	known_blocks_log: Vec<[u8; 32]>,
     /// Hash of the current best block.
     best_block: [u8; 32],
     /// Hash of the latest finalized block.
@@ -299,8 +303,8 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
         }
         methods::MethodCall::author_submitExtrinsic { transaction } => {
 			let response = match announce_transaction(client, transaction.0).await {
-				Ok(()) => {
-					methods::Response::author_submitExtrinsic(()).to_json_response(request_id)
+				Ok(transaction_hash) => {
+					methods::Response::author_submitExtrinsic(transaction_hash).to_json_response(request_id)
 				},
 				Err(e) => todo!("{:?}", e), //TODO:
 			};
@@ -328,6 +332,11 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             let response = if let Some(header) = client.known_blocks.get(hash) {
                 methods::Response::chain_getHeader(header_conv(header)).to_json_response(request_id)
             } else {
+				let mut a = "".to_owned();
+				for header in client.known_blocks_log.iter() {
+					a.push_str(&format!("{}\n", &hex::encode(header)));
+				}
+				todo!("{}", a);
                 json_rpc::parse::build_success_response(request_id, "null")
             };
 
@@ -602,14 +611,19 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
     }
 }
 
-async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<(), QueueNotificationError> {
-    let mut result = Ok(());
+async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<methods::HashHexString, QueueNotificationError> {
+    let mut result = Ok(methods::HashHexString([0; 32]));
     for target in client.peers.iter() {
 		result = client
 			.network_service
 			.clone()
 			.announce_transaction(target.clone(), transaction.clone())
-			.await;
+			.await
+		    .map(|h| {
+				let mut slice: [u8; 32] = Default::default();
+				slice.copy_from_slice(h.as_slice());
+				methods::HashHexString(slice)
+			});
 			// .map_err(|_| ());
 	}
 	result
@@ -620,6 +634,10 @@ async fn storage_query(
     key: &[u8],
     hash: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, ()> {
+	// LRU workaround
+	let finalized_block_hash = client.finalized_block;
+	let _ = client.known_blocks.get(&finalized_block_hash).unwrap();
+
     let trie_root_hash = if let Some(header) = client.known_blocks.get(hash) {
         Some(header.state_root)
     } else {

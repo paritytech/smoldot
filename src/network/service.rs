@@ -280,11 +280,14 @@ where
 		target: &peer_id::PeerId,
 		chain_index: usize,
 		transaction: Vec<u8>,
-	) -> Result<(), QueueNotificationError> {
-        Ok(self
-            .libp2p
-		    .queue_notification(&target, 1 + chain_index * 3 + 1, transaction)
-            .await?)
+	) -> Result<Vec<u8>, QueueNotificationError> {
+		self.libp2p
+		    .queue_notification(&target, chain_index * 2 + 1, transaction.clone())
+            .await?;
+
+		let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
+		hash.update(transaction.as_slice());
+        Ok(hash.finalize().as_bytes().to_vec())
 	}
 
     /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the

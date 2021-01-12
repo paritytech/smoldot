@@ -20,3 +20,4 @@ rand = "0.7.3"
 serde_json = "1.0.60"
 slab = "0.4.2"
 substrate-lite = { version = "0.1.0", path = "../../..", default-features = false }
+hex = "0.4.2"
