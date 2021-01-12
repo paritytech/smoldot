@@ -19,7 +19,7 @@
     "prestart": "node prepare.js",
     "build": "node prepare.js",
     "start": "node demo.js",
-    "test": "node test.js"
+    "test": "node prepare.js && node test.js"
   },
   "dependencies": {
     "buffer": "^6.0.1",
