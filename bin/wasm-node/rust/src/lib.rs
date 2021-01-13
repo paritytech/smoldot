@@ -28,6 +28,7 @@ use std::{
     convert::TryFrom as _,
     iter,
     sync::Arc,
+    time::Duration,
 };
 use substrate_lite::{
     chain, chain_spec,
@@ -53,12 +54,89 @@ static ALLOC: std::alloc::System = std::alloc::System;
 
 // TODO: several places in this module where we unwrap when we shouldn't
 
+/*
+# Implementation notes
+
+TODO: remove this block after this code is production-ready
+
+The objective of the wasm-node is to do two things:
+
+- Synchronizing the chain(s).
+- Answer JSON-RPC queries made by the user.
+
+---
+
+Synchronizing the chain(s) consists in:
+
+  - At initialization, loading the chain specs (that potentially contain a checkpoint) and
+optionally loading an existing database.
+- Connecting and staying connected to a set of full nodes.
+- Still at initialization, sending GrandPa warp sync queries to "jump" to the latest finalized
+  block (https://github.com/paritytech/substrate-lite/issues/270). We would end up with a
+  `ChainInformation` object containing an almost up-to-chain chain.
+- Listening to incoming block announces (block announces contain block headers) and verifying them
+  (https://github.com/paritytech/substrate-lite/issues/271).
+- Listening to incoming GrandPa gossiping messages in order to be up-to-date with blocks being
+  finalized.
+- Every time the current best block is updated, downloading the values of a certain list of
+  storage items (see JSON-RPC section below).
+
+In other words, we should constantly be up-to-date with the best and finalized blocks of the
+chain(s) we're connected to.
+
+Depending on the chain specs being loaded, the node should either connect only to one chain, or,
+if the chain is a parachain, to that one chain and Polkadot. In that second situation, all the
+steps above should be done for both the chain and Polkadot.
+
+The node, notably, doesn't store any block body, and doesn't hold the entire storage.
+
+---
+
+Answering JSON-RPC queries consists, well, in answering the requests made by the user.
+
+An important thing to keep in mind is that the code here should be optimized for usage with a UI
+whose objective is to look at the head of the chain and send transactions. For example, the code
+below keeps a cache of the recent blocks, because we expect the UI to mostly query recent blocks.
+It is for example not part of the objective right now to properly serve a UI that repeatedly
+queries blocks that are months old.
+
+Here is an overview of what the JSON-RPC queries consist of (without going in details):
+
+- Submitting a transaction. It is unclear to me what this involves. In the case of
+`author_submitAndWatchExtrinsic`, this theoretically means keeping track of this transaction in
+order to check, in new blocks, whether this transaction has been included, and notifying the user
+when that is the case.
+- Getting notified when the best block or the finalized block changes.
+- Requesting the headers of recent blocks, in particular the current best block and finalized
+block. Because everything is asynchronous, it is possible that the user requests what they believe
+is the latest finalized block while the latest finalized block has in reality in the meanwhile
+been updated.
+- Requesting storage items of blocks. This should be implemented by asking that information from
+a full node (a so-called "storage proof").
+- Requesting the metadata. The metadata is a piece of information that can be obtained from the
+runtime code (see the `metadata` module), which is itself the storage item whose key is `:code`.
+- Watching for changes in a storage item, where the user wants to be notified when the value of a
+storage item is modified. This should also be implemented by sending, for each block we receive,
+a storage proof requesting the value of every single storage item being watched, and comparing the
+result with the one of the previous block. Note that "has changed" means "has changed compared to
+the previous best block", and the "previous best block" can have the same height as the current
+best block, notably in case of a reorg.
+- Watching for changes in the runtime version. The runtime version is also a piece of information
+that can be obtained from the runtime code. In order to watch for changes in the runtime version,
+one has to watch for changes in the `:code` storage item, similar to the previous bullet point.
+
+In order to be able to implement watching for storage items and runtime versions, the node should
+therefore download, for each new best block, the value of each of these storage items being
+watched and of the `:code` key.
+
+*/
+
 /// Starts a client running the given chain specifications.
 ///
 /// > **Note**: This function returns a `Result`. The return value according to the JavaScript
 /// >           function is what is in the `Ok`. If an `Err` is returned, a JavaScript exception
 /// >           is thrown.
-pub async fn start_client(chain_spec: String) {
+pub async fn start_client(chain_spec: String, database_content: Option<String>) {
     std::panic::set_hook(Box::new(|info| {
         ffi::throw(info.to_string());
     }));
@@ -72,6 +150,20 @@ pub async fn start_client(chain_spec: String) {
         Err(err) => ffi::throw(format!("Error while opening chain specs: {}", err)),
     };
 
+    // The database passed from the user is decoded. Any error while decoding is treated as if
+    // there was no database.
+    let database_content = if let Some(database_content) = database_content {
+        if let Ok(parsed) = substrate_lite::database::finalized_serialize::decode_chain_information(
+            &database_content,
+        ) {
+            Some(parsed)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Load the information about the chain from the chain specs. If a light sync state is
     // present in the chain specs, it is possible to start sync at the finalized block it
     // describes.
@@ -80,10 +172,23 @@ pub async fn start_client(chain_spec: String) {
             chain_spec.genesis_storage(),
         )
         .unwrap();
-    let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
-        light_sync_state.as_chain_information()
-    } else {
-        genesis_chain_information.clone()
+    let chain_information = {
+        let base = if let Some(light_sync_state) = chain_spec.light_sync_state() {
+            light_sync_state.as_chain_information()
+        } else {
+            genesis_chain_information.clone()
+        };
+
+        // Only use the existing database if it is ahead of `base`.
+        if let Some(database_content) = database_content {
+            if database_content.finalized_block_header.number > base.finalized_block_header.number {
+                database_content
+            } else {
+                base
+            }
+        } else {
+            base
+        }
     };
 
     // TODO: un-Arc-ify
@@ -158,6 +263,13 @@ pub async fn start_client(chain_spec: String) {
         }
     };
 
+    // This implementation of `futures::Stream` fires at a regular time interval.
+    // The state of the chain is saved every time it fires.
+    let mut database_save_timer = stream::unfold((), move |_| {
+        ffi::Delay::new(Duration::from_secs(15)).map(|_| Some(((), ())))
+    })
+    .map(|_| ());
+
     loop {
         futures::select! {
             network_message = network_service.next_event().fuse() => {
@@ -216,12 +328,14 @@ pub async fn start_client(chain_spec: String) {
                             ffi::emit_json_rpc_response(&notification);
                         }
 
+                        // Load the entry of the finalized block in order to guarantee that it
+                        // remains in the LRU cache when `put` is called below.
+                        let _ = client.known_blocks.get(&client.finalized_block).unwrap();
+
                         client.best_block = decoded.hash();
                         client.known_blocks.put(client.best_block, decoded.into());
 
-                        // Load the entry of the finalized block in order to guarantee that it
-                        // remains in the LRU cache.
-                        let _ = client.known_blocks.get(&client.finalized_block).unwrap();
+                        debug_assert!(client.known_blocks.get(&client.finalized_block).is_some());
 
                         // TODO: need to update `best_block_metadata` if necessary, and notify the runtime version subscriptions
                     },
@@ -253,6 +367,17 @@ pub async fn start_client(chain_spec: String) {
                     ffi::emit_json_rpc_response(&response2);
                 }
             },
+
+            _interval = database_save_timer.next().fuse() => {
+                debug_assert!(_interval.is_some());
+                // A new task is spawned specifically for the saving, in order to not block the
+                // main processing while waiting for the serialization.
+                let sync_service = sync_service.clone();
+                ffi::spawn_task(async move {
+                    let database_content = sync_service.serialize_chain().await;
+                    ffi::database_save(&database_content);
+                });
+            }
         }
     }
 }

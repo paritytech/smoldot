@@ -77,8 +77,7 @@ pub(crate) fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
             }
 
             let arc_self = arc_self.clone();
-            // TODO: this extra 1ms is quite bad/annoying
-            start_timer_wrap(Duration::from_millis(1), move || {
+            start_timer_wrap(Duration::new(0, 0), move || {
                 if arc_self.done.load(atomic::Ordering::SeqCst) {
                     return;
                 }
@@ -113,10 +112,8 @@ pub(crate) fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
 fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
     let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
-    let milliseconds = u64::try_from(duration.as_millis())
-        .unwrap_or(u64::max_value())
-        .saturating_add(1);
-    unsafe { bindings::start_timer(timer_id, milliseconds as f64) }
+    let milliseconds = u64::try_from(duration.as_millis()).unwrap_or(u64::max_value());
+    unsafe { bindings::start_timer(timer_id, (milliseconds as f64).ceil()) }
 }
 
 // TODO: cancel the timer if the `Delay` is destroyed? we create and destroy a lot of `Delay`s
@@ -213,6 +210,16 @@ impl Sub<Instant> for Instant {
         let ms = self.inner - other.inner;
         assert!(ms >= 0.0);
         Duration::from_millis(ms as u64)
+    }
+}
+
+/// Sets the content of the database to the given string.
+pub(crate) fn database_save(content: &str) {
+    unsafe {
+        bindings::database_save(
+            u32::try_from(content.as_bytes().as_ptr() as usize).unwrap(),
+            u32::try_from(content.as_bytes().len()).unwrap(),
+        );
     }
 }
 
@@ -422,17 +429,18 @@ fn init(
     let chain_specs = String::from_utf8(Vec::from(chain_specs)).expect("non-utf8 chain specs");
 
     let database_content = if database_content_ptr != 0 {
-        Some(unsafe {
+        let data: Box<[u8]> = unsafe {
             Box::from_raw(slice::from_raw_parts_mut(
                 database_content_ptr as *mut u8,
                 database_content_len,
             ))
-        })
+        };
+        String::from_utf8(Vec::from(data)).ok()
     } else {
         None
     };
 
-    spawn_task(super::start_client(chain_specs));
+    spawn_task(super::start_client(chain_specs, database_content));
 }
 
 lazy_static::lazy_static! {

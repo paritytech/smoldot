@@ -48,22 +48,28 @@ impl<T> NonFinalizedTree<T> {
     ) -> Result<HeaderVerifySuccess<T>, HeaderVerifyError> {
         let self_inner = self.inner.take().unwrap();
         match self_inner.verify(scale_encoded_header, now_from_unix_epoch, false) {
-            VerifyOut::Header(Err(err)) => Err(err),
-            VerifyOut::Header(Ok((context, is_new_best, consensus))) => {
+            VerifyOut::HeaderErr(self_inner, err) => {
+                self.inner = Some(self_inner);
+                Err(err)
+            }
+            VerifyOut::HeaderOk(context, is_new_best, consensus) => {
                 let hash = context.header.hash();
                 Ok(HeaderVerifySuccess::Insert {
                     block_height: context.header.number,
                     is_new_best,
                     insert: HeaderInsert {
                         chain: self,
-                        context,
+                        context: Some(context),
                         is_new_best,
                         hash,
-                        consensus,
+                        consensus: Some(consensus),
                     },
                 })
             }
-            VerifyOut::Duplicate => Ok(HeaderVerifySuccess::Duplicate),
+            VerifyOut::Duplicate(self_inner) => {
+                self.inner = Some(self_inner);
+                Ok(HeaderVerifySuccess::Duplicate)
+            }
             _ => unreachable!(),
         }
     }
@@ -115,7 +121,7 @@ impl<T> NonFinalizedTreeInner<T> {
                         err,
                     ))
                 } else {
-                    VerifyOut::Header(Err(HeaderVerifyError::InvalidHeader(err)))
+                    VerifyOut::HeaderErr(self, HeaderVerifyError::InvalidHeader(err))
                 }
             }
         };
@@ -128,7 +134,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     inner: Some(self),
                 }))
             } else {
-                VerifyOut::Duplicate
+                VerifyOut::Duplicate(self)
             };
         }
 
@@ -154,7 +160,7 @@ impl<T> NonFinalizedTreeInner<T> {
                                 parent_hash,
                             })
                         } else {
-                            VerifyOut::Header(Err(HeaderVerifyError::BadParent { parent_hash }))
+                            VerifyOut::HeaderErr(self, HeaderVerifyError::BadParent { parent_hash })
                         }
                     }
                 },
@@ -257,14 +263,15 @@ impl<T> NonFinalizedTreeInner<T> {
             .unwrap(); // TODO: no unwrap
 
             let (is_new_best, consensus) = context.apply_success_header(result);
-            VerifyOut::Header(Ok((context, is_new_best, consensus)))
+            VerifyOut::HeaderOk(context, is_new_best, consensus)
         }
     }
 }
 
 enum VerifyOut<T> {
-    Header(Result<(VerifyContext<T>, bool, BlockConsensus), HeaderVerifyError>),
-    Duplicate,
+    HeaderOk(VerifyContext<T>, bool, BlockConsensus),
+    HeaderErr(NonFinalizedTreeInner<T>, HeaderVerifyError),
+    Duplicate(NonFinalizedTreeInner<T>),
     Body(BodyVerifyStep1<T>),
 }
 
@@ -428,6 +435,7 @@ impl<T> VerifyContext<T> {
 
                     return BodyVerifyStep2::Finished {
                         parent_runtime: success.parent_runtime,
+                        new_runtime: success.new_runtime,
                         storage_top_trie_changes: success.storage_top_trie_changes,
                         offchain_storage_changes: success.offchain_storage_changes,
                         top_trie_root_calculation_cache: success.top_trie_root_calculation_cache,
@@ -461,6 +469,12 @@ impl<T> VerifyContext<T> {
                 }
                 verify::header_body::Verify::StoragePrefixKeys(inner) => {
                     return BodyVerifyStep2::StoragePrefixKeys(StoragePrefixKeys {
+                        context: self,
+                        inner,
+                    })
+                }
+                verify::header_body::Verify::RuntimeCompilation(inner) => {
+                    return BodyVerifyStep2::RuntimeCompilation(RuntimeCompilation {
                         context: self,
                         inner,
                     })
@@ -660,6 +674,10 @@ pub enum BodyVerifyStep2<T> {
     Finished {
         /// Value that was passed to [`BodyVerifyRuntimeRequired::resume`].
         parent_runtime: host::HostVmPrototype,
+        /// Contains `Some` if and only if [`BodyVerifyStep2::Finished::storage_top_trie_changes`]
+        /// contains a change in the `:code` or `:heappages` keys, indicating that the runtime has
+        /// been modified. Contains the new runtime.
+        new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
         storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
         /// List of changes to the offchain storage that this block performs.
@@ -684,6 +702,11 @@ pub enum BodyVerifyStep2<T> {
     StoragePrefixKeys(StoragePrefixKeys<T>),
     /// Fetching the key that follows a given one is required in order to continue.
     StorageNextKey(StorageNextKey<T>),
+    /// A new runtime must be compiled.
+    ///
+    /// This variant doesn't require any specific input from the user, but is provided in order to
+    /// make it possible to benchmark the time it takes to compile runtimes.
+    RuntimeCompilation(RuntimeCompilation<T>),
 }
 
 /// Loading a storage value is required in order to continue.
@@ -869,6 +892,24 @@ impl<T> StorageNextKey<T> {
     }
 }
 
+/// A new runtime must be compiled.
+///
+/// This variant doesn't require any specific input from the user, but is provided in order to
+/// make it possible to benchmark the time it takes to compile runtimes.
+#[must_use]
+pub struct RuntimeCompilation<T> {
+    inner: verify::header_body::RuntimeCompilation,
+    context: VerifyContext<T>,
+}
+
+impl<T> RuntimeCompilation<T> {
+    /// Performs the runtime compilation.
+    pub fn build(self) -> BodyVerifyStep2<T> {
+        let inner = self.inner.build();
+        self.context.with_body_verify(inner)
+    }
+}
+
 ///
 #[derive(Debug)]
 pub enum HeaderVerifySuccess<'c, T> {
@@ -890,57 +931,64 @@ pub enum HeaderVerifySuccess<'c, T> {
 #[must_use]
 pub struct HeaderInsert<'c, T> {
     chain: &'c mut NonFinalizedTree<T>,
-    context: VerifyContext<T>,
+    context: Option<VerifyContext<T>>,
     hash: [u8; 32],
     is_new_best: bool,
-    consensus: BlockConsensus,
+    consensus: Option<BlockConsensus>,
 }
 
 impl<'c, T> HeaderInsert<'c, T> {
     /// Inserts the block with the given user data.
     pub fn insert(mut self, user_data: T) {
-        let new_node_index = self.context.chain.blocks.insert(
-            self.context.parent_tree_index,
+        let mut context = self.context.take().unwrap();
+
+        let new_node_index = context.chain.blocks.insert(
+            context.parent_tree_index,
             Block {
-                header: self.context.header,
+                header: context.header,
                 hash: self.hash,
-                consensus: self.consensus,
+                consensus: self.consensus.take().unwrap(),
                 user_data,
             },
         );
 
         if self.is_new_best {
-            self.context.chain.current_best = Some(new_node_index);
+            context.chain.current_best = Some(new_node_index);
         }
 
-        self.chain.inner = Some(self.context.chain);
+        self.chain.inner = Some(context.chain);
     }
 
     /// Returns the block header about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        From::from(&self.context.header)
+        From::from(&self.context.as_ref().unwrap().header)
     }
 
     /// Destroys the object without inserting the block in the chain. Returns the block header.
-    pub fn into_header(self) -> header::Header {
-        self.chain.inner = Some(self.context.chain);
-        self.context.header
+    pub fn into_header(mut self) -> header::Header {
+        let context = self.context.take().unwrap();
+        self.chain.inner = Some(context.chain);
+        context.header
     }
 }
 
 impl<'c, T> fmt::Debug for HeaderInsert<'c, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("HeaderInsert")
-            .field(&self.context.header)
+            .field(&self.context.as_ref().unwrap().header)
             .finish()
     }
 }
 
-// TODO: restore self.chain.inner
-/*impl<'c, T> Drop for HeaderInsert<'c, T> {
+impl<'c, T> Drop for HeaderInsert<'c, T> {
     fn drop(&mut self) {
+        if let Some(context) = self.context.take() {
+            self.chain.inner = Some(context.chain);
+        } else {
+            debug_assert!(self.chain.inner.is_some());
+        }
     }
-}*/
+}
 
 /// Error that can happen when verifying a block header.
 #[derive(Debug, derive_more::Display)]

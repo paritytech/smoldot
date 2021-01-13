@@ -13,10 +13,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 derive_more = "0.99.11"
-futures = "0.3.8"
+futures = "0.3.9"
 lazy_static = "1.4.0"
 lru = "0.6.3"
-rand = "0.7.3"
-serde_json = "1.0.60"
+rand = "0.8.1"
+serde_json = "1.0.61"
 slab = "0.4.2"
 substrate-lite = { version = "0.1.0", path = "../../..", default-features = false }
