@@ -167,22 +167,6 @@ struct Guarded<TNow, TPeer, TConn> {
     >,
 }
 
-/// Data structure holding the state of a single established (i.e. post-handshake) connection.
-///
-/// This data structure is wrapped around `Arc<Mutex<>>`. As such, its fields do not necessarily
-/// match the state in the [`Network`].
-struct Connection<TNow, TConn> {
-    connection: Option<
-        connection::established::Established<
-            TNow,
-            oneshot::Sender<Result<Vec<u8>, RequestError>>,
-            usize,
-        >,
-    >,
-    user_data: Option<TConn>,
-    waker: Option<Waker>,
-}
-
 impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
@@ -665,288 +649,19 @@ where
                 let established = established.user_data_mut().clone();
                 drop(guarded);
 
-                let mut established = established.lock().await;
-                let established = &mut *established;
-
-                // Update the `core::task::Waker` if necessary.
-                match established.waker {
-                    Some(ref w) if w.will_wake(cx.waker()) => {}
-                    _ => established.waker = Some(cx.waker().clone()),
-                }
-
-                let read_write_result = established.connection.take().unwrap().read_write(
-                    now,
-                    incoming_buffer,
-                    outgoing_buffer,
-                );
-
-                let read_write_result = match read_write_result {
-                    Ok(rw) => rw,
-                    Err(err) => {
-                        let mut guarded = self.guarded.lock().await;
-                        let mut out_overlay_network_indices =
-                            Vec::with_capacity(guarded.peerset.num_overlay_networks());
-                        let mut in_overlay_network_indices =
-                            Vec::with_capacity(guarded.peerset.num_overlay_networks());
-                        let peer_id = {
-                            let mut c = guarded.peerset.connection_mut(connection_id.0).unwrap();
-                            for (overlay_network_index, direction, _) in c.open_substreams_mut() {
-                                match direction {
-                                    peerset::SubstreamDirection::In => {
-                                        in_overlay_network_indices.push(overlay_network_index)
-                                    }
-                                    peerset::SubstreamDirection::Out => {
-                                        out_overlay_network_indices.push(overlay_network_index)
-                                    }
-                                }
-                            }
-                            let peer_id = c.peer_id().clone();
-                            c.remove();
-                            peer_id
-                        };
-
-                        // TODO: only send if last connection
-                        guarded
-                            .events_tx
-                            .send(Event::Disconnected {
-                                peer_id,
-                                user_data: established.user_data.take().unwrap(),
-                                in_overlay_network_indices,
-                                out_overlay_network_indices,
-                            })
-                            .await
-                            .unwrap();
-
-                        return Err(ConnectionError::Established(err));
-                    }
-                };
-
-                read_write.read_bytes += read_write_result.read_bytes;
-                read_write.written_bytes += read_write_result.written_bytes;
-                debug_assert!(read_write.wake_up_after.is_none());
-                read_write.wake_up_after = read_write_result.wake_up_after;
-                read_write.write_close = read_write_result.write_close;
-                established.connection = Some(read_write_result.connection);
-
-                if read_write_result.read_bytes != 0
-                    || read_write_result.written_bytes != 0
-                    || read_write_result.event.is_some()
-                {
-                    if let Some(waker) = established.waker.take() {
-                        waker.wake();
-                    }
-                }
-
-                // TODO: finish here
-
-                match read_write_result.event {
-                    None => {}
-                    Some(connection::established::Event::RequestIn {
-                        id,
-                        protocol_index,
-                        request,
-                    }) => todo!(),
-                    Some(connection::established::Event::Response {
-                        response,
-                        user_data: send_back,
-                        ..
-                    }) => {
-                        let _ = send_back.send(response.map_err(RequestError::Connection));
-                    }
-                    Some(connection::established::Event::NotificationsInOpen {
-                        id,
-                        protocol_index: overlay_network_index,
-                        handshake,
-                    }) => {
-                        let mut guarded = self.guarded.lock().await;
-
-                        guarded
-                            .peerset
-                            .connection_mut(connection_id.0)
-                            .unwrap()
-                            .add_pending_substream(
-                                overlay_network_index,
-                                peerset::SubstreamDirection::In,
-                                id,
-                            );
-
-                        guarded
-                            .events_tx
-                            .send(Event::NotificationsInOpen {
-                                id: connection_id,
-                                overlay_network_index,
-                                remote_handshake: handshake,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                    Some(connection::established::Event::NotificationsInOpenCancel {
-                        protocol_index,
-                        ..
-                    }) => {
-                        let mut guarded = self.guarded.lock().await;
-                        guarded
-                            .peerset
-                            .connection_mut(connection_id.0)
-                            .unwrap()
-                            .remove_pending_substream(
-                                protocol_index,
-                                peerset::SubstreamDirection::In,
-                            )
-                            .unwrap();
-                    }
-                    Some(connection::established::Event::NotificationIn { id, notification }) => {
-                        let overlay_network_index = *established
-                            .connection
-                            .as_mut()
-                            .unwrap()
-                            .notifications_substream_user_data_mut(id)
-                            .unwrap();
-
-                        let mut guarded = self.guarded.lock().await;
-
-                        let mut connection =
-                            guarded.peerset.connection_mut(connection_id.0).unwrap();
-                        let peer_id = connection.peer_id().clone();
-                        let has_symmetric_substream = connection.has_open_substream(
-                            overlay_network_index,
-                            peerset::SubstreamDirection::Out,
-                        );
-
-                        guarded
-                            .events_tx
-                            .send(Event::NotificationsIn {
-                                id: connection_id,
-                                peer_id,
-                                has_symmetric_substream,
-                                overlay_network_index,
-                                notification,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                    Some(connection::established::Event::NotificationsOutAccept {
-                        id,
-                        remote_handshake,
-                    }) => {
-                        let overlay_network_index = *established
-                            .connection
-                            .as_mut()
-                            .unwrap()
-                            .notifications_substream_user_data_mut(id)
-                            .unwrap();
-
-                        let mut guarded = self.guarded.lock().await;
-
-                        guarded
-                            .peerset
-                            .connection_mut(connection_id.0)
-                            .unwrap()
-                            .confirm_substream(
-                                overlay_network_index,
-                                peerset::SubstreamDirection::Out,
-                                |id| id,
-                            );
-
-                        guarded
-                            .events_tx
-                            .send(Event::NotificationsOutAccept {
-                                id: connection_id,
-                                overlay_network_index,
-                                remote_handshake,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                    Some(connection::established::Event::NotificationsOutReject {
-                        id,
-                        user_data: overlay_network_index,
-                    }) => {
-                        let mut guarded = self.guarded.lock().await;
-
-                        let _expected_id = guarded
-                            .peerset
-                            .connection_mut(connection_id.0)
-                            .unwrap()
-                            .remove_pending_substream(
-                                overlay_network_index,
-                                peerset::SubstreamDirection::Out,
-                            )
-                            .unwrap();
-                        debug_assert_eq!(id, _expected_id);
-
-                        guarded
-                            .events_tx
-                            .send(Event::NotificationsOutReject {
-                                id: connection_id,
-                                overlay_network_index,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                    Some(connection::established::Event::NotificationsOutCloseDemanded { id }) => {
-                        todo!()
-                    }
-                    Some(connection::established::Event::NotificationsOutReset {
-                        id,
-                        user_data: overlay_network_index,
-                    }) => {
-                        let mut guarded = self.guarded.lock().await;
-
-                        let _expected_id = guarded
-                            .peerset
-                            .connection_mut(connection_id.0)
-                            .unwrap()
-                            .remove_pending_substream(
-                                overlay_network_index,
-                                peerset::SubstreamDirection::Out,
-                            )
-                            .unwrap();
-                        debug_assert_eq!(id, _expected_id);
-
-                        guarded
-                            .events_tx
-                            .send(Event::NotificationsOutClose {
-                                id: connection_id,
-                                overlay_network_index,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                }
-
-                // Connetion is considered closed if `write_close` is `true` and `incoming_buffer`
-                // is `None`.
-                if read_write.write_close && incoming_buffer.is_none() {
-                    let mut guarded = self.guarded.lock().await;
-                    let mut out_overlay_network_indices =
-                        Vec::with_capacity(guarded.peerset.num_overlay_networks());
-                    let mut in_overlay_network_indices =
-                        Vec::with_capacity(guarded.peerset.num_overlay_networks());
-                    let mut connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
-                    let peer_id = connection.peer_id().clone(); // TODO: no
-                    for (overlay_network_index, direction, _) in connection.open_substreams_mut() {
-                        match direction {
-                            peerset::SubstreamDirection::In => {
-                                in_overlay_network_indices.push(overlay_network_index)
-                            }
-                            peerset::SubstreamDirection::Out => {
-                                out_overlay_network_indices.push(overlay_network_index)
-                            }
-                        }
-                    }
-                    connection.remove();
-                    guarded
-                        .events_tx
-                        .send(Event::Disconnected {
-                            peer_id,
-                            user_data: established.user_data.take().unwrap(),
-                            out_overlay_network_indices,
-                            in_overlay_network_indices,
-                        })
-                        .await
-                        .unwrap();
-                }
+                established
+                    .lock()
+                    .await
+                    .read_write(
+                        &self.guarded,
+                        connection_id,
+                        now,
+                        incoming_buffer,
+                        outgoing_buffer,
+                        &mut read_write,
+                        cx,
+                    )
+                    .await?;
             }
         }
 
@@ -1026,6 +741,314 @@ where
         }
 
         None
+    }
+}
+
+/// Data structure holding the state of a single established (i.e. post-handshake) connection.
+///
+/// This data structure is wrapped around `Arc<Mutex<>>`. As such, its fields do not necessarily
+/// match the state in the [`Network`].
+struct Connection<TNow, TConn> {
+    connection: Option<
+        connection::established::Established<
+            TNow,
+            oneshot::Sender<Result<Vec<u8>, RequestError>>,
+            usize,
+        >,
+    >,
+    user_data: Option<TConn>,
+    waker: Option<Waker>,
+}
+
+impl<TNow, TConn> Connection<TNow, TConn>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
+    async fn read_write<'a, TPeer>(
+        &mut self,
+        guarded: &Mutex<Guarded<TNow, TPeer, TConn>>,
+        connection_id: ConnectionId,
+        now: TNow,
+        incoming_buffer: Option<&[u8]>,
+        outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
+        read_write: &mut ReadWrite<TNow>,
+        cx: &mut Context<'_>,
+    ) -> Result<(), ConnectionError> {
+        // Update the `core::task::Waker` if necessary.
+        match self.waker {
+            Some(ref w) if w.will_wake(cx.waker()) => {}
+            _ => self.waker = Some(cx.waker().clone()),
+        }
+
+        let read_write_result =
+            self.connection
+                .take()
+                .unwrap()
+                .read_write(now, incoming_buffer, outgoing_buffer);
+
+        let read_write_result = match read_write_result {
+            Ok(rw) => rw,
+            Err(err) => {
+                let mut guarded = guarded.lock().await;
+                let mut out_overlay_network_indices =
+                    Vec::with_capacity(guarded.peerset.num_overlay_networks());
+                let mut in_overlay_network_indices =
+                    Vec::with_capacity(guarded.peerset.num_overlay_networks());
+                let peer_id = {
+                    let mut c = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                    for (overlay_network_index, direction, _) in c.open_substreams_mut() {
+                        match direction {
+                            peerset::SubstreamDirection::In => {
+                                in_overlay_network_indices.push(overlay_network_index)
+                            }
+                            peerset::SubstreamDirection::Out => {
+                                out_overlay_network_indices.push(overlay_network_index)
+                            }
+                        }
+                    }
+                    let peer_id = c.peer_id().clone();
+                    c.remove();
+                    peer_id
+                };
+
+                // TODO: only send if last connection
+                guarded
+                    .events_tx
+                    .send(Event::Disconnected {
+                        peer_id,
+                        user_data: self.user_data.take().unwrap(),
+                        in_overlay_network_indices,
+                        out_overlay_network_indices,
+                    })
+                    .await
+                    .unwrap();
+
+                return Err(ConnectionError::Established(err));
+            }
+        };
+
+        read_write.read_bytes += read_write_result.read_bytes;
+        read_write.written_bytes += read_write_result.written_bytes;
+        debug_assert!(read_write.wake_up_after.is_none());
+        read_write.wake_up_after = read_write_result.wake_up_after;
+        read_write.write_close = read_write_result.write_close;
+        self.connection = Some(read_write_result.connection);
+
+        if read_write_result.read_bytes != 0
+            || read_write_result.written_bytes != 0
+            || read_write_result.event.is_some()
+        {
+            if let Some(waker) = self.waker.take() {
+                waker.wake();
+            }
+        }
+
+        // TODO: finish here
+
+        match read_write_result.event {
+            None => {}
+            Some(connection::established::Event::RequestIn {
+                id,
+                protocol_index,
+                request,
+            }) => todo!(),
+            Some(connection::established::Event::Response {
+                response,
+                user_data: send_back,
+                ..
+            }) => {
+                let _ = send_back.send(response.map_err(RequestError::Connection));
+            }
+            Some(connection::established::Event::NotificationsInOpen {
+                id,
+                protocol_index: overlay_network_index,
+                handshake,
+            }) => {
+                let mut guarded = guarded.lock().await;
+
+                guarded
+                    .peerset
+                    .connection_mut(connection_id.0)
+                    .unwrap()
+                    .add_pending_substream(
+                        overlay_network_index,
+                        peerset::SubstreamDirection::In,
+                        id,
+                    );
+
+                guarded
+                    .events_tx
+                    .send(Event::NotificationsInOpen {
+                        id: connection_id,
+                        overlay_network_index,
+                        remote_handshake: handshake,
+                    })
+                    .await
+                    .unwrap();
+            }
+            Some(connection::established::Event::NotificationsInOpenCancel {
+                protocol_index,
+                ..
+            }) => {
+                let mut guarded = guarded.lock().await;
+                guarded
+                    .peerset
+                    .connection_mut(connection_id.0)
+                    .unwrap()
+                    .remove_pending_substream(protocol_index, peerset::SubstreamDirection::In)
+                    .unwrap();
+            }
+            Some(connection::established::Event::NotificationIn { id, notification }) => {
+                let overlay_network_index = *self
+                    .connection
+                    .as_mut()
+                    .unwrap()
+                    .notifications_substream_user_data_mut(id)
+                    .unwrap();
+
+                let mut guarded = guarded.lock().await;
+
+                let mut connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                let peer_id = connection.peer_id().clone();
+                let has_symmetric_substream = connection
+                    .has_open_substream(overlay_network_index, peerset::SubstreamDirection::Out);
+
+                guarded
+                    .events_tx
+                    .send(Event::NotificationsIn {
+                        id: connection_id,
+                        peer_id,
+                        has_symmetric_substream,
+                        overlay_network_index,
+                        notification,
+                    })
+                    .await
+                    .unwrap();
+            }
+            Some(connection::established::Event::NotificationsOutAccept {
+                id,
+                remote_handshake,
+            }) => {
+                let overlay_network_index = *self
+                    .connection
+                    .as_mut()
+                    .unwrap()
+                    .notifications_substream_user_data_mut(id)
+                    .unwrap();
+
+                let mut guarded = guarded.lock().await;
+
+                guarded
+                    .peerset
+                    .connection_mut(connection_id.0)
+                    .unwrap()
+                    .confirm_substream(
+                        overlay_network_index,
+                        peerset::SubstreamDirection::Out,
+                        |id| id,
+                    );
+
+                guarded
+                    .events_tx
+                    .send(Event::NotificationsOutAccept {
+                        id: connection_id,
+                        overlay_network_index,
+                        remote_handshake,
+                    })
+                    .await
+                    .unwrap();
+            }
+            Some(connection::established::Event::NotificationsOutReject {
+                id,
+                user_data: overlay_network_index,
+            }) => {
+                let mut guarded = guarded.lock().await;
+
+                let _expected_id = guarded
+                    .peerset
+                    .connection_mut(connection_id.0)
+                    .unwrap()
+                    .remove_pending_substream(
+                        overlay_network_index,
+                        peerset::SubstreamDirection::Out,
+                    )
+                    .unwrap();
+                debug_assert_eq!(id, _expected_id);
+
+                guarded
+                    .events_tx
+                    .send(Event::NotificationsOutReject {
+                        id: connection_id,
+                        overlay_network_index,
+                    })
+                    .await
+                    .unwrap();
+            }
+            Some(connection::established::Event::NotificationsOutCloseDemanded { id }) => {
+                todo!()
+            }
+            Some(connection::established::Event::NotificationsOutReset {
+                id,
+                user_data: overlay_network_index,
+            }) => {
+                let mut guarded = guarded.lock().await;
+
+                let _expected_id = guarded
+                    .peerset
+                    .connection_mut(connection_id.0)
+                    .unwrap()
+                    .remove_pending_substream(
+                        overlay_network_index,
+                        peerset::SubstreamDirection::Out,
+                    )
+                    .unwrap();
+                debug_assert_eq!(id, _expected_id);
+
+                guarded
+                    .events_tx
+                    .send(Event::NotificationsOutClose {
+                        id: connection_id,
+                        overlay_network_index,
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // Connetion is considered closed if `write_close` is `true` and `incoming_buffer`
+        // is `None`.
+        if read_write.write_close && incoming_buffer.is_none() {
+            let mut guarded = guarded.lock().await;
+            let mut out_overlay_network_indices =
+                Vec::with_capacity(guarded.peerset.num_overlay_networks());
+            let mut in_overlay_network_indices =
+                Vec::with_capacity(guarded.peerset.num_overlay_networks());
+            let mut connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
+            let peer_id = connection.peer_id().clone(); // TODO: no
+            for (overlay_network_index, direction, _) in connection.open_substreams_mut() {
+                match direction {
+                    peerset::SubstreamDirection::In => {
+                        in_overlay_network_indices.push(overlay_network_index)
+                    }
+                    peerset::SubstreamDirection::Out => {
+                        out_overlay_network_indices.push(overlay_network_index)
+                    }
+                }
+            }
+            connection.remove();
+            guarded
+                .events_tx
+                .send(Event::Disconnected {
+                    peer_id,
+                    user_data: self.user_data.take().unwrap(),
+                    out_overlay_network_indices,
+                    in_overlay_network_indices,
+                })
+                .await
+                .unwrap();
+        }
+
+        Ok(())
     }
 }
 
