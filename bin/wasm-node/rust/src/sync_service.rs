@@ -20,8 +20,8 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use std::{collections::HashMap, num::NonZeroU32, pin::Pin};
-use substrate_lite::{chain, chain::sync::optimistic, libp2p, network};
+use std::{collections::HashMap, convert::TryFrom as _, num::{NonZeroU32, NonZeroU64}, pin::Pin};
+use substrate_lite::{chain, chain::sync::all_forks, libp2p, network};
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -85,11 +85,20 @@ impl SyncService {
     }
 
     /// Registers a new source for blocks.
-    pub async fn add_source(&self, peer_id: libp2p::PeerId, best_block_number: u64) {
+    pub async fn add_source(
+        &self,
+        peer_id: libp2p::PeerId,
+        best_block_number: u64,
+        best_block_hash: [u8; 32],
+    ) {
         self.to_background
             .lock()
             .await
-            .send(ToBackground::PeerConnected(peer_id, best_block_number))
+            .send(ToBackground::PeerConnected(
+                peer_id,
+                best_block_number,
+                best_block_hash,
+            ))
             .await
             .unwrap()
     }
@@ -107,14 +116,15 @@ impl SyncService {
     /// Updates the best known block of the source.
     ///
     /// Has no effect if the previously-known best block is lower than the new one.
-    pub async fn raise_source_best_block(&self, peer_id: libp2p::PeerId, best_block_number: u64) {
+    pub async fn block_announce(
+        &self,
+        peer_id: libp2p::PeerId,
+        announce: network::service::EncodedBlockAnnounce,
+    ) {
         self.to_background
             .lock()
             .await
-            .send(ToBackground::PeerRaiseBest {
-                peer_id,
-                best_block_number,
-            })
+            .send(ToBackground::BlockAnnounce { peer_id, announce })
             .await
             .unwrap()
     }
@@ -198,40 +208,22 @@ async fn start_sync(
     mut from_foreground: mpsc::Receiver<ToBackground>,
     mut to_foreground: mpsc::Sender<FromBackground>,
 ) -> impl Future<Output = ()> {
-    let mut sync = optimistic::OptimisticSync::<_, libp2p::PeerId, ()>::new(optimistic::Config {
+    let mut sync = all_forks::AllForksSync::<_, ()>::new(all_forks::Config {
         chain_information,
         sources_capacity: 32,
-        source_selection_randomness_seed: rand::random(),
-        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
         blocks_capacity: {
             // This is the maximum number of blocks between two consecutive justifications.
             1024
-        },
-        download_ahead_blocks: {
-            // Verifying a block mostly consists in:
-            //
-            // - Verifying a sr25519 signature for each block, plus a VRF output when the
-            // block is claiming a primary BABE slot.
-            // - Verifying one ed25519 signature per authority for every justification.
-            //
-            // At the time of writing, the speed of these operations hasn't been benchmarked.
-            // It is likely that it varies quite a bit between the various environments (the
-            // different browser engines, and NodeJS).
-            //
-            // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
-            // second, the number of blocks to download ahead of time in order to not block
-            // is 5k.
-            5000
         },
         full: false,
     });
 
     async move {
         let mut peers_source_id_map = HashMap::new();
-        let mut block_requests_finished = stream::FuturesUnordered::new();
+        //let mut block_requests_finished = stream::FuturesUnordered::new();
 
         loop {
-            while let Some(action) = sync.next_request_action() {
+            /*while let Some(action) = sync.next_request_action() {
                 match action {
                     optimistic::RequestAction::Start {
                         start,
@@ -357,7 +349,7 @@ async fn start_sync(
             // take a long time. In order to avoid blocking the rest of the program in the
             // meanwhile, the `yield_once` function interrupts the current task and gives a
             // chance for other tasks to progress.
-            crate::yield_once().await;
+            crate::yield_once().await;*/
 
             futures::select! {
                 message = from_foreground.next() => {
@@ -369,20 +361,60 @@ async fn start_sync(
                     };
 
                     match message {
-                        ToBackground::PeerConnected(peer_id, best_block_number) => {
-                            let id = sync.add_source(peer_id.clone(), best_block_number);
+                        ToBackground::PeerConnected(peer_id, best_block_number, best_block_hash) => {
+                            let id = sync.add_source(peer_id.clone(), best_block_number, best_block_hash).id();
                             peers_source_id_map.insert(peer_id.clone(), id);
                         },
                         ToBackground::PeerDisconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (_, rq_list) = sync.remove_source(id);
+                            sync.source_mut(id).unwrap().remove();
+                            // TODO: update
+                            /*let (_, rq_list) = sync.remove_source(id);
                             for (_, rq) in rq_list {
                                 rq.abort();
-                            }
+                            }*/
                         },
-                        ToBackground::PeerRaiseBest { peer_id, best_block_number } => {
+                        ToBackground::BlockAnnounce { peer_id, announce } => {
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
-                            sync.raise_source_best_block(id, best_block_number);
+                            let decoded = announce.decode();
+                            // TODO: block header re-encoding
+                            match sync.source_mut(id).unwrap().block_announce(decoded.header.scale_encoding().fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a }), decoded.is_best, crate::ffi::unix_time()) {
+                                all_forks::BlockAnnounceOutcome::HeaderImported => {},
+                                all_forks::BlockAnnounceOutcome::BlockBodyDownloadStart => {},
+                                all_forks::BlockAnnounceOutcome::AncestrySearchStart { first_block_height, last_block_height } => {
+                                    let (send_back, rx) = oneshot::channel();
+                                    debug_assert!(last_block_height < first_block_height);
+                                    let send_result = to_foreground
+                                        .send(FromBackground::RequestStart {
+                                            target: peer_id,
+                                            request: network::protocol::BlocksRequestConfig {
+                                                start: network::protocol::BlocksRequestConfigStart::Number(
+                                                    NonZeroU64::new(first_block_height).unwrap(),
+                                                ),
+                                                desired_count: NonZeroU32::new(u32::try_from(1 + first_block_height- last_block_height).unwrap()).unwrap(),
+                                                direction: network::protocol::BlocksRequestDirection::Descending,
+                                                fields: network::protocol::BlocksRequestFields {
+                                                    header: true,
+                                                    body: false,
+                                                    justification: false,
+                                                },
+                                            },
+                                            send_back,
+                                        })
+                                        .await;
+
+                                    // If the channel is closed, the sync service has been closed too.
+                                    if send_result.is_err() {
+                                        return;
+                                    }
+                                },
+                                all_forks::BlockAnnounceOutcome::TooOld => {},
+                                all_forks::BlockAnnounceOutcome::AlreadyVerified => {},
+                                all_forks::BlockAnnounceOutcome::NotFinalizedChain => {},
+                                all_forks::BlockAnnounceOutcome::Queued => {},
+                                all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {},
+                                all_forks::BlockAnnounceOutcome::HeaderVerifyError(error) => {},
+                            }
                         },
                         ToBackground::Serialize { send_back } => {
                             let chain = sync.as_chain_information();
@@ -392,38 +424,41 @@ async fn start_sync(
                     }
                 },
 
-                (request_id, result) = block_requests_finished.select_next_some() => {
+                // TODO: restore
+                /*(request_id, result) = block_requests_finished.select_next_some() => {
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
-                        let result = result.map_err(|_| ()).and_then(|v| v);
+                        // TODO: restore
+                        /*let result = result.map_err(|_| ()).and_then(|v| v);
                         let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
                             scale_encoded_extrinsics: Vec::new(),
                             user_data: (),
-                        })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));
+                        })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));*/
                     }
-                },
+                },*/
 
-                _ = async move {
+                // TODO: restore
+                /*_ = async move {
                     if verified_blocks == 0 {
                         loop {
                             futures::pending!()
                         }
                     }
-                }.fuse() => {}
+                }.fuse() => {}*/
             }
         }
     }
 }
 
 enum ToBackground {
-    PeerConnected(libp2p::PeerId, u64),
+    PeerConnected(libp2p::PeerId, u64, [u8; 32]),
     PeerDisconnected(libp2p::PeerId),
-    PeerRaiseBest {
+    BlockAnnounce {
         peer_id: libp2p::PeerId,
-        best_block_number: u64,
+        announce: network::service::EncodedBlockAnnounce,
     },
     /// See [`SyncService::serialize_chain`].
     Serialize {

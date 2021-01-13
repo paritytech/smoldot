@@ -148,6 +148,12 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         }
     }
 
+    /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
+    /// latest finalized block. Can later be used to reconstruct a chain.
+    pub fn as_chain_information(&self) -> chain_information::ChainInformationRef {
+        self.chain.as_chain_information()
+    }
+
     /// Inform the [`AllForksSync`] of a new potential source of blocks.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be

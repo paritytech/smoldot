@@ -274,17 +274,16 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         futures::select! {
             network_message = network_service.next_event().fuse() => {
                 match network_message {
-                    network_service::Event::Connected { peer_id, best_block_number } => {
+                    network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
                         client.peers.push(peer_id.clone());
-                        sync_service.add_source(peer_id, best_block_number).await;
+                        sync_service.add_source(peer_id, best_block_number, best_block_hash).await;
                     }
                     network_service::Event::Disconnected(peer_id) => {
                         client.peers.retain(|p| *p != peer_id);
                         sync_service.remove_source(peer_id).await;
                     }
                     network_service::Event::BlockAnnounce { peer_id, announce } => {
-                        let decoded = announce.decode();
-                        sync_service.raise_source_best_block(peer_id, decoded.header.number).await;
+                        sync_service.block_announce(peer_id, announce).await;
                     }
                 }
             },

@@ -228,12 +228,14 @@ impl NetworkService {
                     peer_id,
                     chain_index,
                     best_number,
+                    best_hash,
                     ..
                 } => {
                     debug_assert_eq!(chain_index, 0);
                     return Event::Connected {
                         peer_id,
                         best_block_number: best_number,
+                        best_block_hash: best_hash,
                     };
                 }
                 service::Event::ChainDisconnected {
@@ -253,6 +255,7 @@ pub enum Event {
     Connected {
         peer_id: PeerId,
         best_block_number: u64,
+        best_block_hash: [u8; 32],
     },
     Disconnected(PeerId),
     BlockAnnounce {
