@@ -160,23 +160,27 @@ struct Guarded<TNow, TPeer, TConn> {
     /// or not).
     peerset: peerset::Peerset<
         TPeer,
-        Arc<
-            Mutex<(
-                Option<
-                    connection::established::Established<
-                        TNow,
-                        oneshot::Sender<Result<Vec<u8>, RequestError>>,
-                        usize,
-                    >,
-                >,
-                Option<TConn>,
-                Option<Waker>,
-            )>,
-        >,
+        Arc<Mutex<Connection<TNow, TConn>>>,
         Arc<Mutex<Option<(connection::handshake::HealthyHandshake, TConn)>>>,
         connection::established::SubstreamId,
         connection::established::SubstreamId,
     >,
+}
+
+/// Data structure holding the state of a single established (i.e. post-handshake) connection.
+///
+/// This data structure is wrapped around `Arc<Mutex<>>`. As such, its fields do not necessarily
+/// match the state in the [`Network`].
+struct Connection<TNow, TConn> {
+    connection: Option<
+        connection::established::Established<
+            TNow,
+            oneshot::Sender<Result<Vec<u8>, RequestError>>,
+            usize,
+        >,
+    >,
+    user_data: Option<TConn>,
+    waker: Option<Waker>,
 }
 
 impl<TNow, TPeer, TConn> Network<TNow, TPeer, TConn>
@@ -313,11 +317,11 @@ where
 
         let (send_back, receive_result) = oneshot::channel();
         connection_lock
-            .0
+            .connection
             .as_mut()
             .ok_or(RequestError::ConnectionClosed)?
             .add_request(now, protocol_index, request_data, send_back);
-        if let Some(waker) = connection_lock.2.take() {
+        if let Some(waker) = connection_lock.waker.take() {
             waker.wake();
         }
 
@@ -400,12 +404,12 @@ where
 
         let mut connection_lock = connection.lock().await;
 
-        let waker = connection_lock.2.take();
+        let waker = connection_lock.waker.take();
 
         // TODO: check if substream is still open to avoid a panic in `write_notification_unbounded`
         // TODO: return an error if queue is full
         connection_lock
-            .0
+            .connection
             .as_mut()
             .ok_or(QueueNotificationError::NotConnected)?
             .write_notification_unbounded(substream_id, notification.into());
@@ -505,12 +509,12 @@ where
 
         let mut connection = connection_arc.lock().await;
 
-        if let Some(waker) = connection.2.take() {
+        if let Some(waker) = connection.waker.take() {
             waker.wake();
         }
 
         connection
-            .0
+            .connection
             .as_mut()
             .unwrap()
             .accept_in_notifications_substream(
@@ -634,11 +638,11 @@ where
                                 let waker = cx.waker().clone();
                                 move |_| {
                                     let established = connection.into_connection(config);
-                                    Arc::new(Mutex::new((
-                                        Some(established),
-                                        Some(user_data),
-                                        Some(waker),
-                                    )))
+                                    Arc::new(Mutex::new(Connection {
+                                        connection: Some(established),
+                                        user_data: Some(user_data),
+                                        waker: Some(waker),
+                                    }))
                                 }
                             });
 
@@ -665,17 +669,16 @@ where
                 let established = &mut *established;
 
                 // Update the `core::task::Waker` if necessary.
-                match established.2 {
+                match established.waker {
                     Some(ref w) if w.will_wake(cx.waker()) => {}
-                    _ => established.2 = Some(cx.waker().clone()),
+                    _ => established.waker = Some(cx.waker().clone()),
                 }
 
-                let read_write_result =
-                    established
-                        .0
-                        .take()
-                        .unwrap()
-                        .read_write(now, incoming_buffer, outgoing_buffer);
+                let read_write_result = established.connection.take().unwrap().read_write(
+                    now,
+                    incoming_buffer,
+                    outgoing_buffer,
+                );
 
                 let read_write_result = match read_write_result {
                     Ok(rw) => rw,
@@ -707,7 +710,7 @@ where
                             .events_tx
                             .send(Event::Disconnected {
                                 peer_id,
-                                user_data: established.1.take().unwrap(),
+                                user_data: established.user_data.take().unwrap(),
                                 in_overlay_network_indices,
                                 out_overlay_network_indices,
                             })
@@ -723,13 +726,13 @@ where
                 debug_assert!(read_write.wake_up_after.is_none());
                 read_write.wake_up_after = read_write_result.wake_up_after;
                 read_write.write_close = read_write_result.write_close;
-                established.0 = Some(read_write_result.connection);
+                established.connection = Some(read_write_result.connection);
 
                 if read_write_result.read_bytes != 0
                     || read_write_result.written_bytes != 0
                     || read_write_result.event.is_some()
                 {
-                    if let Some(waker) = established.2.take() {
+                    if let Some(waker) = established.waker.take() {
                         waker.wake();
                     }
                 }
@@ -794,7 +797,7 @@ where
                     }
                     Some(connection::established::Event::NotificationIn { id, notification }) => {
                         let overlay_network_index = *established
-                            .0
+                            .connection
                             .as_mut()
                             .unwrap()
                             .notifications_substream_user_data_mut(id)
@@ -827,7 +830,7 @@ where
                         remote_handshake,
                     }) => {
                         let overlay_network_index = *established
-                            .0
+                            .connection
                             .as_mut()
                             .unwrap()
                             .notifications_substream_user_data_mut(id)
@@ -937,7 +940,7 @@ where
                         .events_tx
                         .send(Event::Disconnected {
                             peer_id,
-                            user_data: established.1.take().unwrap(),
+                            user_data: established.user_data.take().unwrap(),
                             out_overlay_network_indices,
                             in_overlay_network_indices,
                         })
@@ -1117,19 +1120,7 @@ pub enum ConnectionError {
 pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
     network: &'a Network<TNow, TPeer, TConn>,
     connection_id: peerset::ConnectionId,
-    connection: Arc<
-        Mutex<(
-            Option<
-                connection::established::Established<
-                    TNow,
-                    oneshot::Sender<Result<Vec<u8>, RequestError>>,
-                    usize,
-                >,
-            >,
-            Option<TConn>,
-            Option<Waker>,
-        )>,
-    >,
+    connection: Arc<Mutex<Connection<TNow, TConn>>>,
 
     /// Index of the overlay network whose notifications substream to open.
     overlay_network_index: usize,
@@ -1148,7 +1139,7 @@ where
     pub async fn open(self, now: TNow, handshake: impl Into<Vec<u8>>) {
         let mut connection = self.connection.lock().await;
 
-        let substream_id = if let Some(established) = connection.0.as_mut() {
+        let substream_id = if let Some(established) = connection.connection.as_mut() {
             Some(established.open_notifications_substream(
                 now,
                 self.overlay_network_index,
@@ -1159,7 +1150,7 @@ where
             None
         };
 
-        if let Some(waker) = connection.2.take() {
+        if let Some(waker) = connection.waker.take() {
             waker.wake();
         }
 
