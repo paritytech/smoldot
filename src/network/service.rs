@@ -519,7 +519,9 @@ where
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
                         // TODO: transaction announce
                     } else {
-                        // TODO: grandpa
+                        // TODO: don't unwrap
+                        let _notif = protocol::decode_grandpa_notification(&notification).unwrap();
+                        // TODO: do something with these notifs
                     }
                 }
             }
