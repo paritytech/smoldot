@@ -1338,9 +1338,9 @@ checksum = "71d96e3f3c0b6325d8ccd83c33b28acb183edcb6c67938ba104ec546854b0882"
 
 [[package]]
 name = "merlin"
-version = "2.0.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6feca46f4fa3443a01769d768727f10c10a20fdb65e52dc16a81f0c8269bb78"
+checksum = "4e261cf0f8b3c42ded9f7d2bb59dea03aa52bc8a1cbc7482f9fc3fd1229d3b42"
 dependencies = [
  "byteorder",
  "keccak",
@@ -1857,9 +1857,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c24fcd450d3fa2b592732565aa4f17a27a61c65ece4726353e000939b0edee34"
+checksum = "18519b42a40024d661e1714153e9ad0c3de27cd495760ceb09710920f1098b1e"
 dependencies = [
  "libc",
  "rand_chacha 0.3.0",
@@ -2291,7 +2291,7 @@ dependencies = [
  "parity-scale-codec",
  "prost",
  "prost-build",
- "rand 0.8.1",
+ "rand 0.8.2",
  "rand_chacha 0.3.0",
  "schnorrkel",
  "serde",
@@ -2325,7 +2325,7 @@ dependencies = [
  "hex",
  "parking_lot",
  "pin-project 1.0.4",
- "rand 0.8.1",
+ "rand 0.8.2",
  "slab",
  "structopt",
  "substrate-lite",
@@ -2343,7 +2343,7 @@ dependencies = [
  "futures",
  "lazy_static",
  "lru",
- "rand 0.8.1",
+ "rand 0.8.2",
  "serde_json",
  "slab",
  "substrate-lite",
