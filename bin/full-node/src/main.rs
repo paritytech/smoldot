@@ -157,21 +157,6 @@ async fn async_main() {
         None
     };
 
-    // TODO: remove; just for testing
-    /*let metadata = substrate_lite::metadata::metadata_from_runtime_code(
-        chain_spec
-            .genesis_storage()
-            .clone()
-            .find(|(k, _)| *k == b":code")
-            .unwrap().1,
-            1024,
-    )
-    .unwrap();
-    println!(
-        "{:#?}",
-        substrate_lite::metadata::decode(&metadata).unwrap()
-    );*/
-
     let network_service = network_service::NetworkService::new(network_service::Config {
         listen_addresses: Vec::new(),
         chains: iter::once(network_service::ChainConfig {
