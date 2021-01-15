@@ -398,7 +398,8 @@ where
                     mut out_overlay_network_indices,
                     ..
                 } => {
-                    out_overlay_network_indices.retain(|i| (i % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0);
+                    out_overlay_network_indices
+                        .retain(|i| (i % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0);
                     for elem in &mut out_overlay_network_indices {
                         *elem /= NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     }
@@ -464,7 +465,8 @@ where
                             protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
                         // TODO: don't unwrap
 
-                        let chain_config = &self.chains[overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
+                        let chain_config =
+                            &self.chains[overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
 
                         let handshake = protocol::encode_block_announces_handshake(
                             protocol::BlockAnnouncesHandshakeRef {
@@ -781,24 +783,26 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     pub async fn open(self, now: TNow) {
-        let chain_config = &self.chains[self.inner.overlay_network_index() / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
+        let chain_config =
+            &self.chains[self.inner.overlay_network_index() / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
 
-        let handshake = if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-            protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
-                best_hash: &chain_config.best_hash,
-                best_number: chain_config.best_number,
-                genesis_hash: &chain_config.genesis_hash,
-                role: chain_config.role,
-            })
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            })
-        } else if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
-            Vec::new()
-        } else {
-            chain_config.role.scale_encoding().to_vec()
-        };
+        let handshake =
+            if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
+                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
+                    best_hash: &chain_config.best_hash,
+                    best_number: chain_config.best_number,
+                    genesis_hash: &chain_config.genesis_hash,
+                    role: chain_config.role,
+                })
+                .fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                })
+            } else if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
+                Vec::new()
+            } else {
+                chain_config.role.scale_encoding().to_vec()
+            };
 
         self.inner.open(now, handshake).await;
     }
