@@ -22,6 +22,7 @@ use crate::finality::justification::decode::PrecommitRef;
 use alloc::vec::Vec;
 use core::convert::TryFrom as _;
 
+#[derive(Debug, Clone)]
 pub enum GrandpaNotificationRef<'a> {
     Vote(VoteMessageRef<'a>),
     Commit(CommitMessageRef<'a>),
@@ -30,6 +31,7 @@ pub enum GrandpaNotificationRef<'a> {
     CatchUp(CatchUpRef<'a>),
 }
 
+#[derive(Debug, Clone)]
 pub struct VoteMessageRef<'a> {
     pub round_number: u64,
     pub set_id: u64,
@@ -38,33 +40,39 @@ pub struct VoteMessageRef<'a> {
     pub authority_public_key: &'a [u8; 32],
 }
 
+#[derive(Debug, Clone)]
 pub enum MessageRef<'a> {
     Prevote(UnsignedPrevoteRef<'a>),
     Precommit(UnsignedPrecommitRef<'a>),
     PrimaryPropose(PrimaryProposeRef<'a>),
 }
 
+#[derive(Debug, Clone)]
 pub struct UnsignedPrevoteRef<'a> {
     pub target_hash: &'a [u8; 32],
     pub target_number: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct UnsignedPrecommitRef<'a> {
     pub target_hash: &'a [u8; 32],
     pub target_number: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct PrimaryProposeRef<'a> {
     pub target_hash: &'a [u8; 32],
     pub target_number: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct CommitMessageRef<'a> {
     pub round_number: u64,
     pub set_id: u64,
     pub message: CompactCommitRef<'a>,
 }
 
+#[derive(Debug, Clone)]
 pub struct CompactCommitRef<'a> {
     pub target_hash: &'a [u8; 32],
     pub target_number: u32,
@@ -74,17 +82,20 @@ pub struct CompactCommitRef<'a> {
     pub auth_data: Vec<(&'a [u8; 64], &'a [u8; 32])>,
 }
 
+#[derive(Debug, Clone)]
 pub struct NeighborPacket {
     pub round_number: u64,
     pub set_id: u64,
     pub commit_finalized_height: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct CatchUpRequest {
     pub round_number: u64,
     pub set_id: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct CatchUpRef<'a> {
     pub round_number: u64,
     pub prevotes: Vec<PrevoteRef<'a>>,
@@ -93,7 +104,7 @@ pub struct CatchUpRef<'a> {
     pub base_number: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PrevoteRef<'a> {
     /// Hash of the block concerned by the pre-vote.
     pub target_hash: &'a [u8; 32],

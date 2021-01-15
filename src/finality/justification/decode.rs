@@ -175,7 +175,7 @@ impl<'a> Iterator for PrecommitsRefIter<'a> {
 
 impl<'a> ExactSizeIterator for PrecommitsRefIter<'a> {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PrecommitRef<'a> {
     /// Hash of the block concerned by the pre-commit.
     pub target_hash: &'a [u8; 32],
