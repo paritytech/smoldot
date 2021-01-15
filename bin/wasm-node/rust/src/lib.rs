@@ -37,7 +37,6 @@ use substrate_lite::{
 	network::protocol,
 	trie::proof_verify
 };
-use hex::ToHex;
 
 pub mod ffi;
 
@@ -251,7 +250,6 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
             network_service: network_service.clone(),
             peers: Vec::new(),
             known_blocks,
-			known_blocks_log: vec![],
             best_block: finalized_block_hash,
             finalized_block: finalized_block_hash,
             genesis_storage,
@@ -335,7 +333,6 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                         let _ = client.known_blocks.get(&client.finalized_block).unwrap();
 
                         client.best_block = decoded.hash();
-						// client.known_blocks_log.push(client.best_block.clone());
                         client.known_blocks.put(client.best_block, decoded.into());
 
                         debug_assert!(client.known_blocks.get(&client.finalized_block).is_some());
@@ -356,7 +353,6 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                         }
 
                         client.finalized_block = decoded.hash();
-						// client.known_blocks_log.push(client.finalized_block.clone());
                         client.known_blocks.put(client.finalized_block, decoded.into());
                     },
                 }
@@ -395,7 +391,6 @@ struct Client {
     ///
     /// Always contains `best_block` and `finalized_block`.
     known_blocks: lru::LruCache<[u8; 32], substrate_lite::header::Header>,
-	known_blocks_log: Vec<[u8; 32]>,
     /// Hash of the current best block.
     best_block: [u8; 32],
     /// Hash of the latest finalized block.
@@ -457,11 +452,6 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             let response = if let Some(header) = client.known_blocks.get(hash) {
                 methods::Response::chain_getHeader(header_conv(header)).to_json_response(request_id)
             } else {
-				let mut a = "".to_owned();
-				for header in client.known_blocks_log.iter() {
-					a.push_str(&format!("{}\n", &hex::encode(header)));
-				}
-				todo!("{}", a);
                 json_rpc::parse::build_success_response(request_id, "null")
             };
 
