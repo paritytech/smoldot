@@ -54,6 +54,9 @@ pub enum NibbleFromU8Error {
 }
 
 /// Turns an iterator of bytes into an iterator of nibbles corresponding to these bytes.
+///
+/// For each byte, the iterator yields a nibble containing the 4 most significant bits then a
+/// nibble containing the 4 least significant bits.
 pub fn bytes_to_nibbles<I>(bytes: I) -> BytesToNibbles<I> {
     BytesToNibbles {
         inner: bytes,
