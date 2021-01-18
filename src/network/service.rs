@@ -17,7 +17,7 @@
 
 use crate::libp2p::{self, connection, discovery::kademlia, multiaddr, peer_id, QueueNotificationError};
 use crate::network::protocol;
-
+use crate::util;
 use core::{
     fmt, iter,
     num::NonZeroUsize,
@@ -338,14 +338,18 @@ where
 		&self,
 		target: &peer_id::PeerId,
 		chain_index: usize,
-		transaction: Vec<u8>,
+		extrinsic: Vec<u8>,
 	) -> Result<Vec<u8>, QueueNotificationError> {
+		let mut val = Vec::new();
+		val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
+		val.extend_from_slice(util::encode_scale_compact_usize(extrinsic.len()).as_ref());
+		val.extend(extrinsic.clone());
 		self.libp2p
-		    .queue_notification(&target, chain_index * 2 + 1, transaction.clone())
+		    .queue_notification(&target, chain_index * 3 + 1, val.clone())
             .await?;
 
 		let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
-		hash.update(transaction.as_slice());
+		hash.update(val.as_slice());
         Ok(hash.finalize().as_bytes().to_vec())
 	}
 

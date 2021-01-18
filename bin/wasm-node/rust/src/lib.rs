@@ -24,11 +24,11 @@
 
 use futures::prelude::*;
 use smoldot::{
-    chain, chain_spec,
-    json_rpc::{self, methods},
-    libp2p::{multiaddr, peer_id::PeerId},
-    network::protocol,
-    trie::proof_verify,
+	chain, chain_spec,
+	json_rpc::{self, methods},
+	libp2p::{QueueNotificationError, multiaddr, peer_id::PeerId},
+	network::protocol,
+	trie::proof_verify,
 };
 use std::{
     collections::{BTreeMap, HashSet},
