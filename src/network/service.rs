@@ -1,4 +1,4 @@
-// Substrate-lite
+// Smoldot
 // Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
@@ -122,13 +122,15 @@ pub struct ChainNetwork<TNow, TPeer, TConn> {
     substreams_open_rx: Mutex<mpsc::Receiver<()>>,
 }
 
+// Update this when a new request response protocol is added.
+const REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN: usize = 4;
+// Update this when a new notifications protocol is added.
+const NOTIFICATIONS_PROTOCOLS_PER_CHAIN: usize = 3;
+
 impl<TNow, TPeer, TConn> ChainNetwork<TNow, TPeer, TConn>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    // Update this when a new request response protocol is added.
-    const PROTOCOLS_PER_CHAIN: usize = 4;
-
     /// Initializes a new [`ChainNetwork`].
     pub fn new(config: Config<TPeer>) -> Self {
         // TODO: figure out the cloning situation here
@@ -150,6 +152,15 @@ where
                 })
                 .chain(iter::once(libp2p::OverlayNetwork {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
+                    fallback_protocol_names: Vec::new(),
+                    max_handshake_size: 256,      // TODO: arbitrary
+                    max_notification_size: 32768, // TODO: arbitrary
+                    bootstrap_nodes: chain.bootstrap_nodes.clone(),
+                    in_slots: chain.in_slots,
+                    out_slots: chain.out_slots,
+                }))
+                .chain(iter::once(libp2p::OverlayNetwork {
+                    protocol_name: "/paritytech/grandpa/1".to_string(),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
                     max_notification_size: 32768, // TODO: arbitrary
@@ -220,7 +231,7 @@ where
     }
 
     fn protocol_index(&self, chain_index: usize, protocol: usize) -> usize {
-        1 + chain_index * Self::PROTOCOLS_PER_CHAIN + protocol
+        1 + chain_index * REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + protocol
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
@@ -385,7 +396,7 @@ where
                     .await;
 
                 let peer_id = self.libp2p.connection_peer_id(*id).await;
-                let chain_index = overlay_network_index / 2;
+                let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                 *pending_in_accept = None;
             }
 
@@ -400,9 +411,10 @@ where
                     mut out_overlay_network_indices,
                     ..
                 } => {
-                    out_overlay_network_indices.retain(|i| (i % 2) == 0);
+                    out_overlay_network_indices
+                        .retain(|i| (i % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0);
                     for elem in &mut out_overlay_network_indices {
-                        *elem /= 2;
+                        *elem /= NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     }
                     return Event::Disconnected {
                         peer_id,
@@ -414,8 +426,8 @@ where
                     overlay_network_index,
                     remote_handshake,
                 } => {
-                    let chain_index = overlay_network_index / 2;
-                    if overlay_network_index % 2 == 0 {
+                    let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         let remote_handshake =
                             protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
                         // TODO: don't unwrap
@@ -428,7 +440,30 @@ where
                             best_number: remote_handshake.best_number,
                             role: remote_handshake.role,
                         };
+                    } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
+                        // Nothing to do.
+                    } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
+                        // Grandpa notification has been opened. Send neighbor packet.
+                        // TODO: below is not futures-cancellation-safe!
+                        // TODO: should instead return some object so that user does it manually?
+                        let peer_id = self.libp2p.connection_peer_id(id).await;
+                        let packet =
+                            protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
+                                round_number: 1, // TODO: round number 1 apparently means we're not interested in rounds
+                                set_id: 0,       // TODO:
+                                commit_finalized_height: 0, // TODO:
+                            })
+                            .scale_encoding()
+                            .fold(Vec::new(), |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            });
+                        let _ = self
+                            .libp2p
+                            .queue_notification(&peer_id, overlay_network_index, packet)
+                            .await;
                     } else {
+                        unreachable!()
                     }
 
                     // TODO:
@@ -443,8 +478,8 @@ where
                     id,
                     overlay_network_index,
                 } => {
-                    let chain_index = overlay_network_index / 2;
-                    if overlay_network_index % 2 == 0 {
+                    let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         let peer_id = self.libp2p.connection_peer_id(id).await;
                         return Event::ChainDisconnected {
                             peer_id,
@@ -461,12 +496,13 @@ where
                     overlay_network_index,
                     remote_handshake,
                 } => {
-                    if (overlay_network_index % 2) == 0 {
+                    if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
                         let remote_handshake =
                             protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
                         // TODO: don't unwrap
 
-                        let chain_config = &self.chains[overlay_network_index / 2];
+                        let chain_config =
+                            &self.chains[overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
 
                         let handshake = protocol::encode_block_announces_handshake(
                             protocol::BlockAnnouncesHandshakeRef {
@@ -484,10 +520,22 @@ where
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
                         *pending_in_accept = Some((id, overlay_network_index, handshake));
-                    } else {
+                    } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 {
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
                         *pending_in_accept = Some((id, overlay_network_index, Vec::new()));
+                    } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 {
+                        // Grandpa substream.
+                        let chain_config =
+                            &self.chains[overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
+
+                        let handshake = chain_config.role.scale_encoding().to_vec();
+
+                        // Accepting the substream isn't done immediately because of
+                        // futures-cancellation-related concerns.
+                        *pending_in_accept = Some((id, overlay_network_index, handshake));
+                    } else {
+                        unreachable!()
                     }
                 }
                 libp2p::Event::NotificationsIn {
@@ -507,8 +555,8 @@ where
                         continue;
                     }
 
-                    let chain_index = overlay_network_index / 2;
-                    if overlay_network_index % 2 == 0 {
+                    let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         // TODO: don't unwrap
                         let announce = protocol::decode_block_announce(&notification).unwrap();
                         return Event::BlockAnnounce {
@@ -516,8 +564,14 @@ where
                             peer_id,
                             announce: EncodedBlockAnnounce(notification),
                         };
-                    } else {
+                    } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
                         // TODO: transaction announce
+                    } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
+                        // TODO: don't unwrap
+                        let _notif = protocol::decode_grandpa_notification(&notification).unwrap();
+                    // TODO: do something with these notifs
+                    } else {
+                        unreachable!()
                     }
                 }
             }
@@ -633,7 +687,10 @@ pub struct StartConnect {
 /// Event generated by [`ChainNetwork::next_event`].
 #[derive(Debug)]
 pub enum Event {
+    /// Established a transport-level connection (e.g. a TCP socket) with the given peer.
     Connected(peer_id::PeerId),
+
+    /// A transport-level connection (e.g. a TCP socket) has been closed.
     Disconnected {
         peer_id: peer_id::PeerId,
         chain_indices: Vec<usize>,
@@ -719,7 +776,7 @@ where
                 .libp2p
                 .add_addresses(
                     || or_insert(&peer_id),
-                    self.chain_index * 2,
+                    self.chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
                     peer_id.clone(), // TODO: clone :(
                     addrs.iter().cloned(),
                 )
@@ -728,7 +785,16 @@ where
                 .libp2p
                 .add_addresses(
                     || or_insert(&peer_id),
-                    self.chain_index * 2 + 1,
+                    self.chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                    peer_id.clone(), // TODO: clone :(
+                    addrs.iter().cloned(),
+                )
+                .await;
+            self.service
+                .libp2p
+                .add_addresses(
+                    || or_insert(&peer_id),
+                    self.chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
                     peer_id.clone(), // TODO: clone :(
                     addrs,
                 )
@@ -769,22 +835,28 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     pub async fn open(self, now: TNow) {
-        let chain_config = &self.chains[self.inner.overlay_network_index() / 2];
+        let chain_config =
+            &self.chains[self.inner.overlay_network_index() / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
 
-        let handshake = if self.inner.overlay_network_index() % 2 == 0 {
-            protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
-                best_hash: &chain_config.best_hash,
-                best_number: chain_config.best_number,
-                genesis_hash: &chain_config.genesis_hash,
-                role: chain_config.role,
-            })
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            })
-        } else {
-            Vec::new()
-        };
+        let handshake =
+            if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
+                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
+                    best_hash: &chain_config.best_hash,
+                    best_number: chain_config.best_number,
+                    genesis_hash: &chain_config.genesis_hash,
+                    role: chain_config.role,
+                })
+                .fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                })
+            } else if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
+                Vec::new()
+            } else if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
+                chain_config.role.scale_encoding().to_vec()
+            } else {
+                unreachable!()
+            };
 
         self.inner.open(now, handshake).await;
     }
