@@ -24,11 +24,11 @@
 
 use futures::prelude::*;
 use smoldot::{
-	chain, chain_spec,
-	json_rpc::{self, methods},
-	libp2p::{QueueNotificationError, multiaddr, peer_id::PeerId},
-	network::protocol,
-	trie::proof_verify,
+    chain, chain_spec,
+    json_rpc::{self, methods},
+    libp2p::{multiaddr, peer_id::PeerId, QueueNotificationError},
+    network::protocol,
+    trie::proof_verify,
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -335,19 +335,18 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                         client.best_block = decoded.hash();
                         client.known_blocks.put(client.best_block, decoded.into());
 
-						let best_block_hash = client.best_block.clone();
-						match storage_query(&mut client, &b":code"[..], &best_block_hash).await {
-							Ok(Some(value)) => {
-								let best_block_metadata = {
-									let heap_pages = 1024; // TODO: laziness
-									smoldot::metadata::metadata_from_runtime_code(&value, heap_pages).unwrap()
-								};
-								println!("Best block metadata updated");
-								client.best_block_metadata = best_block_metadata;
-							}
-							Ok(None) => todo!("Best block code not found"),
-							Err(()) => {},
-						};
+                        let best_block_hash = client.best_block.clone();
+                        match storage_query(&mut client, &b":code"[..], &best_block_hash).await {
+                            Ok(Some(value)) => {
+                                let best_block_metadata = {
+                                    let heap_pages = 1024; // TODO: laziness
+                                    smoldot::metadata::metadata_from_runtime_code(&value, heap_pages).unwrap()
+                                };
+                                client.best_block_metadata = best_block_metadata;
+                            }
+                            Ok(None) => todo!("Best block code not found"),
+                            Err(()) => {},
+                        };
 
                         debug_assert!(client.known_blocks.get(&client.finalized_block).is_some());
                     },
@@ -435,12 +434,11 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::author_submitExtrinsic { transaction } => {
-			let response = match announce_transaction(client, transaction.0).await {
-				Ok(transaction_hash) => {
-					methods::Response::author_submitExtrinsic(transaction_hash).to_json_response(request_id)
-				},
-				Err(e) => todo!("{:?}", e), //TODO:
-			};
+            let response = match announce_transaction(client, transaction.0).await {
+                Ok(transaction_hash) => methods::Response::author_submitExtrinsic(transaction_hash)
+                    .to_json_response(request_id),
+                Err(e) => todo!("{:?}", e), //TODO:
+            };
             (response, None)
         }
         methods::MethodCall::chain_getBlockHash { height } => {
@@ -738,22 +736,25 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
     }
 }
 
-async fn announce_transaction(client: &mut Client, transaction: Vec<u8>) -> Result<methods::HashHexString, QueueNotificationError> {
+async fn announce_transaction(
+    client: &mut Client,
+    transaction: Vec<u8>,
+) -> Result<methods::HashHexString, QueueNotificationError> {
     let mut result = Ok(methods::HashHexString([0; 32]));
     for target in client.peers.iter() {
-		result = client
-			.network_service
-			.clone()
-			.announce_transaction(target.clone(), transaction.clone())
-			.await
-		    .map(|h| {
-				let mut slice: [u8; 32] = Default::default();
-				slice.copy_from_slice(h.as_slice());
-				methods::HashHexString(slice)
-			});
-			// .map_err(|_| ());
-	}
-	result
+        result = client
+            .network_service
+            .clone()
+            .announce_transaction(target.clone(), transaction.clone())
+            .await
+            .map(|h| {
+                let mut slice: [u8; 32] = Default::default();
+                slice.copy_from_slice(h.as_slice());
+                methods::HashHexString(slice)
+            });
+        // .map_err(|_| ());
+    }
+    result
 }
 
 async fn storage_query(
@@ -761,9 +762,9 @@ async fn storage_query(
     key: &[u8],
     hash: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, ()> {
-	// LRU workaround
-	let finalized_block_hash = client.finalized_block;
-	let _ = client.known_blocks.get(&finalized_block_hash).unwrap();
+    // LRU workaround
+    let finalized_block_hash = client.finalized_block;
+    let _ = client.known_blocks.get(&finalized_block_hash).unwrap();
 
     let trie_root_hash = if let Some(header) = client.known_blocks.get(hash) {
         Some(header.state_root)

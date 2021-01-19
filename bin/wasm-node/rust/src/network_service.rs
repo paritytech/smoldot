@@ -36,7 +36,7 @@ use smoldot::{
         connection,
         multiaddr::{Multiaddr, Protocol},
         peer_id::PeerId,
-		QueueNotificationError,
+        QueueNotificationError,
     },
     network::{protocol, service},
 };
@@ -205,7 +205,7 @@ impl NetworkService {
     // TODO: more docs
     pub async fn announce_transaction(
         self: Arc<Self>,
-		target: PeerId,
+        target: PeerId,
         transaction: Vec<u8>,
     ) -> Result<Vec<u8>, QueueNotificationError> {
         self.network
