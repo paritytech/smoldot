@@ -58,7 +58,7 @@ use crate::{
 };
 
 use alloc::collections::BTreeSet;
-use core::{convert::TryFrom as _, num::NonZeroU32, time::Duration};
+use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
 
 /// Configuration for the [`AllForksSync`].
 #[derive(Debug)]
@@ -451,11 +451,21 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             return BlockAnnounceOutcome::NotFinalizedChain;
         } else {
             // Parent is not in the `NonFinalizedTree`.
+            BlockAnnounceOutcome::AncestrySearchStart {
+                first_block_hash: *announced_header.parent_hash,
+                // It is checked above that the announced block number is always strictly
+                // superior to the finalized block number.
+                num_blocks: NonZeroU64::new(
+                    announced_header.number - self.parent.chain.finalized_block_header().number,
+                )
+                .unwrap(),
+            }
+
             /*self.parent
             .inner
             .unverified
             .insert(parent_header_number, *announced_header.parent_hash);*/
-            todo!() // TODO:
+            //todo!() // TODO:
         }
     }
 
@@ -506,13 +516,11 @@ pub enum BlockAnnounceOutcome {
     /// `first_block_height ..= last_block_height`. The answer will make it possible for the local
     /// state machine to determine how the chain is connected.
     AncestrySearchStart {
-        /// Height of the first block header the source should return.
-        first_block_height: u64,
+        /// Hash of the first block to request.
+        first_block_hash: [u8; 32],
 
-        /// Height of the last block header the source should return.
-        ///
-        /// Always inferior to `first_block_height`.
-        last_block_height: u64,
+        /// Number of blocks the request should return.
+        num_blocks: NonZeroU64,
     },
 
     /// Announced block is too old to be part of the finalized chain.

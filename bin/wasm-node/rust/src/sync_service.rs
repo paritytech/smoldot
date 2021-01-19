@@ -386,17 +386,17 @@ async fn start_sync(
                             match sync.source_mut(id).unwrap().block_announce(decoded.header.scale_encoding().fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a }), decoded.is_best, crate::ffi::unix_time()) {
                                 all_forks::BlockAnnounceOutcome::HeaderImported => {},
                                 all_forks::BlockAnnounceOutcome::BlockBodyDownloadStart => {},
-                                all_forks::BlockAnnounceOutcome::AncestrySearchStart { first_block_height, last_block_height } => {
+                                all_forks::BlockAnnounceOutcome::AncestrySearchStart { first_block_hash, num_blocks } => {
+                                    println!("ancestry search: {:?} {:?}", first_block_hash, num_blocks);  // TODO: remove
                                     let (send_back, rx) = oneshot::channel();
-                                    debug_assert!(last_block_height < first_block_height);
                                     let send_result = to_foreground
                                         .send(FromBackground::RequestStart {
                                             target: peer_id,
                                             request: network::protocol::BlocksRequestConfig {
-                                                start: network::protocol::BlocksRequestConfigStart::Number(
-                                                    NonZeroU64::new(first_block_height).unwrap(),
+                                                start: network::protocol::BlocksRequestConfigStart::Hash(
+                                                    first_block_hash
                                                 ),
-                                                desired_count: NonZeroU32::new(u32::try_from(1 + first_block_height- last_block_height).unwrap()).unwrap(),
+                                                desired_count: NonZeroU32::new(u32::try_from(num_blocks.get()).unwrap_or(u32::max_value())).unwrap(),
                                                 direction: network::protocol::BlocksRequestDirection::Descending,
                                                 fields: network::protocol::BlocksRequestFields {
                                                     header: true,
