@@ -1,4 +1,4 @@
-// Substrate-lite
+// Smoldot
 // Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
@@ -177,7 +177,7 @@ pub enum Error {
     /// Block has modified the `:heappages` key in a way that fails to parse.
     HeapPagesParseError,
     /// Block has modified the `:heappages` key without modifying the `:code` key. This isn't
-    /// supported by substrate-lite.
+    /// supported by smoldot.
     // TODO: this is something that we should support but don't because it's annoying to implement and is clearly not worth the effort
     HeapPagesOnlyModification,
 }
@@ -302,7 +302,7 @@ impl VerifyInner {
                     (None, Some(_)) => {
                         return Verify::Finished(Err(Error::HeapPagesOnlyModification))
                     }
-                    (Some(Some(code)), heap_pages) => {
+                    (Some(Some(_code)), heap_pages) => {
                         let heap_pages = match heap_pages {
                             Some(Some(p)) if p.len() == 8 => {
                                 u64::from_le_bytes(<[u8; 8]>::try_from(&p[..]).unwrap())

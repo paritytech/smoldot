@@ -1,4 +1,4 @@
-// Substrate-lite
+// Smoldot
 // Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
@@ -30,8 +30,8 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
+use smoldot::{chain::sync::optimistic, database::full_sled, libp2p, network};
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
-use substrate_lite::{chain::sync::optimistic, database::full_sled, libp2p, network};
 use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
@@ -102,19 +102,13 @@ impl SyncService {
             finalized_block_number: 0,     // TODO:
         }));
 
-        (config.tasks_executor)(Box::pin(
-            start_sync(
-                config.database.clone(),
-                sync_state.clone(),
-                to_foreground,
-                from_foreground,
-                to_database,
-            )
-            .instrument(
-                tracing::debug_span!(parent: None, "sync-service", root = ?finalized_block_hash), // TDOO: better display
-            )
-            .await,
-        ));
+        (config.tasks_executor)(Box::pin(start_sync(
+            config.database.clone(),
+            sync_state.clone(),
+            to_foreground,
+            from_foreground,
+            to_database,
+        )));
 
         (config.tasks_executor)(Box::pin(
             start_database_write(config.database, messages_rx).instrument(
@@ -200,19 +194,17 @@ impl SyncService {
     /// amongst the different calls in an unpredictable way.
     #[tracing::instrument(skip(self))]
     pub async fn next_event(&self) -> Event {
-        loop {
-            match self.from_background.lock().await.next().await.unwrap() {
-                FromBackground::RequestStart {
+        match self.from_background.lock().await.next().await.unwrap() {
+            FromBackground::RequestStart {
+                target,
+                request,
+                send_back,
+            } => {
+                let id = BlocksRequestId(self.blocks_requests.lock().insert(send_back));
+                Event::BlocksRequest {
+                    id,
                     target,
                     request,
-                    send_back,
-                } => {
-                    let id = BlocksRequestId(self.blocks_requests.lock().insert(send_back));
-                    return Event::BlocksRequest {
-                        id,
-                        target,
-                        request,
-                    };
                 }
             }
         }
@@ -246,7 +238,7 @@ enum ToDatabase {
 
 /// Returns the background task of the sync service.
 #[tracing::instrument(skip(database, sync_state, to_foreground, from_foreground, to_database))]
-async fn start_sync(
+fn start_sync(
     database: Arc<full_sled::SledFullDatabase>,
     sync_state: Arc<Mutex<SyncState>>,
     mut to_foreground: mpsc::Sender<FromBackground>,
@@ -375,8 +367,7 @@ async fn start_sync(
                         // TODO: to_vec() :-/
                         let next_key = finalized_block_storage
                             .range(req.key().to_vec()..)
-                            .skip_while(move |(k, _)| &k[..] <= &req_key[..])
-                            .next()
+                            .find(move |(k, _)| k[..] > req_key[..])
                             .map(|(k, _)| k);
                         process = req.inject_key(next_key);
                     }
