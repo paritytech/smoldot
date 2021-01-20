@@ -21,6 +21,62 @@
 //! buffering and interior mutability in order to provide a convenient-to-use API based around
 //! notifications protocols and request-response protocols.
 
+// # Implementation notes
+//
+// This module is the synchronization point between all libp2p connections. It is the boundary
+// between the "single-threaded world" (each individual libp2p connection uses exterior
+// mutability) and the "multithreaded world" (the API of `Network` uses interior mutability).
+// In other words, it is this module that provides a consistent view of all the connections as a
+// whole, while trying to allow as many concurrent accesses as possible.
+//
+// As such, the code in this module is rather complex.
+//
+// The `Network` struct mainly consists of the following mutable components:
+//
+// - One instance of the `Guarded` struct, guarded by a `Mutex`, containing a view of the state
+// of all connections.
+// - For each active connection, one `Connection` struct, guarded by a `Mutex`, containing the
+// state of this connection in particular.
+// TODO: update with a `Pending` struct or something
+//
+// In order to avoid potential bugs and deadlocks, no single thread of execution must attempt
+// to lock the `Mutex` protecting the `Guarded` then a `Mutex` guarding a connection at the same
+// time without unlocking the `Guarded` first. The other way around, however, is authorized: one
+// can lock the `Mutex` guarding a connection, then the `Mutex` protecting the `Guarded`.
+//
+// The view of the network within the `Guarded` is not necessarily always up-to-date with the
+// actual state of the connections. For example, the `Guarded` might think that a certain
+// substream on a particular connection is open while in reality it has already been closed.
+//
+// Connections hold a "pending event" field containing an event that has happened on this
+// connection but hasn't been delivered to the `Guarded` yet. In other words, the `Guarded`
+// doesn't yet take this event into account in its view.
+// This field only holds space for a single event. The connection should never be updated as long
+// as an event is present in this field, in order to avoid potentially generating a second event.
+// Delivering this event to the `Guarded` is expected to be extremely quick, but in case it is no,
+// connections should be back-pressured.
+//
+// This "pending event" field solves futures-cancellation-related problems. It is legal for the
+// user to interrupt any operation at any `await` point without causing a state mismatch.
+//
+// With all the information above in mind, the flow of a typical operation consists in the
+// following steps:
+//
+// - Lock `Guarded` and inspect the potentially outdated state of the network. Do not modify
+// the state within `Guarded` that would require an update of a connection. Instead, we're going
+// to modify the connection first, then the `Guarded` later.
+// - Unlock `Guarded` then lock the desired connection object.
+// - Inspect the state of the connection. If it is found to be inconsistent with the state found
+// in `Guarded`, either try again from the beginning or abort the operation. An inconsistency can
+// only happen if an event has *just* happened, and considering that connections operate in
+// parallel, there shouldn't be any meaningful difference between this event happening
+// *just before* or *just after* the attempted operation.
+// - Update the state of the connection and set the "pending event" field of that connection to
+// match the modification that has just been performed.
+// - Lock `Guarded` again, while keeping the connection locked.
+// - Remove the "pending event" and apply it to the `Guarded`.
+//
+
 use alloc::sync::Arc;
 use core::{
     iter,
@@ -317,8 +373,8 @@ where
         // underlying data structure specific to the connection.
         let (send_back, receive_result) = oneshot::channel();
 
-        // Lock to the connection. This waits for any other call to `request` or `read_write` to
-        // finish.
+        // Lock to the connection. This waits for any other call to `request`,
+        // `queue_notification` or `read_write` to finish.
         let mut connection_lock = connection_arc.lock().await;
 
         // Actually start the request by updating the underlying state machine specific to that
@@ -329,10 +385,7 @@ where
             .ok_or(RequestError::ConnectionClosed)?
             .add_request(now, protocol_index, request_data, send_back);
 
-        // Wake up the future returned by the latest call to `read_write` on that connection
-        if let Some(waker) = connection_lock.waker.take() {
-            let _ = waker.send(());
-        }
+        let waker = connection_lock.waker.take();
 
         // Make sure to unlock the connection before waiting for the result.
         drop(connection_lock);
@@ -340,6 +393,11 @@ where
         // properly cleaned up if the connection closes. In particular, the channel on which
         // the response is sent back should be properly destroyed if the connection closes.
         drop(connection_arc);
+
+        // Wake up the future returned by the latest call to `read_write` on that connection.
+        if let Some(waker) = waker {
+            let _ = waker.send(());
+        }
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
         match receive_result.await {
@@ -380,9 +438,13 @@ where
         protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) -> Result<(), QueueNotificationError> {
-        let (connection, substream_id) = {
+        // Find which connection and substream to use to send the notification.
+        // Only existing, established, substreams will be used.
+        let (connection_arc, substream_id) = {
             let mut guarded = self.guarded.lock().await;
 
+            // Choose which connection to use.
+            // TODO: done in a dummy way ; choose properly
             let connection = match guarded.peerset.node_mut(target.clone()) {
                 peerset::NodeMut::Known(n) => n
                     .connections()
@@ -391,6 +453,7 @@ where
                 peerset::NodeMut::Unknown(_) => return Err(QueueNotificationError::NotConnected),
             };
 
+            // Find a substream on this connection.
             let substream = *guarded
                 .peerset
                 .connection_mut(connection)
@@ -412,7 +475,9 @@ where
             (connection_arc, substream)
         };
 
-        let mut connection_lock = connection.lock().await;
+        // Lock to the connection. This waits for any other call to `request`,
+        // `queue_notification` or `read_write` to finish.
+        let mut connection_lock = connection_arc.lock().await;
 
         let waker = connection_lock.waker.take();
 
@@ -426,6 +491,7 @@ where
 
         drop(connection_lock);
 
+        // Wake up the future returned by the latest call to `read_write` on that connection.
         if let Some(waker) = waker {
             let _ = waker.send(());
         }
