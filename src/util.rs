@@ -121,14 +121,3 @@ pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> +
 
     array
 }
-
-///
-pub(crate) struct ReadySwitch {}
-
-impl ReadySwitch {
-    pub(crate) fn set_ready(&self) {}
-
-    pub(crate) async fn wait(&self) {}
-
-    pub(crate) fn reset(&self) {}
-}
