@@ -76,6 +76,17 @@
 // - Lock `Guarded` again, while keeping the connection locked.
 // - Remove the "pending event" and apply it to the `Guarded`.
 //
+// Between the moment when `Guarded` is unlocked and the moment when the connection object is
+// locked, *anything* can happen. The connection can close, substream can be destroyed and
+// recreated, and so on. Consequently, care must be taken to not have any ambiguity in whether or
+// not the state found in `Guarded` actually matches the state found in the connection.
+//
+// For example, it is important that `SubstreamId`s are never reused. Otherwise, the following
+// sequence of events could happen: `Guarded` is locked, a `SubstreamId` is found in `Guarded` and
+// copied, `Guarded` is unlocked, the substream with that ID gets destroyed, a new substream that
+// reuses the same ID is recreated, the connection is locked, the copied ID is used to reference
+// the substream which is thought to be the old one but is actually the new one.
+//
 
 use alloc::sync::Arc;
 use core::{
@@ -92,7 +103,7 @@ use futures::{
     prelude::*,
 }; // TODO: no_std-ize
 use rand::Rng as _;
-use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
+use rand_chacha::{ChaCha20Rng, rand_core::{SeedableRng as _, le::read_u32_into}};
 
 pub mod connection;
 pub mod discovery;
@@ -385,6 +396,9 @@ where
             .ok_or(RequestError::ConnectionClosed)?
             .add_request(now, protocol_index, request_data, send_back);
 
+        // Note that no update of the `Guarded` is necessary. The `Guarded` doesn't track ongoing
+        // requests.
+
         let waker = connection_lock.waker.take();
 
         // Make sure to unlock the connection before waiting for the result.
@@ -489,9 +503,11 @@ where
             .ok_or(QueueNotificationError::NotConnected)?
             .write_notification_unbounded(substream_id, notification.into());
 
-        drop(connection_lock);
+        // Note that no update of the `Guarded` is necessary. The `Guarded` doesn't track
+        // notifications being sent.
 
         // Wake up the future returned by the latest call to `read_write` on that connection.
+        drop(connection_lock);
         if let Some(waker) = waker {
             let _ = waker.send(());
         }
@@ -548,56 +564,49 @@ where
             .remove_and_purge_address();
     }
 
-    // TODO: futures cancellation concerns T_T
     pub async fn accept_notifications_in(
         &self,
         id: ConnectionId,
         overlay_network_index: usize,
         handshake: Vec<u8>,
     ) {
-        let mut guarded = self.guarded.lock().await;
+        // Find the connection and substream ID corresponding to the parameters.
+        let (connection_arc, substream_id): (Arc<Mutex<Connection<_, _>>>, _) = {
+            let mut guarded = self.guarded.lock().await;
 
-        let mut substream_id = None;
+            // TODO: we use defensive programming here because the concurrency model is still blurry
+            let mut connection = match guarded.peerset.connection_mut(id.0) {
+                Some(c) => c,
+                None => return,
+            };
 
-        // TODO: we use defensive programming here because the concurrency model is still blurry
-        let mut connection = match guarded.peerset.connection_mut(id.0) {
-            Some(c) => c,
-            None => return,
-        };
-
-        if connection
-            .confirm_substream(
+            let substream_id = match connection.pending_substream_user_data_mut(
                 overlay_network_index,
                 peerset::SubstreamDirection::In,
-                |id| {
-                    substream_id = Some(id);
-                    id
-                },
-            )
-            .is_err()
-        {
-            return;
+            ) {
+                Some(id) => *id,
+                None => return, // TODO: too defensive
+            };
+
+            (connection.user_data_mut().clone(), substream_id)
         };
 
-        let connection_arc = connection.user_data_mut().clone();
-        drop(connection);
-        drop(guarded);
+        let mut connection_lock = connection_arc.lock().await;
 
-        let mut connection = connection_arc.lock().await;
-
-        if let Some(waker) = connection.waker.take() {
-            let _ = waker.send(());
-        }
-
-        connection
+        // TODO: must check if substream_id is still valid
+        connection_lock
             .connection
             .as_mut()
             .unwrap()
-            .accept_in_notifications_substream(
-                substream_id.unwrap(),
-                handshake,
-                overlay_network_index,
-            );
+            .accept_in_notifications_substream(substream_id, handshake, overlay_network_index);
+        connection_lock.pending_event = Some(());
+
+        if let Some(waker) = connection_lock.waker.take() {
+            let _ = waker.send(());
+        }
+
+        let mut guarded = self.guarded.lock().await;
+        connection_lock.propagate_pending_event(&mut guarded).await;
     }
 
     /// Returns the next event produced by the service.
@@ -722,6 +731,7 @@ where
                                     Arc::new(Mutex::new(Connection {
                                         connection: Some(established),
                                         user_data: Some(user_data),
+                                        pending_event: None,
                                         waker: None,
                                     }))
                                 }
@@ -850,6 +860,7 @@ where
 /// This data structure is wrapped around `Arc<Mutex<>>`. As such, its fields do not necessarily
 /// match the state in the [`Network`].
 struct Connection<TNow, TConn> {
+    /// State machine of the underlying connection. `None` if the connection has been closed.
     connection: Option<
         connection::established::Established<
             TNow,
@@ -857,7 +868,18 @@ struct Connection<TNow, TConn> {
             usize,
         >,
     >,
+
+    /// User data decided by the user for that connection.
     user_data: Option<TConn>,
+
+    /// Event that has just happened on the connection, but that the [`Guarded`] isn't yet aware
+    /// of. See the implementations note at the top of the file for more information.
+    pending_event: Option<()>,  // TODO:
+
+    /// A sender is stored here when the user call [`Network::read_write`]. The receiving part
+    /// notifies the user that they must call [`Network::read_write`] again.
+    /// Send a value on that channel in order to notify that data is potentially available to be
+    /// sent on the socket, or that the user should call [`Network::read_write`] in general.
     waker: Option<oneshot::Sender<()>>,
 }
 
@@ -1146,6 +1168,31 @@ where
 
         Ok(())
     }
+
+    /// Removes the pending event stored within that connection and updates the [`Guarded`]
+    /// accordingly.
+    /// See the implementations notes at the top of the file for more information.
+    async fn propagate_pending_event<TPeer>(&mut self, guarded: &mut Guarded<TNow, TPeer, TConn>) {
+        // TODO:
+
+        // TODO:
+        /*
+
+        let mut substream_id = None;
+        if connection
+            .confirm_substream(
+                overlay_network_index,
+                peerset::SubstreamDirection::In,
+                |id| {
+                    substream_id = Some(id);
+                    id
+                },
+            )
+            .is_err()
+        {
+            return;
+        } */
+    }
 }
 
 /// User must start connecting to the given multiaddress.
@@ -1301,14 +1348,13 @@ where
                 self.overlay_network_index,
             ))
         } else {
-            None
+            // This mismatch .
+            return
         };
 
         if let Some(waker) = connection.waker.take() {
             let _ = waker.send(());
         }
-
-        drop(connection);
 
         if let Some(substream_id) = substream_id {
             let mut guarded = self.network.guarded.lock().await;
