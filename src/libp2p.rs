@@ -259,20 +259,33 @@ where
         todo!()
     }
 
-    pub async fn connection_peer_id(&self, id: ConnectionId) -> PeerId {
-        // TODO: cloning :-/
-        self.guarded
-            .lock()
-            .await
-            .peerset
-            .connection_mut(id.0)
-            .unwrap()
-            .peer_id()
-            .clone()
-    }
-
-    /// Sends a request to the given peer.
-    // TODO: more docs
+    /// Sends a request to the given peer, and waits for a response.
+    ///
+    /// This consists in:
+    ///
+    /// - Opening a substream on an established connection with the target.
+    /// - Negotiating the requested protocol (`protocol_index`) on this substream using the
+    ///   *multistream-select* protocol.
+    /// - Sending the request (`request_data` parameter), prefixed with its length.
+    /// - Waiting for the response (prefixed with its length), which is then returned.
+    ///
+    /// An error happens if there is no suitable connection for that request, if the connection
+    /// closes while the request is in progress, if the request or response doesn't respect
+    /// the protocol limits (see [`ConfigRequestResponse`]), or if the remote takes too much time
+    /// to answer.
+    ///
+    /// As the API of this module is inherently subject to race conditions, it is never possible
+    /// to guarantee that this function will succeed. [`RequestError::ConnectionClosed`] should
+    /// be handled by retrying the same request again.
+    ///
+    /// > **Note**: This function doesn't return before the remote has answered. It is strongly
+    /// >           recommended to await the returned `Future` in the background, and not block
+    /// >           any important task on this.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `protocol_index` isn't a valid index in [`Config::request_response_protocols`].
+    ///
     pub async fn request(
         &self,
         now: TNow,
@@ -280,7 +293,8 @@ where
         protocol_index: usize,
         request_data: Vec<u8>,
     ) -> Result<Vec<u8>, RequestError> {
-        let connection = {
+        // Determine which connect to use to send the request.
+        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
             let mut guarded = self.guarded.lock().await;
 
             let connection = match guarded.peerset.node_mut(target) {
@@ -298,23 +312,34 @@ where
                 .clone()
         };
 
-        let mut connection_lock = connection.lock().await;
-
+        // The response to the request will be sent on this channel.
+        // The sending side is stored as a "user data" alongside with the request in the
+        // underlying data structure specific to the connection.
         let (send_back, receive_result) = oneshot::channel();
+
+        // Lock to the connection. This waits for any other call to `request` or `read_write` to
+        // finish.
+        let mut connection_lock = connection_arc.lock().await;
+
+        // Actually start the request by updating the underlying state machine specific to that
+        // connection.
         connection_lock
             .connection
             .as_mut()
             .ok_or(RequestError::ConnectionClosed)?
             .add_request(now, protocol_index, request_data, send_back);
+
+        // Wake up the future returned by the latest call to `read_write` on that connection
         if let Some(waker) = connection_lock.waker.take() {
             let _ = waker.send(());
         }
 
         // Make sure to unlock the connection before waiting for the result.
         drop(connection_lock);
-        // The `Arc` to the connection should also be dropped, so that the channel gets dropped
-        // if the connection is removed from the peerset.
-        drop(connection);
+        // The `Arc` to the connection should also be dropped, in order for everything to be
+        // properly cleaned up if the connection closes. In particular, the channel on which
+        // the response is sent back should be properly destroyed if the connection closes.
+        drop(connection_arc);
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
         match receive_result.await {
@@ -944,21 +969,19 @@ where
                     .unwrap();
 
                 let mut guarded = guarded.lock().await;
-
-                guarded
-                    .peerset
-                    .connection_mut(connection_id.0)
-                    .unwrap()
-                    .confirm_substream(
-                        overlay_network_index,
-                        peerset::SubstreamDirection::Out,
-                        |id| id,
-                    );
+                let mut connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                let peer_id = connection.peer_id().clone();
+                connection.confirm_substream(
+                    overlay_network_index,
+                    peerset::SubstreamDirection::Out,
+                    |id| id,
+                );
 
                 guarded
                     .events_tx
                     .send(Event::NotificationsOutAccept {
                         id: connection_id,
+                        peer_id,
                         overlay_network_index,
                         remote_handshake,
                     })
@@ -971,10 +994,9 @@ where
             }) => {
                 let mut guarded = guarded.lock().await;
 
-                let _expected_id = guarded
-                    .peerset
-                    .connection_mut(connection_id.0)
-                    .unwrap()
+                let mut connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                let peer_id = connection.peer_id().clone();
+                let _expected_id = connection
                     .remove_pending_substream(
                         overlay_network_index,
                         peerset::SubstreamDirection::Out,
@@ -986,6 +1008,7 @@ where
                     .events_tx
                     .send(Event::NotificationsOutReject {
                         id: connection_id,
+                        peer_id,
                         overlay_network_index,
                     })
                     .await
@@ -1000,10 +1023,9 @@ where
             }) => {
                 let mut guarded = guarded.lock().await;
 
-                let _expected_id = guarded
-                    .peerset
-                    .connection_mut(connection_id.0)
-                    .unwrap()
+                let mut connection = guarded.peerset.connection_mut(connection_id.0).unwrap();
+                let peer_id = connection.peer_id().clone();
+                let _expected_id = connection
                     .remove_pending_substream(
                         overlay_network_index,
                         peerset::SubstreamDirection::Out,
@@ -1016,6 +1038,7 @@ where
                     .send(Event::NotificationsOutClose {
                         id: connection_id,
                         overlay_network_index,
+                        peer_id,
                     })
                     .await
                     .unwrap();
@@ -1086,6 +1109,7 @@ pub enum Event<TConn> {
 
     NotificationsOutAccept {
         id: ConnectionId,
+        peer_id: PeerId,
         // TODO: what if fallback?
         overlay_network_index: usize,
         remote_handshake: Vec<u8>,
@@ -1093,12 +1117,14 @@ pub enum Event<TConn> {
 
     NotificationsOutReject {
         id: ConnectionId,
+        peer_id: PeerId,
         // TODO: what if fallback?
         overlay_network_index: usize,
     },
 
     NotificationsOutClose {
         id: ConnectionId,
+        peer_id: PeerId,
         overlay_network_index: usize,
     },
 
