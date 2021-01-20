@@ -804,8 +804,8 @@ pub struct ReadWrite<TNow> {
     /// reaches the value in the `Option`.
     pub wake_up_after: Option<TNow>,
 
-    /// [`ChainNetwork::read_write`] should be called again when this [`ConnectionReadyFuture`]
-    /// returns `Ready`.
+    /// [`ChainNetwork::read_write`] should be called again when this
+    /// [`libp2p::ConnectionReadyFuture`] returns `Ready`.
     pub wake_up_future: libp2p::ConnectionReadyFuture,
 
     /// If `true`, the writing side the connection must be closed. Will always remain to `true`
