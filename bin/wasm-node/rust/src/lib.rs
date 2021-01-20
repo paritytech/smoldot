@@ -333,24 +333,15 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                         let _ = client.known_blocks.get(&client.finalized_block).unwrap();
 
                         client.best_block = decoded.hash();
+						println!("Best block: {}", decoded.number);
                         client.known_blocks.put(client.best_block, decoded.into());
 
-                        let best_block_hash = client.best_block.clone();
-                        match storage_query(&mut client, &b":code"[..], &best_block_hash).await {
-                            Ok(Some(value)) => {
-                                let best_block_metadata = {
-                                    let heap_pages = 1024; // TODO: laziness
-                                    smoldot::metadata::metadata_from_runtime_code(&value, heap_pages).unwrap()
-                                };
-                                client.best_block_metadata = best_block_metadata;
-                            }
-                            Ok(None) => todo!("Best block code not found"),
-                            Err(()) => {},
-                        };
-
                         debug_assert!(client.known_blocks.get(&client.finalized_block).is_some());
+
+						// TODO: need to update `best_block_metadata` if necessary, and notify the runtime version subscriptions
                     },
                     sync_service::Event::NewFinalized { scale_encoded_header } => {
+                        println!("NEW FINALIZED");
                         let decoded = smoldot::header::decode(&scale_encoded_header).unwrap();
                         let header = header_conv(decoded.clone());
 
