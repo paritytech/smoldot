@@ -862,7 +862,7 @@ impl<'a, TPeer, TConn, TPending, TSub, TPendingSub>
         ConnectionId(index)
     }
 
-    /// Returns an iterator to the list of current connections to that node.
+    /// Returns an iterator to the list of current established connections to that node.
     pub fn connections<'b>(&'b self) -> impl Iterator<Item = ConnectionId> + 'b {
         self.peerset.peer_connections
             .range((self.peer_index, 0)..=(self.peer_index, usize::max_value()))

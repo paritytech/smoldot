@@ -683,6 +683,8 @@ where
             write_close: false,
         };
 
+        // TODO: ideally we wouldn't need to lock `guarded`, to reduce the possibility of lock contention
+
         let mut guarded = self.guarded.lock().await;
         match guarded
             .peerset
@@ -772,11 +774,23 @@ where
                                 }
                             });
 
-                            guarded
-                                .events_tx
-                                .send(Event::Connected(remote_peer_id))
-                                .await
-                                .unwrap();
+                            // Send a `Connected` event if and only if this is the first active
+                            // connection to that peer.
+                            if guarded
+                                .peerset
+                                .node_mut(remote_peer_id.clone()) // TODO: clone :-/
+                                .into_known()
+                                .unwrap()
+                                .connections()
+                                .count()
+                                == 1
+                            {
+                                guarded
+                                    .events_tx
+                                    .send(Event::Connected(remote_peer_id))
+                                    .await
+                                    .unwrap();
+                            }
 
                             if let Some(tx) = tx.take() {
                                 let _ = tx.send(());
@@ -1182,17 +1196,27 @@ where
                     peer_id
                 };
 
-                // TODO: only send if last connection
-                guarded
-                    .events_tx
-                    .send(Event::Disconnected {
-                        peer_id,
-                        user_data: self.user_data.take().unwrap(),
-                        in_overlay_network_indices,
-                        out_overlay_network_indices,
-                    })
-                    .await
-                    .unwrap();
+                // Send a `Disconnected` event if and only if there is no other active connection
+                // to that node.
+                // TODO: clone :-/
+                if !guarded
+                    .peerset
+                    .node_mut(peer_id.clone())
+                    .into_known()
+                    .map(|n| n.connections().count() >= 1)
+                    .unwrap_or(false)
+                {
+                    guarded
+                        .events_tx
+                        .send(Event::Disconnected {
+                            peer_id,
+                            user_data: self.user_data.take().unwrap(),
+                            in_overlay_network_indices,
+                            out_overlay_network_indices,
+                        })
+                        .await
+                        .unwrap();
+                }
             }
         }
     }
