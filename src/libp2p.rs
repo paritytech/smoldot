@@ -62,21 +62,25 @@
 // With all the information above in mind, the flow of a typical operation consists in the
 // following steps:
 //
-// - Lock `Guarded` and inspect the potentially outdated state of the network. Do not modify
+// - Lock `Guarded` and inspect the (potentially outdated) state of the network. Do not modify
 // the state within `Guarded` that would require an update of a connection. Instead, we're going
 // to modify the connection first, then the `Guarded` later.
 // - Unlock `Guarded` then lock the desired connection object.
-// - If there exists any "pending event" on that connection, lock the `Guarded` again and and
+// - If there exists any "pending event" on that connection, lock the `Guarded` again and apply
 // the "pending event" to the `Guarded`.
-// - Inspect the state of the connection. If it is found to be inconsistent with the state found
-// in `Guarded`, either try again from the beginning or abort the operation. An inconsistency can
-// only happen if an event has *just* happened, and considering that connections operate in
-// parallel, there shouldn't be any meaningful difference between this event happening
+// - Inspect the state of the connection. If it is found to be inconsistent with the state earlier
+// found in `Guarded`, either try again from the beginning or abort the operation. An
+// inconsistency can only happen if an event has *just* happened, and considering that connections
+// operate in parallel, there shouldn't be any meaningful difference between this event happening
 // *just before* or *just after* the attempted operation.
 // - Update the state of the connection and set the "pending event" field of that connection to
 // match the modification that has just been performed.
 // - Lock `Guarded` again, while keeping the connection locked.
 // - Remove the "pending event" and apply it to the `Guarded`.
+//
+// Alternatively, `Guarded` can also be locked before updating the state of the connection. This
+// skips the event phase and ensures more consistency, at the cost of keeping `Guarded` locked for
+// a longer period of time.
 //
 // Between the moment when `Guarded` is unlocked and the moment when the connection object is
 // locked, *anything* can happen. The connection can close, substream can be destroyed and
