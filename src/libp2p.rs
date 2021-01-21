@@ -822,8 +822,6 @@ where
     pub async fn open_next_substream(&'_ self) -> Option<SubstreamOpen<'_, TNow, TPeer, TConn>> {
         let mut guarded = self.guarded.lock().await;
 
-        // TODO: /!\ because of the way events work, this can detect connections for which we are currently trying to open a substream
-
         for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
             // Grab node for which we have an established outgoing connections but haven't yet
             // opened a substream to.
@@ -919,13 +917,8 @@ impl<TNow> ConnectionInner<TNow> {
 enum PendingEvent {
     Inner(established::Event<oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
     Disconnect,
-    NewPendingOutboundSubstream {
-        substream_id: established::SubstreamId,
-        overlay_network_index: usize,
-    },
-    AcceptInboundSubstream {
-        overlay_network_index: usize,
-    },
+    // TODO: remove?
+    AcceptInboundSubstream { overlay_network_index: usize },
 }
 
 impl<TNow, TConn> Connection<TNow, TConn>
@@ -994,19 +987,6 @@ where
         // TODO: futures cancellation problem when sending event on channel
         match self.pending_event.take() {
             None => {}
-            Some(PendingEvent::NewPendingOutboundSubstream {
-                overlay_network_index,
-                substream_id,
-            }) => {
-                let mut peerset_entry = guarded.peerset.connection_mut(self.id).unwrap();
-                peerset_entry
-                    .add_pending_substream(
-                        overlay_network_index,
-                        peerset::SubstreamDirection::Out,
-                        substream_id,
-                    )
-                    .unwrap();
-            }
             Some(PendingEvent::AcceptInboundSubstream {
                 overlay_network_index,
             }) => {
@@ -1357,15 +1337,18 @@ where
     pub async fn open(self, now: TNow, handshake: impl Into<Vec<u8>>) {
         let mut connection = self.connection.lock().await;
 
-        // The code below will need to set `pending_event`. As it would be an error to override
-        // an existing pending event, flush the existing one.
+        // Because the user can cancel the future at any `await` point, all the asynchronous
+        // operations are performed ahead of any state modification.
+        let mut guarded = self.network.guarded.lock().await;
+
+        // In order to guarantee a proper ordering of events, any pending event must first be
+        // delivered.
         if connection.pending_event.is_some() {
-            let mut guarded = self.network.guarded.lock().await;
             connection.propagate_pending_event(&mut guarded).await;
             debug_assert!(connection.pending_event.is_none());
         }
 
-        // TODO: connection_id might be wrong and not correspond to the wrong connection
+        // TODO: connection_id might be wrong and not correspond to the right connection
         let substream_id = if let Some(established) = connection.connection.as_alive() {
             established.open_notifications_substream(
                 now,
@@ -1379,16 +1362,24 @@ where
             return;
         };
 
-        debug_assert!(connection.pending_event.is_none());
-        connection.pending_event = Some(PendingEvent::NewPendingOutboundSubstream {
-            substream_id,
-            overlay_network_index: self.overlay_network_index,
-        });
+        // Rather than putting a value into `pending_event`, this function immediately updates
+        // `Guarded`. If this was instead done through events, the user could observe that no
+        // substream is being opened as long as the event hasn't been delivered.
 
-        // Wake up the task dedicated to this connection to be guaranteed that `pending_event`
-        // will be delivered.
-        // While it is tempting to propagate the event immediately, there is no guarantee that
-        // the user isn't going to interrupt this asynchronous function.
+        // While updating `Guarded`, it is assumed that there isn't any existing outgoing pending
+        // substream on that overlay index. Hence the `unwrap`. The existence of an instance
+        // of `SubstreamOpen` implies that there is indeed no such pending outgoing substream.
+        let mut peerset_entry = guarded.peerset.connection_mut(connection.id).unwrap();
+        peerset_entry
+            .add_pending_substream(
+                self.overlay_network_index,
+                peerset::SubstreamDirection::Out,
+                substream_id,
+            )
+            .unwrap();
+
+        // Wake up the task dedicated to this connection in order for the substream to start
+        // opening.
         if let Some(waker) = connection.waker.take() {
             let _ = waker.send(());
         }
