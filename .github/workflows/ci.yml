@@ -1,4 +1,4 @@
-# Substrate-lite
+# Smoldot
 # Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 # SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 #
@@ -59,7 +59,7 @@ jobs:
       # The Rust version used for compiling the Wasm node is pinned.
     - run: rustup install --profile=minimal 1.48.0
     - run: rustup target add --toolchain=1.48.0 wasm32-wasi
-    - run: cd bin/wasm-node/javascript && npm install && npm start
+    - run: cd bin/wasm-node/javascript && npm install && npm test
 
   check-features:
     name: Check that combination of features compiles
@@ -75,10 +75,10 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - run: cargo check --package substrate-lite --locked --no-default-features
-    - run: cargo check --package substrate-lite --locked --no-default-features --features database-sled
-    - run: cargo check --package substrate-lite --locked --no-default-features --features std
-    - run: cargo check --package substrate-lite --locked --no-default-features --features database-sled --features std
+    - run: cargo check --package smoldot --locked --no-default-features
+    - run: cargo check --package smoldot --locked --no-default-features --features database-sled
+    - run: cargo check --package smoldot --locked --no-default-features --features std
+    - run: cargo check --package smoldot --locked --no-default-features --features database-sled --features std
 
   check-rustdoc-links:
     name: Check rustdoc intra-doc links

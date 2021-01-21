@@ -1,4 +1,4 @@
-// Substrate-lite
+// Smoldot
 // Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    executor::{host, vm},
+    executor::{self, host, vm},
     header,
 };
 
@@ -67,7 +67,7 @@ impl GrandpaGenesisConfiguration {
                         .map_err(FromGenesisStorageError::HeapPagesDecode)?,
                 )
             } else {
-                1024 // TODO: default heap pages
+                executor::DEFAULT_HEAP_PAGES
             };
             let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
                 .map_err(FromGenesisStorageError::VmInitialization)?;
@@ -164,15 +164,14 @@ pub enum FromVmPrototypeError {
 impl FromVmPrototypeError {
     /// Returns `true` if this error is about an invalid function.
     pub fn is_function_not_found(&self) -> bool {
-        match self {
+        matches!(
+            self,
             FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
                 vm::StartErr::FunctionNotFound,
-            ))
-            | FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+            )) | FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
                 vm::StartErr::NotAFunction,
-            )) => true,
-            _ => false,
-        }
+            ))
+        )
     }
 }
 

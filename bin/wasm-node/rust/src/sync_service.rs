@@ -1,4 +1,4 @@
-// Substrate-lite
+// Smoldot
 // Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
@@ -20,8 +20,8 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
+use smoldot::{chain, chain::sync::optimistic, libp2p, network};
 use std::{collections::HashMap, num::NonZeroU32, pin::Pin};
-use substrate_lite::{chain, chain::sync::optimistic, libp2p, network};
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -138,6 +138,21 @@ impl SyncService {
             .await
             .remove(id.0)
             .send(response);
+    }
+
+    /// Returns a string representing the state of the chain using the
+    /// [`smoldot::database::finalized_serialize`] module.
+    pub async fn serialize_chain(&self) -> String {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .lock()
+            .await
+            .send(ToBackground::Serialize { send_back })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
     }
 
     /// Returns the next event that happened in the sync service.
@@ -368,6 +383,11 @@ async fn start_sync(
                         ToBackground::PeerRaiseBest { peer_id, best_block_number } => {
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             sync.raise_source_best_block(id, best_block_number);
+                        },
+                        ToBackground::Serialize { send_back } => {
+                            let chain = sync.as_chain_information();
+                            let serialized = smoldot::database::finalized_serialize::encode_chain_information(chain);
+                            let _ = send_back.send(serialized);
                         }
                     }
                 },
@@ -404,6 +424,10 @@ enum ToBackground {
     PeerRaiseBest {
         peer_id: libp2p::PeerId,
         best_block_number: u64,
+    },
+    /// See [`SyncService::serialize_chain`].
+    Serialize {
+        send_back: oneshot::Sender<String>,
     },
 }
 
