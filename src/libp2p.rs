@@ -110,10 +110,7 @@ use futures::{
     prelude::*,
 }; // TODO: no_std-ize
 use rand::Rng as _;
-use rand_chacha::{
-    rand_core::{le::read_u32_into, SeedableRng as _},
-    ChaCha20Rng,
-};
+use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub mod connection;
 pub mod discovery;
@@ -603,30 +600,47 @@ where
 
         let mut connection_lock = connection_arc.lock().await;
 
-        // The code below will need to set `pending_event`. As it would be an error to override
-        // an existing pending event, flush the existing one.
+        // Because the user can cancel the future at any `await` point, all the asynchronous
+        // operations are performed ahead of any state modification.
+        let mut guarded = self.guarded.lock().await;
+
+        // In order to guarantee a proper ordering of events, any pending event must first be
+        // delivered.
         if connection_lock.pending_event.is_some() {
-            let mut guarded = self.guarded.lock().await;
             connection_lock.propagate_pending_event(&mut guarded).await;
             debug_assert!(connection_lock.pending_event.is_none());
         }
 
-        if let Some(c) = connection_lock.connection.as_alive() {
+        if let Some(connection) = connection_lock.connection.as_alive() {
             // TODO: must check if substream_id is still valid
-            c.accept_in_notifications_substream(substream_id, handshake, overlay_network_index);
+            connection.accept_in_notifications_substream(
+                substream_id,
+                handshake,
+                overlay_network_index,
+            );
+        } else {
+            // The connection no longer exists. This state mismatch is a normal situation. See
+            // the implementations notes at the top of the file for more information.
+            return;
         }
 
-        debug_assert!(connection_lock.pending_event.is_none());
-        connection_lock.pending_event = Some(PendingEvent::AcceptInboundSubstream {
-            overlay_network_index,
-        });
-
+        // Wake up the connection in order for the substream confirmation to be sent back to the
+        // remote.
         if let Some(waker) = connection_lock.waker.take() {
             let _ = waker.send(());
         }
 
-        let mut guarded = self.guarded.lock().await;
-        connection_lock.propagate_pending_event(&mut guarded).await;
+        // Rather than putting a value into `pending_event`, this function immediately updates
+        // `Guarded`. If this was instead done through events, the user could observe that the
+        // substream hasn't been confirmed yet for as long as the event hasn't been delivered.
+        let mut peerset_entry = guarded.peerset.connection_mut(connection_lock.id).unwrap();
+        peerset_entry
+            .confirm_substream(
+                overlay_network_index,
+                peerset::SubstreamDirection::In,
+                |id| id,
+            )
+            .unwrap();
     }
 
     /// Returns the next event produced by the service.
@@ -921,8 +935,6 @@ impl<TNow> ConnectionInner<TNow> {
 enum PendingEvent {
     Inner(established::Event<oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
     Disconnect,
-    // TODO: remove?
-    AcceptInboundSubstream { overlay_network_index: usize },
 }
 
 impl<TNow, TConn> Connection<TNow, TConn>
@@ -991,18 +1003,6 @@ where
         // TODO: futures cancellation problem when sending event on channel
         match self.pending_event.take() {
             None => {}
-            Some(PendingEvent::AcceptInboundSubstream {
-                overlay_network_index,
-            }) => {
-                let mut peerset_entry = guarded.peerset.connection_mut(self.id).unwrap();
-                peerset_entry
-                    .confirm_substream(
-                        overlay_network_index,
-                        peerset::SubstreamDirection::In,
-                        |id| id,
-                    )
-                    .unwrap();
-            }
             Some(PendingEvent::Inner(established::Event::RequestIn {
                 id,
                 protocol_index,
@@ -1362,7 +1362,7 @@ where
             )
         } else {
             // The connection no longer exists. This state mismatch is a normal situation. See
-            // The implementations notes at the top of the file for more information.
+            // the implementations notes at the top of the file for more information.
             return;
         };
 
