@@ -225,6 +225,7 @@ async fn start_sync(
 
     async move {
         let mut peers_source_id_map = HashMap::new();
+        let mut pending_ancestry_searches = stream::FuturesUnordered::new();
         //let mut block_requests_finished = stream::FuturesUnordered::new();
 
         loop {
@@ -391,7 +392,7 @@ async fn start_sync(
                                     let (send_back, rx) = oneshot::channel();
                                     let send_result = to_foreground
                                         .send(FromBackground::RequestStart {
-                                            target: peer_id,
+                                            target: peer_id.clone(),
                                             request: network::protocol::BlocksRequestConfig {
                                                 start: network::protocol::BlocksRequestConfigStart::Hash(
                                                     first_block_hash
@@ -412,6 +413,11 @@ async fn start_sync(
                                     if send_result.is_err() {
                                         return;
                                     }
+
+                                    pending_ancestry_searches.push(async move {
+                                        let response = rx.await.unwrap();
+                                        (peer_id, response)
+                                    });
                                 },
                                 all_forks::BlockAnnounceOutcome::TooOld => {},
                                 all_forks::BlockAnnounceOutcome::AlreadyVerified => {},
@@ -429,21 +435,16 @@ async fn start_sync(
                     }
                 },
 
-                // TODO: restore
-                /*(request_id, result) = block_requests_finished.select_next_some() => {
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
-                    if let Ok(result) = result {
-                        // TODO: restore
-                        /*let result = result.map_err(|_| ()).and_then(|v| v);
-                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
-                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justification: block.justification,
-                            scale_encoded_extrinsics: Vec::new(),
-                            user_data: (),
-                        })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));*/
-                    }
-                },*/
+                (peer_id, response) = pending_ancestry_searches.select_next_some() => {
+                    // TODO: restore
+                    /*let result = result.map_err(|_| ()).and_then(|v| v);
+                    let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
+                        scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                        scale_encoded_justification: block.justification,
+                        scale_encoded_extrinsics: Vec::new(),
+                        user_data: (),
+                    })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));*/
+                },
 
                 // TODO: restore
                 /*_ = async move {
