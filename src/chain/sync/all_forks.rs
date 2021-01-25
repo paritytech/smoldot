@@ -58,7 +58,7 @@ use crate::{
 };
 
 use alloc::collections::BTreeSet;
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{mem, num::NonZeroU64, time::Duration};
 
 /// Configuration for the [`AllForksSync`].
 #[derive(Debug)]
@@ -99,7 +99,8 @@ struct Inner<TSrc> {
     /// keeping obsolete identifiers in the internal state.
     next_source_id: SourceId,
 
-    /// List of blocks whose body is currently being downloaded from a source.
+    /// List of blocks whose body is currently being downloaded from a source or should be
+    /// downloaded from a source as soon as possible.
     ///
     /// Contains a value the SCALE-encoded header and source the block is currently being
     /// downloaded from.
@@ -121,10 +122,21 @@ struct Block<TBl> {
     user_data: TBl,
 }
 
+/// Extra fields specific to each blocks source.
 struct Source<TSrc> {
     best_block_number: u64,
     best_block_hash: [u8; 32],
+    occupation: SourceOccupation,
     user_data: TSrc,
+}
+
+#[derive(Debug)]
+enum SourceOccupation {
+    /// Source isn't doing anything.
+    Idle,
+    /// Source is performing an ancestry search. Contains the hash of the first block expected in
+    /// the response.
+    AncestrySearch([u8; 32]),
 }
 
 impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
@@ -175,6 +187,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             Source {
                 best_block_number,
                 best_block_hash,
+                occupation: SourceOccupation::Idle,
                 user_data,
             },
         );
@@ -202,6 +215,102 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         }
     }
 
+    /// Call in response to a [`BlockAnnounceOutcome::AncestrySearchStart`].
+    ///
+    /// The headers are expected to be sorted in decreasing order. The first element of the
+    /// iterator should be the block with the hash passed through
+    /// [`BlockAnnounceOutcome::AncestrySearchStart::first_block_hash`]. Each subsequent element
+    /// is then expected to be the parent of the previous one.
+    ///
+    /// It is legal for the iterator to be shorter than the number of blocks that were requested
+    /// through [`BlockAnnounceOutcome::AncestrySearchStart::num_blocks`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the source wasn't known locally as downloading something.
+    ///
+    pub fn ancestry_search_response(
+        &mut self,
+        now_from_unix_epoch: Duration,
+        source_id: SourceId,
+        scale_encoded_headers: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
+    ) -> AncestrySearchResponseOutcome {
+        // Number of the finalized chain. Saved for later.
+        let local_finalized_block_number = self.chain.finalized_block_header().number;
+
+        // The next block in the list of headers should have a hash equal to this one.
+        let mut expected_next_hash = match mem::replace(
+            &mut self.inner.sources.get_mut(&source_id).unwrap().occupation,
+            SourceOccupation::Idle,
+        ) {
+            SourceOccupation::AncestrySearch(hash) => hash,
+            _ => panic!(),
+        };
+
+        // Set to true if any block in the response is "valid", in the sense that it has made
+        // progress.
+        let mut any_progress = false;
+
+        // Iterate through the response. If the request has failed, treat it the same way as if
+        // no blocks were returned.
+        for scale_encoded_header in scale_encoded_headers.into_iter().flat_map(|l| l) {
+            // Compare expected with actual hash.
+            if expected_next_hash
+                != header::hash_from_scale_encoded_header(scale_encoded_header.as_ref())
+            {
+                break;
+            }
+
+            // Invalid headers are skipped. The next iteration will likely fail when comparing
+            // actual with expected hash, but we give it a chance.
+            let decoded_header = match header::decode(scale_encoded_header.as_ref()) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+
+            any_progress = true;
+
+            // Is `decoded_header.parent_hash` known locally?
+            let parent_is_in_chain: bool = {
+                let local_finalized_block_hash = self.chain.finalized_block_hash();
+                *decoded_header.parent_hash == local_finalized_block_hash
+                    || self
+                        .chain
+                        .non_finalized_block_by_hash(decoded_header.parent_hash)
+                        .is_some()
+            };
+
+            if parent_is_in_chain {
+                todo!()
+            } else if decoded_header.number == local_finalized_block_number + 1 {
+                // `parent_is_in_chain` would be true otherwise.
+                debug_assert_ne!(
+                    *decoded_header.parent_hash,
+                    self.chain.finalized_block_hash()
+                );
+
+                // Source has given blocks that aren't part of the finalized chain.
+                // TODO: discard downloaded blocks
+                return AncestrySearchResponseOutcome::NotFinalizedChain {
+                    discarded_unverified_block_headers: Vec::new(),
+                };
+            } else {
+                // Continue looping.
+                expected_next_hash = *decoded_header.parent_hash;
+            }
+        }
+
+        // If this is reached, then the ancestry search was inconclusive. Only blocks of unknown
+        // ancestry have been received.
+
+        if !any_progress {
+            // The response from the node was useless.
+            // TODO: restart ancestry search with other node?
+        }
+        self.inner.sources.get_mut(&source_id).unwrap().occupation = SourceOccupation::AncestrySearch(hash);
+        todo!()
+    }
+
     /// Call in response to a [`BlockAnnounceOutcome::BlockBodyDownloadStart`].
     ///
     /// # Panic
@@ -214,6 +323,10 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         source_id: SourceId,
         block_body: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> BlockBodyVerify<TSrc, TBl> {
+        // TODO: unfinished
+
+        // TODO: update occupation?
+
         // Removes traces of the request from the state machine.
         let block_header_hash = if let Some((h, _)) = self
             .inner
@@ -337,7 +450,8 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
         // It is assumed that all sources will eventually agree on the same finalized chain. If
         // the announced block number is lower or equal than the locally-finalized block number,
         // it is assumed that this source is simply late compared to the local node, and that the
-        // block being announced will get discarded by this source in the future.
+        // block being announced is either part of the finalized chain or belongs to a fork that
+        // will get discarded by this source in the future.
         if announced_header.number <= self.parent.chain.finalized_block_header().number {
             return BlockAnnounceOutcome::TooOld;
         }
@@ -442,6 +556,7 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
                 .insert(announced_header_hash, (header, Some(self.source_id)));
             return BlockAnnounceOutcome::BlockBodyDownloadStart;
         } else if announced_header.number == self.parent.chain.finalized_block_header().number + 1 {
+            // Checked above.
             debug_assert_ne!(
                 *announced_header.parent_hash,
                 self.parent.chain.finalized_block_hash()
@@ -450,15 +565,35 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             // Announced block is not part of the finalized chain.
             return BlockAnnounceOutcome::NotFinalizedChain;
         } else {
-            // Parent is not in the `NonFinalizedTree`.
-            BlockAnnounceOutcome::AncestrySearchStart {
-                first_block_hash: *announced_header.parent_hash,
-                // It is checked above that the announced block number is always strictly
-                // superior to the finalized block number.
-                num_blocks: NonZeroU64::new(
-                    announced_header.number - self.parent.chain.finalized_block_header().number,
-                )
-                .unwrap(),
+            // Parent is not in the `NonFinalizedTree`. It is unknown whether this block belongs
+            // to the same finalized chain as the one known locally, but we expect that it is the
+            // case.
+            match &mut self
+                .parent
+                .inner
+                .sources
+                .get_mut(&self.source_id)
+                .unwrap()
+                .occupation
+            {
+                // If the source is idle, start an ancestry search in order to find a block whose
+                // parent is known locally.
+                occupation @ &mut SourceOccupation::Idle => {
+                    *occupation = SourceOccupation::AncestrySearch(*announced_header.parent_hash);
+                    BlockAnnounceOutcome::AncestrySearchStart {
+                        first_block_hash: *announced_header.parent_hash,
+                        // It is checked above that the announced block number is always strictly
+                        // superior to the finalized block number.
+                        num_blocks: NonZeroU64::new(
+                            announced_header.number
+                                - self.parent.chain.finalized_block_header().number,
+                        )
+                        .unwrap(),
+                    }
+                }
+                // If the source is already busy with something else, delay the ancestry search
+                // for later.
+                _ => todo!(),
             }
 
             /*self.parent
@@ -512,7 +647,7 @@ pub enum BlockAnnounceOutcome {
     /// >           *netsplit*) ends. During the split, some nodes have produced one chain, while
     /// >           some other nodes have produced a different chain.
     ///
-    /// An ancestry search consists in asking the source for its block headers  in the range
+    /// An ancestry search consists in asking the source for its block headers in the range
     /// `first_block_height ..= last_block_height`. The answer will make it possible for the local
     /// state machine to determine how the chain is connected.
     AncestrySearchStart {
@@ -543,6 +678,21 @@ pub enum BlockAnnounceOutcome {
     InvalidHeader(header::Error),
     /// Error while verifying validity of header.
     HeaderVerifyError(verify::header_only::Error),
+}
+
+/// Outcome of calling [`SourceMutAccess::ancestry_search_response`].
+#[derive(Debug)]
+pub enum AncestrySearchResponseOutcome {
+    /// Source has given blocks that aren't part of the finalized chain.
+    ///
+    /// This doesn't necessarily mean that the source is malicious or uses a different chain. It
+    /// is possible for this to legitimately happen, for example if the finalized chain has been
+    /// updated while the ancestry search was in progress.
+    NotFinalizedChain {
+        /// List of block headers that were pending verification and that have now been discarded
+        /// since it has been found out that they don't belong to the finalized chain.
+        discarded_unverified_block_headers: Vec<Vec<u8>>,
+    },
 }
 
 /// Identifier for a source in the [`AllForksSync`].

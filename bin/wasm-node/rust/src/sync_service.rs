@@ -381,10 +381,10 @@ async fn start_sync(
                             }*/
                         },
                         ToBackground::BlockAnnounce { peer_id, announce } => {
-                            let id = *peers_source_id_map.get(&peer_id).unwrap();
+                            let source_id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: block header re-encoding
-                            match sync.source_mut(id).unwrap().block_announce(decoded.header.scale_encoding().fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a }), decoded.is_best, crate::ffi::unix_time()) {
+                            match sync.source_mut(source_id).unwrap().block_announce(decoded.header.scale_encoding().fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a }), decoded.is_best, crate::ffi::unix_time()) {
                                 all_forks::BlockAnnounceOutcome::HeaderImported => {},
                                 all_forks::BlockAnnounceOutcome::BlockBodyDownloadStart => {},
                                 all_forks::BlockAnnounceOutcome::AncestrySearchStart { first_block_hash, num_blocks } => {
@@ -414,9 +414,11 @@ async fn start_sync(
                                         return;
                                     }
 
+                                    // TODO: use this abort
+                                    let (rx, abort) = future::abortable(rx);
+
                                     pending_ancestry_searches.push(async move {
-                                        let response = rx.await.unwrap();
-                                        (peer_id, response)
+                                        rx.await.unwrap().map(|r| (source_id, r))
                                     });
                                 },
                                 all_forks::BlockAnnounceOutcome::TooOld => {},
@@ -435,7 +437,20 @@ async fn start_sync(
                     }
                 },
 
-                (peer_id, response) = pending_ancestry_searches.select_next_some() => {
+                result = pending_ancestry_searches.select_next_some() => {
+                    // `result` is an error if the block request got cancelled by the sync state
+                    // machine. In other words, if `result` is `Err`, the `sync` isn't interested
+                    // by this request anymore and considers that it doesn't exist anymore.
+                    if let Ok((source_id, request_result)) = result {
+                        sync.ancestry_search_response(
+                            crate::ffi::unix_time(),
+                            source_id,
+                            // It is possible for the remote to send back a block without a
+                            // header. This situation is filtered out with the `flat_map`.
+                            request_result.map(|r| r.into_iter().flat_map(|b| b.header))
+                                .map_err(|_| ())
+                        );
+                    }
                     // TODO: restore
                     /*let result = result.map_err(|_| ()).and_then(|v| v);
                     let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
