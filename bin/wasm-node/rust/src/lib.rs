@@ -628,28 +628,30 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::state_getMetadata {} => {
-			let best_block_hash = client.best_block.clone();
-			let response = match storage_query(client, &b":code"[..], &best_block_hash).await {
-				Ok(Some(value)) => {
-					let best_block_metadata = {
-						let heap_pages = 1024; // TODO: laziness
-						smoldot::metadata::metadata_from_runtime_code(&value, heap_pages).unwrap()
-					};
+            let best_block_hash = client.best_block.clone();
+            let response = match storage_query(client, &b":code"[..], &best_block_hash).await {
+                Ok(Some(value)) => {
+                    let best_block_metadata = {
+                        let heap_pages = 1024; // TODO: laziness
+                        smoldot::metadata::metadata_from_runtime_code(&value, heap_pages).unwrap()
+                    };
 
-					client.best_block_metadata = best_block_metadata;
+                    client.best_block_metadata = best_block_metadata;
 
-					methods::Response::state_getMetadata(methods::HexString(
-						client.best_block_metadata.clone(),
-					)).to_json_response(request_id)
-				}
-				Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
-				Err(error) => {
-					// Return the last known best_block_metadata
-					methods::Response::state_getMetadata(methods::HexString(
-						client.best_block_metadata.clone(),
-					)).to_json_response(request_id)
-				}
-			};
+                    methods::Response::state_getMetadata(methods::HexString(
+                        client.best_block_metadata.clone(),
+                    ))
+                    .to_json_response(request_id)
+                }
+                Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
+                Err(error) => {
+                    // Return the last known best_block_metadata
+                    methods::Response::state_getMetadata(methods::HexString(
+                        client.best_block_metadata.clone(),
+                    ))
+                    .to_json_response(request_id)
+                }
+            };
 
             (response, None)
         }

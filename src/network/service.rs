@@ -347,7 +347,11 @@ where
         val.extend_from_slice(util::encode_scale_compact_usize(extrinsic.len()).as_ref());
         val.extend(extrinsic.clone());
         self.libp2p
-            .queue_notification(&target, chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1, val.clone())
+            .queue_notification(
+                &target,
+                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                val.clone(),
+            )
             .await?;
 
         let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
