@@ -57,7 +57,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{btree_map, BTreeMap, BTreeSet};
 use core::{mem, num::NonZeroU64, time::Duration};
 
 /// Configuration for the [`AllForksSync`].
@@ -112,14 +112,32 @@ struct Inner<TSrc> {
     /// Stores `(source, block hash)` tuples. Each tuple is an information about the fact that
     /// this source knows about the given block. Only contains blocks whose height is higher than
     /// the height of the local finalized block.
-    known_blocks1: BTreeSet<(SourceId, [u8; 32])>, // TODO: move to standalone container
+    known_blocks1: BTreeSet<(SourceId, [u8; 32])>, // TODO: move to standalone container?
 
     /// Contains the same entries as [`Inner::known_blocks1`], but in reverse.
-    known_blocks2: BTreeSet<([u8; 32], SourceId)>, // TODO: move to standalone container
+    known_blocks2: BTreeSet<([u8; 32], SourceId)>, // TODO: move to standalone container?
+
+    /// Map of blocks whose parent is either unknown or present in `disjoint_blocks` as well.
+    ///
+    /// The keys are `(block_height, block_hash)`. Using a b-tree and putting the block number in
+    /// the key makes it possible to remove obsolete entries once blocks are finalized. For
+    /// example, when block `N` is finalized, all entries whose key starts with `N` can be
+    /// removed.
+    disjoint_blocks: BTreeMap<(u64, [u8; 32]), DisjointBlock>, // TODO: move to standalone container?
 }
 
 struct Block<TBl> {
     user_data: TBl,
+}
+
+struct DisjointBlock {
+    scale_encoded_header: Vec<u8>,
+
+    /// If `Some`, the given source is currently performing an ancestry search whose first
+    /// block is the parent of this one.
+    /// [`Source::occupation`] must be [`SourceOccupation::AncestrySearch`] with the parent hash
+    /// indicated by [`DisjointBlock::scale_encoded_header`].
+    ancestry_search: Option<SourceId>,
 }
 
 /// Extra fields specific to each blocks source.
@@ -156,6 +174,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 pending_body_downloads: Default::default(),
                 known_blocks1: Default::default(),
                 known_blocks2: Default::default(),
+                disjoint_blocks: Default::default(),
             },
         }
     }
@@ -254,16 +273,16 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // Iterate through the response. If the request has failed, treat it the same way as if
         // no blocks were returned.
         for scale_encoded_header in scale_encoded_headers.into_iter().flat_map(|l| l) {
+            let scale_encoded_header = scale_encoded_header.as_ref();
+
             // Compare expected with actual hash.
-            if expected_next_hash
-                != header::hash_from_scale_encoded_header(scale_encoded_header.as_ref())
-            {
+            if expected_next_hash != header::hash_from_scale_encoded_header(scale_encoded_header) {
                 break;
             }
 
             // Invalid headers are skipped. The next iteration will likely fail when comparing
             // actual with expected hash, but we give it a chance.
-            let decoded_header = match header::decode(scale_encoded_header.as_ref()) {
+            let decoded_header = match header::decode(scale_encoded_header) {
                 Ok(h) => h,
                 Err(_) => continue,
             };
@@ -295,7 +314,33 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     discarded_unverified_block_headers: Vec::new(),
                 };
             } else {
+                // This is equivalent to `disjoint_blocks.insert(...)`, except that we don't want
+                // to modify the value of a `DisjointBlock::ancestry_search` field that might
+                // already be present.
+                match self
+                    .inner
+                    .disjoint_blocks
+                    .entry((decoded_header.number, expected_next_hash))
+                {
+                    btree_map::Entry::Occupied(mut entry) => {
+                        debug_assert_eq!(
+                            entry.get_mut().scale_encoded_header,
+                            scale_encoded_header
+                        );
+                    }
+                    btree_map::Entry::Vacant(entry) => {
+                        entry.insert(DisjointBlock {
+                            scale_encoded_header: scale_encoded_header.to_vec(),
+                            ancestry_search: None,
+                        });
+                    }
+                }
+
                 // Continue looping.
+                // We continue looping even if the block was already present in `disjont_blocks`,
+                // as the rest of the ancestry search response currently being processed might be
+                // longer or contain different blocks than the previously-known chain(s) of
+                // disjoint blocks.
                 expected_next_hash = *decoded_header.parent_hash;
             }
         }
@@ -305,9 +350,9 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
         if !any_progress {
             // The response from the node was useless.
-            // TODO: restart ancestry search with other node?
+            // TODO: somehow ban the node
         }
-        self.inner.sources.get_mut(&source_id).unwrap().occupation = SourceOccupation::AncestrySearch(hash);
+
         todo!()
     }
 
@@ -568,6 +613,19 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             // Parent is not in the `NonFinalizedTree`. It is unknown whether this block belongs
             // to the same finalized chain as the one known locally, but we expect that it is the
             // case.
+            if let btree_map::Entry::Vacant(entry) = self
+                .parent
+                .inner
+                .disjoint_blocks
+                .entry((announced_header.number, announced_header_hash))
+            {
+                entry.insert(DisjointBlock {
+                    scale_encoded_header: announced_scale_encoded_header,
+                    ancestry_search: None,
+                });
+            }
+
+            // TODO: move out the thing below
             match &mut self
                 .parent
                 .inner

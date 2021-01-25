@@ -20,7 +20,7 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use smoldot::{chain, chain::sync::all_forks, libp2p, network};
+use smoldot::{chain, chain::sync::all_forks, informant::HashDisplay, libp2p, network};
 use std::{
     collections::HashMap,
     convert::TryFrom as _,
@@ -284,9 +284,52 @@ async fn start_sync(
                         sync = s;
                         break;
                     }
-                    optimistic::ProcessOne::NewBest { sync: s, .. }
-                    | optimistic::ProcessOne::Reset { sync: s, .. } => {
+
+                    optimistic::ProcessOne::NewBest {
+                        sync: s,
+                        new_best_number,
+                        new_best_hash,
+                    } => {
                         sync = s;
+
+                        log::debug!(
+                            target: "sync-verify",
+                            "New best block: #{} ({})",
+                            new_best_number,
+                            HashDisplay(&new_best_hash),
+                        );
+
+                        let scale_encoded_header = sync.best_block_header().scale_encoding().fold(
+                            Vec::new(),
+                            |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            },
+                        );
+                        if to_foreground
+                            .send(FromBackground::NewBest {
+                                scale_encoded_header,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+
+                    optimistic::ProcessOne::Reset {
+                        sync: s,
+                        reason,
+                        previous_best_height,
+                    } => {
+                        sync = s;
+
+                        log::warn!(
+                            target: "sync-verify",
+                            "Failed to verify block #{}: {}",
+                            previous_best_height + 1,
+                            reason
+                        );
 
                         let scale_encoded_header = sync.best_block_header().scale_encoding().fold(
                             Vec::new(),
@@ -313,6 +356,12 @@ async fn start_sync(
                     } => {
                         sync = s;
                         verified_blocks += 1;
+
+                        log::debug!(
+                            target: "sync-verify",
+                            "Finalized {} block",
+                            finalized_blocks.len()
+                        );
 
                         let scale_encoded_header = finalized_blocks
                             .last()
