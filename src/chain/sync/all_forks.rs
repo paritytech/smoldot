@@ -49,6 +49,36 @@
 //! (`full` equal to `true`).
 //!
 //! In full mode, .
+//!
+//! # Bounded and unbounded containers
+//!
+//! It is important to limit the memory usage of this state machine no matter how the
+//! potentially-malicious sources behave.
+//!
+//! The state in this state machine can be put into three categories:
+//!
+//! - Each source of blocks has a certain fixed-size state associated to it (containing for
+//!   instance its best block number and height). Each source also has up to one in-flight
+//!   request, which might incur more memory usage. Managing this additional request is out of
+//!   scope of this module. The user of this module is expected to limit the number of
+//!   simultaneous sources.
+//!
+//! - A set of verified blocks that descend from the latest finalized block. This set is
+//!   unbounded. The consensus and finalization algorithms of the chain are supposed to limit
+//!   the number of possible blocks in this set.
+//!
+//! - A set of blocks that can't be verified yet. Receiving a block announce inserts an element
+//!   in this set. In order to handle situations where a malicious source announces lots of
+//!   invalid blocks, this set must be bounded. Once it has reached a certain size, the blocks
+//!   with the highest block number are discarded if their parent is also in this set or being
+//!   downloaded from a source.
+//!
+//! Consequently, and assuming that the number of simultaneous sources is bounded, and that
+//! the consensus and finalization algorithms of the chain are properly configured, malicious
+//! sources can't indefinitely grow the state in this state machine.
+//! Malicious sources, however, can potentially increase the number of block requests required to
+//! download a long fork. This is, at most, an annoyance, and not a vulnerability.
+//!
 
 // TODO: finish ^
 
