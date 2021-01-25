@@ -32,6 +32,7 @@ use crate::ffi;
 use core::{num::NonZeroUsize, pin::Pin, time::Duration};
 use futures::{lock::Mutex, prelude::*};
 use smoldot::{
+    informant::HashDisplay,
     libp2p::{
         connection,
         multiaddr::{Multiaddr, Protocol},
@@ -95,7 +96,7 @@ impl NetworkService {
                     best_hash: config.best_block.1,
                     best_number: config.best_block.0,
                     genesis_hash: config.genesis_block_hash,
-                    role: protocol::Role::Full,
+                    role: protocol::Role::Light,
                 }],
                 known_nodes: config
                     .bootstrap_nodes
@@ -133,8 +134,12 @@ impl NetworkService {
                     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
                     // into a `Future<dyn Output = Result<TcpStream, ...>>`.
                     let socket = match multiaddr_to_url(&start_connect.multiaddr) {
-                        Ok(url) => ffi::WebSocket::connect(&url),
-                        Err(_) => {
+                        Ok(url) => {
+                            log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, url);
+                            ffi::WebSocket::connect(&url)
+                        }
+                        Err(()) => {
+                            log::debug!(target: "connections", "Unsupported multiaddr: {}", start_connect.multiaddr);
                             network_service
                                 .network
                                 .pending_outcome_err(start_connect.id)
@@ -184,9 +189,21 @@ impl NetworkService {
         target: PeerId,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
-        self.network
-            .blocks_request(ffi::Instant::now(), target, 0, config)
-            .await // TODO: chain_index
+        log::debug!(target: "network", "Connection({}) <= BlocksRequest({:?})", target, config);
+
+        let result = self
+            .network
+            .blocks_request(ffi::Instant::now(), target.clone(), 0, config)
+            .await; // TODO: chain_index
+
+        log::debug!(
+            target: "network",
+            "Connection({}) => BlocksRequest({:?})",
+            target,
+            result.as_ref().map(|b| b.len())
+        );
+
+        result
     }
 
     /// Sends a storage proof request to the given peer.
@@ -196,9 +213,27 @@ impl NetworkService {
         target: PeerId,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
-        self.network
-            .storage_proof_request(ffi::Instant::now(), target, 0, config)
-            .await // TODO: chain_index
+        log::debug!(
+            target: "network",
+            "Connection({}) <= StorageProofRequest({}, {})",
+            target,
+            HashDisplay(&config.block_hash),
+            config.keys.size_hint().0
+        );
+
+        let result = self
+            .network
+            .storage_proof_request(ffi::Instant::now(), target.clone(), 0, config)
+            .await; // TODO: chain_index
+
+        log::debug!(
+            target: "network",
+            "Connection({}) => StorageProofRequest({:?})",
+            target,
+            result.as_ref().map(|b| b.len())
+        );
+
+        result
     }
 
     /// Sends transaction to the given peer.
@@ -220,11 +255,14 @@ impl NetworkService {
     pub async fn next_event(self: &Arc<Self>) -> Event {
         loop {
             match self.network.next_event().await {
-                service::Event::Connected(_peer_id) => {}
+                service::Event::Connected(peer_id) => {
+                    log::info!(target: "network", "Connected to {}", peer_id);
+                }
                 service::Event::Disconnected {
                     peer_id,
                     chain_indices,
                 } => {
+                    log::info!(target: "network", "Disconnected from {} (chains: {:?})", peer_id, chain_indices);
                     if !chain_indices.is_empty() {
                         return Event::Disconnected(peer_id);
                     }
@@ -234,6 +272,14 @@ impl NetworkService {
                     peer_id,
                     announce,
                 } => {
+                    log::debug!(
+                        target: "network",
+                        "Connection({}) => BlockAnnounce({}, {}, is_best={})",
+                        peer_id,
+                        chain_index,
+                        HashDisplay(&announce.decode().header.hash()),
+                        announce.decode().is_best
+                    );
                     debug_assert_eq!(chain_index, 0);
                     return Event::BlockAnnounce { peer_id, announce };
                 }
@@ -241,8 +287,17 @@ impl NetworkService {
                     peer_id,
                     chain_index,
                     best_number,
+                    best_hash,
                     ..
                 } => {
+                    log::debug!(
+                        target: "network",
+                        "Connection({}) => ChainConnected({}, {}, {})",
+                        peer_id,
+                        chain_index,
+                        best_number,
+                        HashDisplay(&best_hash)
+                    );
                     debug_assert_eq!(chain_index, 0);
                     return Event::Connected {
                         peer_id,
@@ -253,6 +308,12 @@ impl NetworkService {
                     peer_id,
                     chain_index,
                 } => {
+                    log::debug!(
+                        target: "network",
+                        "Connection({}) => ChainDisconnected({})",
+                        peer_id,
+                        chain_index,
+                    );
                     debug_assert_eq!(chain_index, 0);
                     return Event::Disconnected(peer_id);
                 }
@@ -284,21 +345,26 @@ pub enum InitError {
 async fn connection_task(
     websocket: impl Future<Output = Result<Pin<Box<ffi::WebSocket>>, ()>>,
     network_service: Arc<NetworkService>,
-    id: service::PendingId,
+    pending_id: service::PendingId,
 ) {
     // Finishing the ongoing connection process.
     let mut websocket = match websocket.await {
         Ok(s) => s,
-        Err(_) => {
-            network_service.network.pending_outcome_err(id).await;
+        Err(()) => {
+            log::debug!(target: "connections", "Pending({:?}) => Failed to reach", pending_id);
+            network_service
+                .network
+                .pending_outcome_err(pending_id)
+                .await;
             return;
         }
     };
 
-    let id = network_service.network.pending_outcome_ok(id, ()).await;
-
-    // Set to a timer after which the state machine of the connection needs an update.
-    let mut poll_after: ffi::Delay;
+    let id = network_service
+        .network
+        .pending_outcome_ok(pending_id, ())
+        .await;
+    log::debug!(target: "connections", "Pending({:?}) => Connection({:?})", pending_id, id);
 
     let mut write_buffer = vec![0; 4096];
 
@@ -307,72 +373,43 @@ async fn connection_task(
 
         let now = ffi::Instant::now();
 
-        // TODO: hacky code
-        struct Waker(std::sync::Mutex<(bool, Option<std::task::Waker>)>);
-        impl futures::task::ArcWake for Waker {
-            fn wake_by_ref(arc_self: &Arc<Self>) {
-                let mut lock = arc_self.0.lock().unwrap();
-                lock.0 = true;
-                if let Some(w) = lock.1.take() {
-                    w.wake();
-                }
-            }
-        }
-
-        let waker = Arc::new(Waker(std::sync::Mutex::new((false, None))));
-
         let read_write = match network_service
             .network
-            .read_write(
-                id,
-                now,
-                read_buffer,
-                (&mut write_buffer, &mut []),
-                &mut std::task::Context::from_waker(&*futures::task::waker_ref(&waker)),
-            )
+            .read_write(id, now, read_buffer, (&mut write_buffer, &mut []))
             .await
         {
             Ok(rw) => rw,
-            Err(_) => {
+            Err(_err) => {
+                log::debug!(target: "connections", "Connection({:?}) => Closed: {}", id, _err);
                 return;
             }
         };
 
         if read_write.write_close && read_buffer.is_none() {
+            log::debug!(target: "connections", "Connection({:?}) => Closed gracefully", id);
             return;
-        }
-
-        if let Some(wake_up) = read_write.wake_up_after {
-            if wake_up > now {
-                let dur = wake_up - now;
-                poll_after = ffi::Delay::new(dur);
-            } else {
-                poll_after = ffi::Delay::new(Duration::from_secs(0));
-            }
-        } else {
-            poll_after = ffi::Delay::new(Duration::from_secs(3600));
         }
 
         websocket.send(&write_buffer[..read_write.written_bytes]);
 
         websocket.advance_read_cursor(read_write.read_bytes);
 
-        // TODO: maybe optimize the code below so that multiple messages are pulled from `to_connection` at once
+        let mut poll_after = if let Some(wake_up) = read_write.wake_up_after {
+            if wake_up > now {
+                let dur = wake_up - now;
+                future::Either::Left(ffi::Delay::new(dur))
+            } else {
+                continue;
+            }
+        } else {
+            future::Either::Right(future::pending())
+        }
+        .fuse();
 
         futures::select! {
             _ = websocket.read_buffer().fuse() => {},
-            _ = future::poll_fn(move |cx| {
-                let mut lock = waker.0.lock().unwrap();
-                if lock.0 {
-                    return std::task::Poll::Ready(());
-                }
-                match lock.1 {
-                    Some(ref w) if w.will_wake(cx.waker()) => {}
-                    _ => lock.1 = Some(cx.waker().clone()),
-                }
-                std::task::Poll::Pending
-            }).fuse() => {}
-            _ = (&mut poll_after).fuse() => { // TODO: no, ref mut + fuse() = probably panic
+            _ = read_write.wake_up_future.fuse() => {},
+            () = poll_after => {
                 // Nothing to do, but guarantees that we loop again.
             },
         }

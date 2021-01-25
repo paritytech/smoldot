@@ -33,7 +33,7 @@ use smoldot::{
 use std::{
     collections::{BTreeMap, HashSet},
     convert::TryFrom as _,
-    iter,
+    fmt, iter,
     sync::Arc,
     time::Duration,
 };
@@ -137,6 +137,12 @@ watched and of the `:code` key.
 /// >           function is what is in the `Ok`. If an `Err` is returned, a JavaScript exception
 /// >           is thrown.
 pub async fn start_client(chain_spec: String, database_content: Option<String>) {
+    // Try initialize the logging and the panic hook.
+    // Note that `start_client` can theoretically be called multiple times, meaning that these
+    // calls shouldn't panic if reached multiple times.
+    let _ = simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Debug) // TODO: make log level configurable from JS?
+        .init();
     std::panic::set_hook(Box::new(|info| {
         ffi::throw(info.to_string());
     }));
@@ -146,19 +152,22 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
     let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&chain_spec) {
-        Ok(cs) => cs,
+        Ok(cs) => {
+            log::info!("Loaded chain specs for {}", cs.name());
+            cs
+        }
         Err(err) => ffi::throw(format!("Error while opening chain specs: {}", err)),
     };
 
     // The database passed from the user is decoded. Any error while decoding is treated as if
     // there was no database.
     let database_content = if let Some(database_content) = database_content {
-        if let Ok(parsed) =
-            smoldot::database::finalized_serialize::decode_chain_information(&database_content)
-        {
-            Some(parsed)
-        } else {
-            None
+        match smoldot::database::finalized_serialize::decode_chain_information(&database_content) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => {
+                log::warn!("Failed to decode chain information: {}", error);
+                None
+            }
         }
     } else {
         None
@@ -174,6 +183,13 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         .unwrap();
     let chain_information = {
         let base = if let Some(light_sync_state) = chain_spec.light_sync_state() {
+            log::info!(
+                "Using light checkpoint starting at #{}",
+                light_sync_state
+                    .as_chain_information()
+                    .finalized_block_header
+                    .number
+            );
             light_sync_state.as_chain_information()
         } else {
             genesis_chain_information.clone()
@@ -184,6 +200,7 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
             if database_content.finalized_block_header.number > base.finalized_block_header.number {
                 database_content
             } else {
+                log::info!("Skipping database as it is older than checkpoint");
                 base
             }
         } else {
@@ -269,6 +286,8 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         ffi::Delay::new(Duration::from_secs(15)).map(|_| Some(((), ())))
     })
     .map(|_| ());
+
+    log::info!("Starting main loop");
 
     loop {
         futures::select! {
@@ -362,10 +381,31 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
 
             json_rpc_request = ffi::next_json_rpc().fuse() => {
                 // TODO: don't unwrap
+                let request_string = String::from_utf8(Vec::from(json_rpc_request)).unwrap();
+                log::debug!(
+                    target: "json-rpc",
+                    "JSON-RPC => {:?}{}",
+                    if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
+                    if request_string.len() > 100 { "…" } else { "" }
+                );
+
                 // TODO: don't await here; use a queue
-                let (response1, response2) = handle_rpc(&String::from_utf8(Vec::from(json_rpc_request)).unwrap(), &mut client).await;
+                let (response1, response2) = handle_rpc(&request_string, &mut client).await;
+                log::debug!(
+                    target: "json-rpc",
+                    "JSON-RPC <= {:?}{}",
+                    if response1.len() > 100 { &response1[..100] } else { &response1[..] },
+                    if response1.len() > 100 { "…" } else { "" }
+                );
                 ffi::emit_json_rpc_response(&response1);
+
                 if let Some(response2) = response2 {
+                    log::debug!(
+                        target: "json-rpc",
+                        "JSON-RPC <= {:?}{}",
+                        if response2.len() > 100 { &response2[..100] } else { &response2[..] },
+                        if response2.len() > 100 { "…" } else { "" }
+                    );
                     ffi::emit_json_rpc_response(&response2);
                 }
             },
@@ -374,6 +414,7 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                 debug_assert!(_interval.is_some());
                 // A new task is spawned specifically for the saving, in order to not block the
                 // main processing while waiting for the serialization.
+                log::debug!("Database save start");
                 let sync_service = sync_service.clone();
                 ffi::spawn_task(async move {
                     let database_content = sync_service.serialize_chain().await;
@@ -587,10 +628,29 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::state_getMetadata {} => {
-            let response = methods::Response::state_getMetadata(methods::HexString(
-                client.best_block_metadata.clone(),
-            ))
-            .to_json_response(request_id);
+			let best_block_hash = client.best_block.clone();
+			let response = match storage_query(client, &b":code"[..], &best_block_hash).await {
+				Ok(Some(value)) => {
+					let best_block_metadata = {
+						let heap_pages = 1024; // TODO: laziness
+						smoldot::metadata::metadata_from_runtime_code(&value, heap_pages).unwrap()
+					};
+
+					client.best_block_metadata = best_block_metadata;
+
+					methods::Response::state_getMetadata(methods::HexString(
+						client.best_block_metadata.clone(),
+					)).to_json_response(request_id)
+				}
+				Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
+				Err(error) => {
+					// Return the last known best_block_metadata
+					methods::Response::state_getMetadata(methods::HexString(
+						client.best_block_metadata.clone(),
+					)).to_json_response(request_id)
+				}
+			};
+
             (response, None)
         }
         methods::MethodCall::state_getStorage { key, hash } => {
@@ -602,7 +662,11 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                         .to_json_response(request_id)
                 }
                 Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
-                Err(()) => todo!(), // TODO:
+                Err(error) => json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                    None,
+                ),
             };
 
             (response, None)
@@ -752,25 +816,22 @@ async fn storage_query(
     client: &mut Client,
     key: &[u8],
     hash: &[u8; 32],
-) -> Result<Option<Vec<u8>>, ()> {
+) -> Result<Option<Vec<u8>>, StorageQueryError> {
     // LRU workaround
     let finalized_block_hash = client.finalized_block;
     let _ = client.known_blocks.get(&finalized_block_hash).unwrap();
 
     let trie_root_hash = if let Some(header) = client.known_blocks.get(hash) {
-        Some(header.state_root)
+        header.state_root
     } else {
-        None
+        // TODO: should make a block request towards a node
+        return Err(StorageQueryError::FindStorageRootHashError);
     };
 
-    let mut result = Err(());
+    let mut outcome_errors = Vec::with_capacity(3);
 
     for target in client.peers.iter().take(3) {
-        if trie_root_hash.is_none() || result.is_ok() {
-            break;
-        }
-
-        result = client
+        let result = client
             .network_service
             .clone()
             .storage_proof_request(
@@ -781,19 +842,67 @@ async fn storage_query(
                 },
             )
             .await
-            .map_err(|_| ())
+            .map_err(StorageQueryErrorDetail::Network)
             .and_then(|outcome| {
                 proof_verify::verify_proof(proof_verify::Config {
                     proof: outcome.iter().map(|nv| &nv[..]),
                     requested_key: key,
-                    trie_root_hash: trie_root_hash.as_ref().unwrap(),
+                    trie_root_hash: &trie_root_hash,
                 })
-                .map_err(|_| ())
+                .map_err(StorageQueryErrorDetail::ProofVerification)
                 .map(|v| v.map(|v| v.to_owned()))
             });
+
+        match result {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                outcome_errors.push(err);
+            }
+        }
     }
 
-    result
+    debug_assert_eq!(outcome_errors.len(), outcome_errors.capacity());
+    Err(StorageQueryError::StorageRetrieval {
+        errors: outcome_errors,
+    })
+}
+
+#[derive(Debug)]
+enum StorageQueryError {
+    /// Error while finding the storage root hash of the requested block.
+    FindStorageRootHashError,
+    /// Error while retrieving the storage item from other nodes.
+    StorageRetrieval {
+        /// Contains one error per peer that has been contacted. If this list is empty, then we
+        /// aren't connected to any node.
+        errors: Vec<StorageQueryErrorDetail>,
+    },
+}
+
+impl fmt::Display for StorageQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            StorageQueryError::FindStorageRootHashError => write!(f, "Unknown block"),
+            StorageQueryError::StorageRetrieval { errors } if errors.is_empty() => {
+                write!(f, "No node available for storage query")
+            }
+            StorageQueryError::StorageRetrieval { errors } => {
+                write!(f, "Storage query errors:")?;
+                for err in errors {
+                    write!(f, "\n- {}", err)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, derive_more::Display)]
+enum StorageQueryErrorDetail {
+    #[display(fmt = "{}", _0)]
+    Network(smoldot::network::service::StorageProofRequestError),
+    #[display(fmt = "{}", _0)]
+    ProofVerification(proof_verify::Error),
 }
 
 fn header_conv<'a>(header: impl Into<smoldot::header::HeaderRef<'a>>) -> methods::Header {

@@ -38,12 +38,10 @@ smoldot.start({
     database_content: database_content,
     json_rpc_callback: (resp) => {
         if (ws_connection) {
-            console.log("Sending back:", resp.slice(0, 100) + (resp.length > 100 ? '…' : ''));
             ws_connection.sendUTF(resp);
         }
     },
     database_save_callback: (db_content) => {
-        console.log("Saving database");
         fs.writeFileSync(database_path, db_content);
     }
 })
@@ -54,13 +52,13 @@ smoldot.start({
     })
 
 let server = http.createServer(function (request, response) {
-    console.log((new Date()) + ' Received request for ' + request.url);
     response.writeHead(404);
     response.end();
 });
 
 server.listen(9944, function () {
-    console.log((new Date()) + ' Server is listening on port 9944');
+    console.log('Server is listening on port 9944');
+    console.log('Visit https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944');
 });
 
 let wsServer = new websocket.server({
@@ -75,7 +73,6 @@ wsServer.on('request', function (request) {
 
     connection.on('message', function (message) {
         if (message.type === 'utf8') {
-            console.log('Received Message:', message.utf8Data.slice(0, 100) + (message.utf8Data.length > 100 ? '…' : ''));
             if (client) {
                 client.send_json_rpc(message.utf8Data);
             } else {
