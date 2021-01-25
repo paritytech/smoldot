@@ -186,7 +186,7 @@ export async function start(config) {
           total_length += buf_len;
         }
 
-        let log_if_necessary = (string) => {
+        let flush_buffer = (string) => {
           // As documented in the documentation of `println!`, lines are always split by a single
           // `\n` in Rust.
           let index = string.indexOf('\n');
@@ -204,10 +204,10 @@ export async function start(config) {
         // their content if necessary.
         if (fd == 1) {
           stdout_buffer += to_write;
-          stdout_buffer = log_if_necessary(stdout_buffer);
+          stdout_buffer = flush_buffer(stdout_buffer);
         } else if (fd == 2) {
           stderr_buffer += to_write;
-          stderr_buffer = log_if_necessary(stderr_buffer);
+          stderr_buffer = flush_buffer(stderr_buffer);
         }
 
         // Need to write in `out_ptr` how much data was "written".
