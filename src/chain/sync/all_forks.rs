@@ -110,14 +110,17 @@ struct Inner<TSrc> {
         hashbrown::HashMap<[u8; 32], (header::Header, Option<SourceId>), fnv::FnvBuildHasher>,
 
     /// Stores `(source, block hash)` tuples. Each tuple is an information about the fact that
-    /// this source knows about the given block. Only contains blocks whose height is higher than
-    /// the height of the local finalized block.
+    /// this source knows about the given block. Only contains blocks whose height is strictly
+    /// superior to the height of the local finalized block.
     known_blocks1: BTreeSet<(SourceId, [u8; 32])>, // TODO: move to standalone container?
 
     /// Contains the same entries as [`Inner::known_blocks1`], but in reverse.
     known_blocks2: BTreeSet<([u8; 32], SourceId)>, // TODO: move to standalone container?
 
     /// Map of blocks whose parent is either unknown or present in `disjoint_blocks` as well.
+    ///
+    /// Only contains blocks whose height is strictly superior to the height of the local
+    /// finalized block.
     ///
     /// The keys are `(block_height, block_hash)`. Using a b-tree and putting the block number in
     /// the key makes it possible to remove obsolete entries once blocks are finalized. For
@@ -131,6 +134,7 @@ struct Block<TBl> {
 }
 
 struct DisjointBlock {
+    /// Header of the block. Guaranteed to be a valid header.
     scale_encoded_header: Vec<u8>,
 
     /// If `Some`, the given source is currently performing an ancestry search whose first
@@ -216,6 +220,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             self.inner.known_blocks2.insert((best_block_hash, new_id));
         }
 
+        // TODO: start a header request for the best block, if it is unknown locally?
+
         SourceMutAccess {
             parent: self,
             source_id: new_id,
@@ -254,11 +260,12 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         source_id: SourceId,
         scale_encoded_headers: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
     ) -> AncestrySearchResponseOutcome {
-        // Number of the finalized chain. Saved for later.
+        // Height of the finalized chain. Saved for later.
         let local_finalized_block_number = self.chain.finalized_block_header().number;
 
         // The next block in the list of headers should have a hash equal to this one.
-        let mut expected_next_hash = match mem::replace(
+        // Sets the `occupation` of `source_id` back to `Idle`.
+        let expected_next_hash = match mem::replace(
             &mut self.inner.sources.get_mut(&source_id).unwrap().occupation,
             SourceOccupation::Idle,
         ) {
@@ -289,59 +296,44 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
             any_progress = true;
 
-            // Is `decoded_header.parent_hash` known locally?
-            let parent_is_in_chain: bool = {
-                let local_finalized_block_hash = self.chain.finalized_block_hash();
-                *decoded_header.parent_hash == local_finalized_block_hash
-                    || self
-                        .chain
-                        .non_finalized_block_by_hash(decoded_header.parent_hash)
-                        .is_some()
+            // Whether to continue looping after inserting in `disjoint_blocks`.
+            let stop_looping = {
+                // Is `decoded_header.parent_hash` known locally?
+                let parent_is_in_chain: bool = {
+                    let local_finalized_block_hash = self.chain.finalized_block_hash();
+                    *decoded_header.parent_hash == local_finalized_block_hash
+                        || self
+                            .chain
+                            .non_finalized_block_by_hash(decoded_header.parent_hash)
+                            .is_some()
+                };
+
+                // Parent is in chain or parent *should be* in chain
+                parent_is_in_chain || decoded_header.number == local_finalized_block_number + 1
             };
 
-            if parent_is_in_chain {
-                todo!()
-            } else if decoded_header.number == local_finalized_block_number + 1 {
-                // `parent_is_in_chain` would be true otherwise.
-                debug_assert_ne!(
-                    *decoded_header.parent_hash,
-                    self.chain.finalized_block_hash()
-                );
-
-                // Source has given blocks that aren't part of the finalized chain.
-                // TODO: discard downloaded blocks
-                return AncestrySearchResponseOutcome::NotFinalizedChain {
-                    discarded_unverified_block_headers: Vec::new(),
-                };
-            } else {
-                // This is equivalent to `disjoint_blocks.insert(...)`, except that we don't want
-                // to modify the value of a `DisjointBlock::ancestry_search` field that might
-                // already be present.
-                match self
-                    .inner
-                    .disjoint_blocks
-                    .entry((decoded_header.number, expected_next_hash))
-                {
-                    btree_map::Entry::Occupied(mut entry) => {
-                        debug_assert_eq!(
-                            entry.get_mut().scale_encoded_header,
-                            scale_encoded_header
-                        );
-                    }
-                    btree_map::Entry::Vacant(entry) => {
-                        entry.insert(DisjointBlock {
-                            scale_encoded_header: scale_encoded_header.to_vec(),
-                            ancestry_search: None,
-                        });
-                    }
+            // This is equivalent to `disjoint_blocks.insert(...)`, except that we don't want
+            // to modify the value of a `DisjointBlock::ancestry_search` field that might
+            // already be present.
+            match self
+                .inner
+                .disjoint_blocks
+                .entry((decoded_header.number, expected_next_hash))
+            {
+                btree_map::Entry::Occupied(mut entry) => {
+                    debug_assert_eq!(entry.get_mut().scale_encoded_header, scale_encoded_header);
                 }
+                btree_map::Entry::Vacant(entry) => {
+                    entry.insert(DisjointBlock {
+                        scale_encoded_header: scale_encoded_header.to_vec(),
+                        ancestry_search: None,
+                    });
+                }
+            }
 
-                // Continue looping.
-                // We continue looping even if the block was already present in `disjont_blocks`,
-                // as the rest of the ancestry search response currently being processed might be
-                // longer or contain different blocks than the previously-known chain(s) of
-                // disjoint blocks.
-                expected_next_hash = *decoded_header.parent_hash;
+            // Stop looping if the iteration reached the locally-known chain.
+            if stop_looping {
+                break;
             }
         }
 
@@ -406,6 +398,73 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             }
         }
     }
+
+    fn next_action(&mut self) {
+        // Height of the finalized chain. Saved for later.
+        let local_finalized_block_number = self.chain.finalized_block_header().number;
+
+        // Try find any disjoint block that is ready to be verified.
+        // TODO:
+
+        // Try find any disjoint block that could be .
+    }
+
+    /// Passed a known entry in `disjoint_blocks`. Removes this entry and any known children of
+    /// this block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `(number, hash)` isn't an entry in [`Inner::disjoint_chain]`.
+    ///
+    fn discard_disjoint_chain(&mut self, number: u64, hash: [u8; 32]) {
+        // TODO: keep a list of banned blocks for later? this is required by chain specs anyway
+
+        // The implementation consists in iterating over the increasing block number, and removing
+        // all blocks whose parent was removed at the previous iteration.
+
+        // List of blocks to discard at the next iteration.
+        let mut blocks_to_discard = Vec::with_capacity(16);
+        blocks_to_discard.push(hash);
+
+        for number in number.. {
+            // Find in `disjoint_blocks` any block whose parent is in `blocks_to_discard`.
+            let blocks_to_discard_next = {
+                let mut blocks_to_discard_next = Vec::with_capacity(16);
+                for ((_, hash), block) in self
+                    .inner
+                    .disjoint_blocks
+                    .range((number + 1, [0; 32])..(number + 2, [0; 32]))
+                {
+                    let decoded = header::decode(&block.scale_encoded_header).unwrap();
+                    if blocks_to_discard.iter().any(|b| b == decoded.parent_hash) {
+                        blocks_to_discard_next.push(*hash);
+                    }
+                }
+                blocks_to_discard_next
+            };
+
+            // Now discard `blocks_to_discard`.
+            for to_discard in mem::replace(&mut blocks_to_discard, blocks_to_discard_next) {
+                let discarded_block = self
+                    .inner
+                    .disjoint_blocks
+                    .remove(&(number, to_discard))
+                    .unwrap();
+
+                // Any ongoing search needs to be cancelled.
+                if let Some(_source_id) = discarded_block.ancestry_search {
+                    todo!() // TODO:
+                }
+            }
+
+            // The `for` loop would be infinite unless we put an explicit `break`.
+            // Note that `blocks_to_discard` was replaced with `blocks_to_discard_next` above,
+            // we're therefore testing `blocks_to_discard_next.is_empty()`.
+            if blocks_to_discard.is_empty() {
+                break;
+            }
+        }
+    }
 }
 
 /// Access to a source in a [`AllForksSync`]. Obtained through [`AllForksSync::source_mut`].
@@ -446,7 +505,7 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
     /// Returns the user data that was originally passed to [`AllForksSync::add_source`].
     ///
     /// Removing the source implicitly cancels the request that is associated to it (if any).
-    pub fn remove(mut self) -> TSrc {
+    pub fn remove(self) -> TSrc {
         let source_id = self.source_id;
         let source = self.parent.inner.sources.remove(&source_id).unwrap();
 
@@ -459,6 +518,13 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
         {
             // TODO: redirect download to other source
             *src = None;
+        }
+
+        match source.occupation {
+            SourceOccupation::Idle => {},
+            SourceOccupation::AncestrySearch(hash) => {
+                todo!()
+            }
         }
 
         source.user_data
