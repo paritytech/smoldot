@@ -240,12 +240,16 @@ impl NetworkService {
     // TODO: more docs
     pub async fn announce_transaction(
         self: Arc<Self>,
-        target: PeerId,
+        peers: Vec<PeerId>,
         transaction: Vec<u8>,
-    ) -> Result<Vec<u8>, QueueNotificationError> {
-        self.network
-            .announce_transaction(&target, 0, transaction)
-            .await // TODO: chain_index
+    ) -> Result<(), QueueNotificationError> {
+        for target in peers.iter() {
+            let _ = self
+                .network
+                .announce_transaction(&target, 0, &transaction)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Returns the next event that happens in the network service.
