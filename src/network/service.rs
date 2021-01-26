@@ -340,22 +340,18 @@ where
         &self,
         target: &peer_id::PeerId,
         chain_index: usize,
-        extrinsic: Vec<u8>,
-    ) -> Result<Vec<u8>, QueueNotificationError> {
-        let mut val = Vec::new();
+        extrinsic: &Vec<u8>,
+    ) -> Result<(), QueueNotificationError> {
+        let mut val = Vec::with_capacity(1 + extrinsic.len());
         val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
-        val.extend(extrinsic.clone());
+        val.extend_from_slice(extrinsic);
         self.libp2p
             .queue_notification(
                 &target,
                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
                 val.clone(),
             )
-            .await?;
-
-        let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
-        hash.update(val.as_slice());
-        Ok(hash.finalize().as_bytes().to_vec())
+            .await
     }
 
     /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
