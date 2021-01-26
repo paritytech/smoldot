@@ -26,7 +26,7 @@ use futures::prelude::*;
 use smoldot::{
     chain, chain_spec, executor,
     json_rpc::{self, methods},
-    libp2p::{multiaddr, peer_id::PeerId, QueueNotificationError},
+    libp2p::{multiaddr, peer_id::PeerId},
     network::protocol,
     trie::proof_verify,
 };
@@ -469,9 +469,23 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::author_submitExtrinsic { transaction } => {
-            let response = match announce_transaction(client, transaction.0).await {
-                Ok(transaction_hash) => methods::Response::author_submitExtrinsic(transaction_hash)
-                    .to_json_response(request_id),
+            let response = match client
+                .network_service
+				.clone()
+                .announce_transaction(client.peers.clone(), transaction.0.clone())
+                .await
+            {
+                Ok(_) => {
+                    let mut hash_context = blake2_rfc::blake2b::Blake2b::new(32);
+                    hash_context.update(transaction.0.as_slice());
+                    let mut transaction_hash: [u8; 32] = Default::default();
+                    transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
+
+                    methods::Response::author_submitExtrinsic(methods::HashHexString(
+                        transaction_hash,
+                    ))
+                    .to_json_response(request_id)
+                }
                 Err(e) => todo!("{:?}", e), //TODO:
             };
             (response, None)
@@ -859,27 +873,6 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             panic!(); // TODO:
         }
     }
-}
-
-async fn announce_transaction(
-    client: &mut Client,
-    transaction: Vec<u8>,
-) -> Result<methods::HashHexString, QueueNotificationError> {
-    let mut result = Ok(methods::HashHexString([0; 32]));
-    for target in client.peers.iter() {
-        result = client
-            .network_service
-            .clone()
-            .announce_transaction(target.clone(), transaction.clone())
-            .await
-            .map(|h| {
-                let mut slice: [u8; 32] = Default::default();
-                slice.copy_from_slice(h.as_slice());
-                methods::HashHexString(slice)
-            });
-        // .map_err(|_| ());
-    }
-    result
 }
 
 async fn storage_query(
