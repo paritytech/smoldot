@@ -344,7 +344,6 @@ where
     ) -> Result<Vec<u8>, QueueNotificationError> {
         let mut val = Vec::new();
         val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
-        val.extend_from_slice(util::encode_scale_compact_usize(extrinsic.len()).as_ref());
         val.extend(extrinsic.clone());
         self.libp2p
             .queue_notification(
