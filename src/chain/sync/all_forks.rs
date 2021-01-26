@@ -26,8 +26,8 @@
 //! - The latest known finalized block.
 //! - A tree of valid non-finalized blocks that all descend from the latest known finalized block.
 //! - (if full mode) A list of block headers whose body is currently being downloaded.
-//! - (if full mode) A list of block header and bodies waiting to be verified and whose ancestry
-//! with the latest finalized block is currently unknown.
+//! - A list of block header waiting to be verified and whose ancestry with the latest finalized
+//!   block is currently unknown.
 //!
 //! The state machine has the objective to synchronize the tree of non-finalized blocks with its
 //! equivalent on the sources added by the API user.
@@ -437,6 +437,17 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // TODO:
 
         // Try find any disjoint block that could be .
+    }
+
+    /// Passed a known entry in `disjoint_blocks`. Removes this entry and any known children of
+    /// this block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `(number, hash)` isn't an entry in [`Inner::disjoint_chain]`.
+    ///
+    fn verify_disjoint_chain(&mut self, number: u64, hash: [u8; 32]) {
+        
     }
 
     /// Passed a known entry in `disjoint_blocks`. Removes this entry and any known children of
