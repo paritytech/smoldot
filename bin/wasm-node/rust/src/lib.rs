@@ -680,7 +680,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                     .to_json_response(request_id)
                 }
                 Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
-                Err(error) => {
+                Err(_) => {
                     // Return the last known best_block_metadata
                     methods::Response::state_getMetadata(methods::HexString(
                         client.best_block_metadata.clone(),
