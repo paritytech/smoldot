@@ -684,7 +684,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             let response = match storage_query(client, &b":code"[..], &best_block_hash).await {
                 Ok(Some(value)) => {
                     let best_block_metadata = {
-                        let heap_pages = 1024; // TODO: laziness
+                        let heap_pages = executor::DEFAULT_HEAP_PAGES; // TODO: laziness
                         smoldot::metadata::metadata_from_runtime_code(&value, heap_pages).unwrap()
                     };
 
