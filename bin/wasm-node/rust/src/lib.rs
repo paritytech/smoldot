@@ -677,7 +677,8 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                     impl_version: u64::from(runtime_specs.impl_version),
                     transaction_version: u64::from(runtime_specs.transaction_version),
                     apis: runtime_specs.apis,
-                }).unwrap(),
+                })
+                .unwrap(),
             );
             (response, Some(response2))
         }
