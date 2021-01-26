@@ -353,7 +353,6 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                         let _ = client.known_blocks.get(&client.finalized_block).unwrap();
 
                         client.best_block = decoded.hash();
-                        println!("Best block: {}", decoded.number);
                         client.known_blocks.put(client.best_block, decoded.into());
 
                         debug_assert!(client.known_blocks.get(&client.finalized_block).is_some());
@@ -361,7 +360,6 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                         // TODO: need to update `best_block_metadata` if necessary, and notify the runtime version subscriptions
                     },
                     sync_service::Event::NewFinalized { scale_encoded_header } => {
-                        println!("NEW FINALIZED");
                         let decoded = smoldot::header::decode(&scale_encoded_header).unwrap();
                         let header = header_conv(decoded.clone());
 
