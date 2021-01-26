@@ -673,6 +673,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                 spec_version: u64::from(runtime_specs.spec_version),
                 impl_version: u64::from(runtime_specs.impl_version),
                 transaction_version: u64::from(runtime_specs.transaction_version),
+                apis: runtime_specs.apis,
             })
             .to_json_response(request_id);
             (response, Some(response2))
@@ -740,6 +741,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                 spec_version: u64::from(runtime_specs.spec_version),
                 impl_version: u64::from(runtime_specs.impl_version),
                 transaction_version: u64::from(runtime_specs.transaction_version),
+                apis: runtime_specs.apis,
             })
             .to_json_response(request_id);
             (response, None)
