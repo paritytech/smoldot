@@ -471,7 +471,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
         methods::MethodCall::author_submitExtrinsic { transaction } => {
             let response = match client
                 .network_service
-				.clone()
+                .clone()
                 .announce_transaction(client.peers.clone(), transaction.0.clone())
                 .await
             {
