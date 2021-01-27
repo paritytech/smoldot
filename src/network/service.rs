@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::libp2p::{
-    self, connection, discovery::kademlia, multiaddr, peer_id, QueueNotificationError,
+    self, connection, discovery::kademlia, multiaddr, peer_id, PeerId, QueueNotificationError,
 };
 use crate::network::protocol;
 use crate::util;
@@ -668,6 +668,10 @@ where
             wake_up_future: inner.wake_up_future,
             write_close: inner.write_close,
         })
+    }
+
+    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
+        self.libp2p.peers_list_lock().await
     }
 }
 

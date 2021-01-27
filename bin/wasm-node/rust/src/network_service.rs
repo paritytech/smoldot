@@ -240,10 +240,9 @@ impl NetworkService {
     // TODO: more docs
     pub async fn announce_transaction(
         self: Arc<Self>,
-        peers: Vec<PeerId>,
         transaction: &[u8],
     ) -> Result<(), QueueNotificationError> {
-        for target in peers.iter() {
+        for target in self.peers_list().await {
             let _ = self
                 .network
                 .announce_transaction(&target, 0, &transaction)
@@ -323,6 +322,10 @@ impl NetworkService {
                 }
             }
         }
+    }
+
+    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
+        self.network.peers_list().await
     }
 }
 

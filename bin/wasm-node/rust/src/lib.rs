@@ -265,7 +265,6 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         Client {
             chain_spec,
             network_service: network_service.clone(),
-            peers: Vec::new(),
             known_blocks,
             best_block: finalized_block_hash,
             finalized_block: finalized_block_hash,
@@ -295,11 +294,9 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
             network_message = network_service.next_event().fuse() => {
                 match network_message {
                     network_service::Event::Connected { peer_id, best_block_number } => {
-                        client.peers.push(peer_id.clone());
                         sync_service.add_source(peer_id, best_block_number).await;
                     }
                     network_service::Event::Disconnected(peer_id) => {
-                        client.peers.retain(|p| *p != peer_id);
                         sync_service.remove_source(peer_id).await;
                     }
                     network_service::Event::BlockAnnounce { peer_id, announce } => {
@@ -443,9 +440,6 @@ struct Client {
     /// Hash of the latest finalized block.
     finalized_block: [u8; 32],
 
-    // TODO: this is a hack before an actual requests distribution system is implemented
-    peers: Vec<PeerId>,
-
     // TODO: remove; unnecessary
     genesis_storage: BTreeMap<Vec<u8>, Vec<u8>>,
 
@@ -472,7 +466,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             let response = match client
                 .network_service
                 .clone()
-                .announce_transaction(client.peers.clone(), &transaction.0)
+                .announce_transaction(&transaction.0)
                 .await
             {
                 Ok(_) => {
@@ -893,7 +887,7 @@ async fn storage_query(
 
     let mut outcome_errors = Vec::with_capacity(3);
 
-    for target in client.peers.iter().take(3) {
+    for target in client.network_service.peers_list().await.take(3) {
         let result = client
             .network_service
             .clone()
