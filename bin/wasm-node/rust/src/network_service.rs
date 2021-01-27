@@ -236,7 +236,7 @@ impl NetworkService {
         result
     }
 
-    /// Sends transaction to the given peer.
+    /// Announces transaction to the peers we are connected to.
     // TODO: more docs
     pub async fn announce_transaction(
         self: Arc<Self>,
@@ -246,7 +246,7 @@ impl NetworkService {
             let _ = self
                 .network
                 .announce_transaction(&target, 0, &transaction)
-                .await?;
+                .await;
         }
         Ok(())
     }
