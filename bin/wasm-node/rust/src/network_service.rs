@@ -237,18 +237,25 @@ impl NetworkService {
     }
 
     /// Announces transaction to the peers we are connected to.
-    // TODO: more docs
-    pub async fn announce_transaction(
-        self: Arc<Self>,
-        transaction: &[u8],
-    ) -> Result<(), QueueNotificationError> {
+    /// Returns an error if we aren't connected to any peer, or if we fail to send the transaction to all peers.
+    pub async fn announce_transaction(self: Arc<Self>, transaction: &[u8]) -> Result<(), ()> {
+        let mut any_propagated = false;
+
         for target in self.peers_list().await {
-            let _ = self
+            if self
                 .network
                 .announce_transaction(&target, 0, &transaction)
-                .await;
+                .await
+                .is_ok()
+            {
+                any_propagated = true
+            };
         }
-        Ok(())
+        if any_propagated {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
     /// Returns the next event that happens in the network service.
