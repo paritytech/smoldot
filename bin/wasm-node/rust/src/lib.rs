@@ -22,21 +22,11 @@
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use futures::prelude::*;
 use smoldot::{
-    chain, chain_spec, executor,
-    json_rpc::{self, methods},
+    chain, chain_spec,
     libp2p::{multiaddr, peer_id::PeerId},
-    network::protocol,
-    trie::proof_verify,
 };
-use std::{
-    collections::{BTreeMap, HashSet},
-    convert::TryFrom as _,
-    fmt, iter,
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 pub mod ffi;
 

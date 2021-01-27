@@ -22,13 +22,12 @@
 
 use crate::{ffi, network_service, sync_service};
 
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use futures::{prelude::*};
 use smoldot::{
     chain::chain_information,
     chain_spec, executor, header,
-    informant::HashDisplay,
     json_rpc::{self, methods},
-    network::{protocol, service},
+    network::protocol,
     trie::proof_verify,
 };
 use std::{
@@ -37,7 +36,6 @@ use std::{
     fmt, iter,
     pin::Pin,
     sync::Arc,
-    time::Duration,
 };
 
 /// Configuration for a JSON-RPC service.
