@@ -22,7 +22,7 @@
 
 use crate::{ffi, network_service, sync_service};
 
-use futures::{prelude::*};
+use futures::prelude::*;
 use smoldot::{
     chain::chain_information,
     chain_spec, executor, header,
