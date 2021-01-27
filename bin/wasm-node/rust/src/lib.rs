@@ -24,7 +24,7 @@
 
 use futures::prelude::*;
 use smoldot::{
-    chain, chain_spec,
+    chain, chain_spec, executor,
     json_rpc::{self, methods},
     libp2p::{multiaddr, peer_id::PeerId},
     network::protocol,
@@ -137,6 +137,12 @@ watched and of the `:code` key.
 /// >           function is what is in the `Ok`. If an `Err` is returned, a JavaScript exception
 /// >           is thrown.
 pub async fn start_client(chain_spec: String, database_content: Option<String>) {
+    // Try initialize the logging and the panic hook.
+    // Note that `start_client` can theoretically be called multiple times, meaning that these
+    // calls shouldn't panic if reached multiple times.
+    let _ = simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Debug) // TODO: make log level configurable from JS?
+        .init();
     std::panic::set_hook(Box::new(|info| {
         ffi::throw(info.to_string());
     }));
@@ -146,19 +152,22 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
     let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&chain_spec) {
-        Ok(cs) => cs,
+        Ok(cs) => {
+            log::info!("Loaded chain specs for {}", cs.name());
+            cs
+        }
         Err(err) => ffi::throw(format!("Error while opening chain specs: {}", err)),
     };
 
     // The database passed from the user is decoded. Any error while decoding is treated as if
     // there was no database.
     let database_content = if let Some(database_content) = database_content {
-        if let Ok(parsed) =
-            smoldot::database::finalized_serialize::decode_chain_information(&database_content)
-        {
-            Some(parsed)
-        } else {
-            None
+        match smoldot::database::finalized_serialize::decode_chain_information(&database_content) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => {
+                log::warn!("Failed to decode chain information: {}", error);
+                None
+            }
         }
     } else {
         None
@@ -174,6 +183,13 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         .unwrap();
     let chain_information = {
         let base = if let Some(light_sync_state) = chain_spec.light_sync_state() {
+            log::info!(
+                "Using light checkpoint starting at #{}",
+                light_sync_state
+                    .as_chain_information()
+                    .finalized_block_header
+                    .number
+            );
             light_sync_state.as_chain_information()
         } else {
             genesis_chain_information.clone()
@@ -184,6 +200,7 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
             if database_content.finalized_block_header.number > base.finalized_block_header.number {
                 database_content
             } else {
+                log::info!("Skipping database as it is older than checkpoint");
                 base
             }
         } else {
@@ -252,6 +269,7 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
             known_blocks,
             best_block: finalized_block_hash,
             finalized_block: finalized_block_hash,
+            genesis_block: genesis_chain_information.finalized_block_header.hash(),
             genesis_storage,
             best_block_metadata,
             next_subscription: 0,
@@ -269,6 +287,8 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         ffi::Delay::new(Duration::from_secs(15)).map(|_| Some(((), ())))
     })
     .map(|_| ());
+
+    log::info!("Starting main loop");
 
     loop {
         futures::select! {
@@ -360,10 +380,31 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
 
             json_rpc_request = ffi::next_json_rpc().fuse() => {
                 // TODO: don't unwrap
+                let request_string = String::from_utf8(Vec::from(json_rpc_request)).unwrap();
+                log::debug!(
+                    target: "json-rpc",
+                    "JSON-RPC => {:?}{}",
+                    if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
+                    if request_string.len() > 100 { "…" } else { "" }
+                );
+
                 // TODO: don't await here; use a queue
-                let (response1, response2) = handle_rpc(&String::from_utf8(Vec::from(json_rpc_request)).unwrap(), &mut client).await;
+                let (response1, response2) = handle_rpc(&request_string, &mut client).await;
+                log::debug!(
+                    target: "json-rpc",
+                    "JSON-RPC <= {:?}{}",
+                    if response1.len() > 100 { &response1[..100] } else { &response1[..] },
+                    if response1.len() > 100 { "…" } else { "" }
+                );
                 ffi::emit_json_rpc_response(&response1);
+
                 if let Some(response2) = response2 {
+                    log::debug!(
+                        target: "json-rpc",
+                        "JSON-RPC <= {:?}{}",
+                        if response2.len() > 100 { &response2[..100] } else { &response2[..] },
+                        if response2.len() > 100 { "…" } else { "" }
+                    );
                     ffi::emit_json_rpc_response(&response2);
                 }
             },
@@ -372,6 +413,7 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
                 debug_assert!(_interval.is_some());
                 // A new task is spawned specifically for the saving, in order to not block the
                 // main processing while waiting for the serialization.
+                log::debug!("Database save start");
                 let sync_service = sync_service.clone();
                 ffi::spawn_task(async move {
                     let database_content = sync_service.serialize_chain().await;
@@ -392,6 +434,10 @@ struct Client {
     /// Always contains `best_block` and `finalized_block`.
     known_blocks: lru::LruCache<[u8; 32], smoldot::header::Header>,
 
+    /// Hash of the genesis block.
+    /// Keeping the genesis block is important, as the genesis block hash is included in
+    /// transaction signatures, and must therefore be queried by upper-level UIs.
+    genesis_block: [u8; 32],
     /// Hash of the current best block.
     best_block: [u8; 32],
     /// Hash of the latest finalized block.
@@ -423,13 +469,44 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::chain_getBlockHash { height } => {
-            // TODO: implement correctly
-            let response = if height.is_some() {
-                methods::Response::chain_getBlockHash(methods::HashHexString(client.best_block))
+            let response = match height {
+                Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
+                    client.genesis_block,
+                ))
+                .to_json_response(request_id),
+                None => {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(client.best_block))
+                        .to_json_response(request_id)
+                }
+                Some(n)
+                    if client
+                        .known_blocks
+                        .get(&client.best_block)
+                        .map_or(false, |h| h.number == n) =>
+                {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(client.best_block))
+                        .to_json_response(request_id)
+                }
+                Some(n)
+                    if client
+                        .known_blocks
+                        .get(&client.finalized_block)
+                        .map_or(false, |h| h.number == n) =>
+                {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(
+                        client.finalized_block,
+                    ))
                     .to_json_response(request_id)
-            } else {
-                json_rpc::parse::build_success_response(request_id, "null")
+                }
+                Some(_) => {
+                    // While the block could be found in `known_blocks`, there is no guarantee
+                    // that blocks in `known_blocks` are canonical, and we have no choice but to
+                    // return null.
+                    // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
+                    json_rpc::parse::build_success_response(request_id, "null")
+                }
             };
+
             (response, None)
         }
         methods::MethodCall::chain_getFinalizedHead {} => {
@@ -607,19 +684,38 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
 
             let response = methods::Response::state_subscribeRuntimeVersion(&subscription)
                 .to_json_response(request_id);
+            // TODO: subscription has no effect right now
             client.runtime_version.insert(subscription.clone());
 
-            // FIXME: hack
-            let response2 = methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                spec_name: "polkadot".to_string(),
-                impl_name: "smoldot".to_string(),
-                authoring_version: 0,
-                spec_version: 23,
-                impl_version: 0,
-                transaction_version: 4,
-            })
-            .to_json_response(request_id);
+            let best_block_hash = client.best_block;
+            let runtime_code = storage_query(client, &b":code"[..], &best_block_hash)
+                .await
+                .unwrap()
+                .unwrap();
+            // TODO: don't unwrap
+            // TODO: cache the VM
+            let vm = executor::host::HostVmPrototype::new(
+                &runtime_code,
+                executor::DEFAULT_HEAP_PAGES,
+                executor::vm::ExecHint::Oneshot,
+            )
+            .unwrap();
+            let (runtime_specs, _) = executor::core_version(vm).unwrap();
 
+            let response2 = smoldot::json_rpc::parse::build_subscription_event(
+                "state_runtimeVersion",
+                &subscription,
+                &serde_json::to_string(&methods::RuntimeVersion {
+                    spec_name: runtime_specs.spec_name,
+                    impl_name: runtime_specs.impl_name,
+                    authoring_version: u64::from(runtime_specs.authoring_version),
+                    spec_version: u64::from(runtime_specs.spec_version),
+                    impl_version: u64::from(runtime_specs.impl_version),
+                    transaction_version: u64::from(runtime_specs.transaction_version),
+                    apis: runtime_specs.apis,
+                })
+                .unwrap(),
+            );
             (response, Some(response2))
         }
         methods::MethodCall::state_subscribeStorage { list } => {
@@ -663,14 +759,29 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             (response, None)
         }
         methods::MethodCall::state_getRuntimeVersion {} => {
-            // FIXME: hack
+            let best_block_hash = client.best_block;
+            let runtime_code = storage_query(client, &b":code"[..], &best_block_hash)
+                .await
+                .unwrap()
+                .unwrap();
+            // TODO: don't unwrap
+            // TODO: cache the VM
+            let vm = executor::host::HostVmPrototype::new(
+                &runtime_code,
+                executor::DEFAULT_HEAP_PAGES,
+                executor::vm::ExecHint::Oneshot,
+            )
+            .unwrap();
+            let (runtime_specs, _) = executor::core_version(vm).unwrap();
+
             let response = methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                spec_name: "polkadot".to_string(),
-                impl_name: "smoldot".to_string(),
-                authoring_version: 0,
-                spec_version: 23,
-                impl_version: 0,
-                transaction_version: 4,
+                spec_name: runtime_specs.spec_name,
+                impl_name: runtime_specs.impl_name,
+                authoring_version: u64::from(runtime_specs.authoring_version),
+                spec_version: u64::from(runtime_specs.spec_version),
+                impl_version: u64::from(runtime_specs.impl_version),
+                transaction_version: u64::from(runtime_specs.transaction_version),
+                apis: runtime_specs.apis,
             })
             .to_json_response(request_id);
             (response, None)
