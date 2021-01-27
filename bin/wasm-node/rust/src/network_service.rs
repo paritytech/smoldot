@@ -84,7 +84,7 @@ struct Guarded {
 
 impl NetworkService {
     /// Initializes the network service with the given configuration.
-    pub async fn new(config: Config) -> Result<Arc<Self>, InitError> {
+    pub async fn new(config: Config) -> Arc<Self> {
         let network_service = Arc::new(NetworkService {
             guarded: Mutex::new(Guarded {
                 tasks_executor: config.tasks_executor,
@@ -181,7 +181,7 @@ impl NetworkService {
             }
         }));
 
-        Ok(network_service)
+        network_service
     }
 
     /// Sends a blocks request to the given peer.
@@ -354,12 +354,6 @@ pub enum Event {
         peer_id: PeerId,
         announce: service::EncodedBlockAnnounce,
     },
-}
-
-/// Error when initializing the network service.
-#[derive(Debug, derive_more::Display)]
-pub enum InitError {
-    // TODO: add variants or remove error altogether
 }
 
 /// Asynchronous task managing a specific WebSocket connection.

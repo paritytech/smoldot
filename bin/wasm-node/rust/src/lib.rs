@@ -231,8 +231,7 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         ),
         protocol_id: chain_spec.protocol_id().to_string(),
     })
-    .await
-    .unwrap();
+    .await;
 
     let sync_service = Arc::new(
         sync_service::SyncService::new(sync_service::Config {
