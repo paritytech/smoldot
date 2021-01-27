@@ -105,6 +105,26 @@ pub struct Config {
     /// Should be set to the maximum number of block between two consecutive justifications.
     pub blocks_capacity: usize,
 
+    /// Maximum number of blocks of unknown ancestry to keep in memory. A good default is 1024.
+    ///
+    /// When a potential long fork is detected, its blocks are downloaded progressively in
+    /// descending order until a common ancestor is found.
+    /// Unfortunately, an attack could generate fake very long forks in order to make the node
+    /// consume a lot of memory keeping track of the blocks in that fork.
+    /// In order to avoid this, a limit is added to the number of blocks of unknown ancestry that
+    /// are kept in memory.
+    ///
+    /// Note that the download of long forks will always work no matter this limit. In the worst
+    /// case scenario, the same blocks will be downloaded multiple times. There is an implicit
+    /// minimum size equal to the number of sources that have been added to the state machine.
+    ///
+    /// Increasing this value has no drawback, except for increasing the maximum possible memory
+    /// consumption of this state machine.
+    //
+    // Implementation note: the size of `disjoint_blocks` can temporarily grow above this limit
+    // due to the internal processing of the state machine.
+    pub max_disjoint_blocks: usize,
+
     /// If true, the block bodies and storage are also synchronized.
     pub full: bool,
 }
@@ -157,6 +177,9 @@ struct Inner<TSrc> {
     /// example, when block `N` is finalized, all entries whose key starts with `N` can be
     /// removed.
     disjoint_blocks: BTreeMap<(u64, [u8; 32]), DisjointBlock>, // TODO: move to standalone container?
+
+    /// See [`Config::max_disjoint_blocks`].
+    max_disjoint_blocks: usize,
 }
 
 struct Block<TBl> {
@@ -166,6 +189,10 @@ struct Block<TBl> {
 struct DisjointBlock {
     /// Header of the block. Guaranteed to be a valid header.
     scale_encoded_header: Vec<u8>,
+
+    /// If `true`, this block is known to be bad. It is potentially kept in the list in order
+    /// to avoid redownloading this block if a child of this block later gets received.
+    known_bad: bool,
 
     /// If `Some`, the given source is currently performing an ancestry search whose first
     /// block is the parent of this one.
@@ -203,6 +230,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             chain,
             inner: Inner {
                 full: config.full,
+                max_disjoint_blocks: config.max_disjoint_blocks,
                 sources: Default::default(),
                 next_source_id: SourceId(0),
                 pending_body_downloads: Default::default(),
@@ -356,6 +384,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 btree_map::Entry::Vacant(entry) => {
                     entry.insert(DisjointBlock {
                         scale_encoded_header: scale_encoded_header.to_vec(),
+                        known_bad: false,
                         ancestry_search: None,
                     });
                 }
@@ -429,14 +458,126 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         }
     }
 
-    fn next_action(&mut self) {
-        // Height of the finalized chain. Saved for later.
+    fn next_action(&mut self, now_from_unix_epoch: Duration) {
+        // Some information saved for later.
         let local_finalized_block_number = self.chain.finalized_block_header().number;
+        let local_finalized_block_hash = self.chain.finalized_block_hash();
 
-        // Try find any disjoint block that is ready to be verified.
-        // TODO:
+        // `disjoint_blocks` should never contain any block whose height is lower or equal to
+        // `local_finalized_block_number`.
+        debug_assert_eq!(
+            self.inner
+                .disjoint_blocks
+                .range((0, [0; 32])..=(local_finalized_block_number, [0xff; 32]))
+                .count(),
+            0
+        );
 
-        // Try find any disjoint block that could be .
+        // Iterating through the content of `disjoint_blocks`.
+        // Note that this has an `O(n)` complexity. This is okay-ish because the size of
+        // `disjoint_blocks` is bounded, and iterating through the entire list every single time
+        // considerably reduces the risks of a missing cache invalidation.
+        // The `blocks_to_remove` variable will contain the blocks that need to be purged from
+        // `disjoint_blocks` at the end of the operation.
+        let mut blocks_to_remove = Vec::new();
+
+        for (disjoint_list_entry_num, ((_, disjoint_block_hash), disjoint_block)) in
+            self.inner.disjoint_blocks.iter().enumerate()
+        {
+            // `disjoint_blocks` is expected to contain only valid headers.
+            let disjoint_block_header =
+                header::decode(&disjoint_block.scale_encoded_header).unwrap();
+
+            if disjoint_block.known_bad {
+                // Block is known as being bad. Bad blocks are kept in the list as much as
+                // possible in order to not re-download them later.
+                // If the list is full, we remove bad blocks that have at least one child in
+                // `disjoint_blocks`.
+                if (self.inner.disjoint_blocks.len() - blocks_to_remove.len())
+                    > self.inner.max_disjoint_blocks
+                    && self
+                        .inner
+                        .disjoint_blocks
+                        .range(
+                            (disjoint_block_header.number + 1, [0; 32])
+                                ..=(disjoint_block_header.number + 1, [0xff; 32]),
+                        )
+                        .any(|(_, b)| {
+                            header::decode(&b.scale_encoded_header).unwrap().parent_hash
+                                == disjoint_block_hash
+                        })
+                {
+                    blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
+                }
+            } else if *disjoint_block_header.parent_hash == local_finalized_block_hash
+                || self
+                    .chain
+                    .non_finalized_block_by_hash(disjoint_block_header.parent_hash)
+                    .is_some()
+            {
+                // Parent of the block is known locally, meaning that this header is ready to be
+                // verified.
+                let header = match self
+                    .chain
+                    .verify_header(disjoint_block.scale_encoded_header.clone(), now_from_unix_epoch) // TODO: header cloning, meh
+                {
+                    Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => unreachable!(),
+                    Ok(blocks_tree::HeaderVerifySuccess::Insert {
+                        insert,
+                        is_new_best,
+                        ..
+                    }) => {
+                        // Block is removed from `disjoint_blocks` as it is no longer disjoint.
+                        blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
+                        // insert.insert(());
+                        todo!(); // TODO: ^
+                    }
+                    Err(blocks_tree::HeaderVerifyError::BadParent { .. })
+                    | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
+                    Err(blocks_tree::HeaderVerifyError::VerificationFailed(err)) => {
+                        // TODO: must mark the block as bad and not remove it
+                        return BlockAnnounceOutcome::HeaderVerifyError(err);
+                    }
+                };
+            } else if disjoint_block_header.number <= local_finalized_block_number + 1 {
+                // The block is supposed to in the finalized chain or be a child of the finalized
+                // chain but isn't. In both situations, it doesn't interest us. Discard the block
+                // and all of its descendants.
+                // TODO: remove descendants as well blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
+            } else if self.inner.disjoint_blocks.contains_key(&(
+                disjoint_block_header.number - 1,
+                *disjoint_block_header.parent_hash,
+            )) {
+                // Parent of the disjoint block is also in the list of disjoint blocks.
+                // As explained in the module-level documentation, `disjoint_blocks` must be
+                // bounded. This is where the bound is enforced.
+                // We would normally always leave the block in the list, for later, but if the
+                // list is full, then we remove it instead.
+                if disjoint_list_entry_num >= self.inner.max_disjoint_blocks + blocks_to_remove {
+                    blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
+                }
+            } else if disjoint_block.ancestry_search.is_none() {
+                // Start an ancestry search in order to find an ancestor of this block in our
+                // local chain. When answered, this will ultimately add new blocks to
+                // `disjoint_block`.
+                // Iterate through all the sources that know this block.
+                for (_, source_id) in self.inner.known_blocks2.range(
+                    (*disjoint_block_hash, SourceId(u64::min_value()))
+                        ..=(*disjoint_block_hash, SourceId(u64::max_value())),
+                ) {
+                    let mut source = self.inner.sources.get_mut(&source_id).unwrap();
+                    if matches!(source.occupation, SourceOccupation::Idle) {
+                        // TODO: start the search
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Remove the blocks that were marked for removal.
+        for (number, hash) in blocks_to_remove {
+            self.inner.disjoint_blocks.remove(&(number, hash)).unwrap();
+        }
     }
 
     /// Passed a known entry in `disjoint_blocks`. Removes this entry and any known children of
@@ -446,9 +587,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ///
     /// Panics if `(number, hash)` isn't an entry in [`Inner::disjoint_chain]`.
     ///
-    fn verify_disjoint_chain(&mut self, number: u64, hash: [u8; 32]) {
-        
-    }
+    fn verify_disjoint_chain(&mut self, number: u64, hash: [u8; 32]) {}
 
     /// Passed a known entry in `disjoint_blocks`. Removes this entry and any known children of
     /// this block.
@@ -562,7 +701,7 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
         }
 
         match source.occupation {
-            SourceOccupation::Idle => {},
+            SourceOccupation::Idle => {}
             SourceOccupation::AncestrySearch(hash) => {
                 todo!()
             }
@@ -640,7 +779,7 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             return BlockAnnounceOutcome::AlreadyVerified;
         }
 
-        // Determine whether the parent of the announced block is in the `NonFinalizedTree`.
+        // Determine whether the parent of the announced block is known locally.
         let parent_is_in_chain = {
             let local_finalized_block_hash = self.parent.chain.finalized_block_hash();
             *announced_header.parent_hash == local_finalized_block_hash
@@ -728,6 +867,7 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             {
                 entry.insert(DisjointBlock {
                     scale_encoded_header: announced_scale_encoded_header,
+                    known_bad: false,
                     ancestry_search: None,
                 });
             }
