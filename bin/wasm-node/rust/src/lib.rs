@@ -482,7 +482,10 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                 }
                 Err(_) => json_rpc::parse::build_error_response(
                     request_id,
-                    json_rpc::parse::ErrorResponse::ServerError(-32000, "announce_transaction failed"),
+                    json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        "announce_transaction failed",
+                    ),
                     None,
                 ),
             };
