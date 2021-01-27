@@ -251,7 +251,8 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         sync_service: sync_service.clone(),
         chain_spec,
         genesis_chain_information: (&genesis_chain_information).into(),
-    }).await;
+    })
+    .await;
 
     ffi::spawn_task(async move {
         loop {
