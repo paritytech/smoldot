@@ -340,7 +340,7 @@ where
         &self,
         target: &peer_id::PeerId,
         chain_index: usize,
-        extrinsic: &Vec<u8>,
+        extrinsic: &[u8],
     ) -> Result<(), QueueNotificationError> {
         let mut val = Vec::with_capacity(1 + extrinsic.len());
         val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());

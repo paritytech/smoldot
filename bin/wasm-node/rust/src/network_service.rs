@@ -241,7 +241,7 @@ impl NetworkService {
     pub async fn announce_transaction(
         self: Arc<Self>,
         peers: Vec<PeerId>,
-        transaction: Vec<u8>,
+        transaction: &[u8],
     ) -> Result<(), QueueNotificationError> {
         for target in peers.iter() {
             let _ = self

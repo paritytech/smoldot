@@ -472,7 +472,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
             let response = match client
                 .network_service
                 .clone()
-                .announce_transaction(client.peers.clone(), transaction.0.clone())
+                .announce_transaction(client.peers.clone(), &transaction.0)
                 .await
             {
                 Ok(_) => {
