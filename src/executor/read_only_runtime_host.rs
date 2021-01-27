@@ -237,9 +237,7 @@ impl Inner {
 
                 host::HostVm::ExternalStorageNextKey(req) => {
                     self.vm = req.into();
-                    return RuntimeHostVm::NextKey(NextKey {
-                        inner: self,
-                    });
+                    return RuntimeHostVm::NextKey(NextKey { inner: self });
                 }
 
                 host::HostVm::CallRuntimeVersion(req) => {
@@ -290,9 +288,7 @@ impl Inner {
                     self.vm = req.resume();
                 }
 
-                _ => {
-                    return RuntimeHostVm::Finished(Err(Error::ForbiddenHostCall))
-                }
+                _ => return RuntimeHostVm::Finished(Err(Error::ForbiddenHostCall)),
             }
         }
     }
