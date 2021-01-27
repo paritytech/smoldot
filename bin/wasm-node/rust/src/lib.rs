@@ -884,10 +884,6 @@ async fn storage_query(
     key: &[u8],
     hash: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, StorageQueryError> {
-    // LRU workaround
-    let finalized_block_hash = client.finalized_block;
-    let _ = client.known_blocks.get(&finalized_block_hash).unwrap();
-
     let trie_root_hash = if let Some(header) = client.known_blocks.get(hash) {
         header.state_root
     } else {
