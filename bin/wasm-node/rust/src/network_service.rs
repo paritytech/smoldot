@@ -87,6 +87,10 @@ struct Guarded {
 
 impl NetworkService {
     /// Initializes the network service with the given configuration.
+    ///
+    /// Returns the networking service, plus a list of receivers on which events are pushed.
+    /// All of these receivers must be polled regularly to prevent the networking service from
+    /// slowing down.
     pub async fn new(config: Config) -> (Arc<Self>, Vec<mpsc::Receiver<Event>>) {
         let (mut senders, receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
