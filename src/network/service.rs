@@ -670,6 +670,8 @@ where
         })
     }
 
+    /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
+    /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
         self.libp2p.peers_list_lock().await
     }

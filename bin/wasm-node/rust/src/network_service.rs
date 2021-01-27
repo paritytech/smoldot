@@ -324,6 +324,8 @@ impl NetworkService {
         }
     }
 
+    /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
+    /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
         self.network.peers_list().await
     }
