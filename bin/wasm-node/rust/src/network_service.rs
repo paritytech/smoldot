@@ -37,11 +37,13 @@ use smoldot::{
         connection,
         multiaddr::{Multiaddr, Protocol},
         peer_id::PeerId,
-        QueueNotificationError,
     },
     network::{protocol, service},
 };
 use std::sync::Arc;
+
+#[derive(derive_more::Display)]
+pub struct AnnounceTransactionError;
 
 /// Configuration for a [`NetworkService`].
 pub struct Config {
@@ -241,24 +243,23 @@ impl NetworkService {
     pub async fn announce_transaction(
         self: Arc<Self>,
         transaction: &[u8],
-    ) -> Result<(), QueueNotificationError> {
+    ) -> Result<(), AnnounceTransactionError> {
         let mut any_propagated = false;
 
-        let mut result = Err(QueueNotificationError::NotConnected);
         for target in self.peers_list().await {
-            result = self
+            if self
                 .network
                 .announce_transaction(&target, 0, &transaction)
-                .await;
-
-            if result.is_ok() {
+                .await
+                .is_ok()
+            {
                 any_propagated = true
             };
         }
         if any_propagated {
             Ok(())
         } else {
-            result
+            Err(AnnounceTransactionError)
         }
     }
 

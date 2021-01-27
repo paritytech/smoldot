@@ -349,7 +349,7 @@ where
             .queue_notification(
                 &target,
                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                val.clone(),
+                val,
             )
             .await
     }

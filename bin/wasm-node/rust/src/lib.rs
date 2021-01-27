@@ -482,7 +482,7 @@ async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) 
                 }
                 Err(error) => json_rpc::parse::build_error_response(
                     request_id,
-                    json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                    json_rpc::parse::ErrorResponse::ServerError(-32000, &format!("{}", &error)),
                     None,
                 ),
             };
