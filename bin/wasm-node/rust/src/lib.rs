@@ -254,19 +254,21 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
     // TODO: little hack here; json_rpc_service::start uses the sync service, so if we `await`
     // this function here, it would be frozen to dead, as the sync service hasn't properly started
     // yet. Hence sending it to `new_task_tx`.
-    new_task_tx.unbounded_send(
-        json_rpc_service::start(json_rpc_service::Config {
-            tasks_executor: Box::new({
-                let new_task_tx = new_task_tx.clone();
-                move |fut| new_task_tx.unbounded_send(fut).unwrap()
-            }),
-            network_service,
-            sync_service: sync_service.clone(),
-            chain_spec,
-            genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-        })
-        .boxed(),
-    ).unwrap();
+    new_task_tx
+        .unbounded_send(
+            json_rpc_service::start(json_rpc_service::Config {
+                tasks_executor: Box::new({
+                    let new_task_tx = new_task_tx.clone();
+                    move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                }),
+                network_service,
+                sync_service: sync_service.clone(),
+                chain_spec,
+                genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
+            })
+            .boxed(),
+        )
+        .unwrap();
 
     new_task_tx
         .unbounded_send(
