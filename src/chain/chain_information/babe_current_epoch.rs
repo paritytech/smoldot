@@ -124,7 +124,7 @@ impl StorageGet {
         self.0.key_as_vec()
     }
 
-    /// Injects the corresponding st3orage value.
+    /// Injects the corresponding storage value.
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
         Query::from_inner(self.0.inject_value(value))
     }
