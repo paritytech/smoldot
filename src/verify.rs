@@ -70,6 +70,5 @@ mod execute_block;
 
 pub mod aura;
 pub mod babe;
-pub mod babe_current_epoch;
 pub mod header_body;
 pub mod header_only;

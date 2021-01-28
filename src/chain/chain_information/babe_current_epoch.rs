@@ -24,12 +24,14 @@ use crate::{
 use alloc::vec::Vec;
 use parity_scale_codec::{Decode, Encode};
 
+/// Configuration for [`babe_current_epoch`].
 pub struct Config {
     /// Runtime used to get the current babe epoch. Must be built using the Wasm code found at the
     /// `:code` key of the parent block storage.
     pub parent_runtime: host::HostVmPrototype,
 }
 
+/// Problem encountered during a call to [`babe_current_epoch`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
@@ -43,8 +45,8 @@ pub enum Error {
     DecodeFailed(parity_scale_codec::Error),
 }
 
-/// Fetches the current babe epoch using `BabeApi_current_epoch`.
-pub fn babe_current_epoch(config: Config) -> Verify {
+/// Fetches the current Babe epoch using `BabeApi_current_epoch`.
+pub fn babe_current_epoch(config: Config) -> Query {
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
         virtual_machine: config.parent_runtime,
         function_to_call: "BabeApi_current_epoch",
@@ -53,15 +55,15 @@ pub fn babe_current_epoch(config: Config) -> Verify {
     });
 
     match vm {
-        Ok(vm) => Verify::from_inner(vm),
-        Err(err) => Verify::Finished(Err(Error::WasmStart(err))),
+        Ok(vm) => Query::from_inner(vm),
+        Err(err) => Query::Finished(Err(Error::WasmStart(err))),
     }
 }
 
-/// Current state.
+/// Current state of the operation.
 #[must_use]
-pub enum Verify {
-    /// Fetching the babe epoch is over.
+pub enum Query {
+    /// Fetching the Babe epoch is over.
     Finished(Result<BabeEpochInformation, Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
@@ -69,14 +71,14 @@ pub enum Verify {
     NextKey(NextKey),
 }
 
-impl Verify {
+impl Query {
     fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 let mut value = success.virtual_machine.value();
 
                 match DecodableBabeEpochInformation::decode(&mut value) {
-                    Ok(epoch) => Verify::Finished(Ok(BabeEpochInformation {
+                    Ok(epoch) => Query::Finished(Ok(BabeEpochInformation {
                         epoch_index: epoch.epoch_index,
                         start_slot_number: epoch.start_slot_number,
                         authorities: epoch
@@ -91,18 +93,16 @@ impl Verify {
                         c: epoch.c,
                         allowed_slots: epoch.allowed_slots,
                     })),
-                    Err(error) => Verify::Finished(Err(Error::DecodeFailed(error))),
+                    Err(error) => Query::Finished(Err(Error::DecodeFailed(error))),
                 }
             }
             read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => {
-                Verify::Finished(Err(Error::WasmVm(err)))
+                Query::Finished(Err(Error::WasmVm(err)))
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(inner) => {
-                Verify::StorageGet(StorageGet(inner))
+                Query::StorageGet(StorageGet(inner))
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => {
-                Verify::NextKey(NextKey(inner))
-            }
+            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => Query::NextKey(NextKey(inner)),
         }
     }
 }
@@ -124,9 +124,9 @@ impl StorageGet {
         self.0.key_as_vec()
     }
 
-    /// Injects the corresponding storage value.
-    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Verify {
-        Verify::from_inner(self.0.inject_value(value))
+    /// Injects the corresponding st3orage value.
+    pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
+        Query::from_inner(self.0.inject_value(value))
     }
 }
 
@@ -146,8 +146,8 @@ impl NextKey {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Verify {
-        Verify::from_inner(self.0.inject_key(key))
+    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
+        Query::from_inner(self.0.inject_key(key))
     }
 }
 
