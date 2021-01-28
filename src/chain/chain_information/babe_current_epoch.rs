@@ -50,8 +50,8 @@ pub fn babe_current_epoch(config: Config) -> Query {
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
         virtual_machine: config.runtime,
         function_to_call: "BabeApi_current_epoch",
-        // `BabeApi_current_epoch`doesn't take any parameters.
-        parameter: std::iter::empty::<&[u8]>(),
+        // `BabeApi_current_epoch` doesn't take any parameters.
+        parameter: core::iter::empty::<&[u8]>(),
     });
 
     match vm {
