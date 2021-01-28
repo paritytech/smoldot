@@ -276,19 +276,19 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         if best_block_number > self.chain.finalized_block_header().number {
             self.inner.known_blocks1.insert((new_id, best_block_hash));
             self.inner.known_blocks2.insert((best_block_hash, new_id));
-        }
 
-        // Add the announced block in `disjoint_blocks`. It will be processed later.
-        if let btree_map::Entry::Vacant(entry) = self
-            .inner
-            .disjoint_blocks
-            .entry((best_block_number, best_block_hash))
-        {
-            entry.insert(DisjointBlock {
-                scale_encoded_header: None,
-                known_bad: false,
-                ancestry_search: None,
-            });
+            // Add the announced block in `disjoint_blocks`. It will be processed later.
+            if let btree_map::Entry::Vacant(entry) = self
+                .inner
+                .disjoint_blocks
+                .entry((best_block_number, best_block_hash))
+            {
+                entry.insert(DisjointBlock {
+                    scale_encoded_header: None,
+                    known_bad: false,
+                    ancestry_search: None,
+                });
+            }
         }
 
         SourceMutAccess {
@@ -539,7 +539,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                         .chain
                         .verify_header(disjoint_block_encoded_header.clone(), now_from_unix_epoch) // TODO: header cloning, meh
                     {
-                        Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => unreachable!(),
                         Ok(blocks_tree::HeaderVerifySuccess::Insert {
                             insert,
                             is_new_best,
@@ -549,24 +548,31 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                             blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
                             // insert.insert(());
                             todo!(); // TODO: ^
-                        }
-                        Err(blocks_tree::HeaderVerifyError::BadParent { .. })
-                        | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
+                        },
                         Err(blocks_tree::HeaderVerifyError::VerificationFailed(err)) => {
                             // TODO: must mark the block as bad and not remove it
                             return BlockAnnounceOutcome::HeaderVerifyError(err);
-                        }
+                        },
+                        Ok(blocks_tree::HeaderVerifySuccess::Duplicate) |
+                        Err(blocks_tree::HeaderVerifyError::BadParent { .. })
+                        | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
                     };
                 } else if disjoint_block_header.number <= local_finalized_block_number + 1 {
                     // The block is supposed to in the finalized chain or be a child of the finalized
                     // chain but isn't. In both situations, it doesn't interest us. Discard the block
                     // and all of its descendants.
                     // TODO: remove descendants as well blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
-                } else if self.inner.disjoint_blocks.contains_key(&(
+                } else if let Some(parent) = self.inner.disjoint_blocks.get(&(
                     disjoint_block_header.number - 1,
                     *disjoint_block_header.parent_hash,
                 )) {
                     // Parent of the disjoint block is also in the list of disjoint blocks.
+
+                    // Mark the block as bad if its parent is also bad.
+                    if parent.known_bad {
+                        disjoint_block.known_bad = true;
+                    }
+
                     // As explained in the module-level documentation, `disjoint_blocks` must be
                     // bounded. This is where the bound is enforced.
                     // We would normally always leave the block in the list, for later, but if the
@@ -590,6 +596,20 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                             // TODO: start the search
                             break;
                         }
+                    }
+                }
+            } else if disjoint_block.ancestry_search.is_none() {
+                // Block header isn't known.
+                // Start an ancestry search in order to obtain the header of this block.
+                // Iterate through all the sources that know this block.
+                for (_, source_id) in self.inner.known_blocks2.range(
+                    (*disjoint_block_hash, SourceId(u64::min_value()))
+                        ..=(*disjoint_block_hash, SourceId(u64::max_value())),
+                ) {
+                    let mut source = self.inner.sources.get_mut(&source_id).unwrap();
+                    if matches!(source.occupation, SourceOccupation::Idle) {
+                        // TODO: start the search
+                        break;
                     }
                 }
             }
@@ -658,6 +678,13 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             }
         }
     }
+}
+
+/// Action that should be performed on the disjoint blocks of the [`AllForksSync`].
+///
+/// This private enum is necessary because doesn't contain any lifetime and is used internally.
+enum ActionStatic {
+    RemoveBlocks(Vec<(u64, [u8; 32])>),
 }
 
 /// Access to a source in a [`AllForksSync`]. Obtained through [`AllForksSync::source_mut`].
