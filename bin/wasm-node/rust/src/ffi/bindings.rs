@@ -183,7 +183,7 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// Then, pass the pointer and length of these two buffers to this function.
 /// Pass `0` for `database_content_ptr` and `database_content_len` if the database is empty.
 ///
-/// The client will emit log messages by calling the [`log`] function, provided the log level is
+/// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
 #[no_mangle]
 pub extern "C" fn init(
