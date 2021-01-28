@@ -187,8 +187,8 @@ struct Block<TBl> {
 }
 
 struct DisjointBlock {
-    /// Header of the block. Guaranteed to be a valid header.
-    scale_encoded_header: Vec<u8>,
+    /// Header of the block, if known. Guaranteed to be a valid header.
+    scale_encoded_header: Option<Vec<u8>>,
 
     /// If `true`, this block is known to be bad. It is potentially kept in the list in order
     /// to avoid redownloading this block if a child of this block later gets received.
@@ -278,7 +278,18 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             self.inner.known_blocks2.insert((best_block_hash, new_id));
         }
 
-        // TODO: start a header request for the best block, if it is unknown locally?
+        // Add the announced block in `disjoint_blocks`. It will be processed later.
+        if let btree_map::Entry::Vacant(entry) = self
+            .inner
+            .disjoint_blocks
+            .entry((best_block_number, best_block_hash))
+        {
+            entry.insert(DisjointBlock {
+                scale_encoded_header: None,
+                known_bad: false,
+                ancestry_search: None,
+            });
+        }
 
         SourceMutAccess {
             parent: self,
@@ -379,11 +390,14 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .entry((decoded_header.number, expected_next_hash))
             {
                 btree_map::Entry::Occupied(mut entry) => {
-                    debug_assert_eq!(entry.get_mut().scale_encoded_header, scale_encoded_header);
+                    match &mut entry.get_mut().scale_encoded_header {
+                        Some(h) => debug_assert_eq!(*h, scale_encoded_header),
+                        h @ None => *h = Some(scale_encoded_header.to_vec()),
+                    }
                 }
                 btree_map::Entry::Vacant(entry) => {
                     entry.insert(DisjointBlock {
-                        scale_encoded_header: scale_encoded_header.to_vec(),
+                        scale_encoded_header: Some(scale_encoded_header.to_vec()),
                         known_bad: false,
                         ancestry_search: None,
                     });
@@ -484,91 +498,98 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         for (disjoint_list_entry_num, ((_, disjoint_block_hash), disjoint_block)) in
             self.inner.disjoint_blocks.iter().enumerate()
         {
-            // `disjoint_blocks` is expected to contain only valid headers.
-            let disjoint_block_header =
-                header::decode(&disjoint_block.scale_encoded_header).unwrap();
-
-            if disjoint_block.known_bad {
-                // Block is known as being bad. Bad blocks are kept in the list as much as
-                // possible in order to not re-download them later.
-                // If the list is full, we remove bad blocks that have at least one child in
-                // `disjoint_blocks`.
-                if (self.inner.disjoint_blocks.len() - blocks_to_remove.len())
-                    > self.inner.max_disjoint_blocks
-                    && self
-                        .inner
-                        .disjoint_blocks
-                        .range(
-                            (disjoint_block_header.number + 1, [0; 32])
-                                ..=(disjoint_block_header.number + 1, [0xff; 32]),
-                        )
-                        .any(|(_, b)| {
-                            header::decode(&b.scale_encoded_header).unwrap().parent_hash
-                                == disjoint_block_hash
-                        })
-                {
-                    blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
-                }
-            } else if *disjoint_block_header.parent_hash == local_finalized_block_hash
-                || self
-                    .chain
-                    .non_finalized_block_by_hash(disjoint_block_header.parent_hash)
-                    .is_some()
+            // Header of the block might not necessarily be known.
+            if let Some(disjoint_block_encoded_header) =
+                disjoint_block.scale_encoded_header.as_ref()
             {
-                // Parent of the block is known locally, meaning that this header is ready to be
-                // verified.
-                let header = match self
-                    .chain
-                    .verify_header(disjoint_block.scale_encoded_header.clone(), now_from_unix_epoch) // TODO: header cloning, meh
-                {
-                    Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => unreachable!(),
-                    Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                        insert,
-                        is_new_best,
-                        ..
-                    }) => {
-                        // Block is removed from `disjoint_blocks` as it is no longer disjoint.
+                // `disjoint_blocks` is expected to contain only valid headers.
+                let disjoint_block_header = header::decode(disjoint_block_encoded_header).unwrap();
+
+                if disjoint_block.known_bad {
+                    // Block is known as being bad. Bad blocks are kept in the list as much as
+                    // possible in order to not re-download them later.
+                    // If the list is full, we remove bad blocks that have at least one child in
+                    // `disjoint_blocks`.
+                    if (self.inner.disjoint_blocks.len() - blocks_to_remove.len())
+                        > self.inner.max_disjoint_blocks
+                        && self
+                            .inner
+                            .disjoint_blocks
+                            .range(
+                                (disjoint_block_header.number + 1, [0; 32])
+                                    ..=(disjoint_block_header.number + 1, [0xff; 32]),
+                            )
+                            .any(|(_, b)| {
+                                b.scale_encoded_header.map_or(false, |h| {
+                                    header::decode(&h).unwrap().parent_hash == disjoint_block_hash
+                                })
+                            })
+                    {
                         blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
-                        // insert.insert(());
-                        todo!(); // TODO: ^
                     }
-                    Err(blocks_tree::HeaderVerifyError::BadParent { .. })
-                    | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
-                    Err(blocks_tree::HeaderVerifyError::VerificationFailed(err)) => {
-                        // TODO: must mark the block as bad and not remove it
-                        return BlockAnnounceOutcome::HeaderVerifyError(err);
+                } else if *disjoint_block_header.parent_hash == local_finalized_block_hash
+                    || self
+                        .chain
+                        .non_finalized_block_by_hash(disjoint_block_header.parent_hash)
+                        .is_some()
+                {
+                    // Parent of the block is known locally, meaning that this header is ready to be
+                    // verified.
+                    let header = match self
+                        .chain
+                        .verify_header(disjoint_block_encoded_header.clone(), now_from_unix_epoch) // TODO: header cloning, meh
+                    {
+                        Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => unreachable!(),
+                        Ok(blocks_tree::HeaderVerifySuccess::Insert {
+                            insert,
+                            is_new_best,
+                            ..
+                        }) => {
+                            // Block is removed from `disjoint_blocks` as it is no longer disjoint.
+                            blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
+                            // insert.insert(());
+                            todo!(); // TODO: ^
+                        }
+                        Err(blocks_tree::HeaderVerifyError::BadParent { .. })
+                        | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
+                        Err(blocks_tree::HeaderVerifyError::VerificationFailed(err)) => {
+                            // TODO: must mark the block as bad and not remove it
+                            return BlockAnnounceOutcome::HeaderVerifyError(err);
+                        }
+                    };
+                } else if disjoint_block_header.number <= local_finalized_block_number + 1 {
+                    // The block is supposed to in the finalized chain or be a child of the finalized
+                    // chain but isn't. In both situations, it doesn't interest us. Discard the block
+                    // and all of its descendants.
+                    // TODO: remove descendants as well blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
+                } else if self.inner.disjoint_blocks.contains_key(&(
+                    disjoint_block_header.number - 1,
+                    *disjoint_block_header.parent_hash,
+                )) {
+                    // Parent of the disjoint block is also in the list of disjoint blocks.
+                    // As explained in the module-level documentation, `disjoint_blocks` must be
+                    // bounded. This is where the bound is enforced.
+                    // We would normally always leave the block in the list, for later, but if the
+                    // list is full, then we remove it instead.
+                    if disjoint_list_entry_num
+                        >= self.inner.max_disjoint_blocks + blocks_to_remove.len()
+                    {
+                        blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
                     }
-                };
-            } else if disjoint_block_header.number <= local_finalized_block_number + 1 {
-                // The block is supposed to in the finalized chain or be a child of the finalized
-                // chain but isn't. In both situations, it doesn't interest us. Discard the block
-                // and all of its descendants.
-                // TODO: remove descendants as well blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
-            } else if self.inner.disjoint_blocks.contains_key(&(
-                disjoint_block_header.number - 1,
-                *disjoint_block_header.parent_hash,
-            )) {
-                // Parent of the disjoint block is also in the list of disjoint blocks.
-                // As explained in the module-level documentation, `disjoint_blocks` must be
-                // bounded. This is where the bound is enforced.
-                // We would normally always leave the block in the list, for later, but if the
-                // list is full, then we remove it instead.
-                if disjoint_list_entry_num >= self.inner.max_disjoint_blocks + blocks_to_remove {
-                    blocks_to_remove.push((disjoint_block_header.number, *disjoint_block_hash));
-                }
-            } else if disjoint_block.ancestry_search.is_none() {
-                // Start an ancestry search in order to find an ancestor of this block in our
-                // local chain. When answered, this will ultimately add new blocks to
-                // `disjoint_block`.
-                // Iterate through all the sources that know this block.
-                for (_, source_id) in self.inner.known_blocks2.range(
-                    (*disjoint_block_hash, SourceId(u64::min_value()))
-                        ..=(*disjoint_block_hash, SourceId(u64::max_value())),
-                ) {
-                    let mut source = self.inner.sources.get_mut(&source_id).unwrap();
-                    if matches!(source.occupation, SourceOccupation::Idle) {
-                        // TODO: start the search
-                        break;
+                } else if disjoint_block.ancestry_search.is_none() {
+                    // Start an ancestry search in order to find an ancestor of this block in our
+                    // local chain. When answered, this will ultimately add new blocks to
+                    // `disjoint_block`.
+                    // Iterate through all the sources that know this block.
+                    for (_, source_id) in self.inner.known_blocks2.range(
+                        (*disjoint_block_hash, SourceId(u64::min_value()))
+                            ..=(*disjoint_block_hash, SourceId(u64::max_value())),
+                    ) {
+                        let mut source = self.inner.sources.get_mut(&source_id).unwrap();
+                        if matches!(source.occupation, SourceOccupation::Idle) {
+                            // TODO: start the search
+                            break;
+                        }
                     }
                 }
             }
@@ -587,15 +608,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ///
     /// Panics if `(number, hash)` isn't an entry in [`Inner::disjoint_chain]`.
     ///
-    fn verify_disjoint_chain(&mut self, number: u64, hash: [u8; 32]) {}
-
-    /// Passed a known entry in `disjoint_blocks`. Removes this entry and any known children of
-    /// this block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `(number, hash)` isn't an entry in [`Inner::disjoint_chain]`.
-    ///
+    // TODO: remove?
     fn discard_disjoint_chain(&mut self, number: u64, hash: [u8; 32]) {
         // TODO: keep a list of banned blocks for later? this is required by chain specs anyway
 
@@ -779,134 +792,28 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             return BlockAnnounceOutcome::AlreadyVerified;
         }
 
-        // Determine whether the parent of the announced block is known locally.
-        let parent_is_in_chain = {
-            let local_finalized_block_hash = self.parent.chain.finalized_block_hash();
-            *announced_header.parent_hash == local_finalized_block_hash
-                || self
-                    .parent
-                    .chain
-                    .non_finalized_block_by_hash(announced_header.parent_hash)
-                    .is_some()
-        };
-
-        if let Some(pending) = self
+        // Add the announced block in `disjoint_blocks`. It will be processed later.
+        match self
             .parent
             .inner
-            .pending_body_downloads
-            .get_mut(&announced_header_hash)
+            .disjoint_blocks
+            .entry((announced_header.number, announced_header_hash))
         {
-            debug_assert!(self.parent.inner.full);
-
-            // The parent block header has already been announced in the past.
-            // If `pending` is `Some`, it is currently being downloaded.
-            if pending.1.is_some() {
-                return BlockAnnounceOutcome::Queued;
-            } else {
-                // No source is currently downloading this block. Add the source that has just
-                // announced it.
-                pending.1 = Some(self.source_id);
-            }
-            todo!() // TODO:
-        } else if parent_is_in_chain {
-            // Parent is in the `NonFinalizedTree`, meaning it is possible to verify it.
-
-            // Start by verifying the header alone.
-            let header = match self
-                .parent
-                .chain
-                .verify_header(announced_scale_encoded_header, now_from_unix_epoch)
-            {
-                Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => unreachable!(),
-                Ok(blocks_tree::HeaderVerifySuccess::Insert { insert, .. })
-                    if self.parent.inner.full =>
-                {
-                    insert.into_header()
-                }
-                Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                    insert,
-                    is_new_best,
-                    ..
-                }) => {
-                    // insert.insert(());
-                    todo!(); // TODO: ^
-                    return BlockAnnounceOutcome::HeaderImported;
-                }
-                Err(blocks_tree::HeaderVerifyError::BadParent { .. })
-                | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
-                Err(blocks_tree::HeaderVerifyError::VerificationFailed(err)) => {
-                    return BlockAnnounceOutcome::HeaderVerifyError(err);
-                }
-            };
-
-            // Header if valid, and config is in full mode. Request the block body.
-            // TODO: must make sure that source isn't busy
-            self.parent
-                .inner
-                .pending_body_downloads
-                .insert(announced_header_hash, (header, Some(self.source_id)));
-            return BlockAnnounceOutcome::BlockBodyDownloadStart;
-        } else if announced_header.number == self.parent.chain.finalized_block_header().number + 1 {
-            // Checked above.
-            debug_assert_ne!(
-                *announced_header.parent_hash,
-                self.parent.chain.finalized_block_hash()
-            );
-
-            // Announced block is not part of the finalized chain.
-            return BlockAnnounceOutcome::NotFinalizedChain;
-        } else {
-            // Parent is not in the `NonFinalizedTree`. It is unknown whether this block belongs
-            // to the same finalized chain as the one known locally, but we expect that it is the
-            // case.
-            if let btree_map::Entry::Vacant(entry) = self
-                .parent
-                .inner
-                .disjoint_blocks
-                .entry((announced_header.number, announced_header_hash))
-            {
+            btree_map::Entry::Vacant(entry) => {
                 entry.insert(DisjointBlock {
-                    scale_encoded_header: announced_scale_encoded_header,
+                    scale_encoded_header: Some(announced_scale_encoded_header),
                     known_bad: false,
                     ancestry_search: None,
                 });
             }
-
-            // TODO: move out the thing below
-            match &mut self
-                .parent
-                .inner
-                .sources
-                .get_mut(&self.source_id)
-                .unwrap()
-                .occupation
-            {
-                // If the source is idle, start an ancestry search in order to find a block whose
-                // parent is known locally.
-                occupation @ &mut SourceOccupation::Idle => {
-                    *occupation = SourceOccupation::AncestrySearch(*announced_header.parent_hash);
-                    BlockAnnounceOutcome::AncestrySearchStart {
-                        first_block_hash: *announced_header.parent_hash,
-                        // It is checked above that the announced block number is always strictly
-                        // superior to the finalized block number.
-                        num_blocks: NonZeroU64::new(
-                            announced_header.number
-                                - self.parent.chain.finalized_block_header().number,
-                        )
-                        .unwrap(),
-                    }
-                }
-                // If the source is already busy with something else, delay the ancestry search
-                // for later.
-                _ => todo!(),
-            }
-
-            /*self.parent
-            .inner
-            .unverified
-            .insert(parent_header_number, *announced_header.parent_hash);*/
-            //todo!() // TODO:
+            btree_map::Entry::Occupied(entry) => match &mut entry.get_mut().scale_encoded_header {
+                Some(h) => debug_assert_eq!(*h, announced_scale_encoded_header),
+                h @ None => *h = Some(announced_scale_encoded_header.to_vec()),
+            },
         }
+
+        // TODO: self.parent.next_action();
+        todo!()
     }
 
     /// Returns the user data associated to the source. This is the value originally passed
