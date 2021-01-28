@@ -27,8 +27,8 @@ use parity_scale_codec::{Decode, Encode};
 /// Configuration for [`babe_current_epoch`].
 pub struct Config {
     /// Runtime used to get the current babe epoch. Must be built using the Wasm code found at the
-    /// `:code` key of the parent block storage.
-    pub parent_runtime: host::HostVmPrototype,
+    /// `:code` key of the block storage.
+    pub runtime: host::HostVmPrototype,
 }
 
 /// Problem encountered during a call to [`babe_current_epoch`].
@@ -48,7 +48,7 @@ pub enum Error {
 /// Fetches the current Babe epoch using `BabeApi_current_epoch`.
 pub fn babe_current_epoch(config: Config) -> Query {
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
-        virtual_machine: config.parent_runtime,
+        virtual_machine: config.runtime,
         function_to_call: "BabeApi_current_epoch",
         // `BabeApi_current_epoch`doesn't take any parameters.
         parameter: std::iter::empty::<&[u8]>(),
@@ -64,7 +64,7 @@ pub fn babe_current_epoch(config: Config) -> Query {
 #[must_use]
 pub enum Query {
     /// Fetching the Babe epoch is over.
-    Finished(Result<BabeEpochInformation, Error>),
+    Finished(Result<(BabeEpochInformation, host::HostVmPrototype), Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
     /// Fetching the key that follows a given one is required in order to continue.
@@ -78,21 +78,24 @@ impl Query {
                 let mut value = success.virtual_machine.value();
 
                 match DecodableBabeEpochInformation::decode(&mut value) {
-                    Ok(epoch) => Query::Finished(Ok(BabeEpochInformation {
-                        epoch_index: epoch.epoch_index,
-                        start_slot_number: epoch.start_slot_number,
-                        authorities: epoch
-                            .authorities
-                            .into_iter()
-                            .map(|authority| header::BabeAuthority {
-                                public_key: authority.public_key,
-                                weight: authority.weight,
-                            })
-                            .collect(),
-                        randomness: epoch.randomness,
-                        c: epoch.c,
-                        allowed_slots: epoch.allowed_slots,
-                    })),
+                    Ok(epoch) => Query::Finished(Ok((
+                        BabeEpochInformation {
+                            epoch_index: epoch.epoch_index,
+                            start_slot_number: epoch.start_slot_number,
+                            authorities: epoch
+                                .authorities
+                                .into_iter()
+                                .map(|authority| header::BabeAuthority {
+                                    public_key: authority.public_key,
+                                    weight: authority.weight,
+                                })
+                                .collect(),
+                            randomness: epoch.randomness,
+                            c: epoch.c,
+                            allowed_slots: epoch.allowed_slots,
+                        },
+                        success.virtual_machine.into_prototype(),
+                    ))),
                     Err(error) => Query::Finished(Err(Error::DecodeFailed(error))),
                 }
             }

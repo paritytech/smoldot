@@ -246,7 +246,7 @@ pub enum ChainInformationConsensus {
         /// Babe epoch information about the epoch right after the one the finalized block belongs
         /// to.
         ///
-        /// If [`ChainInformationConsensus::babe_config::finalized_block_epoch_information`] is `Some`,
+        /// If [`ChainInformationConsensus::Babe::finalized_block_epoch_information`] is `Some`,
         /// this field must contain the epoch that follows.
         ///
         /// If the finalized block is block #0, then this must contain the information about the
