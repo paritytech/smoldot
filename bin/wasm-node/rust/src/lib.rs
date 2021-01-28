@@ -22,24 +22,15 @@
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use futures::prelude::*;
 use smoldot::{
     chain, chain_spec,
-    json_rpc::{self, methods},
     libp2p::{multiaddr, peer_id::PeerId},
-    network::protocol,
-    trie::proof_verify,
 };
-use std::{
-    collections::{BTreeMap, HashSet},
-    convert::TryFrom as _,
-    fmt, iter,
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 pub mod ffi;
 
+mod json_rpc_service;
 mod network_service;
 mod sync_service;
 
@@ -208,669 +199,61 @@ pub async fn start_client(chain_spec: String, database_content: Option<String>) 
         }
     };
 
-    // TODO: un-Arc-ify
-    let network_service = network_service::NetworkService::new(network_service::Config {
-        tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
-        bootstrap_nodes: {
-            let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-            for node in chain_spec.boot_nodes() {
-                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
-                    list.push((peer_id, address));
-                } else {
-                    panic!() // TODO:
+    let (network_service, mut network_event_receivers) =
+        network_service::NetworkService::new(network_service::Config {
+            tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
+            num_events_receivers: 1, // Configures the length of `network_event_receivers`
+            bootstrap_nodes: {
+                let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
+                for node in chain_spec.boot_nodes() {
+                    let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                    if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                        let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                        list.push((peer_id, address));
+                    } else {
+                        panic!() // TODO:
+                    }
                 }
-            }
-            list
-        },
-        genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-        best_block: (
-            chain_information.finalized_block_header.number,
-            chain_information.finalized_block_header.hash(),
-        ),
-        protocol_id: chain_spec.protocol_id().to_string(),
-    })
-    .await
-    .unwrap();
+                list
+            },
+            genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
+            best_block: (
+                chain_information.finalized_block_header.number,
+                chain_information.finalized_block_header.hash(),
+            ),
+            protocol_id: chain_spec.protocol_id().to_string(),
+        })
+        .await;
 
     let sync_service = Arc::new(
         sync_service::SyncService::new(sync_service::Config {
             chain_information: chain_information.clone(),
             tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
+            network_service: network_service.clone(),
+            network_events_receiver: network_event_receivers.pop().unwrap(),
         })
         .await,
     );
 
-    let genesis_storage = chain_spec
-        .genesis_storage()
-        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-        .collect::<BTreeMap<_, _>>();
-
-    let best_block_metadata = {
-        let code = genesis_storage.get(&b":code"[..]).unwrap();
-        let heap_pages = 1024; // TODO: laziness
-        smoldot::metadata::metadata_from_runtime_code(code, heap_pages).unwrap()
-    };
-
-    let mut client = {
-        let finalized_block_hash = chain_information.finalized_block_header.hash();
-
-        let mut known_blocks = lru::LruCache::new(256);
-        known_blocks.put(
-            finalized_block_hash,
-            chain_information.finalized_block_header.clone(),
-        );
-
-        Client {
-            chain_spec,
-            network_service: network_service.clone(),
-            peers: Vec::new(),
-            known_blocks,
-            best_block: finalized_block_hash,
-            finalized_block: finalized_block_hash,
-            genesis_storage,
-            best_block_metadata,
-            next_subscription: 0,
-            runtime_version: HashSet::new(),
-            all_heads: HashSet::new(),
-            new_heads: HashSet::new(),
-            finalized_heads: HashSet::new(),
-            storage: HashSet::new(),
-        }
-    };
-
-    // This implementation of `futures::Stream` fires at a regular time interval.
-    // The state of the chain is saved every time it fires.
-    let mut database_save_timer = stream::unfold((), move |_| {
-        ffi::Delay::new(Duration::from_secs(15)).map(|_| Some(((), ())))
+    json_rpc_service::start(json_rpc_service::Config {
+        tasks_executor: Box::new(|fut| ffi::spawn_task(fut)),
+        network_service,
+        sync_service: sync_service.clone(),
+        chain_spec,
+        genesis_chain_information: (&genesis_chain_information).into(),
     })
-    .map(|_| ());
+    .await;
 
-    log::info!("Starting main loop");
-
-    loop {
-        futures::select! {
-            network_message = network_service.next_event().fuse() => {
-                match network_message {
-                    network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
-                        client.peers.push(peer_id.clone());
-                        sync_service.add_source(peer_id, best_block_number, best_block_hash).await;
-                    }
-                    network_service::Event::Disconnected(peer_id) => {
-                        client.peers.retain(|p| *p != peer_id);
-                        sync_service.remove_source(peer_id).await;
-                    }
-                    network_service::Event::BlockAnnounce { peer_id, announce } => {
-                        sync_service.block_announce(peer_id, announce).await;
-                    }
-                }
-            },
-
-            sync_message = sync_service.next_event().fuse() => {
-                match sync_message {
-                    sync_service::Event::BlocksRequest { id, target, request } => {
-                        let block_request = network_service.clone().blocks_request(
-                            target,
-                            request
-                        );
-
-                        ffi::spawn_task({
-                            let sync_service = sync_service.clone();
-                            async move {
-                                let result = block_request.await;
-                                sync_service.answer_blocks_request(id, result.map_err(|_| ())).await;
-                            }
-                        });
-                    },
-                    sync_service::Event::NewBest { scale_encoded_header } => {
-                        // TODO: this is also triggered if we reset the sync to a previous point, which isn't correct
-
-                        let decoded = smoldot::header::decode(&scale_encoded_header).unwrap();
-                        let header = header_conv(decoded.clone());
-
-                        for subscription_id in &client.new_heads {
-                            let notification = smoldot::json_rpc::parse::build_subscription_event(
-                                "chain_newHead",
-                                subscription_id,
-                                &serde_json::to_string(&header).unwrap(),
-                            );
-                            ffi::emit_json_rpc_response(&notification);
-                        }
-                        for subscription_id in &client.all_heads {
-                            let notification = smoldot::json_rpc::parse::build_subscription_event(
-                                "chain_newHead",
-                                subscription_id,
-                                &serde_json::to_string(&header).unwrap(),
-                            );
-                            ffi::emit_json_rpc_response(&notification);
-                        }
-
-                        // Load the entry of the finalized block in order to guarantee that it
-                        // remains in the LRU cache when `put` is called below.
-                        let _ = client.known_blocks.get(&client.finalized_block).unwrap();
-
-                        client.best_block = decoded.hash();
-                        client.known_blocks.put(client.best_block, decoded.into());
-
-                        debug_assert!(client.known_blocks.get(&client.finalized_block).is_some());
-
-                        // TODO: need to update `best_block_metadata` if necessary, and notify the runtime version subscriptions
-                    },
-                    sync_service::Event::NewFinalized { scale_encoded_header } => {
-                        let decoded = smoldot::header::decode(&scale_encoded_header).unwrap();
-                        let header = header_conv(decoded.clone());
-
-                        for subscription_id in &client.finalized_heads {
-                            let notification = smoldot::json_rpc::parse::build_subscription_event(
-                                "chain_finalizedHead",
-                                subscription_id,
-                                &serde_json::to_string(&header).unwrap(),
-                            );
-                            ffi::emit_json_rpc_response(&notification);
-                        }
-
-                        client.finalized_block = decoded.hash();
-                        client.known_blocks.put(client.finalized_block, decoded.into());
-                    },
-                }
-            },
-
-            json_rpc_request = ffi::next_json_rpc().fuse() => {
-                // TODO: don't unwrap
-                let request_string = String::from_utf8(Vec::from(json_rpc_request)).unwrap();
-                log::debug!(
-                    target: "json-rpc",
-                    "JSON-RPC => {:?}{}",
-                    if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
-                    if request_string.len() > 100 { "…" } else { "" }
-                );
-
-                // TODO: don't await here; use a queue
-                let (response1, response2) = handle_rpc(&request_string, &mut client).await;
-                log::debug!(
-                    target: "json-rpc",
-                    "JSON-RPC <= {:?}{}",
-                    if response1.len() > 100 { &response1[..100] } else { &response1[..] },
-                    if response1.len() > 100 { "…" } else { "" }
-                );
-                ffi::emit_json_rpc_response(&response1);
-
-                if let Some(response2) = response2 {
-                    log::debug!(
-                        target: "json-rpc",
-                        "JSON-RPC <= {:?}{}",
-                        if response2.len() > 100 { &response2[..100] } else { &response2[..] },
-                        if response2.len() > 100 { "…" } else { "" }
-                    );
-                    ffi::emit_json_rpc_response(&response2);
-                }
-            },
-
-            _interval = database_save_timer.next().fuse() => {
-                debug_assert!(_interval.is_some());
-                // A new task is spawned specifically for the saving, in order to not block the
-                // main processing while waiting for the serialization.
-                log::debug!("Database save start");
-                let sync_service = sync_service.clone();
-                ffi::spawn_task(async move {
-                    let database_content = sync_service.serialize_chain().await;
-                    ffi::database_save(&database_content);
-                });
-            }
+    ffi::spawn_task(async move {
+        loop {
+            ffi::Delay::new(Duration::from_secs(15)).await;
+            log::debug!("Database save start");
+            let database_content = sync_service.serialize_chain().await;
+            ffi::database_save(&database_content);
         }
-    }
-}
+    });
 
-struct Client {
-    chain_spec: chain_spec::ChainSpec,
-
-    network_service: Arc<network_service::NetworkService>,
-
-    /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
-    ///
-    /// Always contains `best_block` and `finalized_block`.
-    known_blocks: lru::LruCache<[u8; 32], smoldot::header::Header>,
-
-    /// Hash of the current best block.
-    best_block: [u8; 32],
-    /// Hash of the latest finalized block.
-    finalized_block: [u8; 32],
-
-    // TODO: this is a hack before an actual requests distribution system is implemented
-    peers: Vec<PeerId>,
-
-    // TODO: remove; unnecessary
-    genesis_storage: BTreeMap<Vec<u8>, Vec<u8>>,
-
-    best_block_metadata: Vec<u8>,
-
-    next_subscription: u64,
-
-    runtime_version: HashSet<String>,
-    all_heads: HashSet<String>,
-    new_heads: HashSet<String>,
-    finalized_heads: HashSet<String>,
-    storage: HashSet<String>,
-}
-
-async fn handle_rpc(rpc: &str, client: &mut Client) -> (String, Option<String>) {
-    let (request_id, call) = methods::parse_json_call(rpc).expect("bad request"); // TODO: don't unwrap
-    match call {
-        methods::MethodCall::author_pendingExtrinsics {} => {
-            let response = methods::Response::author_pendingExtrinsics(Vec::new())
-                .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::chain_getBlockHash { height } => {
-            // TODO: implement correctly
-            let response = if height.is_some() {
-                methods::Response::chain_getBlockHash(methods::HashHexString(client.best_block))
-                    .to_json_response(request_id)
-            } else {
-                json_rpc::parse::build_success_response(request_id, "null")
-            };
-            (response, None)
-        }
-        methods::MethodCall::chain_getFinalizedHead {} => {
-            let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                client.finalized_block,
-            ))
-            .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::chain_getHeader { hash } => {
-            let hash = hash.as_ref().map(|h| &h.0).unwrap_or(&client.best_block);
-            let response = if let Some(header) = client.known_blocks.get(hash) {
-                methods::Response::chain_getHeader(header_conv(header)).to_json_response(request_id)
-            } else {
-                json_rpc::parse::build_success_response(request_id, "null")
-            };
-
-            (response, None)
-        }
-        methods::MethodCall::chain_subscribeAllHeads {} => {
-            let subscription = client.next_subscription.to_string();
-            client.next_subscription += 1;
-
-            let response = methods::Response::chain_subscribeAllHeads(&subscription)
-                .to_json_response(request_id);
-
-            let response2 = smoldot::json_rpc::parse::build_subscription_event(
-                "chain_allHeads", // TODO: is this string correct?
-                &subscription,
-                &serde_json::to_string(&header_conv(
-                    client.known_blocks.get(&client.best_block).unwrap(),
-                ))
-                .unwrap(),
-            );
-
-            client.all_heads.insert(subscription.clone());
-
-            (response, Some(response2))
-        }
-        methods::MethodCall::chain_subscribeNewHeads {} => {
-            let subscription = client.next_subscription.to_string();
-            client.next_subscription += 1;
-
-            let response = methods::Response::chain_subscribeNewHeads(&subscription)
-                .to_json_response(request_id);
-
-            let response2 = smoldot::json_rpc::parse::build_subscription_event(
-                "chain_newHead",
-                &subscription,
-                &serde_json::to_string(&header_conv(
-                    client.known_blocks.get(&client.best_block).unwrap(),
-                ))
-                .unwrap(),
-            );
-
-            client.new_heads.insert(subscription.clone());
-
-            (response, Some(response2))
-        }
-        methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-            let subscription = client.next_subscription.to_string();
-            client.next_subscription += 1;
-
-            let response = methods::Response::chain_subscribeFinalizedHeads(&subscription)
-                .to_json_response(request_id);
-
-            let response2 = smoldot::json_rpc::parse::build_subscription_event(
-                "chain_finalizedHead",
-                &subscription,
-                &serde_json::to_string(&header_conv(
-                    client.known_blocks.get(&client.finalized_block).unwrap(),
-                ))
-                .unwrap(),
-            );
-
-            client.finalized_heads.insert(subscription.clone());
-
-            (response, Some(response2))
-        }
-        methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-            let valid = client.finalized_heads.remove(&subscription);
-            let response = methods::Response::chain_unsubscribeFinalizedHeads(valid)
-                .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::rpc_methods {} => {
-            let response = methods::Response::rpc_methods(methods::RpcMethods {
-                version: 1,
-                methods: methods::MethodCall::method_names()
-                    .map(|n| n.into())
-                    .collect(),
-            })
-            .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::state_queryStorageAt { keys, at } => {
-            let at = at.as_ref().map(|h| h.0).unwrap_or(client.best_block);
-
-            // TODO: have no idea what this describes actually
-            let mut out = methods::StorageChangeSet {
-                block: methods::HashHexString(client.best_block),
-                changes: Vec::new(),
-            };
-
-            for key in keys {
-                // TODO: parallelism?
-                if let Ok(value) = storage_query(client, &key.0, &at).await {
-                    out.changes.push((key, value.map(methods::HexString)));
-                }
-            }
-
-            let response =
-                methods::Response::state_queryStorageAt(vec![out]).to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::state_getKeysPaged {
-            prefix,
-            count,
-            start_key,
-            hash,
-        } => {
-            assert!(hash.is_none()); // TODO:
-
-            let mut out = Vec::new();
-            // TODO: check whether start_key should be included of the set
-            for (k, _) in client
-                .genesis_storage
-                .range(start_key.map(|p| p.0).unwrap_or(Vec::new())..)
-            {
-                if out.len() >= usize::try_from(count).unwrap_or(usize::max_value()) {
-                    break;
-                }
-
-                if prefix
-                    .as_ref()
-                    .map_or(false, |prefix| !k.starts_with(&prefix.0))
-                {
-                    break;
-                }
-
-                out.push(methods::HexString(k.to_vec()));
-            }
-
-            let response = methods::Response::state_getKeysPaged(out).to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::state_getMetadata {} => {
-            let response = methods::Response::state_getMetadata(methods::HexString(
-                client.best_block_metadata.clone(),
-            ))
-            .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::state_getStorage { key, hash } => {
-            let hash = hash.as_ref().map(|h| h.0).unwrap_or(client.best_block);
-
-            let response = match storage_query(client, &key.0, &hash).await {
-                Ok(Some(value)) => {
-                    methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
-                        .to_json_response(request_id)
-                }
-                Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
-                Err(error) => json_rpc::parse::build_error_response(
-                    request_id,
-                    json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                    None,
-                ),
-            };
-
-            (response, None)
-        }
-        methods::MethodCall::state_subscribeRuntimeVersion {} => {
-            let subscription = client.next_subscription.to_string();
-            client.next_subscription += 1;
-
-            let response = methods::Response::state_subscribeRuntimeVersion(&subscription)
-                .to_json_response(request_id);
-            client.runtime_version.insert(subscription.clone());
-
-            // FIXME: hack
-            let response2 = methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                spec_name: "polkadot".to_string(),
-                impl_name: "smoldot".to_string(),
-                authoring_version: 0,
-                spec_version: 23,
-                impl_version: 0,
-                transaction_version: 4,
-            })
-            .to_json_response(request_id);
-
-            (response, Some(response2))
-        }
-        methods::MethodCall::state_subscribeStorage { list } => {
-            let subscription = client.next_subscription.to_string();
-            client.next_subscription += 1;
-
-            let response1 = methods::Response::state_subscribeStorage(&subscription)
-                .to_json_response(request_id);
-            client.storage.insert(subscription.clone());
-
-            // TODO: have no idea what this describes actually
-            let mut out = methods::StorageChangeSet {
-                block: methods::HashHexString(client.best_block),
-                changes: Vec::new(),
-            };
-
-            let best_block_hash = client.best_block;
-
-            for key in list {
-                // TODO: parallelism?
-                if let Ok(value) = storage_query(client, &key.0, &best_block_hash).await {
-                    out.changes.push((key, value.map(methods::HexString)));
-                }
-            }
-
-            // TODO: hack
-            let response2 = smoldot::json_rpc::parse::build_subscription_event(
-                "state_storage",
-                &subscription,
-                &serde_json::to_string(&out).unwrap(),
-            );
-
-            // TODO: subscription not actually implemented
-
-            (response1, Some(response2))
-        }
-        methods::MethodCall::state_unsubscribeStorage { subscription } => {
-            let valid = client.storage.remove(&subscription);
-            let response =
-                methods::Response::state_unsubscribeStorage(valid).to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::state_getRuntimeVersion {} => {
-            // FIXME: hack
-            let response = methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                spec_name: "polkadot".to_string(),
-                impl_name: "smoldot".to_string(),
-                authoring_version: 0,
-                spec_version: 23,
-                impl_version: 0,
-                transaction_version: 4,
-            })
-            .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::system_chain {} => {
-            let response = methods::Response::system_chain(client.chain_spec.name())
-                .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::system_chainType {} => {
-            let response = methods::Response::system_chainType(client.chain_spec.chain_type())
-                .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::system_health {} => {
-            let response = methods::Response::system_health(methods::SystemHealth {
-                is_syncing: true,        // TODO:
-                peers: 1,                // TODO:
-                should_have_peers: true, // TODO:
-            })
-            .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::system_name {} => {
-            let response = methods::Response::system_name("smoldot!").to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::system_peers {} => {
-            // TODO: return proper response
-            let response = methods::Response::system_peers(vec![]).to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::system_properties {} => {
-            let response = methods::Response::system_properties(
-                serde_json::from_str(client.chain_spec.properties()).unwrap(),
-            )
-            .to_json_response(request_id);
-            (response, None)
-        }
-        methods::MethodCall::system_version {} => {
-            let response = methods::Response::system_version("1.0.0").to_json_response(request_id);
-            (response, None)
-        }
-        _ => {
-            println!("unimplemented: {:?}", call);
-            panic!(); // TODO:
-        }
-    }
-}
-
-async fn storage_query(
-    client: &mut Client,
-    key: &[u8],
-    hash: &[u8; 32],
-) -> Result<Option<Vec<u8>>, StorageQueryError> {
-    let trie_root_hash = if let Some(header) = client.known_blocks.get(hash) {
-        header.state_root
-    } else {
-        // TODO: should make a block request towards a node
-        return Err(StorageQueryError::FindStorageRootHashError);
-    };
-
-    let mut outcome_errors = Vec::with_capacity(3);
-
-    for target in client.peers.iter().take(3) {
-        let result = client
-            .network_service
-            .clone()
-            .storage_proof_request(
-                target.clone(),
-                protocol::StorageProofRequestConfig {
-                    block_hash: *hash,
-                    keys: iter::once(key),
-                },
-            )
-            .await
-            .map_err(StorageQueryErrorDetail::Network)
-            .and_then(|outcome| {
-                proof_verify::verify_proof(proof_verify::Config {
-                    proof: outcome.iter().map(|nv| &nv[..]),
-                    requested_key: key,
-                    trie_root_hash: &trie_root_hash,
-                })
-                .map_err(StorageQueryErrorDetail::ProofVerification)
-                .map(|v| v.map(|v| v.to_owned()))
-            });
-
-        match result {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                outcome_errors.push(err);
-            }
-        }
-    }
-
-    debug_assert_eq!(outcome_errors.len(), outcome_errors.capacity());
-    Err(StorageQueryError::StorageRetrieval {
-        errors: outcome_errors,
-    })
-}
-
-#[derive(Debug)]
-enum StorageQueryError {
-    /// Error while finding the storage root hash of the requested block.
-    FindStorageRootHashError,
-    /// Error while retrieving the storage item from other nodes.
-    StorageRetrieval {
-        /// Contains one error per peer that has been contacted. If this list is empty, then we
-        /// aren't connected to any node.
-        errors: Vec<StorageQueryErrorDetail>,
-    },
-}
-
-impl fmt::Display for StorageQueryError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            StorageQueryError::FindStorageRootHashError => write!(f, "Unknown block"),
-            StorageQueryError::StorageRetrieval { errors } if errors.is_empty() => {
-                write!(f, "No node available for storage query")
-            }
-            StorageQueryError::StorageRetrieval { errors } => {
-                write!(f, "Storage query errors:")?;
-                for err in errors {
-                    write!(f, "\n- {}", err)?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-#[derive(Debug, derive_more::Display)]
-enum StorageQueryErrorDetail {
-    #[display(fmt = "{}", _0)]
-    Network(smoldot::network::service::StorageProofRequestError),
-    #[display(fmt = "{}", _0)]
-    ProofVerification(proof_verify::Error),
-}
-
-fn header_conv<'a>(header: impl Into<smoldot::header::HeaderRef<'a>>) -> methods::Header {
-    let header = header.into();
-
-    methods::Header {
-        parent_hash: methods::HashHexString(*header.parent_hash),
-        extrinsics_root: methods::HashHexString(*header.extrinsics_root),
-        state_root: methods::HashHexString(*header.state_root),
-        number: header.number,
-        digest: methods::HeaderDigest {
-            logs: header
-                .digest
-                .logs()
-                .map(|log| {
-                    methods::HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    }))
-                })
-                .collect(),
-        },
-    }
+    log::info!("Initialization complete");
 }
 
 /// Use in an asynchronous context to interrupt the current task execution and schedule it back.
