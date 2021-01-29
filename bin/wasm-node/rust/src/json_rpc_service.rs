@@ -536,16 +536,17 @@ async fn handle_rpc(rpc: &str, client: &mut JsonRpcService) -> (String, Option<S
                 client.best_block_runtime_spec.clone()
             };
 
+            let runtime_specs = runtime_specs.decode();
             let response2 = smoldot::json_rpc::parse::build_subscription_event(
                 "state_runtimeVersion",
                 &subscription,
                 &serde_json::to_string(&methods::RuntimeVersion {
-                    spec_name: runtime_specs.spec_name,
-                    impl_name: runtime_specs.impl_name,
+                    spec_name: runtime_specs.spec_name.into(),
+                    impl_name: runtime_specs.impl_name.into(),
                     authoring_version: u64::from(runtime_specs.authoring_version),
                     spec_version: u64::from(runtime_specs.spec_version),
                     impl_version: u64::from(runtime_specs.impl_version),
-                    transaction_version: u64::from(runtime_specs.transaction_version),
+                    transaction_version: runtime_specs.transaction_version.map(u64::from),
                     apis: runtime_specs.apis,
                 })
                 .unwrap(),
@@ -609,13 +610,14 @@ async fn handle_rpc(rpc: &str, client: &mut JsonRpcService) -> (String, Option<S
                 client.best_block_runtime_spec.clone()
             };
 
+            let runtime_specs = runtime_specs.decode();
             let response = methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                spec_name: runtime_specs.spec_name,
-                impl_name: runtime_specs.impl_name,
+                spec_name: runtime_specs.spec_name.into(),
+                impl_name: runtime_specs.impl_name.into(),
                 authoring_version: u64::from(runtime_specs.authoring_version),
                 spec_version: u64::from(runtime_specs.spec_version),
                 impl_version: u64::from(runtime_specs.impl_version),
-                transaction_version: u64::from(runtime_specs.transaction_version),
+                transaction_version: runtime_specs.transaction_version.map(u64::from),
                 apis: runtime_specs.apis,
             })
             .to_json_response(request_id);
