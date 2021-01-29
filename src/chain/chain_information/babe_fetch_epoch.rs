@@ -65,7 +65,7 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
         virtual_machine: config.runtime,
         function_to_call,
-        // The epoch function don't take any parameters.
+        // The epoch functions don't take any parameters.
         parameter: core::iter::empty::<&[u8]>(),
     });
 
