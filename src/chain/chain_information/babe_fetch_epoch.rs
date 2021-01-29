@@ -24,7 +24,7 @@ use crate::{
 use alloc::vec::Vec;
 use parity_scale_codec::{Decode, Encode};
 
-/// The babe epoch to fetch.
+/// The Babe epoch to fetch.
 pub enum BabeEpochToFetch {
     /// Fetch the current epoch using `BabeApi_current_epoch`.
     CurrentEpoch,
@@ -34,10 +34,10 @@ pub enum BabeEpochToFetch {
 
 /// Configuration for [`babe_fetch_epoch`].
 pub struct Config {
-    /// Runtime used to get the babe epoch. Must be built using the Wasm code found at the
+    /// Runtime used to get the Babe epoch. Must be built using the Wasm code found at the
     /// `:code` key of the block storage.
     pub runtime: host::HostVmPrototype,
-    /// The babe epoch to fetch.
+    /// The Babe epoch to fetch.
     pub epoch_to_fetch: BabeEpochToFetch,
 }
 
