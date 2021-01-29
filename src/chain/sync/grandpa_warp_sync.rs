@@ -10,10 +10,8 @@ use crate::{
     finality::{grandpa::warp_sync, justification::verify},
     header::Header,
     libp2p::PeerId,
-    network::service::{ChainNetwork, GrandpaWarpSyncRequestError},
+    network::protocol::GrandpaWarpSyncResponseFragment,
 };
-use core::ops::{Add, Sub};
-use core::time::Duration;
 
 /// Problem encountered during a call to [`grandpa_warp_sync`].
 #[derive(Debug, derive_more::Display)]
@@ -29,35 +27,22 @@ pub enum Error {
 }
 
 /// The configuration for [`grandpa_warp_sync`].
-pub struct Config<'a, TNow, TPeer, TConn> {
+pub struct Config<'a> {
     pub connected_peers: Vec<PeerId>,
-    pub network: &'a ChainNetwork<TNow, TPeer, TConn>,
-    pub now: TNow,
-    pub chain_index: usize,
-    pub begin_hash: [u8; 32],
     pub genesis_chain_information: &'a ChainInformation,
 }
 
 /// Starts syncing via grandpa warp sync.
-pub fn grandpa_warp_sync<TNow, TPeer, TConn>(
-    config: Config<'_, TNow, TPeer, TConn>,
-) -> GrandpaWarpSync<TNow, TPeer, TConn>
-where
-    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-{
+pub fn grandpa_warp_sync(config: Config) -> GrandpaWarpSync {
     GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
         peer_index: 0,
         connected_peers: config.connected_peers,
-        network: config.network,
-        now: config.now,
-        chain_index: config.chain_index,
-        begin_hash: config.begin_hash,
         genesis_chain_information: config.genesis_chain_information,
     })
 }
 
 /// The grandpa warp sync state machine.
-pub enum GrandpaWarpSync<'a, TNow, TPeer, TConn> {
+pub enum GrandpaWarpSync<'a> {
     /// Warp syncing is over.
     Finished(Result<(ChainInformation, HostVmPrototype), Error>),
     /// Loading a storage value is required in order to continue.
@@ -67,12 +52,12 @@ pub enum GrandpaWarpSync<'a, TNow, TPeer, TConn> {
     /// Verifying the warp sync response is required to continue.
     Verifier(Verifier<'a>),
     /// Performing a network request is required to continue.
-    WarpSyncRequest(WarpSyncRequest<'a, TNow, TPeer, TConn>),
+    WarpSyncRequest(WarpSyncRequest<'a>),
     /// Fetching the parameters for the virtual machine is required to continue.
     VirtualMachineParamsGet(VirtualMachineParamsGet<'a>),
 }
 
-impl<'a, TNow, TPeer, TConn> GrandpaWarpSync<'a, TNow, TPeer, TConn> {
+impl<'a> GrandpaWarpSync<'a> {
     fn from_babe_fetch_epoch_query(
         query: babe_fetch_epoch::Query,
         fetched_current_epoch: Option<BabeEpochInformation>,
@@ -151,10 +136,10 @@ impl<'a> StorageGet<'a> {
     }
 
     /// Injects the corresponding storage value.
-    pub fn inject_value<TNow, TPeer, TConn>(
+    pub fn inject_value(
         self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> GrandpaWarpSync<'a, TNow, TPeer, TConn> {
+    ) -> GrandpaWarpSync<'a> {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_value(value),
             self.fetched_current_epoch,
@@ -183,10 +168,7 @@ impl<'a> NextKey<'a> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key<TNow, TPeer, TConn>(
-        self,
-        key: Option<impl AsRef<[u8]>>,
-    ) -> GrandpaWarpSync<'a, TNow, TPeer, TConn> {
+    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> GrandpaWarpSync<'a> {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_key(key),
             self.fetched_current_epoch,
@@ -202,7 +184,7 @@ pub struct Verifier<'a> {
 }
 
 impl<'a> Verifier<'a> {
-    pub fn next<TNow, TPeer, TConn>(self) -> GrandpaWarpSync<'a, TNow, TPeer, TConn> {
+    pub fn next(self) -> GrandpaWarpSync<'a> {
         match self.verifier.next() {
             Ok(warp_sync::Next::NotFinished(next_verifier)) => GrandpaWarpSync::Verifier(Self {
                 verifier: next_verifier,
@@ -229,66 +211,43 @@ struct PostVerificationState<'a> {
     genesis_chain_information: &'a ChainInformation,
 }
 
-/// Performing a network request is required to continue.
-pub struct WarpSyncRequest<'a, TNow, TPeer, TConn> {
+/// Performing a grandpa warp sync network request is required to continue.
+pub struct WarpSyncRequest<'a> {
     peer_index: usize,
     connected_peers: Vec<PeerId>,
-
-    now: TNow,
-    network: &'a ChainNetwork<TNow, TPeer, TConn>,
-    chain_index: usize,
-    begin_hash: [u8; 32],
     genesis_chain_information: &'a ChainInformation,
 }
 
-impl<'a, TNow, TPeer, TConn> WarpSyncRequest<'a, TNow, TPeer, TConn>
-where
-    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-{
-    /// Peform the grandpa warp sync request. Returns an optional error if a
-    /// request failed.
-    pub async fn request(
+impl<'a> WarpSyncRequest<'a> {
+    /// The peer to make a grandpa warp sync network request to.
+    pub fn current_peer(&self) -> PeerId {
+        self.connected_peers[self.peer_index].clone()
+    }
+
+    /// Submit a grandpa warp sync network response if the request succeeded or
+    /// `None` if it did not.
+    pub async fn handle_responste(
         self,
-    ) -> (
-        GrandpaWarpSync<'a, TNow, TPeer, TConn>,
-        Option<GrandpaWarpSyncRequestError>,
-    ) {
-        let peer = self.connected_peers[self.peer_index].clone();
-
-        let response = self
-            .network
-            .grandpa_warp_sync_request(self.now.clone(), peer, self.chain_index, self.begin_hash)
-            .await;
-
+        response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
+    ) -> GrandpaWarpSync<'a> {
         let next_index = self.peer_index + 1;
 
         match response {
-            Ok(response_fragments) => (
-                GrandpaWarpSync::Verifier(Verifier {
-                    verifier: warp_sync::Verifier::new(
-                        self.genesis_chain_information,
-                        response_fragments,
-                    ),
-                    genesis_chain_information: self.genesis_chain_information,
-                }),
-                None,
-            ),
-            Err(error) if next_index < self.connected_peers.len() => (
+            Some(response_fragments) => GrandpaWarpSync::Verifier(Verifier {
+                verifier: warp_sync::Verifier::new(
+                    self.genesis_chain_information,
+                    response_fragments,
+                ),
+                genesis_chain_information: self.genesis_chain_information,
+            }),
+            None if next_index < self.connected_peers.len() => {
                 GrandpaWarpSync::WarpSyncRequest(Self {
                     peer_index: next_index,
                     connected_peers: self.connected_peers,
-                    now: self.now,
-                    network: self.network,
-                    chain_index: self.chain_index,
-                    begin_hash: self.begin_hash,
                     genesis_chain_information: self.genesis_chain_information,
-                }),
-                Some(error),
-            ),
-            Err(error) => (
-                GrandpaWarpSync::Finished(Err(Error::AllRequestsFailed)),
-                Some(error),
-            ),
+                })
+            }
+            None => GrandpaWarpSync::Finished(Err(Error::AllRequestsFailed)),
         }
     }
 }
@@ -301,12 +260,12 @@ pub struct VirtualMachineParamsGet<'a> {
 impl<'a> VirtualMachineParamsGet<'a> {
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
-    pub fn inject_virtual_machine_params<TNow, TPeer, TConn>(
+    pub fn inject_virtual_machine_params(
         self,
         code: impl AsRef<[u8]>,
         heap_pages: u64,
         exec_hint: ExecHint,
-    ) -> GrandpaWarpSync<'a, TNow, TPeer, TConn> {
+    ) -> GrandpaWarpSync<'a> {
         match HostVmPrototype::new(code, heap_pages, exec_hint) {
             Ok(runtime) => {
                 let babe_current_epoch_query =
