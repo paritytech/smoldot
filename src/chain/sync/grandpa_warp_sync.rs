@@ -74,11 +74,11 @@ pub enum GrandpaWarpSync<'a, TNow, TPeer, TConn> {
 
 impl<'a, TNow, TPeer, TConn> GrandpaWarpSync<'a, TNow, TPeer, TConn> {
     fn from_babe_fetch_epoch_query(
-        inner: babe_fetch_epoch::Query,
+        query: babe_fetch_epoch::Query,
         fetched_current_epoch: Option<BabeEpochInformation>,
         state: PostVerificationState<'a>,
     ) -> Self {
-        match (inner, fetched_current_epoch) {
+        match (query, fetched_current_epoch) {
             (babe_fetch_epoch::Query::Finished(Ok((next_epoch, runtime))), Some(current_epoch)) => {
                 let slots_per_epoch = match state.genesis_chain_information.consensus {
                     ChainInformationConsensus::Babe {
