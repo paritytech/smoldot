@@ -1,16 +1,17 @@
-use crate::chain::chain_information::{
-    babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-    ChainInformationFinality,
+use crate::{
+    chain::chain_information::{
+        babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+        ChainInformationFinality,
+    },
+    executor::{
+        host::{HostVmPrototype, NewErr},
+        vm::ExecHint,
+    },
+    finality::{grandpa::warp_sync, justification::verify},
+    header::Header,
+    libp2p::PeerId,
+    network::service::{ChainNetwork, GrandpaWarpSyncRequestError},
 };
-use crate::executor::host::HostVmPrototype;
-use crate::executor::host::NewErr;
-use crate::executor::vm::ExecHint;
-use crate::finality::grandpa::warp_sync::{self, Next};
-use crate::finality::justification::verify;
-use crate::header::Header;
-use crate::libp2p::PeerId;
-use crate::network::service::ChainNetwork;
-use crate::network::service::GrandpaWarpSyncRequestError;
 use core::ops::{Add, Sub};
 use core::time::Duration;
 
@@ -203,11 +204,11 @@ pub struct Verifier<'a> {
 impl<'a> Verifier<'a> {
     pub fn next<TNow, TPeer, TConn>(self) -> GrandpaWarpSync<'a, TNow, TPeer, TConn> {
         match self.verifier.next() {
-            Ok(Next::NotFinished(next_verifier)) => GrandpaWarpSync::Verifier(Self {
+            Ok(warp_sync::Next::NotFinished(next_verifier)) => GrandpaWarpSync::Verifier(Self {
                 verifier: next_verifier,
                 genesis_chain_information: self.genesis_chain_information,
             }),
-            Ok(Next::Success {
+            Ok(warp_sync::Next::Success {
                 header,
                 chain_information_finality,
             }) => GrandpaWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
