@@ -28,7 +28,9 @@ pub enum Error {
 
 /// The configuration for [`grandpa_warp_sync`].
 pub struct Config<'a> {
+    /// A list of connected peers.
     pub connected_peers: Vec<PeerId>,
+    /// The chain information of the genesis block.
     pub genesis_chain_information: &'a ChainInformation,
 }
 
