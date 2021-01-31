@@ -62,7 +62,10 @@ impl<TSrc> AllForksSources<TSrc> {
     /// Creates a new container. Must be passed the height of the known finalized block.
     pub fn new(sources_capacity: usize, finalized_block_height: u64) -> Self {
         AllForksSources {
-            sources: Default::default(),
+            sources: hashbrown::HashMap::with_capacity_and_hasher(
+                sources_capacity,
+                Default::default(),
+            ),
             next_source_id: SourceId(0),
             known_blocks1: Default::default(),
             known_blocks2: Default::default(),
