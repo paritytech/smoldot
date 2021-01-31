@@ -131,19 +131,20 @@ async fn start_sync(
     network_service: Arc<network_service::NetworkService>,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
-    let mut sync = either::Left(all_forks::AllForksSync::<libp2p::PeerId, ()>::new(
-        all_forks::Config {
-            chain_information,
-            sources_capacity: 32,
-            blocks_capacity: {
-                // This is the maximum number of blocks between two consecutive justifications.
-                1024
+    let mut sync: either::Either<_, (all_forks::SourceId, all_forks::HeaderVerify<_, _>)> =
+        either::Left(all_forks::AllForksSync::<libp2p::PeerId, ()>::new(
+            all_forks::Config {
+                chain_information,
+                sources_capacity: 32,
+                blocks_capacity: {
+                    // This is the maximum number of blocks between two consecutive justifications.
+                    1024
+                },
+                // TODO: document
+                max_disjoint_headers: 1024,
+                full: false,
             },
-            // TODO: document
-            max_disjoint_headers: 1024,
-            full: false,
-        },
-    ));
+        ));
 
     async move {
         let mut peers_source_id_map = HashMap::new();
@@ -159,8 +160,38 @@ async fn start_sync(
             let mut sync_inner = match sync {
                 either::Left(s) => s,
                 either::Right((source_id, verify)) => {
-                    // verify.perform(crate::ffi::unix_time(), ());
-                    todo!()
+                    match verify.perform(crate::ffi::unix_time(), ()) {
+                        all_forks::HeaderVerifyOutcome::Success {
+                            sync: s,
+                            next_request,
+                        } => {
+                            sync = either::Left(s);
+                            debug_assert!(request_to_start.is_none());
+                            request_to_start = next_request.map(|r| (source_id, r))
+                        }
+                        all_forks::HeaderVerifyOutcome::SuccessContinue { next_block } => {
+                            sync = either::Right((source_id, next_block));
+                        }
+                        all_forks::HeaderVerifyOutcome::Error {
+                            sync: s,
+                            error,
+                            next_request,
+                            ..
+                        } => {
+                            log::warn!("Failed to verify header: {}", error);
+                            sync = either::Left(s);
+                            debug_assert!(request_to_start.is_none());
+                            request_to_start = next_request.map(|r| (source_id, r))
+                        }
+                        all_forks::HeaderVerifyOutcome::ErrorContinue {
+                            next_block, error, ..
+                        } => {
+                            log::warn!("Failed to verify header: {}", error);
+                            sync = either::Right((source_id, next_block));
+                        }
+                    };
+
+                    continue;
                 }
             };
 
