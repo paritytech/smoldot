@@ -23,7 +23,7 @@ use futures::{
     prelude::*,
 };
 use smoldot::{chain, chain::sync::all_forks, informant::HashDisplay, libp2p, network};
-use std::{collections::HashMap, num::NonZeroU32, pin::Pin, sync::Arc};
+use std::{collections::HashMap, convert::TryFrom as _, num::NonZeroU32, pin::Pin, sync::Arc};
 
 mod lossy_channel;
 
@@ -131,22 +131,24 @@ async fn start_sync(
     network_service: Arc<network_service::NetworkService>,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
-    let mut sync = all_forks::AllForksSync::<_, ()>::new(all_forks::Config {
-        chain_information,
-        sources_capacity: 32,
-        blocks_capacity: {
-            // This is the maximum number of blocks between two consecutive justifications.
-            1024
+    let mut sync = either::Left(all_forks::AllForksSync::<libp2p::PeerId, ()>::new(
+        all_forks::Config {
+            chain_information,
+            sources_capacity: 32,
+            blocks_capacity: {
+                // This is the maximum number of blocks between two consecutive justifications.
+                1024
+            },
+            // TODO: document
+            max_disjoint_blocks: 1024,
+            full: false,
         },
-        // TODO: document
-        max_disjoint_blocks: 1024,
-        full: false,
-    });
+    ));
 
     async move {
         let mut peers_source_id_map = HashMap::new();
         let mut pending_ancestry_searches = stream::FuturesUnordered::new();
-        //let mut block_requests_finished = stream::FuturesUnordered::new();
+        let mut header_requests = stream::FuturesUnordered::new();
 
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
@@ -154,6 +156,14 @@ async fn start_sync(
         let mut request_to_start = None::<(all_forks::SourceId, all_forks::Request)>;
 
         loop {
+            let mut sync_inner = match sync {
+                either::Left(s) => s,
+                either::Right((source_id, verify)) => {
+                    // verify.perform(crate::ffi::unix_time(), ());
+                    todo!()
+                }
+            };
+
             match request_to_start.take() {
                 None => {}
                 Some((
@@ -163,178 +173,68 @@ async fn start_sync(
                         num_blocks,
                     },
                 )) => {
-                    println!("ancestry search: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
-                    let (send_back, rx) = oneshot::channel();
-                    let send_result = to_foreground
-                        .send(FromBackground::RequestStart {
-                            target: peer_id.clone(),
-                            request: network::protocol::BlocksRequestConfig {
-                                start: network::protocol::BlocksRequestConfigStart::Hash(
-                                    first_block_hash,
-                                ),
-                                desired_count: NonZeroU32::new(
-                                    u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                                )
-                                .unwrap(),
-                                direction: network::protocol::BlocksRequestDirection::Descending,
-                                fields: network::protocol::BlocksRequestFields {
-                                    header: true,
-                                    body: false,
-                                    justification: false,
-                                },
-                            },
-                            send_back,
-                        })
-                        .await;
+                    let peer_id = sync_inner
+                        .source_mut(source_id)
+                        .unwrap()
+                        .user_data()
+                        .clone();
 
-                    // If the channel is closed, the sync service has been closed too.
-                    if send_result.is_err() {
-                        return;
-                    }
+                    println!("ancestry search: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
+                    let block_request = network_service.clone().blocks_request(
+                        peer_id.clone(),
+                        network::protocol::BlocksRequestConfig {
+                            start: network::protocol::BlocksRequestConfigStart::Hash(
+                                first_block_hash,
+                            ),
+                            desired_count: NonZeroU32::new(
+                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                            )
+                            .unwrap(),
+                            direction: network::protocol::BlocksRequestDirection::Descending,
+                            fields: network::protocol::BlocksRequestFields {
+                                header: true,
+                                body: false,
+                                justification: false,
+                            },
+                        },
+                    );
 
                     // TODO: use this abort
-                    let (rx, abort) = future::abortable(rx);
+                    let (block_request, abort) = future::abortable(block_request);
 
                     pending_ancestry_searches
-                        .push(async move { rx.await.unwrap().map(|r| (source_id, r)) });
+                        .push(async move { block_request.await.unwrap().map(|r| (source_id, r)) });
                 }
-            }
+                Some((source_id, all_forks::Request::HeaderRequest { number, hash })) => {
+                    let peer_id = sync_inner
+                        .source_mut(source_id)
+                        .unwrap()
+                        .user_data()
+                        .clone();
 
-            /*while let Some(action) = sync.next_request_action() {
-                match action {
-                    optimistic::RequestAction::Start {
-                        start,
-                        block_height,
-                        source,
-                        num_blocks,
-                        ..
-                    } => {
-                        let block_request = network_service.clone().blocks_request(
-                            source.clone(),
-                            network::protocol::BlocksRequestConfig {
-                                start: network::protocol::BlocksRequestConfigStart::Number(
-                                    block_height,
-                                ),
-                                desired_count: num_blocks,
-                                direction: network::protocol::BlocksRequestDirection::Ascending,
-                                fields: network::protocol::BlocksRequestFields {
-                                    header: true,
-                                    body: false,
-                                    justification: true,
-                                },
+                    println!("header search: {:?} {:?}", number, hash); // TODO: remove
+                    let block_request = network_service.clone().blocks_request(
+                        peer_id.clone(),
+                        network::protocol::BlocksRequestConfig {
+                            start: network::protocol::BlocksRequestConfigStart::Hash(hash),
+                            desired_count: NonZeroU32::new(1).unwrap(),
+                            direction: network::protocol::BlocksRequestDirection::Ascending,
+                            fields: network::protocol::BlocksRequestFields {
+                                header: true,
+                                body: false,
+                                justification: false,
                             },
-                        );
+                        },
+                    );
 
-                        let (block_request, abort) = future::abortable(block_request);
-                        let request_id = start.start(abort);
-                        block_requests_finished
-                            .push(async move { (request_id, block_request.await.map_err(|_| ())) });
-                    }
-                    optimistic::RequestAction::Cancel { user_data, .. } => {
-                        user_data.abort();
-                    }
+                    // TODO: use this abort
+                    let (block_request, abort) = future::abortable(block_request);
+
+                    header_requests
+                        .push(async move { block_request.await.unwrap().map(|r| (source_id, r)) });
                 }
+                _ => todo!(),
             }
-
-            let mut verified_blocks = 0u64;
-
-            // Verify blocks that have been fetched from queries.
-            // TODO: tweak this mechanism of stopping sync from time to time
-            while verified_blocks < 4096 {
-                match sync.process_one(crate::ffi::unix_time()) {
-                    optimistic::ProcessOne::Idle { sync: s } => {
-                        sync = s;
-                        break;
-                    }
-
-                    optimistic::ProcessOne::NewBest {
-                        sync: s,
-                        new_best_number,
-                        new_best_hash,
-                    } => {
-                        sync = s;
-
-                        log::debug!(
-                            target: "sync-verify",
-                            "New best block: #{} ({})",
-                            new_best_number,
-                            HashDisplay(&new_best_hash),
-                        );
-
-                        let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                        // TODO: remove expired senders
-                        for notif in &mut best_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-                    }
-
-                    optimistic::ProcessOne::Reset {
-                        sync: s,
-                        reason,
-                        previous_best_height,
-                    } => {
-                        sync = s;
-
-                        log::warn!(
-                            target: "sync-verify",
-                            "Failed to verify block #{}: {}",
-                            previous_best_height + 1,
-                            reason
-                        );
-
-                        let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                        // TODO: remove expired senders
-                        for notif in &mut best_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-                    }
-
-                    optimistic::ProcessOne::Finalized {
-                        sync: s,
-                        finalized_blocks,
-                        ..
-                    } => {
-                        sync = s;
-                        verified_blocks += 1;
-
-                        log::debug!(
-                            target: "sync-verify",
-                            "Finalized {} block",
-                            finalized_blocks.len()
-                        );
-
-                        let scale_encoded_header = finalized_blocks
-                            .last()
-                            .unwrap()
-                            .header
-                            .scale_encoding()
-                            .fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            });
-
-                        // TODO: remove expired senders
-                        for notif in &mut best_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-
-                        // TODO: remove expired senders
-                        for notif in &mut finalized_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-                    }
-
-                    // Other variants can be produced if the sync state machine is configured for
-                    // syncing the storage, which is not the case here.
-                    _ => unreachable!(),
-                }
-            }
-
-            // Since `process_one` is a CPU-heavy operation, looping until it is done can
-            // take a long time. In order to avoid blocking the rest of the program in the
-            // meanwhile, the `yield_once` function interrupts the current task and gives a
-            // chance for other tasks to progress.
-            crate::yield_once().await;*/
 
             futures::select! {
                 network_event = from_network_service.next() => {
@@ -347,38 +247,41 @@ async fn start_sync(
 
                     match network_event {
                         network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
-                            let (source, request) = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let (source, request) = sync_inner.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             debug_assert!(request_to_start.is_none());
                             request_to_start = request.map(|r| (source.id(), r));
                             peers_source_id_map.insert(peer_id.clone(), source.id());
+                            sync = either::Left(sync_inner);
                         },
                         network_service::Event::Disconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            sync.source_mut(id).unwrap().remove();
+                            sync_inner.source_mut(id).unwrap().remove();
                             // TODO: update
                             /*let (_, rq_list) = sync.remove_source(id);
                             for (_, rq) in rq_list {
                                 rq.abort();
                             }*/
+                            sync = either::Left(sync_inner);
                         },
                         network_service::Event::BlockAnnounce { peer_id, announce } => {
                             let source_id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: block header re-encoding
-                            match sync.block_announce(source_id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                            match sync_inner.block_announce(source_id, decoded.header.scale_encoding_vec(), decoded.is_best) {
                                 all_forks::BlockAnnounceOutcome::HeaderVerify(verify) => {
-                                    verify.perform(crate::ffi::unix_time(), ());
-                                    todo!()
+                                    sync = either::Right((source_id, verify));
                                 },
                                 all_forks::BlockAnnounceOutcome::Disjoint { sync: s, next_request } => {
-                                    sync = s;
+                                    sync = either::Left(s);
                                     debug_assert!(request_to_start.is_none());
                                     request_to_start = next_request.map(|r| (source_id, r));
                                 },
                                 all_forks::BlockAnnounceOutcome::TooOld(s) |
                                 all_forks::BlockAnnounceOutcome::AlreadyInChain(s) |
                                 all_forks::BlockAnnounceOutcome::NotFinalizedChain(s) |
-                                all_forks::BlockAnnounceOutcome::InvalidHeader { sync: s, .. } => { sync = s; }
+                                all_forks::BlockAnnounceOutcome::InvalidHeader { sync: s, .. } => {
+                                    sync = either::Left(s);
+                                }
                             }
                         },
                     };
@@ -394,23 +297,25 @@ async fn start_sync(
 
                     match message {
                         ToBackground::Serialize { send_back } => {
-                            let chain = sync.as_chain_information();
+                            let chain = sync_inner.as_chain_information();
                             let serialized = smoldot::database::finalized_serialize::encode_chain_information(chain);
                             let _ = send_back.send(serialized);
                         }
                         ToBackground::SubscribeFinalized { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             finalized_notifications.push(tx);
-                            let current = sync.finalized_block_header().scale_encoding_vec();
+                            let current = sync_inner.finalized_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
                         ToBackground::SubscribeBest { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             best_notifications.push(tx);
-                            let current = sync.best_block_header().scale_encoding_vec();
+                            let current = sync_inner.best_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
                     }
+
+                    sync = either::Left(sync_inner);
                 },
 
                 result = pending_ancestry_searches.select_next_some() => {
@@ -418,37 +323,63 @@ async fn start_sync(
                     // machine. In other words, if `result` is `Err`, the `sync` isn't interested
                     // by this request anymore and considers that it doesn't exist anymore.
                     if let Ok((source_id, request_result)) = result {
-                        let outcome = sync.ancestry_search_response(
+                        let outcome = sync_inner.ancestry_search_response(
                             source_id,
                             // It is possible for the remote to send back a block without a
                             // header. This situation is filtered out with the `flat_map`.
-                            request_result.map(|r| r.into_iter().flat_map(|b| b.header))
-                                .map_err(|_| ())
+                            Ok(request_result.into_iter().flat_map(|b| b.header))
                         );
 
                         match outcome {
-                            all_forks::AncestrySearchResponseOutcome::Verify(verify) => todo!(),
+                            all_forks::AncestrySearchResponseOutcome::Verify(verify) => {
+                                sync = either::Right((source_id, verify));
+                            },
                             all_forks::AncestrySearchResponseOutcome::NotFinalizedChain { sync: s, next_request, .. } |
                             all_forks::AncestrySearchResponseOutcome::Inconclusive { sync: s, next_request } |
                             all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain { sync: s, next_request } => {
-                                sync = s;
+                                sync = either::Left(s);
                                 debug_assert!(request_to_start.is_none());
                                 request_to_start = next_request.map(|r| (source_id, r));
                             },
                         }
 
                         // TODO:
+                    } else {
+                        sync = either::Left(sync_inner);
                     }
                 },
 
-                // TODO: restore
-                /*_ = async move {
-                    if verified_blocks == 0 {
-                        loop {
-                            futures::pending!()
+                result = header_requests.select_next_some() => {
+                    // TODO: call ancestry_search_response for a header request?
+                    // `result` is an error if the block request got cancelled by the sync state
+                    // machine. In other words, if `result` is `Err`, the `sync` isn't interested
+                    // by this request anymore and considers that it doesn't exist anymore.
+                    if let Ok((source_id, request_result)) = result {
+                        let outcome = sync_inner.ancestry_search_response(
+                            source_id,
+                            // It is possible for the remote to send back a block without a
+                            // header. This situation is filtered out with the `flat_map`.
+                            Ok(request_result.into_iter().flat_map(|b| b.header))
+                        );
+
+                        match outcome {
+                            all_forks::AncestrySearchResponseOutcome::Verify(verify) => {
+                                sync = either::Right((source_id, verify));
+                            },
+                            all_forks::AncestrySearchResponseOutcome::NotFinalizedChain { sync: s, next_request, .. } |
+                            all_forks::AncestrySearchResponseOutcome::Inconclusive { sync: s, next_request } |
+                            all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain { sync: s, next_request } => {
+                                sync = either::Left(s);
+                                debug_assert!(request_to_start.is_none());
+                                request_to_start = next_request.map(|r| (source_id, r));
+                            },
                         }
+
+                        // TODO:
+                    } else {
+                        sync = either::Left(sync_inner);
                     }
-                }.fuse() => {}*/
+                },
             }
         }
     }

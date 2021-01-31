@@ -251,6 +251,35 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         self.chain.as_chain_information()
     }
 
+    /// Returns the header of the finalized block.
+    pub fn finalized_block_header(&self) -> header::HeaderRef {
+        self.chain.as_chain_information().finalized_block_header
+    }
+
+    /// Returns the header of the best block.
+    ///
+    /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
+    /// >           best block might be reverted in the future.
+    pub fn best_block_header(&self) -> header::HeaderRef {
+        self.chain.best_block_header()
+    }
+
+    /// Returns the number of the best block.
+    ///
+    /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
+    /// >           best block might be reverted in the future.
+    pub fn best_block_number(&self) -> u64 {
+        self.chain.best_block_header().number
+    }
+
+    /// Returns the hash of the best block.
+    ///
+    /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
+    /// >           best block might be reverted in the future.
+    pub fn best_block_hash(&self) -> [u8; 32] {
+        self.chain.best_block_hash()
+    }
+
     /// Inform the [`AllForksSync`] of a new potential source of blocks.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
@@ -365,7 +394,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             SourceOccupation::Idle,
         ) {
             SourceOccupation::AncestrySearch(hash) => hash,
-            _ => panic!(),
+            SourceOccupation::HeaderRequest(hash) => hash, // TODO: correct?
+            SourceOccupation::Idle => panic!(),
         };
 
         // Set to true below if any block is inserted in `disjoint_blocks`.
@@ -530,10 +560,12 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
                     let local_finalized_height = self.chain.finalized_block_header().number;
                     debug_assert!(*disjoint_block_height > local_finalized_height);
+                    let first_block_hash = *header::decode(&disjoint_block_encoded_header)
+                        .unwrap()
+                        .parent_hash;
+                    source_access.occupation = SourceOccupation::AncestrySearch(first_block_hash);
                     return Some(Request::AncestrySearch {
-                        first_block_hash: *header::decode(&disjoint_block_encoded_header)
-                            .unwrap()
-                            .parent_hash,
+                        first_block_hash,
                         num_blocks: NonZeroU64::new(
                             *disjoint_block_height - local_finalized_height,
                         )
@@ -544,6 +576,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 // Block header isn't known.
                 // Start a header request to obtain the header of this block.
                 disjoint_block.ancestry_search = Some(source_id);
+                source_access.occupation = SourceOccupation::HeaderRequest(*disjoint_block_hash);
                 return Some(Request::HeaderRequest {
                     number: *disjoint_block_height,
                     hash: *disjoint_block_hash,
@@ -593,7 +626,15 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 BlockAnnounceOutcome::NotFinalizedChain(sync)
             }
             HeaderFromSourceOutcome::Disjoint(mut sync) => {
-                let next_request = sync.source_next_request(source_id);
+                let next_request = if matches!(
+                    sync.inner.sources.get(&source_id).unwrap().occupation,
+                    SourceOccupation::Idle
+                ) {
+                    sync.source_next_request(source_id)
+                } else {
+                    None
+                };
+
                 BlockAnnounceOutcome::Disjoint { sync, next_request }
             }
         }
@@ -1177,7 +1218,20 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
             },
             // TODO: use is_new_best
             (Ok(is_new_best), true) => {
-                let next_request = self.parent.source_next_request(self.source_id);
+                let next_request = if matches!(
+                    self.parent
+                        .inner
+                        .sources
+                        .get(&self.source_id)
+                        .unwrap()
+                        .occupation,
+                    SourceOccupation::Idle
+                ) {
+                    self.parent.source_next_request(self.source_id)
+                } else {
+                    None
+                };
+
                 HeaderVerifyOutcome::Success {
                     sync: self.parent,
                     next_request,
@@ -1193,7 +1247,20 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
                 user_data,
             },
             (Err((error, user_data)), true) => {
-                let next_request = self.parent.source_next_request(self.source_id);
+                let next_request = if matches!(
+                    self.parent
+                        .inner
+                        .sources
+                        .get(&self.source_id)
+                        .unwrap()
+                        .occupation,
+                    SourceOccupation::Idle
+                ) {
+                    self.parent.source_next_request(self.source_id)
+                } else {
+                    None
+                };
+
                 HeaderVerifyOutcome::Error {
                     sync: self.parent,
                     error,

@@ -185,6 +185,7 @@ impl NetworkService {
                                 break Event::Connected {
                                     peer_id,
                                     best_block_number: best_number,
+                                    best_block_hash: best_hash,
                                 };
                             }
                             service::Event::ChainDisconnected {
