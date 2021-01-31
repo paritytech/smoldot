@@ -140,7 +140,7 @@ async fn start_sync(
                 1024
             },
             // TODO: document
-            max_disjoint_blocks: 1024,
+            max_disjoint_headers: 1024,
             full: false,
         },
     ));
