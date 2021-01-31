@@ -357,20 +357,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         mut self,
         source_id: SourceId,
         scale_encoded_headers: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
-    ) -> (AncestrySearchResponseOutcome<TSrc, TBl>, Option<Request>) {
-        let outcome = self.ancestry_search_response_inner(source_id, scale_encoded_headers);
-        // TODO: (outcome, )
-        todo!()
-    }
-
-    fn ancestry_search_response_inner(
-        mut self,
-        source_id: SourceId,
-        scale_encoded_headers: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
     ) -> AncestrySearchResponseOutcome<TSrc, TBl> {
-        // Height of the finalized chain. Saved for later.
-        let local_finalized_block_number = self.chain.finalized_block_header().number;
-
         // The next block in the list of headers should have a hash equal to this one.
         // Sets the `occupation` of `source_id` back to `Idle`.
         let expected_next_hash = match mem::replace(
@@ -409,10 +396,10 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             let decoded_header_number = decoded_header.number;
 
             match self.header_from_source(source_id, &expected_next_hash, decoded_header, false) {
-                BlockAnnounceOutcome::HeaderVerify(this) => {
+                HeaderFromSourceOutcome::HeaderVerify(this) => {
                     return AncestrySearchResponseOutcome::Verify(this);
                 }
-                BlockAnnounceOutcome::TooOld(this) => {
+                HeaderFromSourceOutcome::TooOld(this) => {
                     // Block is below the finalized block number.
                     // Ancestry searches never request any block earlier than the finalized block
                     // number. `TooOld` can happen if the source is misbehaving, but also if the
@@ -422,7 +409,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     self = this;
                     break;
                 }
-                BlockAnnounceOutcome::NotFinalizedChain(this) => {
+                HeaderFromSourceOutcome::NotFinalizedChain(this) => {
                     // Block isn't part of the finalized chain.
                     // This doesn't necessarily mean that the source and the local node disagree
                     // on the finalized chain. It is possible that the finalized block has been
@@ -435,22 +422,28 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     let discarded =
                         self.discard_disjoint_chain(decoded_header_number, expected_next_hash);
 
+                    let next_request = self.source_next_request(source_id);
                     return AncestrySearchResponseOutcome::NotFinalizedChain {
                         sync: self,
+                        next_request,
                         discarded_unverified_block_headers: discarded
                             .into_iter()
                             .map(|(_, _, b)| b.scale_encoded_header.unwrap())
                             .collect(),
                     };
                 }
-                BlockAnnounceOutcome::AlreadyInChain(this) => {
+                HeaderFromSourceOutcome::AlreadyInChain(mut this) => {
                     // Block is already in chain. Can happen if a different response or
                     // announcement has arrived and been processed between the moment the request
                     // was emitted and the moment the response is received.
                     debug_assert_eq!(index_in_response, 0);
-                    return AncestrySearchResponseOutcome::AllAlreadyInChain(this);
+                    let next_request = this.source_next_request(source_id);
+                    return AncestrySearchResponseOutcome::AllAlreadyInChain {
+                        sync: this,
+                        next_request,
+                    };
                 }
-                BlockAnnounceOutcome::Disjoint(this) => {
+                HeaderFromSourceOutcome::Disjoint(this) => {
                     // Block of unknown ancestry. Continue looping.
                     any_progress = true;
                     self = this;
@@ -461,7 +454,11 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // If this is reached, then the ancestry search was inconclusive. Only disjoint blocks
         // have been received.
         // TODO: use any_progress
-        AncestrySearchResponseOutcome::Inconclusive(self)
+        let next_request = self.source_next_request(source_id);
+        AncestrySearchResponseOutcome::Inconclusive {
+            sync: self,
+            next_request,
+        }
     }
 
     /// Finds a request that the given source could start performing.
@@ -578,12 +575,28 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // TODO: also return Option<Request>?
         let announced_header = match header::decode(&announced_scale_encoded_header) {
             Ok(h) => h,
-            Err(err) => todo!(), // TODO: return (BlockAnnounceOutcome::InvalidHeader(err), None),
+            Err(err) => return BlockAnnounceOutcome::InvalidHeader(err),
         };
 
         let announced_header_hash = announced_header.hash();
 
-        self.header_from_source(source_id, &announced_header_hash, announced_header, is_best)
+        match self.header_from_source(source_id, &announced_header_hash, announced_header, is_best)
+        {
+            HeaderFromSourceOutcome::HeaderVerify(verify) => {
+                BlockAnnounceOutcome::HeaderVerify(verify)
+            }
+            HeaderFromSourceOutcome::TooOld(sync) => BlockAnnounceOutcome::TooOld(sync),
+            HeaderFromSourceOutcome::AlreadyInChain(sync) => {
+                BlockAnnounceOutcome::AlreadyInChain(sync)
+            }
+            HeaderFromSourceOutcome::NotFinalizedChain(sync) => {
+                BlockAnnounceOutcome::NotFinalizedChain(sync)
+            }
+            HeaderFromSourceOutcome::Disjoint(mut sync) => {
+                let next_request = sync.source_next_request(source_id);
+                BlockAnnounceOutcome::Disjoint { sync, next_request }
+            }
+        }
     }
 
     /// Called when a source reports a header, either through a block announce, an ancestry
@@ -602,7 +615,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         header_hash: &[u8; 32],
         header: header::HeaderRef,
         known_to_be_source_best: bool,
-    ) -> BlockAnnounceOutcome<TSrc, TBl> {
+    ) -> HeaderFromSourceOutcome<TSrc, TBl> {
         debug_assert_eq!(header.hash(), *header_hash);
 
         // No matter what is done below, start by updating the view the local state machine
@@ -619,7 +632,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
         if header.number <= self.chain.finalized_block_header().number {
-            return BlockAnnounceOutcome::TooOld(self);
+            return HeaderFromSourceOutcome::TooOld(self);
         }
 
         // Now that we know that the block height is (supposedly) a descendant of the finalized
@@ -640,13 +653,13 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             .non_finalized_block_by_hash(&header_hash)
             .is_some()
         {
-            return BlockAnnounceOutcome::AlreadyInChain(self);
+            return HeaderFromSourceOutcome::AlreadyInChain(self);
         }
 
         // `pending_body_downloads` contains blocks whose header has already been verified.
         if self.inner.pending_body_downloads.contains_key(header_hash) {
             debug_assert!(self.inner.full);
-            return BlockAnnounceOutcome::AlreadyInChain(self);
+            return HeaderFromSourceOutcome::AlreadyInChain(self);
         }
 
         if *header.parent_hash == self.chain.finalized_block_hash()
@@ -674,7 +687,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             );
             let verifiable_blocks = self.discard_disjoint_chain(header.number, *header_hash);
 
-            BlockAnnounceOutcome::HeaderVerify(HeaderVerify {
+            HeaderFromSourceOutcome::HeaderVerify(HeaderVerify {
                 parent: self,
                 verifiable_blocks: verifiable_blocks
                     .into_iter()
@@ -690,7 +703,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .inner
                 .disjoint_blocks
                 .contains_key(&(header.number, *header_hash)));
-            BlockAnnounceOutcome::NotFinalizedChain(self)
+            HeaderFromSourceOutcome::NotFinalizedChain(self)
         } else {
             // Parent is not in the `NonFinalizedTree`. It is unknown whether this block belongs
             // to the same finalized chain as the one known locally, but we expect that it is the
@@ -717,7 +730,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 }
             }
 
-            BlockAnnounceOutcome::Disjoint(self)
+            HeaderFromSourceOutcome::Disjoint(self)
         }
     }
 
@@ -1005,8 +1018,10 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
     }
 }
 
-/// Outcome of calling [`AllForksSync::block_announce`].
-pub enum BlockAnnounceOutcome<TSrc, TBl> {
+/// Outcome of calling [`AllForksSync::header_from_source`].
+///
+/// Not public.
+enum HeaderFromSourceOutcome<TSrc, TBl> {
     /// Header is ready to be verified.
     HeaderVerify(HeaderVerify<TSrc, TBl>),
 
@@ -1026,6 +1041,33 @@ pub enum BlockAnnounceOutcome<TSrc, TBl> {
     Disjoint(AllForksSync<TSrc, TBl>),
 }
 
+/// Outcome of calling [`AllForksSync::block_announce`].
+pub enum BlockAnnounceOutcome<TSrc, TBl> {
+    /// Header is ready to be verified.
+    HeaderVerify(HeaderVerify<TSrc, TBl>),
+
+    /// Announced block is too old to be part of the finalized chain.
+    ///
+    /// It is assumed that all sources will eventually agree on the same finalized chain. Blocks
+    /// whose height is inferior to the height of the latest known finalized block should simply
+    /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
+    /// verified, and it is assumed that the source is simply late.
+    TooOld(AllForksSync<TSrc, TBl>),
+    /// Announced block has already been successfully verified and is part of the non-finalized
+    /// chain.
+    AlreadyInChain(AllForksSync<TSrc, TBl>),
+    /// Announced block is known to not be a descendant of the finalized block.
+    NotFinalizedChain(AllForksSync<TSrc, TBl>),
+    /// Header cannot be verified now, and has been stored for later.
+    Disjoint {
+        sync: AllForksSync<TSrc, TBl>,
+        /// Next request that the same source should now perform.
+        next_request: Option<Request>,
+    },
+    /// Failed to decode announce header.
+    InvalidHeader(header::Error),
+}
+
 /// Outcome of calling [`SourceMutAccess::ancestry_search_response`].
 pub enum AncestrySearchResponseOutcome<TSrc, TBl> {
     /// Ready to start verifying one or more headers return in the ancestry search.
@@ -1039,6 +1081,9 @@ pub enum AncestrySearchResponseOutcome<TSrc, TBl> {
     NotFinalizedChain {
         sync: AllForksSync<TSrc, TBl>,
 
+        /// Next request that the same source should now perform.
+        next_request: Option<Request>,
+
         /// List of block headers that were pending verification and that have now been discarded
         /// since it has been found out that they don't belong to the finalized chain.
         discarded_unverified_block_headers: Vec<Vec<u8>>,
@@ -1046,13 +1091,23 @@ pub enum AncestrySearchResponseOutcome<TSrc, TBl> {
 
     /// Couldn't verify any of the blocks of the ancestry search. Some or all of these blocks
     /// have been stored in the local machine for later.
-    Inconclusive(AllForksSync<TSrc, TBl>),
+    Inconclusive {
+        sync: AllForksSync<TSrc, TBl>,
+
+        /// Next request that the same source should now perform.
+        next_request: Option<Request>,
+    },
 
     /// All blocks in the ancestry search response were already in the list of verified blocks.
     ///
     /// This can happen if a block announce or different ancestry search response has been
     /// processed in between the request and response.
-    AllAlreadyInChain(AllForksSync<TSrc, TBl>),
+    AllAlreadyInChain {
+        sync: AllForksSync<TSrc, TBl>,
+
+        /// Next request that the same source should now perform.
+        next_request: Option<Request>,
+    },
 }
 
 /// Identifier for a source in the [`AllForksSync`].
