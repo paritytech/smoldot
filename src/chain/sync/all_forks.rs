@@ -87,7 +87,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::collections::{btree_map, BTreeMap, BTreeSet};
+use alloc::collections::{btree_map, BTreeMap, BTreeSet, VecDeque};
 use core::{mem, num::NonZeroU64, time::Duration};
 
 /// Configuration for the [`AllForksSync`].
@@ -381,6 +381,9 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             _ => panic!(),
         };
 
+        // Set to true below if any block is inserted in `disjoint_blocks`.
+        let mut any_progress = false;
+
         // Iterate through the headers. If the request has failed, treat it the same way as if
         // no blocks were returned.
         for (index_in_response, scale_encoded_header) in scale_encoded_headers
@@ -428,12 +431,16 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     self = this;
 
                     // Discard from the local state all blocks that descend from this one.
-                    // TODO: blocks aren't marked as bad
                     // TODO: keep known bad blocks and document
-                    self.discard_disjoint_chain(decoded_header_number, expected_next_hash);
+                    let discarded =
+                        self.discard_disjoint_chain(decoded_header_number, expected_next_hash);
 
                     return AncestrySearchResponseOutcome::NotFinalizedChain {
-                        discarded_unverified_block_headers: todo!(),
+                        sync: self,
+                        discarded_unverified_block_headers: discarded
+                            .into_iter()
+                            .map(|(_, _, b)| b.scale_encoded_header.unwrap())
+                            .collect(),
                     };
                 }
                 BlockAnnounceOutcome::AlreadyInChain(this) => {
@@ -445,6 +452,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 }
                 BlockAnnounceOutcome::Disjoint(this) => {
                     // Block of unknown ancestry. Continue looping.
+                    any_progress = true;
                     self = this;
                 }
             }
@@ -452,6 +460,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
         // If this is reached, then the ancestry search was inconclusive. Only disjoint blocks
         // have been received.
+        // TODO: use any_progress
         AncestrySearchResponseOutcome::Inconclusive(self)
     }
 
@@ -625,14 +634,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // TODO: somehow optimize? the encoded block is normally known from it being decoded
         let scale_encoded_header = header.scale_encoding_vec();
 
-        // Calculate the height of the parent of the block.
-        let parent_header_number = match header.number.checked_sub(1) {
-            Some(n) => n,
-            // The code right above verifies that `header.number <= finalized_number`,
-            // which is always true if `header.number` is 0.
-            None => unreachable!(),
-        };
-
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
             .chain
@@ -660,14 +661,25 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .disjoint_blocks
                 .contains_key(&(header.number, *header_hash)));
 
-            let block_height = header.number;
-            let parent_hash = *header.parent_hash;
+            // The block and all its descendants can all be verified.
+            // Remove them all from `disjoint_blocks` and move them to a new `HeaderVerify`
+            // object.
+            self.inner.disjoint_blocks.insert(
+                (header.number, *header_hash),
+                DisjointBlock {
+                    scale_encoded_header: Some(scale_encoded_header.to_vec()),
+                    known_bad: false,
+                    ancestry_search: None,
+                },
+            );
+            let verifiable_blocks = self.discard_disjoint_chain(header.number, *header_hash);
+
             BlockAnnounceOutcome::HeaderVerify(HeaderVerify {
                 parent: self,
-                block_hash: *header_hash,
-                block_height,
-                parent_hash,
-                scale_encoded_header,
+                verifiable_blocks: verifiable_blocks
+                    .into_iter()
+                    .map(|(_, _, bl)| bl.scale_encoded_header.unwrap())
+                    .collect(),
             })
         } else if header.number == self.chain.finalized_block_header().number + 1 {
             // Checked above.
@@ -769,11 +781,18 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ///
     /// Panics if `(number, hash)` isn't an entry in [`Inner::disjoint_chain]`.
     ///
-    fn discard_disjoint_chain(&mut self, number: u64, hash: [u8; 32]) {
+    fn discard_disjoint_chain(
+        &mut self,
+        number: u64,
+        hash: [u8; 32],
+    ) -> Vec<(u64, [u8; 32], DisjointBlock)> {
         // TODO: keep a list of banned blocks for later? this is required by chain specs anyway
 
         // The implementation consists in iterating over the increasing block number, and removing
         // all blocks whose parent was removed at the previous iteration.
+
+        // Return value of the function.
+        let mut result = Vec::with_capacity(64);
 
         // List of blocks to discard at the next iteration.
         let mut blocks_to_discard = Vec::with_capacity(16);
@@ -800,7 +819,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
             // Now discard `blocks_to_discard`.
             for to_discard in mem::replace(&mut blocks_to_discard, blocks_to_discard_next) {
-                let discarded_block = self
+                let mut discarded_block = self
                     .inner
                     .disjoint_blocks
                     .remove(&(number, to_discard))
@@ -810,6 +829,9 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 if let Some(_source_id) = discarded_block.ancestry_search {
                     todo!() // TODO:
                 }
+
+                discarded_block.ancestry_search = None;
+                result.push((number, to_discard, discarded_block));
             }
 
             // The `for` loop would be infinite unless we put an explicit `break`.
@@ -819,6 +841,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 break;
             }
         }
+
+        result
     }
 }
 
@@ -981,7 +1005,7 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
     }
 }
 
-/// Outcome of calling [`AllForksSync::header_from_source`].
+/// Outcome of calling [`AllForksSync::block_announce`].
 pub enum BlockAnnounceOutcome<TSrc, TBl> {
     /// Header is ready to be verified.
     HeaderVerify(HeaderVerify<TSrc, TBl>),
@@ -1013,6 +1037,8 @@ pub enum AncestrySearchResponseOutcome<TSrc, TBl> {
     /// is possible for this to legitimately happen, for example if the finalized chain has been
     /// updated while the ancestry search was in progress.
     NotFinalizedChain {
+        sync: AllForksSync<TSrc, TBl>,
+
         /// List of block headers that were pending verification and that have now been discarded
         /// since it has been found out that they don't belong to the finalized chain.
         discarded_unverified_block_headers: Vec<Vec<u8>>,
@@ -1041,10 +1067,9 @@ pub struct SourceId(u64);
 /// Internally holds the [`AllForksSync`].
 pub struct HeaderVerify<TSrc, TBl> {
     parent: AllForksSync<TSrc, TBl>,
-    block_height: u64,
-    block_hash: [u8; 32],
-    parent_hash: [u8; 32],
-    scale_encoded_header: Vec<u8>,
+
+    /// List of blocks to verify. Must never be empty.
+    verifiable_blocks: VecDeque<Vec<u8>>,
 }
 
 impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
@@ -1054,70 +1079,13 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
         now_from_unix_epoch: Duration,
         user_data: TBl,
     ) -> HeaderVerifyOutcome<TSrc, TBl> {
-        // Before verifying, find in `disjoint_blocks` the next header to verify.
-        // The order of verification is: any other block with the same height and the same
-        // parent, then any child.
-        // TODO: move after verification
-        // TODO: make cleaner
-        let next_verification: Option<(u64, [u8; 32], [u8; 32], Vec<u8>)> = {
-            let sibling = self
-                .parent
-                .inner
-                .disjoint_blocks
-                .range((self.block_height, [0x0; 32])..=(self.block_height, [0xff; 32]))
-                .filter(|(_, b)| !b.known_bad)
-                .find(|(_, block)| {
-                    if let Some(header) = block.scale_encoded_header.as_ref() {
-                        let decoded = header::decode(&header).unwrap();
-                        *decoded.parent_hash == self.parent_hash
-                    } else {
-                        false
-                    }
-                })
-                .map(|((n, h), _)| (*n, *h, self.parent_hash));
+        // `verifiable_blocks` must never be empty.
+        let scale_encoded_header = self.verifiable_blocks.pop_front().unwrap();
 
-            let parameters = if let Some(sibling) = sibling {
-                Some(sibling)
-            } else {
-                self.parent
-                    .inner
-                    .disjoint_blocks
-                    .range((self.block_height + 1, [0x0; 32])..=(self.block_height + 1, [0xff; 32]))
-                    .filter(|(_, b)| !b.known_bad)
-                    .find(|(_, block)| {
-                        if let Some(header) = block.scale_encoded_header.as_ref() {
-                            let decoded = header::decode(&header).unwrap();
-                            *decoded.parent_hash == self.block_hash
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|((n, h), _)| (*n, *h, self.block_hash))
-            };
-
-            if let Some((height, hash, parent_hash)) = parameters {
-                let disjoint_block = self
-                    .parent
-                    .inner
-                    .disjoint_blocks
-                    .remove(&(height, hash))
-                    .unwrap();
-                Some((
-                    height,
-                    hash,
-                    parent_hash,
-                    disjoint_block.scale_encoded_header.unwrap(),
-                ))
-            } else {
-                None
-            }
-        };
-
-        // Perform the actual verification.
         let result = match self
             .parent
             .chain
-            .verify_header(self.scale_encoded_header, now_from_unix_epoch)
+            .verify_header(scale_encoded_header, now_from_unix_epoch)
         {
             Ok(blocks_tree::HeaderVerifySuccess::Insert {
                 insert,
@@ -1136,36 +1104,27 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
             | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
         };
 
-        match (result, next_verification) {
+        match (result, self.verifiable_blocks.is_empty()) {
             (
                 Ok(is_new_best), // TODO: use is_new_best
-                Some((block_height, block_hash, parent_hash, scale_encoded_header)),
+                false,
             ) => HeaderVerifyOutcome::SuccessContinue {
                 next_block: HeaderVerify {
                     parent: self.parent,
-                    block_height,
-                    block_hash,
-                    parent_hash,
-                    scale_encoded_header,
+                    verifiable_blocks: self.verifiable_blocks,
                 },
             },
             // TODO: use is_new_best
-            (Ok(is_new_best), None) => HeaderVerifyOutcome::Success(self.parent),
-            (
-                Err((error, user_data)),
-                Some((block_height, block_hash, parent_hash, scale_encoded_header)),
-            ) => HeaderVerifyOutcome::ErrorContinue {
+            (Ok(is_new_best), true) => HeaderVerifyOutcome::Success(self.parent),
+            (Err((error, user_data)), false) => HeaderVerifyOutcome::ErrorContinue {
                 next_block: HeaderVerify {
                     parent: self.parent,
-                    block_height,
-                    block_hash,
-                    parent_hash,
-                    scale_encoded_header,
+                    verifiable_blocks: self.verifiable_blocks,
                 },
                 error,
                 user_data,
             },
-            (Err((error, user_data)), None) => HeaderVerifyOutcome::Error {
+            (Err((error, user_data)), true) => HeaderVerifyOutcome::Error {
                 sync: self.parent,
                 error,
                 user_data,

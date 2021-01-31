@@ -138,6 +138,8 @@ async fn start_sync(
             // This is the maximum number of blocks between two consecutive justifications.
             1024
         },
+        // TODO: document
+        max_disjoint_blocks: 1024,
         full: false,
     });
 
@@ -313,7 +315,7 @@ async fn start_sync(
                             let source_id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: block header re-encoding
-                            match sync.source_mut(source_id).unwrap().block_announce(decoded.header.scale_encoding().fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a }), decoded.is_best, crate::ffi::unix_time()) {
+                            match sync.block_announce(source_id, decoded.header.scale_encoding_vec(), decoded.is_best) {
                                 all_forks::BlockAnnounceOutcome::HeaderImported => {},
                                 all_forks::BlockAnnounceOutcome::BlockBodyDownloadStart => {},
                                 all_forks::BlockAnnounceOutcome::AncestrySearchStart { first_block_hash, num_blocks } => {
@@ -350,12 +352,8 @@ async fn start_sync(
                                         rx.await.unwrap().map(|r| (source_id, r))
                                     });
                                 },
-                                all_forks::BlockAnnounceOutcome::TooOld => {},
-                                all_forks::BlockAnnounceOutcome::AlreadyVerified => {},
-                                all_forks::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all_forks::BlockAnnounceOutcome::Queued => {},
-                                all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {},
-                                all_forks::BlockAnnounceOutcome::HeaderVerifyError(error) => {},
+                                all_forks::BlockAnnounceOutcome::TooOld(s) => { sync = s; },
+                                all_forks::BlockAnnounceOutcome::NotFinalizedChain(s) => { sync = s; },
                             }
                         },
                     };
