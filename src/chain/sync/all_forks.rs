@@ -575,7 +575,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // TODO: also return Option<Request>?
         let announced_header = match header::decode(&announced_scale_encoded_header) {
             Ok(h) => h,
-            Err(err) => return BlockAnnounceOutcome::InvalidHeader(err),
+            Err(error) => return BlockAnnounceOutcome::InvalidHeader { sync: self, error },
         };
 
         let announced_header_hash = announced_header.hash();
@@ -689,6 +689,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
             HeaderFromSourceOutcome::HeaderVerify(HeaderVerify {
                 parent: self,
+                source_id,
                 verifiable_blocks: verifiable_blocks
                     .into_iter()
                     .map(|(_, _, bl)| bl.scale_encoded_header.unwrap())
@@ -1065,7 +1066,10 @@ pub enum BlockAnnounceOutcome<TSrc, TBl> {
         next_request: Option<Request>,
     },
     /// Failed to decode announce header.
-    InvalidHeader(header::Error),
+    InvalidHeader {
+        sync: AllForksSync<TSrc, TBl>,
+        error: header::Error,
+    },
 }
 
 /// Outcome of calling [`SourceMutAccess::ancestry_search_response`].
@@ -1122,7 +1126,8 @@ pub struct SourceId(u64);
 /// Internally holds the [`AllForksSync`].
 pub struct HeaderVerify<TSrc, TBl> {
     parent: AllForksSync<TSrc, TBl>,
-
+    /// Source that gave the first block that allows verification.
+    source_id: SourceId,
     /// List of blocks to verify. Must never be empty.
     verifiable_blocks: VecDeque<Vec<u8>>,
 }
@@ -1166,24 +1171,36 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
             ) => HeaderVerifyOutcome::SuccessContinue {
                 next_block: HeaderVerify {
                     parent: self.parent,
+                    source_id: self.source_id,
                     verifiable_blocks: self.verifiable_blocks,
                 },
             },
             // TODO: use is_new_best
-            (Ok(is_new_best), true) => HeaderVerifyOutcome::Success(self.parent),
+            (Ok(is_new_best), true) => {
+                let next_request = self.parent.source_next_request(self.source_id);
+                HeaderVerifyOutcome::Success {
+                    sync: self.parent,
+                    next_request,
+                }
+            }
             (Err((error, user_data)), false) => HeaderVerifyOutcome::ErrorContinue {
                 next_block: HeaderVerify {
                     parent: self.parent,
+                    source_id: self.source_id,
                     verifiable_blocks: self.verifiable_blocks,
                 },
                 error,
                 user_data,
             },
-            (Err((error, user_data)), true) => HeaderVerifyOutcome::Error {
-                sync: self.parent,
-                error,
-                user_data,
-            },
+            (Err((error, user_data)), true) => {
+                let next_request = self.parent.source_next_request(self.source_id);
+                HeaderVerifyOutcome::Error {
+                    sync: self.parent,
+                    error,
+                    user_data,
+                    next_request,
+                }
+            }
         }
     }
 
@@ -1194,7 +1211,11 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
 /// Outcome of calling [`HeaderVerify::perform`].
 pub enum HeaderVerifyOutcome<TSrc, TBl> {
     /// Header has been successfully verified.
-    Success(AllForksSync<TSrc, TBl>),
+    Success {
+        sync: AllForksSync<TSrc, TBl>,
+        /// Next request that must be performed on the source.
+        next_request: Option<Request>,
+    },
 
     /// Header has been successfully verified. A follow-up header is ready to be verified.
     SuccessContinue {
@@ -1209,6 +1230,8 @@ pub enum HeaderVerifyOutcome<TSrc, TBl> {
         error: verify::header_only::Error,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
+        /// Next request that must be performed on the source.
+        next_request: Option<Request>,
     },
 
     /// Header verification failed. A follow-up header is ready to be verified.

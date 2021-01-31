@@ -151,7 +151,55 @@ async fn start_sync(
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
 
+        let mut request_to_start = None::<(all_forks::SourceId, all_forks::Request)>;
+
         loop {
+            match request_to_start.take() {
+                None => {}
+                Some((
+                    source_id,
+                    all_forks::Request::AncestrySearch {
+                        first_block_hash,
+                        num_blocks,
+                    },
+                )) => {
+                    println!("ancestry search: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
+                    let (send_back, rx) = oneshot::channel();
+                    let send_result = to_foreground
+                        .send(FromBackground::RequestStart {
+                            target: peer_id.clone(),
+                            request: network::protocol::BlocksRequestConfig {
+                                start: network::protocol::BlocksRequestConfigStart::Hash(
+                                    first_block_hash,
+                                ),
+                                desired_count: NonZeroU32::new(
+                                    u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                                )
+                                .unwrap(),
+                                direction: network::protocol::BlocksRequestDirection::Descending,
+                                fields: network::protocol::BlocksRequestFields {
+                                    header: true,
+                                    body: false,
+                                    justification: false,
+                                },
+                            },
+                            send_back,
+                        })
+                        .await;
+
+                    // If the channel is closed, the sync service has been closed too.
+                    if send_result.is_err() {
+                        return;
+                    }
+
+                    // TODO: use this abort
+                    let (rx, abort) = future::abortable(rx);
+
+                    pending_ancestry_searches
+                        .push(async move { rx.await.unwrap().map(|r| (source_id, r)) });
+                }
+            }
+
             /*while let Some(action) = sync.next_request_action() {
                 match action {
                     optimistic::RequestAction::Start {
@@ -299,8 +347,10 @@ async fn start_sync(
 
                     match network_event {
                         network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
-                            let id = sync.add_source(peer_id.clone(), best_block_number, best_block_hash).id();
-                            peers_source_id_map.insert(peer_id.clone(), id);
+                            let (source, request) = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            debug_assert!(request_to_start.is_none());
+                            request_to_start = request.map(|r| (source.id(), r));
+                            peers_source_id_map.insert(peer_id.clone(), source.id());
                         },
                         network_service::Event::Disconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
@@ -316,45 +366,29 @@ async fn start_sync(
                             let decoded = announce.decode();
                             // TODO: block header re-encoding
                             match sync.block_announce(source_id, decoded.header.scale_encoding_vec(), decoded.is_best) {
-                                all_forks::BlockAnnounceOutcome::HeaderImported => {},
-                                all_forks::BlockAnnounceOutcome::BlockBodyDownloadStart => {},
-                                all_forks::BlockAnnounceOutcome::AncestrySearchStart { first_block_hash, num_blocks } => {
-                                    println!("ancestry search: {:?} {:?}", first_block_hash, num_blocks);  // TODO: remove
-                                    let (send_back, rx) = oneshot::channel();
-                                    let send_result = to_foreground
-                                        .send(FromBackground::RequestStart {
-                                            target: peer_id.clone(),
-                                            request: network::protocol::BlocksRequestConfig {
-                                                start: network::protocol::BlocksRequestConfigStart::Hash(
-                                                    first_block_hash
-                                                ),
-                                                desired_count: NonZeroU32::new(u32::try_from(num_blocks.get()).unwrap_or(u32::max_value())).unwrap(),
-                                                direction: network::protocol::BlocksRequestDirection::Descending,
-                                                fields: network::protocol::BlocksRequestFields {
-                                                    header: true,
-                                                    body: false,
-                                                    justification: false,
-                                                },
-                                            },
-                                            send_back,
-                                        })
-                                        .await;
-
-                                    // If the channel is closed, the sync service has been closed too.
-                                    if send_result.is_err() {
-                                        return;
-                                    }
-
-                                    // TODO: use this abort
-                                    let (rx, abort) = future::abortable(rx);
-
-                                    pending_ancestry_searches.push(async move {
-                                        rx.await.unwrap().map(|r| (source_id, r))
-                                    });
+                                all_forks::BlockAnnounceOutcome::HeaderVerify(verify) => {
+                                    verify.perform(crate::ffi::unix_time(), ());
+                                    todo!()
                                 },
-                                all_forks::BlockAnnounceOutcome::TooOld(s) => { sync = s; },
-                                all_forks::BlockAnnounceOutcome::NotFinalizedChain(s) => { sync = s; },
+                                all_forks::BlockAnnounceOutcome::Disjoint { sync: s, next_request } => {
+                                    sync = s;
+                                    debug_assert!(request_to_start.is_none());
+                                    request_to_start = next_request.map(|r| (source_id, r));
+                                },
+                                all_forks::BlockAnnounceOutcome::TooOld(s) |
+                                all_forks::BlockAnnounceOutcome::AlreadyInChain(s) |
+                                all_forks::BlockAnnounceOutcome::NotFinalizedChain(s) |
+                                all_forks::BlockAnnounceOutcome::InvalidHeader { sync: s, .. } => { sync = s; }
                             }
+                        },
+                    };
+                }
+
+                message = from_foreground.next() => {
+                    let message = match message {
+                        Some(m) => m,
+                        None => {
+                            return
                         },
                     };
 
@@ -384,23 +418,27 @@ async fn start_sync(
                     // machine. In other words, if `result` is `Err`, the `sync` isn't interested
                     // by this request anymore and considers that it doesn't exist anymore.
                     if let Ok((source_id, request_result)) = result {
-                        sync.ancestry_search_response(
-                            crate::ffi::unix_time(),
+                        let outcome = sync.ancestry_search_response(
                             source_id,
                             // It is possible for the remote to send back a block without a
                             // header. This situation is filtered out with the `flat_map`.
                             request_result.map(|r| r.into_iter().flat_map(|b| b.header))
                                 .map_err(|_| ())
                         );
+
+                        match outcome {
+                            all_forks::AncestrySearchResponseOutcome::Verify(verify) => todo!(),
+                            all_forks::AncestrySearchResponseOutcome::NotFinalizedChain { sync: s, next_request, .. } |
+                            all_forks::AncestrySearchResponseOutcome::Inconclusive { sync: s, next_request } |
+                            all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain { sync: s, next_request } => {
+                                sync = s;
+                                debug_assert!(request_to_start.is_none());
+                                request_to_start = next_request.map(|r| (source_id, r));
+                            },
+                        }
+
+                        // TODO:
                     }
-                    // TODO: restore
-                    /*let result = result.map_err(|_| ()).and_then(|v| v);
-                    let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
-                        scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                        scale_encoded_justification: block.justification,
-                        scale_encoded_extrinsics: Vec::new(),
-                        user_data: (),
-                    })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));*/
                 },
 
                 // TODO: restore
