@@ -434,9 +434,11 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             };
 
             let decoded_header_number = decoded_header.number;
+            println!("response block {:?}", decoded_header_number);
 
             match self.header_from_source(source_id, &expected_next_hash, decoded_header, false) {
                 HeaderFromSourceOutcome::HeaderVerify(this) => {
+                    println!("verify");
                     return AncestrySearchResponseOutcome::Verify(this);
                 }
                 HeaderFromSourceOutcome::TooOld(this) => {
@@ -446,6 +448,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     // finalized block has been updated between the moment the request was emitted
                     // and the moment the response is received.
                     debug_assert_eq!(index_in_response, 0);
+                    println!("too old");
                     self = this;
                     break;
                 }
@@ -456,6 +459,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     // updated between the moment the request was emitted and the moment the
                     // response is received.
                     self = this;
+                    println!("not finalized");
 
                     // Discard from the local state all blocks that descend from this one.
                     // TODO: keep known bad blocks and document
@@ -478,6 +482,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     // announcement has arrived and been processed between the moment the request
                     // was emitted and the moment the response is received.
                     debug_assert_eq!(index_in_response, 0);
+                    println!("already in chain");
                     let next_request = this.source_next_request(source_id);
                     return AncestrySearchResponseOutcome::AllAlreadyInChain {
                         sync: this,
@@ -774,7 +779,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             if let btree_map::Entry::Vacant(entry) = self
                 .inner
                 .unknown_headers
-                .entry((header.number - 1, *header_hash))
+                .entry((header.number - 1, *header.parent_hash))
             {
                 entry.insert(None);
             }
