@@ -46,4 +46,5 @@
 //! single actor controlling all said incoming connections.
 
 pub mod all_forks;
+pub mod grandpa_warp_sync;
 pub mod optimistic;
