@@ -276,7 +276,7 @@ impl WarpSyncRequest {
 
             if next_index == self.peers.len() {
                 GrandpaWarpSync::WaitingForPeers(WaitingForPeers {
-                    peers: Vec::new(),
+                    peers: self.peers,
                     genesis_chain_information: self.genesis_chain_information,
                 })
             } else {
@@ -328,7 +328,7 @@ impl WarpSyncRequest {
                 genesis_chain_information: self.genesis_chain_information,
             }),
             None => GrandpaWarpSync::WaitingForPeers(WaitingForPeers {
-                peers: Vec::new(),
+                peers: self.peers,
                 genesis_chain_information: self.genesis_chain_information,
             }),
         }
@@ -393,7 +393,10 @@ pub struct WaitingForPeers {
 impl WaitingForPeers {
     /// Add a peer to the list of peers.
     pub fn add_peer(mut self, peer: PeerId) -> GrandpaWarpSync {
+        assert!(!self.peers.iter().any(|p| p == &peer));
+
         self.peers.push(peer);
+
         GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
             peer_index: 0,
             peers: self.peers,
