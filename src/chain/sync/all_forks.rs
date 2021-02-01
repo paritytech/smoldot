@@ -318,9 +318,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         source_id: SourceId,
         scale_encoded_headers: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
     ) -> AncestrySearchResponseOutcome<TSrc, TBl> {
-        // The next block in the list of headers should have a hash equal to this one.
         // Sets the `occupation` of `source_id` back to `Idle`.
-        let (_, _, mut expected_next_hash) = match mem::take(
+        let (_, requested_block_height, requested_block_hash) = match mem::take(
             &mut self
                 .inner
                 .sources
@@ -335,6 +334,9 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
         // Set to true below if any block is inserted in `disjoint_headers`.
         let mut any_progress = false;
+
+        // The next block in the list of headers should have a hash equal to this one.
+        let mut expected_next_hash = requested_block_hash;
 
         // Iterate through the headers. If the request has failed, treat it the same way as if
         // no blocks were returned.
@@ -414,7 +416,16 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
         // If this is reached, then the ancestry search was inconclusive. Only disjoint blocks
         // have been received.
-        // TODO: use any_progress
+        if !any_progress {
+            // TODO: distinguish errors from empty requests?
+            // Avoid sending the same request to the same source over and over again.
+            self.inner
+                .sources
+                .source_mut(source_id)
+                .unwrap()
+                .remove_known_block(requested_block_height, requested_block_hash);
+        }
+
         let next_request = self.source_next_request(source_id);
         AncestrySearchResponseOutcome::Inconclusive {
             sync: self,
