@@ -169,10 +169,12 @@ impl<'a, TSrc> SourceMutAccess<'a, TSrc> {
     /// > **Note**: Can be used when a request is sent to a node, and the node answers that it
     /// >           doesn't know about the requested block contrary to previously believed.
     pub fn remove_known_block(&mut self, height: u64, hash: [u8; 32]) {
-        let _was_in1 = self.parent
+        let _was_in1 = self
+            .parent
             .known_blocks1
             .remove(&(self.source_id, height, hash));
-        let _was_in2 = self.parent
+        let _was_in2 = self
+            .parent
             .known_blocks2
             .remove(&(height, hash, self.source_id));
         debug_assert_eq!(_was_in1, _was_in2);

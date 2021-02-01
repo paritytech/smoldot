@@ -261,7 +261,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> (SourceMutAccess<TSrc, TBl>, Option<Request>) {
-        let mut new_source = self.inner.sources.add_source(
+        let new_source = self.inner.sources.add_source(
             Source {
                 occupation: None,
                 user_data,
@@ -270,10 +270,17 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             best_block_hash,
         );
 
-        self.inner
-            .pending_blocks
-            .block_mut(best_block_number, best_block_hash)
-            .or_insert(());
+        if best_block_number > self.chain.finalized_block_header().number
+            && self
+                .chain
+                .non_finalized_block_by_hash(&best_block_hash)
+                .is_none()
+        {
+            self.inner
+                .pending_blocks
+                .block_mut(best_block_number, best_block_hash)
+                .or_insert(());
+        }
 
         let source_id = new_source.id();
         let request = self.source_next_request(source_id);
@@ -578,7 +585,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             .inner
             .pending_blocks
             .block_mut(header.number, *header_hash)
-            .or_insert(());
+            .or_insert(()); // TODO: don't always invert
 
         if *header.parent_hash == self.chain.finalized_block_hash()
             || self
@@ -587,6 +594,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .is_some()
         {
             // Parent is in the `NonFinalizedTree`, meaning it is possible to verify it.
+            // TODO: don't do this
             block_access.update_header(scale_encoded_header.clone()); // TODO: clone :(
 
             HeaderFromSourceOutcome::HeaderVerify(HeaderVerify {
