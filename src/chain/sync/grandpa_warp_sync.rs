@@ -29,6 +29,7 @@ use crate::{
     libp2p::PeerId,
     network::protocol::GrandpaWarpSyncResponseFragment,
 };
+use core::convert::TryInto as _;
 
 /// Problem encountered during a call to [`grandpa_warp_sync`].
 #[derive(Debug, derive_more::Display)]
@@ -49,13 +50,15 @@ pub enum Error {
 pub struct Config {
     /// The chain information of the genesis block.
     pub genesis_chain_information: ChainInformation,
+    /// The initial capacity of the list of peers.
+    pub sources_capacity: usize,
 }
 
 /// Starts syncing via GrandPa warp sync.
 pub fn grandpa_warp_sync(config: Config) -> GrandpaWarpSync {
     GrandpaWarpSync::WaitingForPeers(WaitingForPeers {
         genesis_chain_information: config.genesis_chain_information,
-        peers: Vec::new(),
+        peers: Vec::with_capacity(config.sources_capacity),
     })
 }
 
@@ -270,7 +273,7 @@ impl WarpSyncRequest {
     ///
     /// Panics if the peer wasn't added to the list earlier.
     ///
-    pub fn remove(mut self, to_remove: PeerId) -> GrandpaWarpSync {
+    pub fn remove_peer(mut self, to_remove: PeerId) -> GrandpaWarpSync {
         if to_remove == self.current_peer() {
             let next_index = self.peer_index + 1;
 
@@ -351,8 +354,6 @@ impl VirtualMachineParamsGet {
     ) -> GrandpaWarpSync {
         let (code, heap_pages) = match (code, heap_pages) {
             (Some(code), Some(heap_pages)) => {
-                use std::convert::TryInto;
-
                 let heap_pages = match heap_pages.as_ref().try_into() {
                     Ok(heap_pages) => heap_pages,
                     Err(error) => {
@@ -398,7 +399,7 @@ impl WaitingForPeers {
         self.peers.push(peer);
 
         GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
-            peer_index: 0,
+            peer_index: self.peers.len() - 1,
             peers: self.peers,
             genesis_chain_information: self.genesis_chain_information,
         })
