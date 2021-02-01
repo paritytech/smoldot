@@ -88,8 +88,13 @@ use crate::{
 };
 
 use alloc::collections::{btree_map, BTreeMap, BTreeSet, VecDeque};
-use core::{mem, num::NonZeroU64, time::Duration};
+use core::{
+    iter, mem,
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
 
+mod pending_blocks;
 mod sources;
 
 pub use sources::SourceId;
@@ -129,6 +134,19 @@ pub struct Config {
     // due to the internal processing of the state machine.
     pub max_disjoint_headers: usize,
 
+    /// Maximum number of simultaneous pending requests made towards the same block.
+    ///
+    /// Should be set according to the failure rate of requests. For example if requests have a
+    /// 10% chance of failing, then setting to value to `2` gives a 1% chance that downloading
+    /// this block will overall fail and has to be attempted again.
+    ///
+    /// Also keep in mind that sources might maliciously take a long time to answer requests. A
+    /// higher value makes it possible to reduce the risks of the syncing taking a long time
+    /// because of malicious sources.
+    ///
+    /// The higher the value, the more bandwidth is potentially wasted.
+    pub max_requests_per_block: NonZeroU32,
+
     /// If true, the block bodies and storage are also synchronized.
     pub full: bool,
 }
@@ -150,6 +168,11 @@ struct Inner<TSrc> {
 
     /// List of sources. Controlled by the API user.
     sources: sources::AllForksSources<Source<TSrc>>,
+
+    /// List of blocks whose existence is known but can't be verified yet.
+    /// Also contains a list of ongoing requests. The requests are kept up-to-date with the
+    /// information in [`Inner::sources`].
+    pending_blocks: pending_blocks::PendingBlocks<(), ()>,
 
     /// List of blocks whose header has been verified, but whose body is currently being
     /// downloaded from a source or should be downloaded from a source.
@@ -233,6 +256,11 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     config.sources_capacity,
                     finalized_block_height,
                 ),
+                pending_blocks: pending_blocks::PendingBlocks::new(pending_blocks::Config {
+                    blocks_capacity: config.blocks_capacity,
+                    max_disjoint_headers: config.max_disjoint_headers,
+                    max_requests_per_block: config.max_requests_per_block,
+                }),
                 pending_body_downloads: Default::default(),
                 disjoint_headers: Default::default(),
                 unknown_headers: Default::default(),
@@ -296,6 +324,11 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             best_block_number,
             best_block_hash,
         );
+
+        self.inner
+            .pending_blocks
+            .block_mut(best_block_number, best_block_hash)
+            .or_insert(());
 
         let mut request = None;
 
@@ -505,53 +538,12 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             SourceOccupation::Idle
         ));
 
-        // Iterator through `pending_body_downloads` to find a block that needs attention.
-        for (block_hash, _) in self
-            .inner
-            .pending_body_downloads
-            .iter()
-            .filter(|(_, (_, s))| s.is_none())
-        {
-            // Only download the block if the source knows about it.
-            // `continue` if this `pending_body_download` isn't known by this source.
-            if !source_access.knows_block(todo!(), block_hash) {
-                continue;
-            }
-
-            // TODO: finish
-            todo!()
-        }
-
-        // Iterator through `unknown_headers` to find a block that needs attention.
-        for (
-            &(ref unknown_block_height, ref unknown_block_hash),
-            &mut ref mut downloading_source,
-        ) in self
-            .inner
-            .unknown_headers
-            .iter_mut()
-            .filter(|(_, s)| s.is_none())
-        {
+        for desired_query in self.inner.pending_blocks.desired_queries() {
             // The source can only operate on blocks that it knows about.
             // `continue` if this block isn't known by this source.
             if !source_access.knows_block(*unknown_block_height, unknown_block_hash) {
                 continue;
             }
-
-            // Start an ancestry search in order to find an ancestor of this block in our
-            // local chain. When answered, this will ultimately add new blocks to
-            // `disjoint_block`.
-            *downloading_source = Some(source_id);
-
-            let local_finalized_height = self.chain.finalized_block_header().number;
-            debug_assert!(*unknown_block_height > local_finalized_height);
-            source_access.user_data().occupation =
-                SourceOccupation::AncestrySearch(*unknown_block_height, *unknown_block_hash);
-            return Some(Request::AncestrySearch {
-                first_block_hash: *unknown_block_hash,
-                num_blocks: NonZeroU64::new(*unknown_block_height - local_finalized_height)
-                    .unwrap(),
-            });
         }
 
         None
@@ -649,19 +641,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
         if header.number <= self.chain.finalized_block_header().number {
-            debug_assert!(!self
-                .inner
-                .unknown_headers
-                .contains_key(&(header.number, *header_hash)));
-            debug_assert!(!self
-                .inner
-                .disjoint_headers
-                .contains_key(&(header.number, *header_hash)));
             return HeaderFromSourceOutcome::TooOld(self);
         }
-
-        // TODO: somehow optimize? the encoded block is normally known from it being decoded
-        let scale_encoded_header = header.scale_encoding_vec();
 
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
@@ -669,29 +650,17 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             .non_finalized_block_by_hash(&header_hash)
             .is_some()
         {
-            debug_assert!(!self
-                .inner
-                .unknown_headers
-                .contains_key(&(header.number, *header_hash)));
-            debug_assert!(!self
-                .inner
-                .disjoint_headers
-                .contains_key(&(header.number, *header_hash)));
             return HeaderFromSourceOutcome::AlreadyInChain(self);
         }
 
-        // As the header is now known, remove it from `unknown_headers`.
-        // TODO: cancel request if there was one!
-        let _ = self
+        // TODO: somehow optimize? the encoded block is normally known from it being decoded
+        let scale_encoded_header = header.scale_encoding_vec();
+
+        let mut block_access = self
             .inner
-            .unknown_headers
-            .remove(&(header.number, *header_hash));
-
-        // `pending_body_downloads` contains blocks whose header has already been verified.
-        if self.inner.pending_body_downloads.contains_key(header_hash) {
-            debug_assert!(self.inner.full);
-            return HeaderFromSourceOutcome::AlreadyInChain(self);
-        }
+            .pending_blocks
+            .block_mut(header.number, *header_hash)
+            .or_insert(());
 
         if *header.parent_hash == self.chain.finalized_block_hash()
             || self
@@ -700,29 +669,15 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .is_some()
         {
             // Parent is in the `NonFinalizedTree`, meaning it is possible to verify it.
-            debug_assert!(!self
-                .inner
-                .disjoint_headers
-                .contains_key(&(header.number, *header_hash)));
-
-            // The block and all its descendants can all be verified.
-            // Remove them all from `disjoint_headers` and move them to a new `HeaderVerify`
-            // object.
-            // TODO: no, that's stupid
-            self.inner.disjoint_headers.insert(
-                (header.number, *header_hash),
-                DisjointBlock {
-                    scale_encoded_header: scale_encoded_header.to_vec(),
-                },
-            );
-            let verifiable_blocks = self.discard_disjoint_chain(header.number, *header_hash);
+            block_access.update_header(
+                scale_encoded_header.clone(),
+                pending_blocks::ParentState::Known,
+            ); // TODO: clone :(
 
             HeaderFromSourceOutcome::HeaderVerify(HeaderVerify {
                 parent: self,
                 source_id,
-                verifiable_blocks: verifiable_blocks
-                    .into_iter()
-                    .map(|(_, _, bl)| bl.scale_encoded_header)
+                verifiable_blocks: iter::once((header.number, *header_hash, scale_encoded_header))
                     .collect(),
             })
         } else if header.number == self.chain.finalized_block_header().number + 1 {
@@ -730,41 +685,16 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             debug_assert_ne!(*header.parent_hash, self.chain.finalized_block_hash());
 
             // Announced block is not part of the finalized chain.
-            debug_assert!(!self
-                .inner
-                .disjoint_headers
-                .contains_key(&(header.number, *header_hash)));
+            block_access.remove_verify_failed();
             HeaderFromSourceOutcome::NotFinalizedChain(self)
         } else {
             // Parent is not in the `NonFinalizedTree`. It is unknown whether this block belongs
             // to the same finalized chain as the one known locally, but we expect that it is the
             // case.
-
-            // Insert the parent in the unknown headers.
-            if let btree_map::Entry::Vacant(entry) = self
-                .inner
-                .unknown_headers
-                .entry((header.number - 1, *header.parent_hash))
-            {
-                entry.insert(None);
-            }
-
-            // Update `disjoint_headers`.
-            match self
-                .inner
-                .disjoint_headers
-                .entry((header.number, *header_hash))
-            {
-                btree_map::Entry::Occupied(mut entry) => {
-                    debug_assert_eq!(entry.get_mut().scale_encoded_header, scale_encoded_header);
-                }
-                btree_map::Entry::Vacant(entry) => {
-                    entry.insert(DisjointBlock {
-                        scale_encoded_header: scale_encoded_header.to_vec(),
-                    });
-                }
-            }
-
+            block_access.update_header(
+                scale_encoded_header,
+                pending_blocks::ParentState::UnknownOrPending,
+            );
             HeaderFromSourceOutcome::Disjoint(self)
         }
     }
@@ -820,75 +750,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 todo!()
             }
         }*/
-    }
-
-    /// Passed a known entry in `disjoint_headers`. Removes this entry and any known children of
-    /// this block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `(number, hash)` isn't an entry in [`Inner::disjoint_chain]`.
-    ///
-    fn discard_disjoint_chain(
-        &mut self,
-        number: u64,
-        hash: [u8; 32],
-    ) -> Vec<(u64, [u8; 32], DisjointBlock)> {
-        // TODO: keep a list of banned blocks for later? this is required by chain specs anyway
-
-        // The implementation consists in iterating over the increasing block number, and removing
-        // all blocks whose parent was removed at the previous iteration.
-
-        // Return value of the function.
-        let mut result = Vec::with_capacity(64);
-
-        // List of blocks to discard at the next iteration.
-        let mut blocks_to_discard = Vec::with_capacity(16);
-        blocks_to_discard.push(hash);
-
-        for number in number.. {
-            // Find in `disjoint_headers` any block whose parent is in `blocks_to_discard`.
-            let blocks_to_discard_next = {
-                let mut blocks_to_discard_next = Vec::with_capacity(16);
-                for ((_, hash), block) in self
-                    .inner
-                    .disjoint_headers
-                    .range((number + 1, [0; 32])..(number + 2, [0; 32]))
-                {
-                    let decoded = header::decode(&block.scale_encoded_header).unwrap();
-                    if blocks_to_discard.iter().any(|b| b == decoded.parent_hash) {
-                        blocks_to_discard_next.push(*hash);
-                    }
-                }
-                blocks_to_discard_next
-            };
-
-            // Now discard `blocks_to_discard`.
-            for to_discard in mem::replace(&mut blocks_to_discard, blocks_to_discard_next) {
-                let mut discarded_block = self
-                    .inner
-                    .disjoint_headers
-                    .remove(&(number, to_discard))
-                    .unwrap();
-
-                // Any ongoing search needs to be cancelled.
-                // TODO:
-                /*if let Some(_source_id) = discarded_block.ancestry_search {
-                    todo!() // TODO:
-                }*/
-
-                result.push((number, to_discard, discarded_block));
-            }
-
-            // The `for` loop would be infinite unless we put an explicit `break`.
-            // Note that `blocks_to_discard` was replaced with `blocks_to_discard_next` above,
-            // we're therefore testing `blocks_to_discard_next.is_empty()`.
-            if blocks_to_discard.is_empty() {
-                break;
-            }
-        }
-
-        result
     }
 }
 
@@ -1141,7 +1002,7 @@ pub struct HeaderVerify<TSrc, TBl> {
     /// Source that gave the first block that allows verification.
     source_id: SourceId,
     /// List of blocks to verify. Must never be empty.
-    verifiable_blocks: VecDeque<Vec<u8>>,
+    verifiable_blocks: VecDeque<(u64, [u8; 32], Vec<u8>)>,
 }
 
 impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
@@ -1152,12 +1013,13 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
         user_data: TBl,
     ) -> HeaderVerifyOutcome<TSrc, TBl> {
         // `verifiable_blocks` must never be empty.
-        let scale_encoded_header = self.verifiable_blocks.pop_front().unwrap();
+        let (to_verify_height, to_verify_hash, to_verify_scale_encoded_header) =
+            self.verifiable_blocks.pop_front().unwrap();
 
         let result = match self
             .parent
             .chain
-            .verify_header(scale_encoded_header, now_from_unix_epoch)
+            .verify_header(to_verify_scale_encoded_header, now_from_unix_epoch)
         {
             Ok(blocks_tree::HeaderVerifySuccess::Insert {
                 insert,
@@ -1168,13 +1030,30 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
                 Ok(is_new_best)
             }
             Err(blocks_tree::HeaderVerifyError::VerificationFailed(error)) => {
-                // TODO: mark the block as bad and insert it back in `disjoint_headers`?
                 Err((error, user_data))
             }
             Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
             | Err(blocks_tree::HeaderVerifyError::BadParent { .. })
             | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
         };
+
+        if result.is_ok() {
+            let outcome = self
+                .parent
+                .inner
+                .pending_blocks
+                .block_mut(to_verify_height, to_verify_hash)
+                .or_insert(())
+                .remove_verify_success();
+            self.verifiable_blocks.extend(outcome.verify_next);
+        } else {
+            self.parent
+                .inner
+                .pending_blocks
+                .block_mut(to_verify_height, to_verify_hash)
+                .or_insert(())
+                .remove_verify_failed();
+        }
 
         match (result, self.verifiable_blocks.is_empty()) {
             (
