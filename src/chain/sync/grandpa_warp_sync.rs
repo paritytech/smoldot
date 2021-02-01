@@ -144,15 +144,15 @@ pub struct StorageGet<TSrc> {
     state: PostVerificationState<TSrc>,
 }
 
-impl<TSrc: Clone> StorageGet<TSrc> {
+impl<TSrc> StorageGet<TSrc> {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
         self.inner.key()
     }
 
     /// Returns the source that we received the warp sync data from.
-    pub fn warp_sync_source(&self) -> TSrc {
-        self.state.warp_sync_source.clone()
+    pub fn warp_sync_source(&self) -> &TSrc {
+        &self.state.warp_sync_source
     }
 
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -183,15 +183,15 @@ pub struct NextKey<TSrc> {
     state: PostVerificationState<TSrc>,
 }
 
-impl<TSrc: Clone> NextKey<TSrc> {
+impl<TSrc> NextKey<TSrc> {
     /// Returns the key whose next key must be passed back.
     pub fn key(&self) -> &[u8] {
         self.inner.key()
     }
 
     /// Returns the source that we received the warp sync data from.
-    pub fn warp_sync_source(&self) -> TSrc {
-        self.state.warp_sync_source.clone()
+    pub fn warp_sync_source(&self) -> &TSrc {
+        &self.state.warp_sync_source
     }
 
     /// Injects the key.
@@ -254,10 +254,10 @@ pub struct WarpSyncRequest<TSrc> {
     genesis_chain_information: ChainInformation,
 }
 
-impl<TSrc: Clone + PartialEq> WarpSyncRequest<TSrc> {
+impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
     /// The source to make a GrandPa warp sync request to.
-    pub fn current_source(&self) -> TSrc {
-        self.sources[self.source_index].clone()
+    pub fn current_source(&self) -> &TSrc {
+        &self.sources[self.source_index]
     }
 
     /// Add a source to the list of sources.
@@ -273,7 +273,7 @@ impl<TSrc: Clone + PartialEq> WarpSyncRequest<TSrc> {
     /// Panics if the source wasn't added to the list earlier.
     ///
     pub fn remove_source(mut self, to_remove: TSrc) -> GrandpaWarpSync<TSrc> {
-        if to_remove == self.current_source() {
+        if &to_remove == self.current_source() {
             let next_index = self.source_index + 1;
 
             if next_index == self.sources.len() {
@@ -307,11 +307,9 @@ impl<TSrc: Clone + PartialEq> WarpSyncRequest<TSrc> {
 
     /// Submit a GrandPa warp sync response if the request succeeded or `None` if it did not.
     pub fn handle_response(
-        self,
+        mut self,
         response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
     ) -> GrandpaWarpSync<TSrc> {
-        let warp_sync_source = self.current_source();
-
         let next_index = self.source_index + 1;
 
         match response {
@@ -321,7 +319,7 @@ impl<TSrc: Clone + PartialEq> WarpSyncRequest<TSrc> {
                     response_fragments,
                 ),
                 genesis_chain_information: self.genesis_chain_information,
-                warp_sync_source,
+                warp_sync_source: self.sources.remove(self.source_index),
             }),
             None if next_index < self.sources.len() => GrandpaWarpSync::WarpSyncRequest(Self {
                 source_index: next_index,
