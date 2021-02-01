@@ -179,14 +179,31 @@ async fn start_sync(
                 either::Right((source_id, verify)) => {
                     match verify.perform(crate::ffi::unix_time(), ()) {
                         all_forks::HeaderVerifyOutcome::Success {
+                            is_new_best,
                             sync: s,
                             next_request,
                         } => {
+                            if is_new_best {
+                                log::info!(
+                                    target: "sync-verify",
+                                    "New best block: {} {}",
+                                    s.best_block_number(),
+                                    HashDisplay(&s.best_block_hash())
+                                );
+                            } else {
+                                log::info!(
+                                    target: "sync-verify",
+                                    "Imported non-best block: {} {}",
+                                    s.best_block_number(),
+                                    HashDisplay(&s.best_block_hash())
+                                );
+                            }
+
                             sync = either::Left(s);
                             debug_assert!(request_to_start.is_none());
-                            request_to_start = next_request.map(|r| (source_id, r))
+                            request_to_start = next_request.map(|r| (source_id, r));
                         }
-                        all_forks::HeaderVerifyOutcome::SuccessContinue { next_block } => {
+                        all_forks::HeaderVerifyOutcome::SuccessContinue { next_block, .. } => {
                             sync = either::Right((source_id, next_block));
                         }
                         all_forks::HeaderVerifyOutcome::Error {

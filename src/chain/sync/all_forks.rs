@@ -496,7 +496,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> BlockAnnounceOutcome<TSrc, TBl> {
-        // TODO: also return Option<Request>?
         let announced_header = match header::decode(&announced_scale_encoded_header) {
             Ok(h) => h,
             Err(error) => return BlockAnnounceOutcome::InvalidHeader { sync: self, error },
@@ -507,6 +506,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         match self.header_from_source(source_id, &announced_header_hash, announced_header, is_best)
         {
             HeaderFromSourceOutcome::HeaderVerify(verify) => {
+                println!("verifiable announce");
                 BlockAnnounceOutcome::HeaderVerify(verify)
             }
             HeaderFromSourceOutcome::TooOld(sync) => BlockAnnounceOutcome::TooOld(sync),
@@ -518,7 +518,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             }
             HeaderFromSourceOutcome::Disjoint(mut sync) => {
                 let next_request = sync.source_next_request(source_id);
-
                 BlockAnnounceOutcome::Disjoint { sync, next_request }
             }
         }
@@ -947,7 +946,7 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
                 .inner
                 .pending_blocks
                 .block_mut(to_verify_height, to_verify_hash)
-                .or_insert(())
+                .or_insert(()) // TODO: optimization: don't insert
                 .remove_verify_success();
             self.verifiable_blocks.extend(outcome.verify_next);
         } else {
@@ -955,25 +954,28 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
                 .inner
                 .pending_blocks
                 .block_mut(to_verify_height, to_verify_hash)
-                .or_insert(())
+                .or_insert(()) // TODO: optimization: don't insert
                 .remove_verify_failed();
         }
 
+        println!("verification ok");
+
         match (result, self.verifiable_blocks.is_empty()) {
             (
-                Ok(is_new_best), // TODO: use is_new_best
+                Ok(is_new_best),
                 false,
             ) => HeaderVerifyOutcome::SuccessContinue {
+                is_new_best,
                 next_block: HeaderVerify {
                     parent: self.parent,
                     source_id: self.source_id,
                     verifiable_blocks: self.verifiable_blocks,
                 },
             },
-            // TODO: use is_new_best
             (Ok(is_new_best), true) => {
                 let next_request = self.parent.source_next_request(self.source_id);
                 HeaderVerifyOutcome::Success {
+                    is_new_best,
                     sync: self.parent,
                     next_request,
                 }
@@ -1007,6 +1009,9 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
 pub enum HeaderVerifyOutcome<TSrc, TBl> {
     /// Header has been successfully verified.
     Success {
+        /// True if the newly-verified block is considered the new best block.
+        is_new_best: bool,
+        /// State machine yielded back. Use to continue the processing.
         sync: AllForksSync<TSrc, TBl>,
         /// Next request that must be performed on the source.
         next_request: Option<Request>,
@@ -1014,12 +1019,15 @@ pub enum HeaderVerifyOutcome<TSrc, TBl> {
 
     /// Header has been successfully verified. A follow-up header is ready to be verified.
     SuccessContinue {
+        /// True if the newly-verified block is considered the new best block.
+        is_new_best: bool,
         /// Next verification.
         next_block: HeaderVerify<TSrc, TBl>,
     },
 
     /// Header verification failed.
     Error {
+        /// State machine yielded back. Use to continue the processing.
         sync: AllForksSync<TSrc, TBl>,
         /// Error that happened.
         error: verify::header_only::Error,

@@ -460,7 +460,7 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
     /// Returns the list of blocks that are children of this one, and are thus ready to be
     /// verified as well.
     pub fn remove_verify_success(self) -> RemoveVerifySuccessOutcome {
-        let mut children_iter = self.parent.children_mut(self.key.0, &self.key.1);
+        let children_iter = self.parent.children_mut(self.key.0, &self.key.1);
 
         // List of blocks that are now ready to be verified.
         let mut verify_next = Vec::with_capacity({
@@ -490,7 +490,7 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
         let removed_block: Block<_> = self.parent.blocks.remove(&self.key).unwrap();
         // TODO: remove ongoing requests?
 
-        todo!()
+        RemoveVerifySuccessOutcome { verify_next }
     }
 
     /// Removes the block from the collection, as its verification has failed.
