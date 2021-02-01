@@ -16,6 +16,10 @@ use crate::{
 /// Problem encountered during a call to [`grandpa_warp_sync`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
+    #[display(fmt = "Missing code or heap pages")]
+    MissingCodeOrHeapPages,
+    #[display(fmt = "Failed to parse heap pages: {}", _0)]
+    FailedToParseHeapPages(std::array::TryFromSliceError),
     #[display(fmt = "{}", _0)]
     Verifier(verify::Error),
     #[display(fmt = "{}", _0)]
@@ -238,38 +242,39 @@ impl WarpSyncRequest {
     }
 
     /// Add a peer to the list of peers.
-    pub fn add_peer(mut self, peer: PeerId) -> GrandpaWarpSync {
+    pub fn add_peer(&mut self, peer: PeerId) {
         self.peers.push(peer);
-
-        GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
-            peer_index: self.peer_index,
-            peers: self.peers,
-            genesis_chain_information: self.genesis_chain_information,
-        })
     }
 
     /// Remove a peer from the list of peers.
-    ///
-    /// Will panic if `to_remove` is the `current_peer`.
-    pub fn remove_other_peer(mut self, to_remove: PeerId) -> GrandpaWarpSync {
+    pub fn remove(mut self, to_remove: PeerId) -> GrandpaWarpSync {
         if to_remove == self.current_peer() {
-            panic!("Atttempted to remove the current peer.");
-        }
+            let next_index = self.peer_index + 1;
 
-        let index = self.peers.iter().position(|peer| peer == &to_remove);
-
-        if let Some(index) = index {
-            // There's no point in removing a peer if it's behind the current index.
-            if index > self.peer_index {
-                self.peers.remove(index);
+            if next_index == self.peers.len() {
+                GrandpaWarpSync::WaitingForPeers(WaitingForPeers {
+                    peers: Vec::new(),
+                    genesis_chain_information: self.genesis_chain_information,
+                })
+            } else {
+                GrandpaWarpSync::WarpSyncRequest(Self {
+                    peer_index: next_index,
+                    peers: self.peers,
+                    genesis_chain_information: self.genesis_chain_information,
+                })
             }
-        }
+        } else {
+            let index = self.peers.iter().position(|peer| peer == &to_remove);
 
-        GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
-            peer_index: self.peer_index,
-            peers: self.peers,
-            genesis_chain_information: self.genesis_chain_information,
-        })
+            if let Some(index) = index {
+                // There's no point in removing a peer if it's behind the current index.
+                if index > self.peer_index {
+                    self.peers.remove(index);
+                }
+            }
+
+            GrandpaWarpSync::WarpSyncRequest(self)
+        }
     }
 
     /// Submit a GrandPa warp sync network response if the request succeeded or
@@ -314,10 +319,26 @@ impl VirtualMachineParamsGet {
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn inject_virtual_machine_params(
         self,
-        code: impl AsRef<[u8]>,
-        heap_pages: u64,
+        code: Option<impl AsRef<[u8]>>,
+        heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
     ) -> GrandpaWarpSync {
+        let (code, heap_pages) = match (code, heap_pages) {
+            (Some(code), Some(heap_pages)) => {
+                use std::convert::TryInto;
+
+                let heap_pages = match heap_pages.as_ref().try_into() {
+                    Ok(heap_pages) => heap_pages,
+                    Err(error) => {
+                        return GrandpaWarpSync::Finished(Err(Error::FailedToParseHeapPages(error)))
+                    }
+                };
+
+                (code, u64::from_le_bytes(heap_pages))
+            }
+            _ => return GrandpaWarpSync::Finished(Err(Error::MissingCodeOrHeapPages)),
+        };
+
         match HostVmPrototype::new(code, heap_pages, exec_hint) {
             Ok(runtime) => {
                 let babe_current_epoch_query =
@@ -347,14 +368,15 @@ impl WaitingForPeers {
     /// Add a peer to the list of peers.
     pub fn add_peer(mut self, peer: PeerId) -> GrandpaWarpSync {
         self.peers.push(peer);
-        GrandpaWarpSync::WaitingForPeers(Self {
-            peers: self.peers,
-            genesis_chain_information: self.genesis_chain_information,
-        })
+        GrandpaWarpSync::WaitingForPeers(self)
     }
 
     /// Proceed to issuing GrandPa warp sync requests.
     pub fn ready(self) -> GrandpaWarpSync {
+        if self.peers.is_empty() {
+            return GrandpaWarpSync::WaitingForPeers(self);
+        }
+
         GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
             peer_index: 0,
             peers: self.peers,
