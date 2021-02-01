@@ -24,14 +24,48 @@
 //!
 //! In addition to a set of blocks, this data structure also stores a set of ongoing requests for
 //! these blocks.
+//!
+//! # Blocks
+//!
+//! The [`PendingBlocks`] collection stores a list of pending blocks.
+//!
+//! Blocks are expected to be added to this collection whenever we hear about them from a source
+//! of blocks (such as a peer) and that it is not possible to verify them immediately (because
+//! their parent isn't known).
+//!
+//! Each block has zero, one, or more *requests* associated to it. When a request is associated
+//! to a block, it means that we expect the response of the request to contain needed information
+//! about the block in question.
+//!
+//! Blocks can only be removed in three different ways:
+//!
+//! - Calling [`OccupiedBlockEntry::remove_verify_success`] marks a block as valid and removes
+//! it, as it is not pending anymore.
+//! - Calling [`OccupiedBlockEntry::remove_verify_failed`] marks a block and all its descendants
+//! as invalid. This may or may not remove the block itself and all its descendants.
+//! - Pending blocks might automatically be pruned by the state machine if the list is too big.  TODO not implemented
+//!
+//! # Requests
+//!
+//! In addition to a list of blocks, this data structure also stores a list of ongoing requests.
+//! Each block has zero, one, or more requests associated to it.
+//!
+//! Call [`PendingBlocks::desired_queries`] to find the list of queries that *should* be started.
+//! Call [`OccupiedBlockEntry::add_descending_request`] to allocate a new [`RequestId`] and add
+//! a new request. This has the effect of changing the outcome of
+//! [`PendingBlocks::desired_queries`].
+//! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished.
+//!
 
-use crate::{
-    chain::{blocks_tree, chain_information},
-    header, verify,
+// TODO: remove the requests user data? depends if need to be cancellable or not
+
+use crate::header;
+
+use alloc::collections::{BTreeMap, BTreeSet};
+use core::{
+    convert::TryFrom as _,
+    num::{NonZeroU32, NonZeroU64},
 };
-
-use alloc::collections::{btree_map, BTreeMap, BTreeSet, VecDeque};
-use core::{convert::TryFrom as _, mem, num::{NonZeroU32, NonZeroU64}, time::Duration};
 
 /// Configuration for the [`PendingBlocks`].
 #[derive(Debug)]
@@ -160,6 +194,22 @@ impl<TBl, TRq> PendingBlocks<TBl, TRq> {
         }
     }
 
+    /// Marks the request as finished.
+    ///
+    /// Returns the height and hash block of the first block that requested.
+    ///
+    /// The next call to [`PendingBlocks::desired_queries`] might return the same request again.
+    /// In order to avoid that, you are encouraged to update the list of blocks in the container
+    /// with the outcome of the request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn finish_request(&mut self, request_id: RequestId) -> (u64, [u8; 32]) {
+        todo!()
+    }
+
     /// Returns an iterator yielding blocks that should be requested from the sources of blocks.
     ///
     /// Considering this state machine is unable to differentiate between blocks that are
@@ -168,13 +218,15 @@ impl<TBl, TRq> PendingBlocks<TBl, TRq> {
     ///
     /// In order to avoid this, you are encouraged to remove from the [`PendingBlocks`] any block
     /// that can be marked as verified or bad prior to calling this method.
-    pub fn desired_queries(&self) -> impl Iterator<Item = DesiredQuery> {
+    ///
+    /// Guaranteed to always return blocks that are in the data structure.
+    pub fn desired_queries<'a>(&'a self) -> impl Iterator<Item = DesiredQuery> + 'a {
         // TODO: this is O(n); maybe do something more optimized once it's fully working and has unit tests
         self.blocks
-            .iter_mut()
+            .iter()
             .filter(|(_, s)| matches!(s.inner, BlockInner::Unknown))
             .filter_map(
-                |(&(ref unknown_block_height, ref unknown_block_hash), &mut ref mut block)| {
+                move |(&(ref unknown_block_height, ref unknown_block_hash), &ref block)| {
                     let num_existing_requests = self
                         .blocks_requests
                         .range(
@@ -198,11 +250,13 @@ impl<TBl, TRq> PendingBlocks<TBl, TRq> {
 
                     Some(DesiredQuery {
                         first_block_hash: *unknown_block_hash,
-                        num_blocks: NonZeroU64::new(*unknown_block_height - local_finalized_height)
-                            .unwrap(),
+                        first_block_height: *unknown_block_height,
+                        num_blocks: NonZeroU64::new(128).unwrap(), // TODO: *unknown_block_height - ...
                     })
                 },
             )
+
+        // TODO: all query the parents of `UnverifiedHeader` blocks if they're not present
     }
 
     /// Gives access to a block, either present or absent.
@@ -215,7 +269,7 @@ impl<TBl, TRq> PendingBlocks<TBl, TRq> {
         }
     }
 
-    /// Passed a known entry in `blocks`. Removes this entry and any known children of this block.
+    /*/// Passed a known entry in `blocks`. Removes this entry and any known children of this block.
     ///
     /// # Panic
     ///
@@ -282,7 +336,7 @@ impl<TBl, TRq> PendingBlocks<TBl, TRq> {
         }
 
         result
-    }
+    }*/
 
     /// Returns the list of children of the given block that are in the collection.
     fn children_mut<'a>(
@@ -299,15 +353,18 @@ impl<TBl, TRq> PendingBlocks<TBl, TRq> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct DesiredQuery {
+    /// Height of the first block to request.
+    pub first_block_height: u64,
+
     /// Hash of the first block to request.
-    first_block_hash: [u8; 32],
+    pub first_block_hash: [u8; 32],
 
     /// Number of blocks the request should return.
     ///
     /// Note that this is only an indication, and the source is free to give fewer blocks
     /// than requested. If that happens, the state machine might later send out further
     /// ancestry search requests to complete the chain.
-    num_blocks: NonZeroU64,
+    pub num_blocks: NonZeroU64,
 }
 
 /// Access to a block, either present or absent, w.r.t to the container.
@@ -325,6 +382,14 @@ impl<'a, TBl, TRq> BlockEntry<'a, TBl, TRq> {
         match self {
             BlockEntry::Occupied(e) => e,
             BlockEntry::Vacant(e) => e.insert(user_data),
+        }
+    }
+
+    /// Returns `Some` for the `Occupied` variant, and `None` otherwise.
+    pub fn into_occupied(self) -> Option<OccupiedBlockEntry<'a, TBl, TRq>> {
+        match self {
+            BlockEntry::Occupied(e) => Some(e),
+            BlockEntry::Vacant(_) => None,
         }
     }
 }
@@ -355,10 +420,9 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
         debug_assert_eq!(header::hash_from_scale_encoded_header(&header), self.key.1);
 
         let block = self.parent.blocks.get_mut(&self.key).unwrap();
-        match block.inner {
+        match &block.inner {
             // Transition from `Unknown` to `UnverifiedHeader`.
             BlockInner::Unknown => {
-                let decoded_header = header::decode(&header).unwrap();
                 block.inner = BlockInner::UnverifiedHeader {
                     scale_encoded_header: header,
                 };
@@ -373,7 +437,7 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
             } => {
                 // Since headers are indexed by their hash, a mismatch here would mean that two
                 // different headers have the same hash.
-                debug_assert_eq!(already_in, header);
+                debug_assert_eq!(already_in, &header);
             }
         };
     }
@@ -392,7 +456,7 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
         });
 
         for ((child_height, child_hash), child) in children_iter {
-            match child.inner {
+            match &child.inner {
                 // `Unknown` blocks can't be returned by `self.children()` since we don't know
                 // their ancestry.
                 BlockInner::Unknown => unreachable!(),
@@ -411,7 +475,7 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
 
         // Actually remove from list.
         let removed_block: Block<_> = self.parent.blocks.remove(&self.key).unwrap();
-        // TODO: remove ongoing requests
+        // TODO: remove ongoing requests?
 
         todo!()
     }
@@ -425,17 +489,20 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
         let removed_block: Block<_> = self.parent.blocks.remove(&self.key).unwrap();
 
         // TODO: remove children of the block as well
-        // TODO: remove ongoing requests
+        // TODO: remove ongoing requests?
         todo!()
     }
 
     /// Adds a new request to the collection. Allocates a new [`RequestId`].
     ///
-    /// The request fetches this block and `num_requested_blocks - 1` ancestors.
+    /// The request is expected to fetch this block and `num_requested_blocks - 1` ancestors.
+    ///
+    /// The main effect of this method is to adjust the outcome of calling
+    /// [`PendingBlocks::desired_queries`].
     pub fn add_descending_request(
         &mut self,
         user_data: TRq,
-        num_requested_blocks: NonZeroU32,
+        num_requested_blocks: NonZeroU64,
     ) -> RequestId {
         let request_id = RequestId(self.parent.requests.insert(Request {
             target_block: self.key,

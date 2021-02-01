@@ -173,41 +173,6 @@ struct Inner<TSrc> {
     /// Also contains a list of ongoing requests. The requests are kept up-to-date with the
     /// information in [`Inner::sources`].
     pending_blocks: pending_blocks::PendingBlocks<(), ()>,
-
-    /// List of blocks whose header has been verified, but whose body is currently being
-    /// downloaded from a source or should be downloaded from a source.
-    ///
-    /// Contains as value the SCALE-encoded header and source the block is currently being
-    /// downloaded from.
-    ///
-    /// Always empty if `full` is `false`.
-    pending_body_downloads:
-        hashbrown::HashMap<[u8; 32], (Vec<u8>, Option<SourceId>), fnv::FnvBuildHasher>,
-
-    /// Map of blocks whose parent is either in `unknown_headers` or in `disjoint_headers`.
-    ///
-    /// Only contains blocks whose height is strictly superior to the height of the local
-    /// finalized block.
-    ///
-    /// The keys are `(block_height, block_hash)`. Using a b-tree and putting the block number in
-    /// the key makes it possible to remove obsolete entries once blocks are finalized. For
-    /// example, when block `N` is finalized, all entries whose key starts with `N` can be
-    /// removed.
-    disjoint_headers: BTreeMap<(u64, [u8; 32]), DisjointBlock>, // TODO: move to standalone container?
-
-    /// List of block height and hash whose header is not known.
-    ///
-    /// Only contains blocks whose height is strictly superior to the height of the local
-    /// finalized block.
-    ///
-    /// The keys are `(block_height, block_hash)`. Using a b-tree and putting the block number in
-    /// the key makes it possible to remove obsolete entries once blocks are finalized. For
-    /// example, when block `N` is finalized, all entries whose key starts with `N` can be
-    /// removed.
-    unknown_headers: BTreeMap<(u64, [u8; 32]), Option<SourceId>>,
-
-    /// See [`Config::max_disjoint_headers`].
-    max_disjoint_headers: usize,
 }
 
 struct Block<TBl> {
@@ -222,19 +187,8 @@ struct DisjointBlock {
 /// Extra fields specific to each blocks source.
 struct Source<TSrc> {
     /// What the source is busy doing.
-    occupation: SourceOccupation,
+    occupation: Option<pending_blocks::RequestId>,
     user_data: TSrc,
-}
-
-#[derive(Debug)]
-enum SourceOccupation {
-    /// Source isn't doing anything.
-    Idle,
-    /// Source is performing an ancestry search. Contains the height and hash of the first block
-    /// expected in the response.
-    AncestrySearch(u64, [u8; 32]),
-    /// Source is performing a header request. Contains the height and hash of the expected block.
-    HeaderRequest(u64, [u8; 32]),
 }
 
 impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
@@ -251,7 +205,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             chain,
             inner: Inner {
                 full: config.full,
-                max_disjoint_headers: config.max_disjoint_headers,
                 sources: sources::AllForksSources::new(
                     config.sources_capacity,
                     finalized_block_height,
@@ -261,9 +214,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     max_disjoint_headers: config.max_disjoint_headers,
                     max_requests_per_block: config.max_requests_per_block,
                 }),
-                pending_body_downloads: Default::default(),
-                disjoint_headers: Default::default(),
-                unknown_headers: Default::default(),
             },
         }
     }
@@ -318,7 +268,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> (SourceMutAccess<TSrc, TBl>, Option<Request>) {
         let mut new_source = self.inner.sources.add_source(
             Source {
-                occupation: SourceOccupation::Idle,
+                occupation: None,
                 user_data,
             },
             best_block_number,
@@ -330,38 +280,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             .block_mut(best_block_number, best_block_hash)
             .or_insert(());
 
-        let mut request = None;
-
-        // If the source's best block is below the finalized block height, don't do anything.
-        if best_block_number > self.chain.finalized_block_header().number {
-            // Add the source's best block to `unknown_headers`.
-            let entry = self
-                .inner
-                .unknown_headers
-                .entry((best_block_number, best_block_hash))
-                .or_insert(None);
-
-            if entry.is_none() {
-                // If this entry was unknown, ask the source about this block.
-                new_source.user_data().occupation =
-                    SourceOccupation::HeaderRequest(best_block_number, best_block_hash);
-                *entry = Some(new_source.id());
-                request = Some(Request::HeaderRequest {
-                    hash: best_block_hash,
-                    number: best_block_number,
-                });
-            }
-        }
-
         let source_id = new_source.id();
-
-        // `request` might have been already filled above.
-        // If not, try use this new source to make progress elsewhere.
-        if request.is_none() {
-            // At this point, the state of `self` is consistent. It's ok to call a separate
-            // method.
-            request = self.source_next_request(source_id);
-        }
+        let request = self.source_next_request(source_id);
 
         (
             SourceMutAccess {
@@ -405,7 +325,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> AncestrySearchResponseOutcome<TSrc, TBl> {
         // The next block in the list of headers should have a hash equal to this one.
         // Sets the `occupation` of `source_id` back to `Idle`.
-        let (expected_next_height, expected_next_hash) = match mem::replace(
+        let (expected_next_height, expected_next_hash) = match mem::take(
             &mut self
                 .inner
                 .sources
@@ -413,20 +333,10 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .unwrap()
                 .user_data()
                 .occupation,
-            SourceOccupation::Idle,
         ) {
-            SourceOccupation::AncestrySearch(num, hash) => (num, hash),
-            SourceOccupation::HeaderRequest(num, hash) => (num, hash), // TODO: correct?
-            SourceOccupation::Idle => panic!(),
+            Some(request_id) => self.inner.pending_blocks.finish_request(request_id),
+            None => panic!(),
         };
-
-        if let Some(entry) = self
-            .inner
-            .unknown_headers
-            .get_mut(&(expected_next_height, expected_next_hash))
-        {
-            *entry = None;
-        }
 
         // Set to true below if any block is inserted in `disjoint_headers`.
         let mut any_progress = false;
@@ -481,20 +391,11 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     self = this;
                     println!("not finalized");
 
-                    // Discard from the local state all blocks that descend from this one.
-                    // TODO: keep known bad blocks and document
-                    // TODO: move to header_from_source
-                    let discarded =
-                        self.discard_disjoint_chain(decoded_header_number, expected_next_hash);
-
                     let next_request = self.source_next_request(source_id);
                     return AncestrySearchResponseOutcome::NotFinalizedChain {
                         sync: self,
                         next_request,
-                        discarded_unverified_block_headers: discarded
-                            .into_iter()
-                            .map(|(_, _, b)| b.scale_encoded_header)
-                            .collect(),
+                        discarded_unverified_block_headers: Vec::new(), // TODO:
                     };
                 }
                 HeaderFromSourceOutcome::AlreadyInChain(mut this) => {
@@ -531,22 +432,47 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ///
     /// If `Some` is returned, updates the [`SourceOccupation`] in `self` and returns the request
     /// that must be started.
+    #[must_use]
     fn source_next_request(&mut self, source_id: SourceId) -> Option<Request> {
         let mut source_access = self.inner.sources.source_mut(source_id).unwrap();
-        debug_assert!(matches!(
-            source_access.user_data().occupation,
-            SourceOccupation::Idle
-        ));
 
-        for desired_query in self.inner.pending_blocks.desired_queries() {
-            // The source can only operate on blocks that it knows about.
-            // `continue` if this block isn't known by this source.
-            if !source_access.knows_block(*unknown_block_height, unknown_block_hash) {
-                continue;
-            }
+        // Don't start more than one request at a time.
+        // TODO: in the future, allow multiple requests
+        if source_access.user_data().occupation.is_some() {
+            return None;
         }
 
-        None
+        // Find a query that is appropriate for this source.
+        let query_to_start = self
+            .inner
+            .pending_blocks
+            .desired_queries()
+            .find(|desired_query| {
+                // The source can only operate on blocks that it knows about.
+                // `continue` if this block isn't known by this source.
+                source_access.knows_block(
+                    desired_query.first_block_height,
+                    &desired_query.first_block_hash,
+                )
+            })?;
+
+        // Start the request.
+        let request_id: pending_blocks::RequestId = self
+            .inner
+            .pending_blocks
+            .block_mut(
+                query_to_start.first_block_height,
+                query_to_start.first_block_hash,
+            )
+            .into_occupied()
+            .unwrap()
+            .add_descending_request((), query_to_start.num_blocks);
+        source_access.user_data().occupation = Some(request_id);
+
+        Some(Request::AncestrySearch {
+            first_block_hash: query_to_start.first_block_hash,
+            num_blocks: query_to_start.num_blocks,
+        })
     }
 
     /// Update the source with a newly-announced block.
@@ -588,19 +514,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 BlockAnnounceOutcome::NotFinalizedChain(sync)
             }
             HeaderFromSourceOutcome::Disjoint(mut sync) => {
-                let next_request = if matches!(
-                    sync.inner
-                        .sources
-                        .source_mut(source_id)
-                        .unwrap()
-                        .user_data()
-                        .occupation,
-                    SourceOccupation::Idle
-                ) {
-                    sync.source_next_request(source_id)
-                } else {
-                    None
-                };
+                let next_request = sync.source_next_request(source_id);
 
                 BlockAnnounceOutcome::Disjoint { sync, next_request }
             }
@@ -669,10 +583,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .is_some()
         {
             // Parent is in the `NonFinalizedTree`, meaning it is possible to verify it.
-            block_access.update_header(
-                scale_encoded_header.clone(),
-                pending_blocks::ParentState::Known,
-            ); // TODO: clone :(
+            block_access.update_header(scale_encoded_header.clone()); // TODO: clone :(
 
             HeaderFromSourceOutcome::HeaderVerify(HeaderVerify {
                 parent: self,
@@ -691,10 +602,14 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             // Parent is not in the `NonFinalizedTree`. It is unknown whether this block belongs
             // to the same finalized chain as the one known locally, but we expect that it is the
             // case.
-            block_access.update_header(
-                scale_encoded_header,
-                pending_blocks::ParentState::UnknownOrPending,
-            );
+            block_access.update_header(scale_encoded_header);
+
+            // Also insert the parent in the list of pending blocks.
+            self.inner
+                .pending_blocks
+                .block_mut(header.number - 1, *header.parent_hash)
+                .or_insert(());
+
             HeaderFromSourceOutcome::Disjoint(self)
         }
     }
@@ -850,24 +765,9 @@ impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
             .unwrap()
             .remove();
 
-        let source_id = self.source_id;
-        if let Some((_, (_, src))) = self
-            .parent
-            .inner
-            .pending_body_downloads
-            .iter_mut()
-            .find(|(_, (_, s))| *s == Some(source_id))
-        {
-            // TODO: redirect download to other source
-            *src = None;
-        }
-
-        match source.occupation {
-            SourceOccupation::Idle => {}
-            SourceOccupation::AncestrySearch(_, hash) => {
-                todo!()
-            }
-            SourceOccupation::HeaderRequest(_, _) => todo!(),
+        if let Some(request_id) = source.occupation {
+            // TODO: self.parent.inner.pending_blocks.finish_request(request_id);
+            todo!()
         }
 
         // TODO: None hardcoded
@@ -1068,21 +968,7 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
             },
             // TODO: use is_new_best
             (Ok(is_new_best), true) => {
-                let next_request = if matches!(
-                    self.parent
-                        .inner
-                        .sources
-                        .source_mut(self.source_id)
-                        .unwrap()
-                        .user_data()
-                        .occupation,
-                    SourceOccupation::Idle
-                ) {
-                    self.parent.source_next_request(self.source_id)
-                } else {
-                    None
-                };
-
+                let next_request = self.parent.source_next_request(self.source_id);
                 HeaderVerifyOutcome::Success {
                     sync: self.parent,
                     next_request,
@@ -1098,21 +984,7 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
                 user_data,
             },
             (Err((error, user_data)), true) => {
-                let next_request = if matches!(
-                    self.parent
-                        .inner
-                        .sources
-                        .source_mut(self.source_id)
-                        .unwrap()
-                        .user_data()
-                        .occupation,
-                    SourceOccupation::Idle
-                ) {
-                    self.parent.source_next_request(self.source_id)
-                } else {
-                    None
-                };
-
+                let next_request = self.parent.source_next_request(self.source_id);
                 HeaderVerifyOutcome::Error {
                     sync: self.parent,
                     error,
