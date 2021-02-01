@@ -368,15 +368,6 @@ impl WaitingForPeers {
     /// Add a peer to the list of peers.
     pub fn add_peer(mut self, peer: PeerId) -> GrandpaWarpSync {
         self.peers.push(peer);
-        GrandpaWarpSync::WaitingForPeers(self)
-    }
-
-    /// Proceed to issuing GrandPa warp sync requests.
-    pub fn ready(self) -> GrandpaWarpSync {
-        if self.peers.is_empty() {
-            return GrandpaWarpSync::WaitingForPeers(self);
-        }
-
         GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
             peer_index: 0,
             peers: self.peers,
