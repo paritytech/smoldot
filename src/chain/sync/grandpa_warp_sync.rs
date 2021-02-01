@@ -260,10 +260,16 @@ impl WarpSyncRequest {
 
     /// Add a peer to the list of peers.
     pub fn add_peer(&mut self, peer: PeerId) {
+        assert!(!self.peers.iter().any(|p| p == &peer));
         self.peers.push(peer);
     }
 
     /// Remove a peer from the list of peers.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the peer wasn't added to the list earlier.
+    ///
     pub fn remove(mut self, to_remove: PeerId) -> GrandpaWarpSync {
         if to_remove == self.current_peer() {
             let next_index = self.peer_index + 1;
@@ -281,13 +287,16 @@ impl WarpSyncRequest {
                 })
             }
         } else {
-            let index = self.peers.iter().position(|peer| peer == &to_remove);
+            let index = self
+                .peers
+                .iter()
+                .position(|peer| peer == &to_remove)
+                .unwrap();
 
-            if let Some(index) = index {
-                // There's no point in removing a peer if it's behind the current index.
-                if index > self.peer_index {
-                    self.peers.remove(index);
-                }
+            self.peers.remove(index);
+
+            if index < self.peer_index {
+                self.peer_index -= 1;
             }
 
             GrandpaWarpSync::WarpSyncRequest(self)
