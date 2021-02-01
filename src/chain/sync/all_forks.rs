@@ -87,7 +87,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::collections::{btree_map, BTreeMap, BTreeSet, VecDeque};
+use alloc::collections::VecDeque;
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -177,11 +177,6 @@ struct Inner<TSrc> {
 
 struct Block<TBl> {
     user_data: TBl,
-}
-
-struct DisjointBlock {
-    /// Header of the block. Guaranteed to be a valid header.
-    scale_encoded_header: Vec<u8>,
 }
 
 /// Extra fields specific to each blocks source.
@@ -325,7 +320,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> AncestrySearchResponseOutcome<TSrc, TBl> {
         // The next block in the list of headers should have a hash equal to this one.
         // Sets the `occupation` of `source_id` back to `Idle`.
-        let (_, expected_next_height, expected_next_hash) = match mem::take(
+        let (_, _, expected_next_hash) = match mem::take(
             &mut self
                 .inner
                 .sources
@@ -363,12 +358,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 Err(_) => continue,
             };
 
-            let decoded_header_number = decoded_header.number;
-            println!("response block {:?}", decoded_header_number);
-
             match self.header_from_source(source_id, &expected_next_hash, decoded_header, false) {
                 HeaderFromSourceOutcome::HeaderVerify(this) => {
-                    println!("verify");
                     return AncestrySearchResponseOutcome::Verify(this);
                 }
                 HeaderFromSourceOutcome::TooOld(this) => {
@@ -378,7 +369,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     // finalized block has been updated between the moment the request was emitted
                     // and the moment the response is received.
                     debug_assert_eq!(index_in_response, 0);
-                    println!("too old");
                     self = this;
                     break;
                 }
@@ -389,7 +379,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     // updated between the moment the request was emitted and the moment the
                     // response is received.
                     self = this;
-                    println!("not finalized");
 
                     let next_request = self.source_next_request(source_id);
                     return AncestrySearchResponseOutcome::NotFinalizedChain {
@@ -403,7 +392,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     // announcement has arrived and been processed between the moment the request
                     // was emitted and the moment the response is received.
                     debug_assert_eq!(index_in_response, 0);
-                    println!("already in chain");
                     let next_request = this.source_next_request(source_id);
                     return AncestrySearchResponseOutcome::AllAlreadyInChain {
                         sync: this,
@@ -412,7 +400,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 }
                 HeaderFromSourceOutcome::Disjoint(this) => {
                     // Block of unknown ancestry. Continue looping.
-                    println!("disjoint");
                     any_progress = true;
                     self = this;
                 }
@@ -421,7 +408,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
         // If this is reached, then the ancestry search was inconclusive. Only disjoint blocks
         // have been received.
-        println!("inconclusive");
         // TODO: use any_progress
         let next_request = self.source_next_request(source_id);
         AncestrySearchResponseOutcome::Inconclusive {
@@ -441,7 +427,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // Don't start more than one request at a time.
         // TODO: in the future, allow multiple requests
         if source_access.user_data().occupation.is_some() {
-            println!("busy source");
             return None;
         }
 
@@ -506,7 +491,6 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         match self.header_from_source(source_id, &announced_header_hash, announced_header, is_best)
         {
             HeaderFromSourceOutcome::HeaderVerify(verify) => {
-                println!("verifiable announce");
                 BlockAnnounceOutcome::HeaderVerify(verify)
             }
             HeaderFromSourceOutcome::TooOld(sync) => BlockAnnounceOutcome::TooOld(sync),
@@ -958,13 +942,8 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
                 .remove_verify_failed();
         }
 
-        println!("verification ok");
-
         match (result, self.verifiable_blocks.is_empty()) {
-            (
-                Ok(is_new_best),
-                false,
-            ) => HeaderVerifyOutcome::SuccessContinue {
+            (Ok(is_new_best), false) => HeaderVerifyOutcome::SuccessContinue {
                 is_new_best,
                 next_block: HeaderVerify {
                     parent: self.parent,

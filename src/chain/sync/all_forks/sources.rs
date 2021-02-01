@@ -16,6 +16,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Collection of sources used for the `all_forks` syncing.
+//!
+//! Each source stored in the [`AllForksSources`] is associated to:
+//!
+//! - A [`SourceId`].
+//! - A best block.
+//! - A list of blocks known by this source.
+//! - An opaque user data, of type `TSrc`.
+//!
 
 use alloc::collections::BTreeSet;
 

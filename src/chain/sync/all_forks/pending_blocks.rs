@@ -469,6 +469,7 @@ impl<'a, TBl, TRq> OccupiedBlockEntry<'a, TBl, TRq> {
         });
 
         for ((child_height, child_hash), child) in children_iter {
+            debug_assert_eq!(child_height, self.key.0 + 1);
             match &child.inner {
                 // `Unknown` blocks can't be returned by `self.children()` since we don't know
                 // their ancestry.
