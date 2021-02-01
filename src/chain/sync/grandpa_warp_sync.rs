@@ -16,8 +16,6 @@ use crate::{
 /// Problem encountered during a call to [`grandpa_warp_sync`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
-    #[display(fmt = "All requests failed.")]
-    AllRequestsFailed,
     #[display(fmt = "{}", _0)]
     Verifier(verify::Error),
     #[display(fmt = "{}", _0)]
@@ -27,43 +25,42 @@ pub enum Error {
 }
 
 /// The configuration for [`grandpa_warp_sync`].
-pub struct Config<'a> {
-    /// A list of connected peers.
-    pub connected_peers: Vec<PeerId>,
+pub struct Config {
     /// The chain information of the genesis block.
-    pub genesis_chain_information: &'a ChainInformation,
+    pub genesis_chain_information: ChainInformation,
 }
 
-/// Starts syncing via grandpa warp sync.
+/// Starts syncing via GrandPa warp sync.
 pub fn grandpa_warp_sync(config: Config) -> GrandpaWarpSync {
-    GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
-        peer_index: 0,
-        connected_peers: config.connected_peers,
+    GrandpaWarpSync::WaitingForPeers(WaitingForPeers {
         genesis_chain_information: config.genesis_chain_information,
+        peers: Vec::new(),
     })
 }
 
-/// The grandpa warp sync state machine.
-pub enum GrandpaWarpSync<'a> {
+/// The GrandPa warp sync state machine.
+pub enum GrandpaWarpSync {
     /// Warp syncing is over.
     Finished(Result<(ChainInformation, HostVmPrototype), Error>),
     /// Loading a storage value is required in order to continue.
-    StorageGet(StorageGet<'a>),
+    StorageGet(StorageGet),
     /// Fetching the key that follows a given one is required in order to continue.
-    NextKey(NextKey<'a>),
+    NextKey(NextKey),
     /// Verifying the warp sync response is required to continue.
-    Verifier(Verifier<'a>),
+    Verifier(Verifier),
     /// Performing a network request is required to continue.
-    WarpSyncRequest(WarpSyncRequest<'a>),
+    WarpSyncRequest(WarpSyncRequest),
     /// Fetching the parameters for the virtual machine is required to continue.
-    VirtualMachineParamsGet(VirtualMachineParamsGet<'a>),
+    VirtualMachineParamsGet(VirtualMachineParamsGet),
+    /// Adding more peers to perform GrandPa warp sync network requests to is required to continue.
+    WaitingForPeers(WaitingForPeers),
 }
 
-impl<'a> GrandpaWarpSync<'a> {
+impl GrandpaWarpSync {
     fn from_babe_fetch_epoch_query(
         query: babe_fetch_epoch::Query,
         fetched_current_epoch: Option<BabeEpochInformation>,
-        state: PostVerificationState<'a>,
+        state: PostVerificationState,
     ) -> Self {
         match (query, fetched_current_epoch) {
             (babe_fetch_epoch::Query::Finished(Ok((next_epoch, runtime))), Some(current_epoch)) => {
@@ -118,16 +115,21 @@ impl<'a> GrandpaWarpSync<'a> {
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet<'a> {
+pub struct StorageGet {
     inner: babe_fetch_epoch::StorageGet,
     fetched_current_epoch: Option<BabeEpochInformation>,
-    state: PostVerificationState<'a>,
+    state: PostVerificationState,
 }
 
-impl<'a> StorageGet<'a> {
+impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    pub fn key<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
         self.inner.key()
+    }
+
+    /// Returns the peer that we received the warp sync data from.
+    pub fn warp_sync_peer(&self) -> PeerId {
+        self.state.warp_sync_peer.clone()
     }
 
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -141,7 +143,7 @@ impl<'a> StorageGet<'a> {
     pub fn inject_value(
         self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> GrandpaWarpSync<'a> {
+    ) -> GrandpaWarpSync {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_value(value),
             self.fetched_current_epoch,
@@ -152,16 +154,21 @@ impl<'a> StorageGet<'a> {
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey<'a> {
+pub struct NextKey {
     inner: babe_fetch_epoch::NextKey,
     fetched_current_epoch: Option<BabeEpochInformation>,
-    state: PostVerificationState<'a>,
+    state: PostVerificationState,
 }
 
-impl<'a> NextKey<'a> {
+impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&self) -> &[u8] {
         self.inner.key()
+    }
+
+    /// Returns the peer that we received the warp sync data from.
+    pub fn warp_sync_peer(&self) -> PeerId {
+        self.state.warp_sync_peer.clone()
     }
 
     /// Injects the key.
@@ -170,7 +177,7 @@ impl<'a> NextKey<'a> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> GrandpaWarpSync<'a> {
+    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> GrandpaWarpSync {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_key(key),
             self.fetched_current_epoch,
@@ -180,17 +187,19 @@ impl<'a> NextKey<'a> {
 }
 
 /// Verifying the warp sync response is required to continue.
-pub struct Verifier<'a> {
+pub struct Verifier {
     verifier: warp_sync::Verifier,
-    genesis_chain_information: &'a ChainInformation,
+    genesis_chain_information: ChainInformation,
+    warp_sync_peer: PeerId,
 }
 
-impl<'a> Verifier<'a> {
-    pub fn next(self) -> GrandpaWarpSync<'a> {
+impl Verifier {
+    pub fn next(self) -> GrandpaWarpSync {
         match self.verifier.next() {
             Ok(warp_sync::Next::NotFinished(next_verifier)) => GrandpaWarpSync::Verifier(Self {
                 verifier: next_verifier,
                 genesis_chain_information: self.genesis_chain_information,
+                warp_sync_peer: self.warp_sync_peer,
             }),
             Ok(warp_sync::Next::Success {
                 header,
@@ -200,6 +209,7 @@ impl<'a> Verifier<'a> {
                     header,
                     chain_information_finality,
                     genesis_chain_information: self.genesis_chain_information,
+                    warp_sync_peer: self.warp_sync_peer,
                 },
             }),
             Err(error) => GrandpaWarpSync::Finished(Err(Error::Verifier(error))),
@@ -207,59 +217,99 @@ impl<'a> Verifier<'a> {
     }
 }
 
-struct PostVerificationState<'a> {
+struct PostVerificationState {
     header: Header,
     chain_information_finality: ChainInformationFinality,
-    genesis_chain_information: &'a ChainInformation,
+    genesis_chain_information: ChainInformation,
+    warp_sync_peer: PeerId,
 }
 
-/// Performing a grandpa warp sync network request is required to continue.
-pub struct WarpSyncRequest<'a> {
+/// Performing a GrandPa warp sync network request is required to continue.
+pub struct WarpSyncRequest {
     peer_index: usize,
-    connected_peers: Vec<PeerId>,
-    genesis_chain_information: &'a ChainInformation,
+    peers: Vec<PeerId>,
+    genesis_chain_information: ChainInformation,
 }
 
-impl<'a> WarpSyncRequest<'a> {
-    /// The peer to make a grandpa warp sync network request to.
+impl WarpSyncRequest {
+    /// The peer to make a GrandPa warp sync network request to.
     pub fn current_peer(&self) -> PeerId {
-        self.connected_peers[self.peer_index].clone()
+        self.peers[self.peer_index].clone()
     }
 
-    /// Submit a grandpa warp sync network response if the request succeeded or
+    /// Add a peer to the list of peers.
+    pub fn add_peer(mut self, peer: PeerId) -> GrandpaWarpSync {
+        self.peers.push(peer);
+
+        GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
+            peer_index: self.peer_index,
+            peers: self.peers,
+            genesis_chain_information: self.genesis_chain_information,
+        })
+    }
+
+    /// Remove a peer from the list of peers.
+    ///
+    /// Will panic if `to_remove` is the `current_peer`.
+    pub fn remove_other_peer(mut self, to_remove: PeerId) -> GrandpaWarpSync {
+        if to_remove == self.current_peer() {
+            panic!("Atttempted to remove the current peer.");
+        }
+
+        let index = self.peers.iter().position(|peer| peer == &to_remove);
+
+        if let Some(index) = index {
+            // There's no point in removing a peer if it's behind the current index.
+            if index > self.peer_index {
+                self.peers.remove(index);
+            }
+        }
+
+        GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
+            peer_index: self.peer_index,
+            peers: self.peers,
+            genesis_chain_information: self.genesis_chain_information,
+        })
+    }
+
+    /// Submit a GrandPa warp sync network response if the request succeeded or
     /// `None` if it did not.
-    pub async fn handle_responste(
+    pub async fn handle_response(
         self,
         response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
-    ) -> GrandpaWarpSync<'a> {
+    ) -> GrandpaWarpSync {
+        let warp_sync_peer = self.current_peer();
+
         let next_index = self.peer_index + 1;
 
         match response {
             Some(response_fragments) => GrandpaWarpSync::Verifier(Verifier {
                 verifier: warp_sync::Verifier::new(
-                    self.genesis_chain_information,
+                    &self.genesis_chain_information,
                     response_fragments,
                 ),
                 genesis_chain_information: self.genesis_chain_information,
+                warp_sync_peer,
             }),
-            None if next_index < self.connected_peers.len() => {
-                GrandpaWarpSync::WarpSyncRequest(Self {
-                    peer_index: next_index,
-                    connected_peers: self.connected_peers,
-                    genesis_chain_information: self.genesis_chain_information,
-                })
-            }
-            None => GrandpaWarpSync::Finished(Err(Error::AllRequestsFailed)),
+            None if next_index < self.peers.len() => GrandpaWarpSync::WarpSyncRequest(Self {
+                peer_index: next_index,
+                peers: self.peers,
+                genesis_chain_information: self.genesis_chain_information,
+            }),
+            None => GrandpaWarpSync::WaitingForPeers(WaitingForPeers {
+                peers: Vec::new(),
+                genesis_chain_information: self.genesis_chain_information,
+            }),
         }
     }
 }
 
 /// Fetching the parameters for the virtual machine is required to continue.
-pub struct VirtualMachineParamsGet<'a> {
-    state: PostVerificationState<'a>,
+pub struct VirtualMachineParamsGet {
+    state: PostVerificationState,
 }
 
-impl<'a> VirtualMachineParamsGet<'a> {
+impl VirtualMachineParamsGet {
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn inject_virtual_machine_params(
@@ -267,7 +317,7 @@ impl<'a> VirtualMachineParamsGet<'a> {
         code: impl AsRef<[u8]>,
         heap_pages: u64,
         exec_hint: ExecHint,
-    ) -> GrandpaWarpSync<'a> {
+    ) -> GrandpaWarpSync {
         match HostVmPrototype::new(code, heap_pages, exec_hint) {
             Ok(runtime) => {
                 let babe_current_epoch_query =
@@ -284,5 +334,31 @@ impl<'a> VirtualMachineParamsGet<'a> {
             }
             Err(error) => GrandpaWarpSync::Finished(Err(Error::NewRuntime(error))),
         }
+    }
+}
+
+/// Adding more peers to perform GrandPa warp sync network requests to is required to continue.
+pub struct WaitingForPeers {
+    peers: Vec<PeerId>,
+    genesis_chain_information: ChainInformation,
+}
+
+impl WaitingForPeers {
+    /// Add a peer to the list of peers.
+    pub fn add_peer(mut self, peer: PeerId) -> GrandpaWarpSync {
+        self.peers.push(peer);
+        GrandpaWarpSync::WaitingForPeers(Self {
+            peers: self.peers,
+            genesis_chain_information: self.genesis_chain_information,
+        })
+    }
+
+    /// Proceed to issuing GrandPa warp sync requests.
+    pub fn ready(self) -> GrandpaWarpSync {
+        GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
+            peer_index: 0,
+            peers: self.peers,
+            genesis_chain_information: self.genesis_chain_information,
+        })
     }
 }
