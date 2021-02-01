@@ -320,7 +320,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> AncestrySearchResponseOutcome<TSrc, TBl> {
         // The next block in the list of headers should have a hash equal to this one.
         // Sets the `occupation` of `source_id` back to `Idle`.
-        let (_, _, expected_next_hash) = match mem::take(
+        let (_, _, mut expected_next_hash) = match mem::take(
             &mut self
                 .inner
                 .sources
@@ -358,7 +358,12 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 Err(_) => continue,
             };
 
-            match self.header_from_source(source_id, &expected_next_hash, decoded_header, false) {
+            match self.header_from_source(
+                source_id,
+                &expected_next_hash,
+                decoded_header.clone(),
+                false,
+            ) {
                 HeaderFromSourceOutcome::HeaderVerify(this) => {
                     return AncestrySearchResponseOutcome::Verify(this);
                 }
@@ -402,6 +407,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                     // Block of unknown ancestry. Continue looping.
                     any_progress = true;
                     self = this;
+                    expected_next_hash = *decoded_header.parent_hash;
                 }
             }
         }
