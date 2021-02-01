@@ -334,7 +334,7 @@ pub struct VirtualMachineParamsGet {
 impl VirtualMachineParamsGet {
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
-    pub fn inject_virtual_machine_params(
+    pub fn set_virtual_machine_params(
         self,
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
