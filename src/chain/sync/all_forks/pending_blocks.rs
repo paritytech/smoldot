@@ -206,8 +206,21 @@ impl<TBl, TRq> PendingBlocks<TBl, TRq> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_request(&mut self, request_id: RequestId) -> (u64, [u8; 32]) {
-        todo!()
+    pub fn finish_request(&mut self, request_id: RequestId) -> (TRq, u64, [u8; 32]) {
+        let request = self.requests.remove(request_id.0);
+
+        let _was_in = self.blocks_requests.remove(&(
+            request.target_block.0,
+            request.target_block.1,
+            request_id,
+        ));
+        debug_assert!(_was_in);
+
+        (
+            request.user_data,
+            request.target_block.0,
+            request.target_block.1,
+        )
     }
 
     /// Returns an iterator yielding blocks that should be requested from the sources of blocks.

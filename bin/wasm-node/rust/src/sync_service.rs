@@ -158,6 +158,7 @@ async fn start_sync(
                 },
                 // TODO: document
                 max_disjoint_headers: 1024,
+                max_requests_per_block: NonZeroU32::new(2).unwrap(),
                 full: false,
             },
         ));

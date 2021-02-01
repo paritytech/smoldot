@@ -325,7 +325,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> AncestrySearchResponseOutcome<TSrc, TBl> {
         // The next block in the list of headers should have a hash equal to this one.
         // Sets the `occupation` of `source_id` back to `Idle`.
-        let (expected_next_height, expected_next_hash) = match mem::take(
+        let (_, expected_next_height, expected_next_hash) = match mem::take(
             &mut self
                 .inner
                 .sources
@@ -412,6 +412,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 }
                 HeaderFromSourceOutcome::Disjoint(this) => {
                     // Block of unknown ancestry. Continue looping.
+                    println!("disjoint");
                     any_progress = true;
                     self = this;
                 }
@@ -420,6 +421,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
         // If this is reached, then the ancestry search was inconclusive. Only disjoint blocks
         // have been received.
+        println!("inconclusive");
         // TODO: use any_progress
         let next_request = self.source_next_request(source_id);
         AncestrySearchResponseOutcome::Inconclusive {
@@ -439,6 +441,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         // Don't start more than one request at a time.
         // TODO: in the future, allow multiple requests
         if source_access.user_data().occupation.is_some() {
+            println!("busy source");
             return None;
         }
 
@@ -548,6 +551,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         } else {
             source_access.add_known_block(header.number, header.hash());
         }
+        source_access.add_known_block(header.number - 1, *header.parent_hash);
 
         // It is assumed that all sources will eventually agree on the same finalized chain. If
         // the block number is lower or equal than the locally-finalized block number, it is
