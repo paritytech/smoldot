@@ -733,7 +733,7 @@ pub enum Request {
 pub struct SourceMutAccess<'a, TSrc, TBl> {
     parent: &'a mut AllForksSync<TSrc, TBl>,
 
-    /// Guaranteed to be a valid entry in [`AllForksSync::sources`].
+    /// Guaranteed to be a valid entry in [`Inner::sources`].
     source_id: SourceId,
 }
 
