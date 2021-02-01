@@ -27,10 +27,10 @@
 
 use alloc::collections::BTreeSet;
 
-/// Identifier for a source in the [`AllForksSync`].
+/// Identifier for a source in the [`AllForksSources`].
 //
 // Implementation note: the `u64` values are never re-used, making it possible to avoid clearing
-// obsolete SourceIds in the `AllForksSync` state machine.
+// obsolete SourceIds in the `AllForksSources` state machine.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(u64);
 
@@ -49,7 +49,7 @@ pub struct AllForksSources<TSrc> {
     // TODO: somehow limit the size of these two containers, to avoid growing forever if the source continuously announces fake blocks?
     known_blocks1: BTreeSet<(SourceId, u64, [u8; 32])>,
 
-    /// Contains the same entries as [`Inner::known_blocks1`], but in reverse.
+    /// Contains the same entries as [`AllForksSources::known_blocks1`], but in reverse.
     known_blocks2: BTreeSet<(u64, [u8; 32], SourceId)>,
 
     /// Height of the finalized block. All sources whose best block number is superior to this
@@ -59,7 +59,7 @@ pub struct AllForksSources<TSrc> {
 
 /// Extra fields specific to each blocks source.
 ///
-/// `best_block_number`/`best_block_hash` must be present in [`Inner::unknown_headers`].
+/// `best_block_number`/`best_block_hash` must be present in the known blocks.
 struct Source<TSrc> {
     best_block_number: u64,
     best_block_hash: [u8; 32],

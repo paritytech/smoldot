@@ -306,15 +306,15 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         }
     }
 
-    /// Call in response to a [`BlockAnnounceOutcome::AncestrySearchStart`].
+    /// Call in response to a [`Request::AncestrySearch`].
     ///
     /// The headers are expected to be sorted in decreasing order. The first element of the
     /// iterator should be the block with the hash passed through
-    /// [`BlockAnnounceOutcome::AncestrySearchStart::first_block_hash`]. Each subsequent element
-    /// is then expected to be the parent of the previous one.
+    /// [`Request::AncestrySearch::first_block_hash`]. Each subsequent element is then expected to
+    /// be the parent of the previous one.
     ///
     /// It is legal for the iterator to be shorter than the number of blocks that were requested
-    /// through [`BlockAnnounceOutcome::AncestrySearchStart::num_blocks`].
+    /// through [`Request::AncestrySearch::num_blocks`].
     ///
     /// # Panic
     ///
@@ -442,8 +442,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
 
     /// Finds a request that the given source could start performing.
     ///
-    /// If `Some` is returned, updates the [`SourceOccupation`] in `self` and returns the request
-    /// that must be started.
+    /// If `Some` is returned, updates `self` and returns the request that must be started.
     #[must_use]
     fn source_next_request(&mut self, source_id: SourceId) -> Option<Request> {
         let mut source_access = self.inner.sources.source_mut(source_id).unwrap();
@@ -497,7 +496,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ///
     /// # Panic
     ///
-    /// Panics if [`source_id`] is invalid.
+    /// Panics if `source_id` is invalid.
     ///
     pub fn block_announce(
         self,
@@ -539,7 +538,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ///
     /// # Panic
     ///
-    /// Panics if [`source_id`] is invalid.
+    /// Panics if `source_id` is invalid.
     ///
     fn header_from_source(
         mut self,
@@ -626,7 +625,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         }
     }
 
-    /// Call in response to a [`BlockAnnounceOutcome::BlockBodyDownloadStart`].
+    /*/// Call in response to a [`BlockAnnounceOutcome::BlockBodyDownloadStart`].
     ///
     /// # Panic
     ///
@@ -677,7 +676,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 todo!()
             }
         }*/
-    }
+    }*/
 }
 
 /// Request that should be performed towards a source.
@@ -864,7 +863,7 @@ pub enum BlockAnnounceOutcome<TSrc, TBl> {
     },
 }
 
-/// Outcome of calling [`SourceMutAccess::ancestry_search_response`].
+/// Outcome of calling [`AllForksSync::ancestry_search_response`].
 pub enum AncestrySearchResponseOutcome<TSrc, TBl> {
     /// Ready to start verifying one or more headers return in the ancestry search.
     Verify(HeaderVerify<TSrc, TBl>),
