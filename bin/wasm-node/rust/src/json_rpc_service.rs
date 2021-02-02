@@ -23,6 +23,7 @@
 use crate::{ffi, network_service, sync_service};
 
 use futures::prelude::*;
+use methods::RpcMethods;
 use smoldot::{
     chain_spec, executor, header,
     json_rpc::{self, methods},
@@ -406,6 +407,17 @@ async fn handle_rpc(rpc: &str, client: &mut JsonRpcService) -> (String, Option<S
                 .to_json_response(request_id);
             (response, None)
         }
+        methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
+            assert!(hash.is_none()); // TODO:
+                                     // TODO: complete hack
+            let response = methods::Response::payment_queryInfo(methods::RuntimeDispatchInfo {
+                weight: 220429000,                     // TODO: no
+                class: methods::DispatchClass::Normal, // TODO: no
+                partial_fee: 15600000001,              // TODO: no
+            })
+            .to_json_response(request_id);
+            (response, None)
+        }
         methods::MethodCall::rpc_methods {} => {
             let response = methods::Response::rpc_methods(methods::RpcMethods {
                 version: 1,
@@ -623,6 +635,15 @@ async fn handle_rpc(rpc: &str, client: &mut JsonRpcService) -> (String, Option<S
                 apis: runtime_specs.apis,
             })
             .to_json_response(request_id);
+            (response, None)
+        }
+        methods::MethodCall::system_accountNextIndex { account } => {
+            // TODO: implement
+            let response = json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, "Unsupported call"),
+                None,
+            );
             (response, None)
         }
         methods::MethodCall::system_chain {} => {
