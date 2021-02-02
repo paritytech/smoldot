@@ -602,6 +602,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 },
             )
         } else {
+            // TODO: return an object instead of verifying immediately
             let error = match self
                 .chain
                 .verify_header(block.scale_encoded_header, now_from_unix_epoch)

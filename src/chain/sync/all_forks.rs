@@ -865,7 +865,7 @@ pub enum BlockAnnounceOutcome<TSrc, TBl> {
 
 /// Outcome of calling [`AllForksSync::ancestry_search_response`].
 pub enum AncestrySearchResponseOutcome<TSrc, TBl> {
-    /// Ready to start verifying one or more headers return in the ancestry search.
+    /// Ready to start verifying one or more headers returned in the ancestry search.
     Verify(HeaderVerify<TSrc, TBl>),
 
     /// Source has given blocks that aren't part of the finalized chain.

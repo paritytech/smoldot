@@ -34,7 +34,7 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use smoldot::{chain, chain::sync::optimistic, informant::HashDisplay, libp2p, network};
+use smoldot::{chain, chain::sync::all_sync, informant::HashDisplay, libp2p, network};
 use std::{collections::HashMap, num::NonZeroU32, pin::Pin, sync::Arc};
 
 mod lossy_channel;
@@ -159,7 +159,7 @@ async fn start_sync(
     network_service: Arc<network_service::NetworkService>,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
-    let mut sync = optimistic::OptimisticSync::<_, libp2p::PeerId, ()>::new(optimistic::Config {
+    let mut sync = all_sync::AllSync::<_, libp2p::PeerId, ()>::new(all_sync::Config {
         chain_information,
         sources_capacity: 32,
         source_selection_randomness_seed: rand::random(),
@@ -188,13 +188,122 @@ async fn start_sync(
     });
 
     async move {
+        // TODO: remove
         let mut peers_source_id_map = HashMap::new();
-        let mut block_requests_finished = stream::FuturesUnordered::new();
+
+        // List of block requests currently in progress.
+        let mut pending_block_requests = stream::FuturesUnordered::new();
 
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
 
+        // If `Some`, contains a request that the sync state machine wants to start on a source.
+        let mut request_to_start = None::<(all_sync::SourceId, all_sync::Request)>;
+
         loop {
+            match request_to_start.take() {
+                None => {}
+                Some((
+                    source_id,
+                    all_sync::Request {
+                        request_id,
+                        detail:
+                            all_sync::RequestDetail::BlocksRequest {
+                                first_block_hash,
+                                ascending,
+                                num_blocks,
+                                request_headers,
+                                request_bodies,
+                            },
+                    },
+                )) => {
+                    let peer_id = sync_inner
+                        .source_mut(source_id)
+                        .unwrap()
+                        .user_data()
+                        .clone();
+
+                    println!("blocks request: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
+                    let block_request = network_service.clone().blocks_request(
+                        peer_id.clone(),
+                        network::protocol::BlocksRequestConfig {
+                            start: network::protocol::BlocksRequestConfigStart::Hash(
+                                first_block_hash,
+                            ),
+                            desired_count: NonZeroU32::new(
+                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                            )
+                            .unwrap(),
+                            direction: if ascending {
+                                network::protocol::BlocksRequestDirection::Ascending
+                            } else {
+                                network::protocol::BlocksRequestDirection::Descending
+                            },
+                            fields: network::protocol::BlocksRequestFields {
+                                header: request_headers,
+                                body: request_bodies,
+                                justification: false,
+                            },
+                        },
+                    );
+
+                    // TODO: use this abort
+                    let (block_request, abort) = future::abortable(block_request);
+
+                    pending_block_requests
+                        .push(async move { block_request.await.unwrap().map(|r| (source_id, r)) });
+                }
+                Some((
+                    source_id,
+                    all_sync::Request {
+                        request_id,
+                        detail:
+                            all_sync::RequestDetail::GrandpaWarpSync {
+                                local_finalized_block_height,
+                            },
+                    },
+                )) => {
+                    let peer_id = sync_inner
+                        .source_mut(source_id)
+                        .unwrap()
+                        .user_data()
+                        .clone();
+
+                    println!("header search: {:?} {:?}", number, hash); // TODO: remove
+                    let block_request = network_service.clone().blocks_request(
+                        peer_id.clone(),
+                        network::protocol::BlocksRequestConfig {
+                            start: network::protocol::BlocksRequestConfigStart::Hash(hash),
+                            desired_count: NonZeroU32::new(1).unwrap(),
+                            direction: network::protocol::BlocksRequestDirection::Ascending,
+                            fields: network::protocol::BlocksRequestFields {
+                                header: true,
+                                body: false,
+                                justification: false,
+                            },
+                        },
+                    );
+
+                    // TODO: use this abort
+                    let (block_request, abort) = future::abortable(block_request);
+
+                    header_requests
+                        .push(async move { block_request.await.unwrap().map(|r| (source_id, r)) });
+                }
+                Some((
+                    source_id,
+                    all_sync::Request {
+                        request_id,
+                        detail:
+                            all_sync::RequestDetail::StorageGet {
+                                block_hash,
+                                state_trie_root,
+                                key,
+                            },
+                    },
+                )) => todo!()
+            }
+
             while let Some(action) = sync.next_request_action() {
                 match action {
                     optimistic::RequestAction::Start {
