@@ -23,7 +23,6 @@
 use crate::{ffi, network_service, sync_service};
 
 use futures::prelude::*;
-use methods::RpcMethods;
 use smoldot::{
     chain_spec, executor, header,
     json_rpc::{self, methods},
