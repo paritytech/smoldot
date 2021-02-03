@@ -960,7 +960,7 @@ impl JsonRpcService {
                 (Some(response), None)
             }
             _method => {
-                log::warn!(target: "json-rpc", "JSON-RPC call not supported yet: {:?}", _method);
+                log::error!(target: "json-rpc", "JSON-RPC call not supported yet: {:?}", _method);
                 let response = json_rpc::parse::build_error_response(
                     request_id,
                     json_rpc::parse::ErrorResponse::ServerError(
