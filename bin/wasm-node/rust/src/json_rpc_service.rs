@@ -1175,7 +1175,7 @@ impl JsonRpcService {
             }
             methods::MethodCall::system_name {} => {
                 let response =
-                    methods::Response::system_name("smoldot!").to_json_response(request_id);
+                    methods::Response::system_name("smoldot").to_json_response(request_id);
                 (Some(response), None)
             }
             methods::MethodCall::system_peers {} => {
