@@ -434,7 +434,7 @@ struct LatestKnownRuntime {
     heap_pages: Option<Vec<u8>>,
 
     /// List of active subscriptions for runtime version updates.
-    /// Whenever [`LatestKnownRuntime::runtime_spec`] is updated, one should emit a notification
+    /// Whenever [`LatestKnownRuntime::runtime`] is updated, one should emit a notification
     /// regarding these subscriptions.
     runtime_version_subscriptions: HashSet<String>,
 }
