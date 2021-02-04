@@ -1132,11 +1132,8 @@ impl JsonRpcService {
                 (Some(response), None)
             }
             methods::MethodCall::system_accountNextIndex { account } => {
-                // TODO: properly implement deserializing; https://github.com/paritytech/substrate/blob/74a50abd6cbaad1253daf3585d5cdaa4592e9184/primitives/core/src/crypto.rs#L228
-                let account_id = bs58::decode(&account).into_vec().unwrap(); // TODO: don't unwrap
-                let account_id = &account_id[1..33];
                 let response = match self
-                    .recent_best_block_runtime_call("AccountNonceApi_account_nonce", account_id)
+                    .recent_best_block_runtime_call("AccountNonceApi_account_nonce", &account.0)
                     .await
                 {
                     Ok(return_value) => {
@@ -1265,7 +1262,7 @@ impl JsonRpcService {
             // Get `runtime_block_hash` and `runtime_block_state_root`, the hash and state trie
             // root of a recent best block that uses this runtime.
             let (spec_version, runtime_block_hash, runtime_block_state_root) = {
-                let mut lock = self.latest_known_runtime.lock().await;
+                let lock = self.latest_known_runtime.lock().await;
                 (
                     lock.runtime
                         .as_ref()
