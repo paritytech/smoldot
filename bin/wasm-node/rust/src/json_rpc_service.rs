@@ -1262,7 +1262,8 @@ impl JsonRpcService {
         // it with the value previously found. If there is a mismatch, the entire runtime call
         // is restarted from scratch.
         loop {
-            // Get `runtime_block_hash`, the hash of a recent best block that uses this runtime.
+            // Get `runtime_block_hash` and `runtime_block_state_root`, the hash and state trie
+            // root of a recent best block that uses this runtime.
             let (spec_version, runtime_block_hash, runtime_block_state_root) = {
                 let mut lock = self.latest_known_runtime.lock().await;
                 (
@@ -1280,7 +1281,7 @@ impl JsonRpcService {
             // Perform the call proof request.
             // Note that `latest_known_runtime` is not locked.
             // If the call proof fail, do as if the proof was empty. This will enable the
-            // fallback consisting as performing individual storage proof requests.
+            // fallback consisting in performing individual storage proof requests.
             let call_proof = self
                 .network_service
                 .clone()
@@ -1292,7 +1293,7 @@ impl JsonRpcService {
                 .await
                 .unwrap_or(Vec::new());
 
-            // Lock `latest_known_runtime_lock` again. `continue` if the runtime has been changed
+            // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
             // in-between.
             let mut latest_known_runtime_lock = self.latest_known_runtime.lock().await;
             let runtime = latest_known_runtime_lock
@@ -1332,7 +1333,7 @@ impl JsonRpcService {
                         return Err(RuntimeCallError::CallError(error));
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                        let requested_key = get.key_as_vec(); // TODO: don't use as_vec
+                        let requested_key = get.key_as_vec(); // TODO: optimization: don't use as_vec
                         let storage_value = proof_verify::verify_proof(proof_verify::Config {
                             requested_key: &requested_key,
                             trie_root_hash: &runtime_block_state_root,
@@ -1362,10 +1363,10 @@ enum StorageQueryError {
 
 #[derive(Debug, derive_more::Display)]
 enum RuntimeCallError {
-    /// Error while performing the runtime call.
+    /// Error during the runtime call.
     #[display(fmt = "{}", _0)]
     CallError(executor::read_only_runtime_host::Error),
-    /// Error while starting the runtime call.
+    /// Error initializing the runtime call.
     #[display(fmt = "{}", _0)]
     StartError(executor::host::StartErr),
     /// Runtime of the best block isn't valid.
