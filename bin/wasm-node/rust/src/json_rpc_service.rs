@@ -67,7 +67,7 @@ pub struct Config {
     /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the [`start`]
     /// >           function could in theory use the [`Config::chain_spec`] parameter to derive
     /// >           this value, doing so is quite expensive. We prefer to require this value
-    /// >           from the upper layer instead, as it is most likely needed anyway.
+    /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 }
 
