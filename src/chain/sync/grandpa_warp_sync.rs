@@ -31,9 +31,6 @@ use crate::{
 };
 use core::convert::TryInto as _;
 
-/// This needs to be kept up-to-date with the value in substrate.
-const WARP_SYNC_RESPONSE_FRAGMENTS_LIMIT: usize = 100;
-
 /// Problem encountered during a call to [`grandpa_warp_sync`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
@@ -349,14 +346,22 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
     /// Submit a GrandPa warp sync response if the request succeeded or `None` if it did not.
     pub fn handle_response(
         mut self,
-        response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
+        mut response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
     ) -> GrandpaWarpSync<TSrc> {
+        // Count a response of 0 fragments as a failed response.
+        if response
+            .as_ref()
+            .map(|fragments| fragments.is_empty())
+            .unwrap_or(false)
+        {
+            response = None;
+        }
+
         let next_index = self.source_index + 1;
 
         match response {
             Some(response_fragments) => {
-                let final_set_of_fragments =
-                    response_fragments.len() != WARP_SYNC_RESPONSE_FRAGMENTS_LIMIT;
+                let final_set_of_fragments = response_fragments.len() == 1;
 
                 let verifier = match self.previous_verifier_values {
                     Some((_, chain_information_finality)) => {
