@@ -109,7 +109,7 @@ impl GrandpaGenesisConfiguration {
                 host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
                 host::HostVm::ExternalStorageGet(rq) => {
-                    let value = genesis_storage_access(rq.key());
+                    let value = genesis_storage_access(rq.key().as_ref());
                     vm = rq.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 

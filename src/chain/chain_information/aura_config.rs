@@ -89,7 +89,7 @@ impl AuraGenesisConfiguration {
                 host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let value = genesis_storage_access(req.key());
+                    let value = genesis_storage_access(req.key().as_ref());
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
@@ -117,7 +117,7 @@ impl AuraGenesisConfiguration {
                 host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let value = genesis_storage_access(req.key());
+                    let value = genesis_storage_access(req.key().as_ref());
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 

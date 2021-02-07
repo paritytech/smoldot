@@ -166,12 +166,12 @@ impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => {
-                either::Either::Left(iter::once(either::Either::Left(req.key())))
-            }
-            host::HostVm::ExternalStorageAppend(req) => {
-                either::Either::Left(iter::once(either::Either::Left(req.key())))
-            }
+            host::HostVm::ExternalStorageGet(req) => either::Left(iter::once(either::Left(
+                either::Left(either::Left(req.key())),
+            ))),
+            host::HostVm::ExternalStorageAppend(req) => either::Left(iter::once(either::Left(
+                either::Left(either::Right(req.key())),
+            ))),
 
             host::HostVm::ExternalStorageRoot(_) => {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
@@ -190,9 +190,9 @@ impl StorageGet {
                 }
             }
 
-            host::HostVm::ExternalStorageChangesRoot(_) => {
-                either::Either::Left(iter::once(either::Either::Left(&b":changes_trie"[..])))
-            }
+            host::HostVm::ExternalStorageChangesRoot(_) => either::Left(iter::once(either::Left(
+                either::Right(&b":changes_trie"[..]),
+            ))),
 
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
@@ -499,7 +499,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    if let Some(overlay) = self.top_trie_changes.get(req.key()) {
+                    let change = self.top_trie_changes.get(req.key().as_ref());
+                    if let Some(overlay) = change {
                         self.vm = req.resume_full_value(overlay.as_ref().map(|v| &v[..]));
                     } else {
                         self.vm = req.into();

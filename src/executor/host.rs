@@ -651,6 +651,19 @@ impl ReadyToRun {
 
                     let len = u32::try_from(val >> 32).unwrap();
                     let ptr = u32::try_from(val & 0xffffffff).unwrap();
+
+                    if len.saturating_add(ptr) > self.inner.vm.memory_size() {
+                        return HostVm::Error {
+                            error: Error::ParamOutOfRange {
+                                function: host_fn.name(),
+                                param_num: $num,
+                                pointer: ptr,
+                                length: len,
+                            },
+                            prototype: self.inner.into_prototype(),
+                        };
+                    }
+
                     (ptr, len)
                 }};
             }
@@ -722,9 +735,10 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_storage_get_version_1 => {
-                    let key = expect_pointer_size!(0);
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                     return HostVm::ExternalStorageGet(ExternalStorageGet {
-                        key,
+                        key_ptr,
+                        key_size,
                         calling: id,
                         value_out_ptr: None,
                         offset: 0,
@@ -733,11 +747,12 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_storage_read_version_1 => {
-                    let key = expect_pointer_size!(0);
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                     let (value_out_ptr, value_out_size) = expect_pointer_size_raw!(1);
                     let offset = expect_u32!(2);
                     return HostVm::ExternalStorageGet(ExternalStorageGet {
-                        key,
+                        key_ptr,
+                        key_size,
                         calling: id,
                         value_out_ptr: Some(value_out_ptr),
                         offset,
@@ -754,9 +769,10 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_storage_exists_version_1 => {
-                    let key = expect_pointer_size!(0);
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                     return HostVm::ExternalStorageGet(ExternalStorageGet {
-                        key,
+                        key_ptr,
+                        key_size,
                         calling: id,
                         value_out_ptr: None,
                         offset: 0,
@@ -1415,11 +1431,10 @@ pub struct ExternalStorageGet {
     /// output should be stored.
     value_out_ptr: Option<u32>,
 
-    /// Key whose value must be loaded.
-    // TODO: This should be a value length and pointer intead, so that we can read from the
-    //       VM's memory without copying. However the underlying Wasm VM code doesn't support
-    //       reading without copies.
-    key: Vec<u8>,
+    /// Pointer to the key whose value must be loaded. Guaranteed to be in range.
+    key_ptr: u32,
+    /// Size of the key whose value must be loaded. Guaranteed to be in range.
+    key_size: u32,
     /// Offset within the value that the Wasm VM requires.
     offset: u32,
     /// Maximum size that the Wasm VM would accept.
@@ -1428,8 +1443,11 @@ pub struct ExternalStorageGet {
 
 impl ExternalStorageGet {
     /// Returns the key whose value must be provided back with [`ExternalStorageGet::resume`].
-    pub fn key(&self) -> &[u8] {
-        &self.key
+    pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+        self.inner
+            .vm
+            .read_memory(self.key_ptr, self.key_size)
+            .unwrap()
     }
 
     /// Offset within the value that is requested.
