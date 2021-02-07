@@ -533,11 +533,8 @@ impl NetworkService {
     /// networking is inherently unreliable, successfully sending a transaction to a peer doesn't
     /// necessarily mean that the remote has received it. In practice, however, the likelyhood of
     /// a transaction not being received are extremely low. This can be considered as known flaw.
-    pub async fn announce_transaction(
-        self: Arc<Self>,
-        transaction: &[u8],
-    ) -> Vec<PeerId> {
-        let mut sent_peers = Vec::with_capacity(16);  // TODO: capacity?
+    pub async fn announce_transaction(self: Arc<Self>, transaction: &[u8]) -> Vec<PeerId> {
+        let mut sent_peers = Vec::with_capacity(16); // TODO: capacity?
 
         // TODO: keep track of which peer knows about which transaction, and don't send it again
 
