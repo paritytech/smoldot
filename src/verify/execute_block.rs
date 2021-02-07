@@ -151,7 +151,7 @@ impl Verify {
     fn from_inner(inner: runtime_host::RuntimeHostVm) -> Self {
         match inner {
             runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                if !success.virtual_machine.value().is_empty() {
+                if !success.virtual_machine.value().as_ref().is_empty() {
                     return Verify::Finished(Err(Error::NonEmptyOutput));
                 }
 

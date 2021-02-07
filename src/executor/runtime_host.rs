@@ -112,7 +112,7 @@ pub struct SuccessVirtualMachine(host::Finished);
 
 impl SuccessVirtualMachine {
     /// Returns the value the called function has returned.
-    pub fn value(&self) -> &[u8] {
+    pub fn value<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         self.0.value()
     }
 

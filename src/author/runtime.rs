@@ -271,7 +271,7 @@ impl BlockBuild {
                     Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
                     Stage::InitializeBlock,
                 ) => {
-                    if !success.virtual_machine.value().is_empty() {
+                    if !success.virtual_machine.value().as_ref().is_empty() {
                         return BlockBuild::Finished(Err(Error::InitializeBlockNonEmptyOutput));
                     }
 
@@ -291,11 +291,12 @@ impl BlockBuild {
                     Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
                     Stage::InherentExtrinsics,
                 ) => {
-                    let extrinsics =
-                        match parse_inherent_extrinsics_output(success.virtual_machine.value()) {
-                            Ok(extrinsics) => extrinsics,
-                            Err(err) => return BlockBuild::Finished(Err(err)),
-                        };
+                    let extrinsics = match parse_inherent_extrinsics_output(
+                        success.virtual_machine.value().as_ref(),
+                    ) {
+                        Ok(extrinsics) => extrinsics,
+                        Err(err) => return BlockBuild::Finished(Err(err)),
+                    };
 
                     shared.block_body.reserve(extrinsics.len());
                     shared.logs.push_str(&success.logs);
@@ -356,7 +357,7 @@ impl BlockBuild {
 
                     shared.stage = new_stage;
 
-                    match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
+                    match parse_apply_extrinsic_output(&success.virtual_machine.value().as_ref()) {
                         Ok(Ok(Ok(()))) => {}
                         Ok(Ok(Err(error))) => {
                             return BlockBuild::Finished(Err(
@@ -383,11 +384,12 @@ impl BlockBuild {
                     Inner::Runtime(runtime_host::RuntimeHostVm::Finished(Ok(success))),
                     Stage::ApplyExtrinsic(_),
                 ) => {
-                    let result =
-                        match parse_apply_extrinsic_output(&success.virtual_machine.value()) {
-                            Ok(r) => r,
-                            Err(err) => return BlockBuild::Finished(Err(err)),
-                        };
+                    let result = match parse_apply_extrinsic_output(
+                        &success.virtual_machine.value().as_ref(),
+                    ) {
+                        Ok(r) => r,
+                        Err(err) => return BlockBuild::Finished(Err(err)),
+                    };
 
                     if result.is_ok() {
                         shared.block_body.push(match &mut shared.stage {
@@ -418,7 +420,7 @@ impl BlockBuild {
                     Stage::FinalizeBlock,
                 ) => {
                     shared.logs.push_str(&success.logs);
-                    let scale_encoded_header = success.virtual_machine.value().to_owned();
+                    let scale_encoded_header = success.virtual_machine.value().as_ref().to_owned();
                     return BlockBuild::Finished(Ok(Success {
                         scale_encoded_header,
                         body: shared.block_body,

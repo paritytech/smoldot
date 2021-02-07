@@ -424,31 +424,14 @@ impl ReadyToRun {
                     // According to the runtime environment specifications, the return value is two
                     // consecutive I32s representing the length and size of the SCALE-encoded
                     // return value.
-                    let ret_len = u32::try_from(ret >> 32).unwrap();
-                    let ret_ptr = u32::try_from(ret & 0xffffffff).unwrap();
+                    let value_size = u32::try_from(ret >> 32).unwrap();
+                    let value_ptr = u32::try_from(ret & 0xffffffff).unwrap();
 
-                    let ret_data = self
-                        .inner
-                        .vm
-                        .read_memory(ret_ptr, ret_len)
-                        .map(|d| d.as_ref().to_vec());
-                    if let Ok(value) = ret_data {
-                        return HostVm::Finished(Finished {
-                            inner: self.inner,
-                            value,
-                        });
-                    } else {
-                        let error = Error::ReturnedPtrOutOfRange {
-                            pointer: ret_ptr,
-                            size: ret_len,
-                            memory_size: self.inner.vm.memory_size(),
-                        };
-
-                        return HostVm::Error {
-                            prototype: self.inner.into_prototype(),
-                            error,
-                        };
-                    }
+                    return HostVm::Finished(Finished {
+                        inner: self.inner,
+                        value_ptr,
+                        value_size,
+                    });
                 }
 
                 Ok(vm::ExecOutcome::Finished {
@@ -1394,17 +1377,19 @@ impl fmt::Debug for ReadyToRun {
 pub struct Finished {
     inner: Inner,
 
-    /// Value returned by the VM.
-    // TODO: This should be a value length and pointer intead, so that we can read from the
-    //       VM's memory without copying. However the underlying Wasm VM code doesn't support
-    //       reading without copies.
-    value: Vec<u8>,
+    /// Pointer to the value returned by the VM. Guaranteed to be in range.
+    value_ptr: u32,
+    /// Size of the value returned by the VM. Guaranteed to be in range.
+    value_size: u32,
 }
 
 impl Finished {
     /// Returns the value the called function has returned.
-    pub fn value(&self) -> &[u8] {
-        &self.value
+    pub fn value<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+        self.inner
+            .vm
+            .read_memory(self.value_ptr, self.value_size)
+            .unwrap()
     }
 
     /// Turns the virtual machine back into a prototype.

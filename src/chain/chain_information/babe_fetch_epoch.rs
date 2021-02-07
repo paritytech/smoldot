@@ -90,9 +90,11 @@ impl Query {
     fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let mut value = success.virtual_machine.value();
+                let decoded = DecodableBabeEpochInformation::decode(
+                    &mut success.virtual_machine.value().as_ref(),
+                );
 
-                match DecodableBabeEpochInformation::decode(&mut value) {
+                match decoded {
                     Ok(epoch) => Query::Finished(Ok((
                         BabeEpochInformation {
                             epoch_index: epoch.epoch_index,

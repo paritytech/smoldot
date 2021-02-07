@@ -104,7 +104,7 @@ impl GrandpaGenesisConfiguration {
             match vm {
                 host::HostVm::ReadyToRun(r) => vm = r.run(),
                 host::HostVm::Finished(data) => {
-                    break data.value().to_owned();
+                    break data.value().as_ref().to_owned();
                 }
                 host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
