@@ -26,7 +26,7 @@ use crate::{
         DEFAULT_HEAP_PAGES,
     },
     finality::{grandpa::warp_sync, justification::verify},
-    header::Header,
+    header::{Header, HeaderRef},
     network::protocol::GrandpaWarpSyncResponseFragment,
 };
 use core::convert::TryInto as _;
@@ -158,8 +158,8 @@ impl<TSrc> StorageGet<TSrc> {
     }
 
     /// Returns the header that we're warp syncing up to.
-    pub fn warp_sync_header(&self) -> Header {
-        self.state.header.clone()
+    pub fn warp_sync_header(&self) -> HeaderRef {
+        (&self.state.header).into()
     }
 
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -202,8 +202,8 @@ impl<TSrc> NextKey<TSrc> {
     }
 
     /// Returns the header that we're warp syncing up to.
-    pub fn warp_sync_header(&self) -> Header {
-        self.state.header.clone()
+    pub fn warp_sync_header(&self) -> HeaderRef {
+        (&self.state.header).into()
     }
 
     /// Injects the key.
@@ -364,11 +364,12 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
                 let final_set_of_fragments = response_fragments.len() == 1;
 
                 let verifier = match self.previous_verifier_values {
-                    Some((_, chain_information_finality)) => {
-                        warp_sync::Verifier::new(&chain_information_finality, response_fragments)
-                    }
+                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                        (&chain_information_finality).into(),
+                        response_fragments,
+                    ),
                     None => warp_sync::Verifier::new(
-                        &self.start_chain_information.finality,
+                        (&self.start_chain_information.finality).into(),
                         response_fragments,
                     ),
                 };
@@ -403,8 +404,8 @@ pub struct VirtualMachineParamsGet<TSrc> {
 
 impl<TSrc> VirtualMachineParamsGet<TSrc> {
     /// Returns the header that we're warp syncing up to.
-    pub fn warp_sync_header(&self) -> Header {
-        self.state.header.clone()
+    pub fn warp_sync_header(&self) -> HeaderRef {
+        (&self.state.header).into()
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`

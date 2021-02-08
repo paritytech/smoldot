@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::chain::chain_information::ChainInformationFinality;
+use crate::chain::chain_information::{ChainInformationFinality, ChainInformationFinalityRef};
 use crate::finality::justification::verify::{
     verify, Config as VerifyConfig, Error as VerifyError,
 };
@@ -32,11 +32,11 @@ pub struct Verifier {
 
 impl Verifier {
     pub fn new(
-        start_chain_information_finality: &ChainInformationFinality,
+        start_chain_information_finality: ChainInformationFinalityRef,
         warp_sync_response_fragments: Vec<GrandpaWarpSyncResponseFragment>,
     ) -> Self {
         let (authorities_list, authorities_set_id) = match start_chain_information_finality {
-            ChainInformationFinality::Grandpa {
+            ChainInformationFinalityRef::Grandpa {
                 finalized_triggered_authorities,
                 after_finalized_block_authorities_set_id,
                 ..
@@ -46,7 +46,7 @@ impl Verifier {
                     .map(|auth| auth.public_key)
                     .collect();
 
-                (authorities_list, *after_finalized_block_authorities_set_id)
+                (authorities_list, after_finalized_block_authorities_set_id)
             }
             // TODO:
             _ => unimplemented!(),
