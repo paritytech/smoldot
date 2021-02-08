@@ -196,7 +196,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> (SourceId, Vec<Request>) {
-        match self.inner {
+        match &mut self.inner {
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
                 waiting,
             )) => {
@@ -263,18 +263,36 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// of a different type.
     ///
     pub fn blocks_request_response(
-        self,
+        mut self,
         request_id: RequestId,
+        blocks: Result<impl Iterator<Item = BlockRequestSuccessBlock<TBl>>, ()>,
     ) -> BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
         let request = self.requests.remove(request_id.0);
 
         match (self.inner, request) {
             (IdleInner::GrandpaWarpSync(_), _) => panic!(), // Grandpa warp sync never starts block requests.
-            (IdleInner::Optimistic(sync), RequestMapping::Optimistic(request_id)) => {
-                let (_, outcome) = sync.finish_request(request_id, todo!());
+            (IdleInner::Optimistic(mut sync), RequestMapping::Optimistic(request_id)) => {
+                let (_, outcome) = sync.finish_request(
+                    request_id,
+                    blocks
+                        .map(|iter| {
+                            iter.map(|block| optimistic::RequestSuccessBlock {
+                                scale_encoded_header: block.scale_encoded_header,
+                                scale_encoded_extrinsics: block.scale_encoded_extrinsics,
+                                scale_encoded_justification: block.scale_encoded_justification,
+                                user_data: block.user_data,
+                            })
+                        })
+                        .map_err(|()| optimistic::RequestFail::BlocksUnavailable),
+                );
+
+                todo!()
             }
-            (IdleInner::AllForks(sync), RequestMapping::AllForks(request_id)) => {
-                match sync.ancestry_search_response(source_id, scale_encoded_headers) {
+            (IdleInner::AllForks(sync), RequestMapping::AllForks(source_id)) => {
+                match sync.ancestry_search_response(
+                    source_id,
+                    blocks.map(|iter| iter.map(|block| block.scale_encoded_header)),
+                ) {
                     all_forks::AncestrySearchResponseOutcome::Verify(verify) => {
                         BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
                             inner: HeaderVerifyInner::AllForks(verify),
@@ -333,10 +351,12 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     },
                 }
             }
+            // TODO: not all variants implemented
+            _ => panic!(),
         }
     }
 
-    /// Inject a response to a previously-emitted GrandPa warp sync request.
+    /*/// Inject a response to a previously-emitted GrandPa warp sync request.
     ///
     /// # Panic
     ///
@@ -392,9 +412,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             _ => panic!(),
         }
-    }
+    }*/
 
-    /// Inject a response to a previously-emitted storage proof request.
+    /*/// Inject a response to a previously-emitted storage proof request.
     ///
     /// # Panic
     ///
@@ -414,7 +434,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             _ => panic!(),
         }
-    }
+    }*/
 }
 
 /// Request that should be performed towards a source.
@@ -465,6 +485,13 @@ pub enum RequestDetail {
         /// Key whose value is requested.
         key: Vec<u8>,
     },
+}
+
+pub struct BlockRequestSuccessBlock<TBl> {
+    pub scale_encoded_header: Vec<u8>,
+    pub scale_encoded_justification: Option<Vec<u8>>,
+    pub scale_encoded_extrinsics: Vec<Vec<u8>>,
+    pub user_data: TBl,
 }
 
 /// Outcome of calling [`Idle::block_announce`].

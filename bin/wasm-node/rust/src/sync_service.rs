@@ -34,8 +34,8 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use smoldot::{chain, chain::sync::all_sync, informant::HashDisplay, libp2p, network};
-use std::{collections::HashMap, num::NonZeroU32, pin::Pin, sync::Arc};
+use smoldot::{chain, chain::sync::all, informant::HashDisplay, libp2p, network};
+use std::{collections::HashMap, convert::TryFrom as _, num::NonZeroU32, pin::Pin, sync::Arc};
 
 mod lossy_channel;
 
@@ -159,7 +159,7 @@ async fn start_sync(
     network_service: Arc<network_service::NetworkService>,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
-    let mut sync = all_sync::AllSync::<_, libp2p::PeerId, ()>::new(all_sync::Config {
+    let mut sync = all::AllSync::<_, libp2p::PeerId, ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
         source_selection_randomness_seed: rand::random(),
@@ -197,248 +197,93 @@ async fn start_sync(
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
 
-        // If `Some`, contains a request that the sync state machine wants to start on a source.
-        let mut request_to_start = None::<(all_sync::SourceId, all_sync::Request)>;
+        // If non-empty, contains a request that the sync state machine wants to start on a source.
+        let mut requests_to_start = Vec::<(all::SourceId, all::Request)>::with_capacity(16);
 
         loop {
-            match request_to_start.take() {
-                None => {}
-                Some((
-                    source_id,
-                    all_sync::Request {
-                        request_id,
-                        detail:
-                            all_sync::RequestDetail::BlocksRequest {
-                                first_block_hash,
-                                ascending,
-                                num_blocks,
-                                request_headers,
-                                request_bodies,
-                            },
-                    },
-                )) => {
-                    let peer_id = sync_inner
-                        .source_mut(source_id)
-                        .unwrap()
-                        .user_data()
-                        .clone();
+            let sync_inner = match sync {
+                all::AllSync::Idle(idle) => idle,
+            };
 
-                    println!("blocks request: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
-                    let block_request = network_service.clone().blocks_request(
-                        peer_id.clone(),
-                        network::protocol::BlocksRequestConfig {
-                            start: network::protocol::BlocksRequestConfigStart::Hash(
-                                first_block_hash,
-                            ),
-                            desired_count: NonZeroU32::new(
-                                u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                            )
-                            .unwrap(),
-                            direction: if ascending {
-                                network::protocol::BlocksRequestDirection::Ascending
-                            } else {
-                                network::protocol::BlocksRequestDirection::Descending
-                            },
-                            fields: network::protocol::BlocksRequestFields {
-                                header: request_headers,
-                                body: request_bodies,
-                                justification: false,
-                            },
+            for request in requests_to_start.drain(..) {
+                match request {
+                    (
+                        source_id,
+                        all::Request {
+                            id,
+                            detail:
+                                all::RequestDetail::BlocksRequest {
+                                    first_block_hash,
+                                    ascending,
+                                    num_blocks,
+                                    request_headers,
+                                    request_bodies,
+                                },
                         },
-                    );
+                    ) => {
+                        let peer_id = sync_inner
+                            .source_mut(source_id)
+                            .unwrap()
+                            .user_data()
+                            .clone();
 
-                    // TODO: use this abort
-                    let (block_request, abort) = future::abortable(block_request);
-
-                    pending_block_requests
-                        .push(async move { block_request.await.unwrap().map(|r| (source_id, r)) });
-                }
-                Some((
-                    source_id,
-                    all_sync::Request {
-                        request_id,
-                        detail:
-                            all_sync::RequestDetail::GrandpaWarpSync {
-                                local_finalized_block_height,
-                            },
-                    },
-                )) => {
-                    let peer_id = sync_inner
-                        .source_mut(source_id)
-                        .unwrap()
-                        .user_data()
-                        .clone();
-
-                    println!("header search: {:?} {:?}", number, hash); // TODO: remove
-                    let block_request = network_service.clone().blocks_request(
-                        peer_id.clone(),
-                        network::protocol::BlocksRequestConfig {
-                            start: network::protocol::BlocksRequestConfigStart::Hash(hash),
-                            desired_count: NonZeroU32::new(1).unwrap(),
-                            direction: network::protocol::BlocksRequestDirection::Ascending,
-                            fields: network::protocol::BlocksRequestFields {
-                                header: true,
-                                body: false,
-                                justification: false,
-                            },
-                        },
-                    );
-
-                    // TODO: use this abort
-                    let (block_request, abort) = future::abortable(block_request);
-
-                    header_requests
-                        .push(async move { block_request.await.unwrap().map(|r| (source_id, r)) });
-                }
-                Some((
-                    source_id,
-                    all_sync::Request {
-                        request_id,
-                        detail:
-                            all_sync::RequestDetail::StorageGet {
-                                block_hash,
-                                state_trie_root,
-                                key,
-                            },
-                    },
-                )) => todo!()
-            }
-
-            while let Some(action) = sync.next_request_action() {
-                match action {
-                    optimistic::RequestAction::Start {
-                        start,
-                        block_height,
-                        source,
-                        num_blocks,
-                        ..
-                    } => {
+                        println!("blocks request: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
                         let block_request = network_service.clone().blocks_request(
-                            source.clone(),
+                            peer_id.clone(),
                             network::protocol::BlocksRequestConfig {
-                                start: network::protocol::BlocksRequestConfigStart::Number(
-                                    block_height,
+                                start: network::protocol::BlocksRequestConfigStart::Hash(
+                                    first_block_hash,
                                 ),
-                                desired_count: num_blocks,
-                                direction: network::protocol::BlocksRequestDirection::Ascending,
+                                desired_count: NonZeroU32::new(
+                                    u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                                )
+                                .unwrap(),
+                                direction: if ascending {
+                                    network::protocol::BlocksRequestDirection::Ascending
+                                } else {
+                                    network::protocol::BlocksRequestDirection::Descending
+                                },
                                 fields: network::protocol::BlocksRequestFields {
-                                    header: true,
-                                    body: false,
-                                    justification: true,
+                                    header: request_headers,
+                                    body: request_bodies,
+                                    justification: false,
                                 },
                             },
                         );
 
+                        // TODO: use this abort
                         let (block_request, abort) = future::abortable(block_request);
-                        let request_id = start.start(abort);
-                        block_requests_finished
-                            .push(async move { (request_id, block_request.await.map_err(|_| ())) });
+
+                        pending_block_requests.push(async move {
+                            block_request.await.unwrap().map(|r| (source_id, r))
+                        });
                     }
-                    optimistic::RequestAction::Cancel { user_data, .. } => {
-                        user_data.abort();
+                    (
+                        source_id,
+                        all::Request {
+                            id,
+                            detail:
+                                all::RequestDetail::GrandpaWarpSync {
+                                    local_finalized_block_height,
+                                },
+                        },
+                    ) => {
+                        todo!()
                     }
+                    (
+                        source_id,
+                        all::Request {
+                            id,
+                            detail:
+                                all::RequestDetail::StorageGet {
+                                    block_hash,
+                                    state_trie_root,
+                                    key,
+                                },
+                        },
+                    ) => todo!(),
                 }
             }
-
-            let mut verified_blocks = 0u64;
-
-            // Verify blocks that have been fetched from queries.
-            // TODO: tweak this mechanism of stopping sync from time to time
-            while verified_blocks < 4096 {
-                match sync.process_one(crate::ffi::unix_time()) {
-                    optimistic::ProcessOne::Idle { sync: s } => {
-                        sync = s;
-                        break;
-                    }
-
-                    optimistic::ProcessOne::NewBest {
-                        sync: s,
-                        new_best_number,
-                        new_best_hash,
-                    } => {
-                        sync = s;
-
-                        log::debug!(
-                            target: "sync-verify",
-                            "New best block: #{} ({})",
-                            new_best_number,
-                            HashDisplay(&new_best_hash),
-                        );
-
-                        let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                        // TODO: remove expired senders
-                        for notif in &mut best_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-                    }
-
-                    optimistic::ProcessOne::Reset {
-                        sync: s,
-                        reason,
-                        previous_best_height,
-                    } => {
-                        sync = s;
-
-                        log::warn!(
-                            target: "sync-verify",
-                            "Failed to verify block #{}: {}",
-                            previous_best_height + 1,
-                            reason
-                        );
-
-                        let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                        // TODO: remove expired senders
-                        for notif in &mut best_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-                    }
-
-                    optimistic::ProcessOne::Finalized {
-                        sync: s,
-                        finalized_blocks,
-                        ..
-                    } => {
-                        sync = s;
-                        verified_blocks += 1;
-
-                        log::debug!(
-                            target: "sync-verify",
-                            "Finalized {} block",
-                            finalized_blocks.len()
-                        );
-
-                        let scale_encoded_header = finalized_blocks
-                            .last()
-                            .unwrap()
-                            .header
-                            .scale_encoding()
-                            .fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            });
-
-                        // TODO: remove expired senders
-                        for notif in &mut best_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-
-                        // TODO: remove expired senders
-                        for notif in &mut finalized_notifications {
-                            let _ = notif.send(scale_encoded_header.clone());
-                        }
-                    }
-
-                    // Other variants can be produced if the sync state machine is configured for
-                    // syncing the storage, which is not the case here.
-                    _ => unreachable!(),
-                }
-            }
-
-            // Since `process_one` is a CPU-heavy operation, looping until it is done can
-            // take a long time. In order to avoid blocking the rest of the program in the
-            // meanwhile, the `yield_once` function interrupts the current task and gives a
-            // chance for other tasks to progress.
-            crate::yield_once().await;
 
             futures::select! {
                 network_event = from_network_service.next() => {
@@ -450,20 +295,25 @@ async fn start_sync(
                     };
 
                     match network_event {
-                        network_service::Event::Connected { peer_id, best_block_number, .. } => {
-                            let id = sync.add_source(peer_id.clone(), best_block_number);
+                        network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
+                            let (id, requests) = sync_inner.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id.clone(), id);
+                            requests.extend(requests.into_iter());
                         },
                         network_service::Event::Disconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (_, rq_list) = sync.remove_source(id);
-                            for (_, rq) in rq_list {
+                            let rq_list = sync_inner.remove_source(id);
+                            // TODO:
+                            /*for (_, rq) in rq_list {
                                 rq.abort();
-                            }
+                            }*/
                         },
                         network_service::Event::BlockAnnounce { peer_id, announce } => {
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
-                            sync.raise_source_best_block(id, announce.decode().header.number);
+                            let decoded = announce.decode();
+                            // TODO: use outcome
+                            // TODO: stupid to re-encode
+                            sync_inner.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best);
                         },
                     }
                 }
@@ -478,7 +328,7 @@ async fn start_sync(
 
                     match message {
                         ToBackground::Serialize { send_back } => {
-                            let chain = sync.as_chain_information();
+                            let chain = sync_inner.as_chain_information();
                             let serialized = smoldot::database::finalized_serialize::encode_chain_information(chain);
                             let _ = send_back.send(serialized);
                         }
@@ -489,19 +339,19 @@ async fn start_sync(
                         ToBackground::SubscribeFinalized { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             finalized_notifications.push(tx);
-                            let current = sync.finalized_block_header().scale_encoding_vec();
+                            let current = sync_inner.finalized_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
                         ToBackground::SubscribeBest { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             best_notifications.push(tx);
-                            let current = sync.best_block_header().scale_encoding_vec();
+                            let current = sync_inner.best_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
                     }
                 },
 
-                (request_id, result) = block_requests_finished.select_next_some() => {
+                (request_id, result) = pending_block_requests.select_next_some() => {
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
@@ -514,14 +364,6 @@ async fn start_sync(
                         })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));
                     }
                 },
-
-                _ = async move {
-                    if verified_blocks == 0 {
-                        loop {
-                            futures::pending!()
-                        }
-                    }
-                }.fuse() => {}
             }
         }
     }
