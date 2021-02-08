@@ -27,7 +27,7 @@
 //! Use [`SyncService::subscribe_best`] and [`SyncService::subscribe_finalized`] to get notified
 //! about updates of the best and finalized blocks.
 
-use crate::network_service;
+use crate::{ffi, network_service};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -202,8 +202,33 @@ async fn start_sync(
         let mut requests_to_start = Vec::<(all::SourceId, all::Request)>::with_capacity(16);
 
         loop {
-            let mut sync_inner = match sync {
-                all::AllSync::Idle(idle) => idle,
+            let mut sync_inner = loop {
+                match sync {
+                    all::AllSync::Idle(idle) => break idle,
+                    all::AllSync::HeaderVerify(verify) => {
+                        match verify.perform(ffi::unix_time(), ()) {
+                            all::HeaderVerifyOutcome::Success {
+                                sync: sync_inner, ..
+                            } => {
+                                // TODO: use next_request
+                                sync = all::AllSync::Idle(sync_inner);
+                            }
+                            all::HeaderVerifyOutcome::SuccessContinue { next_block, .. } => {
+                                // TODO: use next_request
+                                sync = all::AllSync::HeaderVerify(next_block);
+                            }
+                            all::HeaderVerifyOutcome::Error {
+                                sync: sync_inner, ..
+                            } => {
+                                // TODO: use next_request
+                                sync = all::AllSync::Idle(sync_inner);
+                            }
+                            all::HeaderVerifyOutcome::ErrorContinue { next_block, .. } => {
+                                sync = all::AllSync::HeaderVerify(next_block);
+                            }
+                        }
+                    }
+                }
             };
 
             for request in requests_to_start.drain(..) {
@@ -214,7 +239,7 @@ async fn start_sync(
                             id,
                             detail:
                                 all::RequestDetail::BlocksRequest {
-                                    first_block_hash,
+                                    first_block,
                                     ascending,
                                     num_blocks,
                                     request_headers,
@@ -224,13 +249,18 @@ async fn start_sync(
                     ) => {
                         let peer_id = sync_inner.source_user_data_mut(source_id).clone();
 
-                        println!("blocks request: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
+                        println!("blocks request: {:?} {:?}", first_block, num_blocks); // TODO: remove
                         let block_request = network_service.clone().blocks_request(
                             peer_id.clone(),
                             network::protocol::BlocksRequestConfig {
-                                start: network::protocol::BlocksRequestConfigStart::Hash(
-                                    first_block_hash,
-                                ),
+                                start: match first_block {
+                                    all::BlocksRequestFirstBlock::Hash(h) => {
+                                        network::protocol::BlocksRequestConfigStart::Hash(h)
+                                    }
+                                    all::BlocksRequestFirstBlock::Number(n) => {
+                                        network::protocol::BlocksRequestConfigStart::Number(n)
+                                    }
+                                },
                                 desired_count: NonZeroU32::new(
                                     u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                                 )
@@ -357,16 +387,36 @@ async fn start_sync(
                     if let Ok(result) = result {
                         let result = result.map_err(|_| ());
                         // TODO: use outcome
-                        let _ = sync_inner.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                        let outcome = sync_inner.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
                             scale_encoded_extrinsics: Vec::new(),
                             user_data: (),
-                        })));
-                        todo!()
-                    }
+                        })), ffi::unix_time());
 
-                    sync = all::AllSync::Idle(sync_inner);
+                        match outcome {
+                            all::BlocksRequestResponseOutcome::VerifyHeader(verify) => {
+                                sync = all::AllSync::HeaderVerify(verify);
+                            },
+                            all::BlocksRequestResponseOutcome::Queued(sync_inner) => {
+                                sync = all::AllSync::Idle(sync_inner);
+                            },
+                            all::BlocksRequestResponseOutcome::NotFinalizedChain { sync: sync_inner, .. } => {
+                                // TODO: use next_request
+                                sync = all::AllSync::Idle(sync_inner);
+                            },
+                            all::BlocksRequestResponseOutcome::Inconclusive { sync: sync_inner, .. } => {
+                                // TODO: use next_request
+                                sync = all::AllSync::Idle(sync_inner);
+                            },
+                            all::BlocksRequestResponseOutcome::AllAlreadyInChain { sync: sync_inner, .. } => {
+                                // TODO: use next_request
+                                sync = all::AllSync::Idle(sync_inner);
+                            },
+                        }
+                    } else {
+                        sync = all::AllSync::Idle(sync_inner);
+                    }
                 },
             }
         }

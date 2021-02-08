@@ -22,10 +22,13 @@ use crate::{
         chain_information,
         sync::{all_forks, grandpa_warp_sync, optimistic},
     },
-    header,
+    header, verify,
 };
 
-use core::num::{NonZeroU32, NonZeroU64};
+use core::{
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -73,6 +76,7 @@ pub struct Config {
 
 pub enum AllSync<TRq, TSrc, TBl> {
     Idle(Idle<TRq, TSrc, TBl>),
+    HeaderVerify(HeaderVerify<TRq, TSrc, TBl>),
 }
 
 impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
@@ -83,13 +87,18 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 }
 
 pub struct Idle<TRq, TSrc, TBl> {
-    inner: IdleInner<TRq, TSrc, TBl>,
+    inner: IdleInner<TSrc, TBl>,
+    shared: Shared,
+    marker: core::marker::PhantomData<TRq>, // TODO: remove
+}
+
+struct Shared {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping>,
 }
 
-enum IdleInner<TRq, TSrc, TBl> {
-    Optimistic(optimistic::OptimisticSync<TRq, OptimisticSourceExtra<TSrc>, TBl>),
+enum IdleInner<TSrc, TBl> {
+    Optimistic(optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>),
     /// > **Note**: Must never contain [`grandpa_warp_sync::GrandpaWarpSync::Finished`].
     GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync<TSrc>),
     AllForks(all_forks::AllForksSync<TSrc, TBl>),
@@ -145,8 +154,11 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 source_selection_randomness_seed: config.source_selection_randomness_seed,
                 full: config.full,
             })),
-            sources: slab::Slab::with_capacity(config.sources_capacity),
-            requests: slab::Slab::with_capacity(config.sources_capacity),
+            shared: Shared {
+                sources: slab::Slab::with_capacity(config.sources_capacity),
+                requests: slab::Slab::with_capacity(config.sources_capacity),
+            },
+            marker: Default::default(),
         }
     }
 
@@ -158,7 +170,10 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
 
     /// Returns the header of the finalized block.
     pub fn finalized_block_header(&self) -> header::HeaderRef {
-        todo!()
+        match &self.inner {
+            IdleInner::Optimistic(sync) => sync.finalized_block_header(),
+            _ => todo!(),
+        }
     }
 
     /// Returns the header of the best block.
@@ -166,7 +181,10 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
     pub fn best_block_header(&self) -> header::HeaderRef {
-        todo!()
+        match &self.inner {
+            IdleInner::Optimistic(sync) => sync.best_block_header(),
+            _ => todo!(),
+        }
     }
 
     /// Returns the number of the best block.
@@ -174,7 +192,10 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
     pub fn best_block_number(&self) -> u64 {
-        todo!()
+        match &self.inner {
+            IdleInner::Optimistic(sync) => sync.best_block_number(),
+            _ => todo!(),
+        }
     }
 
     /// Returns the hash of the best block.
@@ -182,7 +203,10 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// > **Note**: This value is provided only for informative purposes. Keep in mind that this
     /// >           best block might be reverted in the future.
     pub fn best_block_hash(&self) -> [u8; 32] {
-        todo!()
+        match &self.inner {
+            IdleInner::Optimistic(sync) => sync.best_block_hash(),
+            _ => todo!(),
+        }
     }
 
     /// Adds a new source to the sync state machine.
@@ -210,7 +234,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 todo!()
             }
             IdleInner::Optimistic(optimistic) => {
-                let outer_source_id_entry = self.sources.vacant_entry();
+                let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
                 let inner_source_id = optimistic.add_source(
@@ -224,12 +248,45 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
 
                 outer_source_id_entry.insert(SourceMapping::Optimistic(inner_source_id));
 
-                optimistic.next_request_action();
+                let mut requests_to_start = Vec::new();
+
+                while let Some(action) = optimistic.next_request_action() {
+                    // Actions requested by the optimistic syncing are pulled as often as
+                    // they might appear. As such, the only actions pullable now are the
+                    // consequence of the new source, and necessarily concern the new source.
+                    match action {
+                        optimistic::RequestAction::Start {
+                            source_id,
+                            block_height,
+                            num_blocks,
+                            start,
+                            ..
+                        } if source_id == inner_source_id => {
+                            let request_id = RequestId(
+                                self.shared
+                                    .requests
+                                    .insert(RequestMapping::Optimistic(start.start(()))),
+                            );
+
+                            requests_to_start.push(Request {
+                                id: request_id,
+                                detail: RequestDetail::BlocksRequest {
+                                    first_block: BlocksRequestFirstBlock::Number(block_height),
+                                    ascending: true,
+                                    num_blocks: NonZeroU64::from(num_blocks),
+                                    request_bodies: true, // TODO: ?!
+                                    request_headers: true,
+                                },
+                            });
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
+                (outer_source_id, requests_to_start)
             }
             _ => todo!(),
         }
-
-        todo!()
     }
 
     /// Removes a source from the state machine. Returns the user data of this source, and all
@@ -246,7 +303,10 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     }
 
     pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        match (&mut self.inner, self.sources.get(source_id.0).unwrap()) {
+        match (
+            &mut self.inner,
+            self.shared.sources.get(source_id.0).unwrap(),
+        ) {
             (IdleInner::Optimistic(sync), SourceMapping::Optimistic(src)) => {
                 &mut sync.source_user_data_mut(*src).user_data
             }
@@ -275,8 +335,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         mut self,
         request_id: RequestId,
         blocks: Result<impl Iterator<Item = BlockRequestSuccessBlock<TBl>>, ()>,
+        now_from_unix_epoch: Duration, // TODO: remove
     ) -> BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
-        let request = self.requests.remove(request_id.0);
+        let request = self.shared.requests.remove(request_id.0);
 
         match (self.inner, request) {
             (IdleInner::GrandpaWarpSync(_), _) => panic!(), // Grandpa warp sync never starts block requests.
@@ -295,7 +356,20 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         .map_err(|()| optimistic::RequestFail::BlocksUnavailable),
                 );
 
-                todo!()
+                match sync.process_one(now_from_unix_epoch) {
+                    optimistic::ProcessOne::Idle { sync } => {
+                        BlocksRequestResponseOutcome::Queued(Idle {
+                            inner: IdleInner::Optimistic(sync),
+                            marker: Default::default(),
+                            shared: self.shared,
+                        })
+                    }
+                    other => BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
+                        inner: HeaderVerifyInner::Optimistic(other),
+                        shared: self.shared,
+                        marker: Default::default(),
+                    }),
+                }
             }
             (IdleInner::AllForks(sync), RequestMapping::AllForks(source_id)) => {
                 match sync.ancestry_search_response(
@@ -305,6 +379,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     all_forks::AncestrySearchResponseOutcome::Verify(verify) => {
                         BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
                             inner: HeaderVerifyInner::AllForks(verify),
+                            shared: self.shared,
                             marker: Default::default(),
                         })
                     }
@@ -462,7 +537,7 @@ pub enum RequestDetail {
     /// Requesting blocks from the source is requested.
     BlocksRequest {
         /// Hash of the first block to request.
-        first_block_hash: [u8; 32],
+        first_block: BlocksRequestFirstBlock,
         /// `True` if the `first_block_hash` is the response should contain blocks in an
         /// increasing number, starting from `first_block_hash` with the lowest number. If `false`,
         /// the blocks should be in decreasing number, with `first_block_hash` as the highest
@@ -494,6 +569,12 @@ pub enum RequestDetail {
         /// Key whose value is requested.
         key: Vec<u8>,
     },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BlocksRequestFirstBlock {
+    Hash([u8; 32]),
+    Number(NonZeroU64),
 }
 
 pub struct BlockRequestSuccessBlock<TBl> {
@@ -538,6 +619,9 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
     /// Ready to start verifying one or more headers returned in the ancestry search.
     VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
 
+    /// Blocks have been queued and will be processed later.
+    Queued(Idle<TRq, TSrc, TBl>),
+
     /// Source has given blocks that aren't part of the finalized chain.
     ///
     /// This doesn't necessarily mean that the source is malicious or uses a different chain. It
@@ -577,9 +661,89 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
 
 pub struct HeaderVerify<TRq, TSrc, TBl> {
     inner: HeaderVerifyInner<TSrc, TBl>,
+    shared: Shared,
     marker: core::marker::PhantomData<TRq>, // TODO: remove
 }
 
 enum HeaderVerifyInner<TSrc, TBl> {
     AllForks(all_forks::HeaderVerify<TSrc, TBl>),
+    Optimistic(optimistic::ProcessOne<(), OptimisticSourceExtra<TSrc>, TBl>),
+}
+
+impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
+    /// Perform the verification.
+    pub fn perform(
+        mut self,
+        now_from_unix_epoch: Duration,
+        user_data: TBl,
+    ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
+        match self.inner {
+            // TODO: the verification in the optimistic is immediate ; change that
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Idle { .. }) => unreachable!(),
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { sync, .. }) => {
+                HeaderVerifyOutcome::Success {
+                    is_new_best: true,
+                    sync: Idle {
+                        inner: IdleInner::Optimistic(sync),
+                        marker: Default::default(),
+                        shared: self.shared,
+                    },
+                    next_request: todo!(),
+                }
+            }
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Reset { sync, .. }) => todo!(),
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Finalized { .. }) => todo!(),
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageGet(_))
+            | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageNextKey(_))
+            | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStoragePrefixKeys(
+                _,
+            )) => {
+                unreachable!()
+            }
+            _ => todo!(),
+        }
+    }
+}
+
+/// Outcome of calling [`HeaderVerify::perform`].
+pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
+    /// Header has been successfully verified.
+    Success {
+        /// True if the newly-verified block is considered the new best block.
+        is_new_best: bool,
+        /// State machine yielded back. Use to continue the processing.
+        sync: Idle<TRq, TSrc, TBl>,
+        /// Next request that must be performed on the source.
+        next_request: Option<Request>,
+    },
+
+    /// Header has been successfully verified. A follow-up header is ready to be verified.
+    SuccessContinue {
+        /// True if the newly-verified block is considered the new best block.
+        is_new_best: bool,
+        /// Next verification.
+        next_block: HeaderVerify<TRq, TSrc, TBl>,
+    },
+
+    /// Header verification failed.
+    Error {
+        /// State machine yielded back. Use to continue the processing.
+        sync: Idle<TRq, TSrc, TBl>,
+        /// Error that happened.
+        error: verify::header_only::Error,
+        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
+        user_data: TBl,
+        /// Next request that must be performed on the source.
+        next_request: Option<Request>,
+    },
+
+    /// Header verification failed. A follow-up header is ready to be verified.
+    ErrorContinue {
+        /// Next verification.
+        next_block: HeaderVerify<TRq, TSrc, TBl>,
+        /// Error that happened.
+        error: verify::header_only::Error,
+        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
+        user_data: TBl,
+    },
 }
