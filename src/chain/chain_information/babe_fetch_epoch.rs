@@ -39,8 +39,6 @@ pub struct Config {
     pub runtime: host::HostVmPrototype,
     /// The Babe epoch to fetch.
     pub epoch_to_fetch: BabeEpochToFetch,
-    /// The Babe genesis config.
-    pub babe_genesis_config: header::BabeNextConfig,
 }
 
 /// Problem encountered during a call to [`babe_fetch_epoch`].
@@ -72,8 +70,34 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
     });
 
     match vm {
-        Ok(vm) => Query::from_inner(vm, config.babe_genesis_config),
+        Ok(vm) => Query::from_inner(vm),
         Err(err) => Query::Finished(Err(Error::WasmStart(err))),
+    }
+}
+
+/// Partial information about a Babe epoch.
+pub struct PartialBabeEpochInformation {
+    epoch_index: u64,
+    start_slot_number: Option<u64>,
+    authorities: Vec<header::BabeAuthority>,
+    randomness: [u8; 32],
+}
+
+impl PartialBabeEpochInformation {
+    /// Complete the epoch information by supplying Babe configuration information.
+    pub fn complete(
+        self,
+        c: (u64, u64),
+        allowed_slots: header::BabeAllowedSlots,
+    ) -> BabeEpochInformation {
+        BabeEpochInformation {
+            epoch_index: self.epoch_index,
+            start_slot_number: self.start_slot_number,
+            authorities: self.authorities,
+            randomness: self.randomness,
+            c,
+            allowed_slots,
+        }
     }
 }
 
@@ -81,7 +105,7 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
 #[must_use]
 pub enum Query {
     /// Fetching the Babe epoch is over.
-    Finished(Result<(BabeEpochInformation, host::HostVmPrototype), Error>),
+    Finished(Result<(PartialBabeEpochInformation, host::HostVmPrototype), Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
     /// Fetching the key that follows a given one is required in order to continue.
@@ -89,10 +113,7 @@ pub enum Query {
 }
 
 impl Query {
-    fn from_inner(
-        inner: read_only_runtime_host::RuntimeHostVm,
-        babe_config: header::BabeNextConfig,
-    ) -> Self {
+    fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 let decoded = DecodableBabeEpochInformation::decode(
@@ -101,7 +122,7 @@ impl Query {
 
                 match decoded {
                     Ok(epoch) => Query::Finished(Ok((
-                        BabeEpochInformation {
+                        PartialBabeEpochInformation {
                             epoch_index: epoch.epoch_index,
                             start_slot_number: Some(epoch.start_slot_number),
                             authorities: epoch
@@ -113,8 +134,6 @@ impl Query {
                                 })
                                 .collect(),
                             randomness: epoch.randomness,
-                            c: babe_config.c,
-                            allowed_slots: babe_config.allowed_slots,
                         },
                         success.virtual_machine.into_prototype(),
                     ))),
@@ -125,52 +144,44 @@ impl Query {
                 Query::Finished(Err(Error::WasmVm(err)))
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(inner) => {
-                Query::StorageGet(StorageGet { inner, babe_config })
+                Query::StorageGet(StorageGet(inner))
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => {
-                Query::NextKey(NextKey { inner, babe_config })
-            }
+            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => Query::NextKey(NextKey(inner)),
         }
     }
 }
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet {
-    inner: read_only_runtime_host::StorageGet,
-    babe_config: header::BabeNextConfig,
-}
+pub struct StorageGet(read_only_runtime_host::StorageGet);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
-        self.inner.key()
+        self.0.key()
     }
 
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     ///
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
     pub fn key_as_vec(&self) -> Vec<u8> {
-        self.inner.key_as_vec()
+        self.0.key_as_vec()
     }
 
     /// Injects the corresponding storage value.
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
-        Query::from_inner(self.inner.inject_value(value), self.babe_config)
+        Query::from_inner(self.0.inject_value(value))
     }
 }
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey {
-    inner: read_only_runtime_host::NextKey,
-    babe_config: header::BabeNextConfig,
-}
+pub struct NextKey(read_only_runtime_host::NextKey);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
-        self.inner.key()
+        self.0.key()
     }
 
     /// Injects the key.
@@ -180,7 +191,7 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
-        Query::from_inner(self.inner.inject_key(key), self.babe_config)
+        Query::from_inner(self.0.inject_key(key))
     }
 }
 

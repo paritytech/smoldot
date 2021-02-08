@@ -18,8 +18,8 @@
 use crate::{
     chain::chain_information::{
         babe_config::{BabeGenesisConfiguration, FromVmPrototypeError},
-        babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-        ChainInformationFinality,
+        babe_fetch_epoch::{self, PartialBabeEpochInformation},
+        ChainInformation, ChainInformationConsensus, ChainInformationFinality,
     },
     chain_spec::ChainSpec,
     executor::{
@@ -56,8 +56,6 @@ pub struct Config {
     pub start_chain_information: ChainInformation,
     /// The initial capacity of the list of sources.
     pub sources_capacity: usize,
-    /// The chain spec of the chain.
-    pub chain_spec: ChainSpec,
 }
 
 /// Starts syncing via GrandPa warp sync.
@@ -65,7 +63,6 @@ pub fn grandpa_warp_sync<TSrc>(config: Config) -> GrandpaWarpSync<TSrc> {
     GrandpaWarpSync::WaitingForSources(WaitingForSources {
         state: PreVerificationState {
             start_chain_information: config.start_chain_information,
-            chain_spec: config.chain_spec,
         },
         sources: Vec::with_capacity(config.sources_capacity),
         previous_verifier_values: None,
@@ -93,26 +90,35 @@ pub enum GrandpaWarpSync<TSrc> {
 impl<TSrc> GrandpaWarpSync<TSrc> {
     fn from_babe_fetch_epoch_query(
         query: babe_fetch_epoch::Query,
-        fetched_current_epoch: Option<BabeEpochInformation>,
+        fetched_current_epoch: Option<PartialBabeEpochInformation>,
         state: PostVerificationState<TSrc>,
-        babe_genesis_config: BabeNextConfig,
     ) -> Self {
         match (query, fetched_current_epoch) {
             (babe_fetch_epoch::Query::Finished(Ok((next_epoch, runtime))), Some(current_epoch)) => {
-                let slots_per_epoch = match state.start_chain_information.consensus {
-                    ChainInformationConsensus::Babe {
-                        slots_per_epoch, ..
-                    } => slots_per_epoch,
-                    _ => unreachable!(),
-                };
+                let (slots_per_epoch, babe_config_c, babe_config_allowed_slots) =
+                    match state.start_chain_information.consensus {
+                        ChainInformationConsensus::Babe {
+                            slots_per_epoch,
+                            finalized_next_epoch_transition,
+                            ..
+                        } => (
+                            slots_per_epoch,
+                            finalized_next_epoch_transition.c,
+                            finalized_next_epoch_transition.allowed_slots,
+                        ),
+                        _ => unreachable!(),
+                    };
 
                 Self::Finished(Ok((
                     ChainInformation {
                         finalized_block_header: state.header,
                         finality: state.chain_information_finality,
                         consensus: ChainInformationConsensus::Babe {
-                            finalized_block_epoch_information: Some(current_epoch),
-                            finalized_next_epoch_transition: next_epoch,
+                            finalized_block_epoch_information: Some(
+                                current_epoch.complete(babe_config_c, babe_config_allowed_slots),
+                            ),
+                            finalized_next_epoch_transition: next_epoch
+                                .complete(babe_config_c, babe_config_allowed_slots),
                             slots_per_epoch,
                         },
                     },
@@ -124,14 +130,8 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                         runtime,
                         epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
-                        babe_genesis_config,
                     });
-                Self::from_babe_fetch_epoch_query(
-                    babe_next_epoch_query,
-                    Some(current_epoch),
-                    state,
-                    babe_genesis_config,
-                )
+                Self::from_babe_fetch_epoch_query(babe_next_epoch_query, Some(current_epoch), state)
             }
             (babe_fetch_epoch::Query::Finished(Err(error)), _) => {
                 Self::Finished(Err(Error::BabeFetchEpoch(error)))
@@ -141,7 +141,6 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                     inner: storage_get,
                     fetched_current_epoch,
                     state,
-                    babe_genesis_config,
                 })
             }
             (babe_fetch_epoch::Query::NextKey(next_key), fetched_current_epoch) => {
@@ -149,7 +148,6 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                     inner: next_key,
                     fetched_current_epoch,
                     state,
-                    babe_genesis_config,
                 })
             }
         }
@@ -160,9 +158,8 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
 #[must_use]
 pub struct StorageGet<TSrc> {
     inner: babe_fetch_epoch::StorageGet,
-    fetched_current_epoch: Option<BabeEpochInformation>,
+    fetched_current_epoch: Option<PartialBabeEpochInformation>,
     state: PostVerificationState<TSrc>,
-    babe_genesis_config: BabeNextConfig,
 }
 
 impl<TSrc> StorageGet<TSrc> {
@@ -197,7 +194,6 @@ impl<TSrc> StorageGet<TSrc> {
             self.inner.inject_value(value),
             self.fetched_current_epoch,
             self.state,
-            self.babe_genesis_config,
         )
     }
 }
@@ -206,9 +202,8 @@ impl<TSrc> StorageGet<TSrc> {
 #[must_use]
 pub struct NextKey<TSrc> {
     inner: babe_fetch_epoch::NextKey,
-    fetched_current_epoch: Option<BabeEpochInformation>,
+    fetched_current_epoch: Option<PartialBabeEpochInformation>,
     state: PostVerificationState<TSrc>,
-    babe_genesis_config: BabeNextConfig,
 }
 
 impl<TSrc> NextKey<TSrc> {
@@ -238,7 +233,6 @@ impl<TSrc> NextKey<TSrc> {
             self.inner.inject_key(key),
             self.fetched_current_epoch,
             self.state,
-            self.babe_genesis_config,
         )
     }
 }
@@ -246,10 +240,10 @@ impl<TSrc> NextKey<TSrc> {
 /// Verifying the warp sync response is required to continue.
 pub struct Verifier<TSrc> {
     verifier: warp_sync::Verifier,
+    state: PreVerificationState,
     warp_sync_source_index: usize,
     sources: Vec<TSrc>,
     final_set_of_fragments: bool,
-    state: PreVerificationState,
 }
 
 impl<TSrc> Verifier<TSrc> {
@@ -257,10 +251,10 @@ impl<TSrc> Verifier<TSrc> {
         match self.verifier.next() {
             Ok(warp_sync::Next::NotFinished(next_verifier)) => GrandpaWarpSync::Verifier(Self {
                 verifier: next_verifier,
+                state: self.state,
                 sources: self.sources,
                 warp_sync_source_index: self.warp_sync_source_index,
                 final_set_of_fragments: self.final_set_of_fragments,
-                state: self.state,
             }),
             Ok(warp_sync::Next::Success {
                 header,
@@ -274,7 +268,6 @@ impl<TSrc> Verifier<TSrc> {
                             start_chain_information: self.state.start_chain_information,
                             warp_sync_source: self.sources.remove(self.warp_sync_source_index),
                         },
-                        chain_spec: self.state.chain_spec,
                     })
                 } else {
                     GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
@@ -292,7 +285,6 @@ impl<TSrc> Verifier<TSrc> {
 
 struct PreVerificationState {
     start_chain_information: ChainInformation,
-    chain_spec: ChainSpec,
 }
 
 struct PostVerificationState<TSrc> {
@@ -432,7 +424,6 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
 /// Fetching the parameters for the virtual machine is required to continue.
 pub struct VirtualMachineParamsGet<TSrc> {
     state: PostVerificationState<TSrc>,
-    chain_spec: ChainSpec,
 }
 
 impl<TSrc> VirtualMachineParamsGet<TSrc> {
@@ -466,41 +457,16 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
 
         match HostVmPrototype::new(code, heap_pages, exec_hint) {
             Ok(runtime) => {
-                let (babe_genesis_config, runtime) = {
-                    let genesis_storage = self.chain_spec.genesis_storage();
-
-                    let result =
-                        BabeGenesisConfiguration::from_virtual_machine_prototype(runtime, |k| {
-                            genesis_storage
-                                .clone()
-                                .find(|(k2, _)| *k2 == k)
-                                .map(|(_, v)| v.to_owned())
-                        });
-
-                    match result {
-                        Ok((babe_genesis_configuration, runtime)) => {
-                            (babe_genesis_configuration.epoch0_configuration, runtime)
-                        }
-                        Err(error) => {
-                            return GrandpaWarpSync::Finished(Err(
-                                Error::BabeGenesisConfigurationFromVm(error),
-                            ))
-                        }
-                    }
-                };
-
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                         runtime,
                         epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
-                        babe_genesis_config,
                     });
 
                 GrandpaWarpSync::from_babe_fetch_epoch_query(
                     babe_current_epoch_query,
                     None,
                     self.state,
-                    babe_genesis_config,
                 )
             }
             Err(error) => GrandpaWarpSync::Finished(Err(Error::NewRuntime(error))),
