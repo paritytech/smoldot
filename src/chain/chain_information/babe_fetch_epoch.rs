@@ -16,11 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    chain::chain_information::{
-        babe_config::{BabeGenesisConfiguration, FromVmPrototypeError},
-        BabeEpochInformation,
-    },
-    chain_spec::ChainSpec,
+    chain::chain_information::BabeEpochInformation,
     executor::{host, read_only_runtime_host},
     header,
 };
@@ -43,12 +39,12 @@ pub struct Config {
     pub runtime: host::HostVmPrototype,
     /// The Babe epoch to fetch.
     pub epoch_to_fetch: BabeEpochToFetch,
-    /// The chain spec of the chain.
-    pub chain_spec: ChainSpec,
+    /// The Babe genesis config.
+    pub babe_genesis_config: header::BabeNextConfig,
 }
 
 /// Problem encountered during a call to [`babe_fetch_epoch`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
@@ -59,7 +55,6 @@ pub enum Error {
     /// Error while decoding the babe epoch.
     #[display(fmt = "{}", _0)]
     DecodeFailed(parity_scale_codec::Error),
-    BabeGenesisConfigurationFromVm(FromVmPrototypeError),
 }
 
 /// Fetches a Babe epoch using `BabeApi_current_epoch` or `BabeApi_next_epoch`.
@@ -69,31 +64,15 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
         BabeEpochToFetch::NextEpoch => "BabeApi_next_epoch",
     };
 
-    let genesis_storage = config.chain_spec.genesis_storage();
-
-    let result = BabeGenesisConfiguration::from_virtual_machine_prototype(config.runtime, |k| {
-        genesis_storage
-            .clone()
-            .find(|(k2, _)| *k2 == k)
-            .map(|(_, v)| v.to_owned())
-    });
-
-    let (babe_config, runtime) = match result {
-        Ok((babe_genesis_configuration, runtime)) => {
-            (babe_genesis_configuration.epoch0_configuration, runtime)
-        }
-        Err(error) => return Query::Finished(Err(Error::BabeGenesisConfigurationFromVm(error))),
-    };
-
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
-        virtual_machine: runtime,
+        virtual_machine: config.runtime,
         function_to_call,
         // The epoch functions don't take any parameters.
         parameter: core::iter::empty::<&[u8]>(),
     });
 
     match vm {
-        Ok(vm) => Query::from_inner(vm, babe_config),
+        Ok(vm) => Query::from_inner(vm, config.babe_genesis_config),
         Err(err) => Query::Finished(Err(Error::WasmStart(err))),
     }
 }
