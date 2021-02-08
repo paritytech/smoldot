@@ -245,6 +245,15 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         todo!()
     }
 
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        match (&mut self.inner, self.sources.get(source_id.0).unwrap()) {
+            (IdleInner::Optimistic(sync), SourceMapping::Optimistic(src)) => {
+                &mut sync.source_user_data_mut(*src).user_data
+            }
+            _ => panic!(), // TODO:
+        }
+    }
+
     /// Injects a block announcement made by a source into the state machine.
     pub fn block_announce(
         self,

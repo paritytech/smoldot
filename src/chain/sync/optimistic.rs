@@ -375,6 +375,10 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         (src_user_data, drain)
     }
 
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        &mut self.inner.sources.get_mut(&source_id).unwrap().user_data
+    }
+
     /// Returns an iterator that extracts all requests that need to be started and requests that
     /// need to be cancelled.
     pub fn next_request_action(&mut self) -> Option<RequestAction<TRq, TSrc, TBl>> {

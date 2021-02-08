@@ -159,7 +159,8 @@ async fn start_sync(
     network_service: Arc<network_service::NetworkService>,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
-    let mut sync = all::AllSync::<_, libp2p::PeerId, ()>::new(all::Config {
+    // TODO: implicit generics
+    let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
         source_selection_randomness_seed: rand::random(),
@@ -201,7 +202,7 @@ async fn start_sync(
         let mut requests_to_start = Vec::<(all::SourceId, all::Request)>::with_capacity(16);
 
         loop {
-            let sync_inner = match sync {
+            let mut sync_inner = match sync {
                 all::AllSync::Idle(idle) => idle,
             };
 
@@ -221,11 +222,7 @@ async fn start_sync(
                                 },
                         },
                     ) => {
-                        let peer_id = sync_inner
-                            .source_mut(source_id)
-                            .unwrap()
-                            .user_data()
-                            .clone();
+                        let peer_id = sync_inner.source_user_data_mut(source_id).clone();
 
                         println!("blocks request: {:?} {:?}", first_block_hash, num_blocks); // TODO: remove
                         let block_request = network_service.clone().blocks_request(
@@ -254,9 +251,7 @@ async fn start_sync(
                         // TODO: use this abort
                         let (block_request, abort) = future::abortable(block_request);
 
-                        pending_block_requests.push(async move {
-                            block_request.await.unwrap().map(|r| (source_id, r))
-                        });
+                        pending_block_requests.push(async move { (id, block_request.await) });
                     }
                     (
                         source_id,
@@ -297,8 +292,8 @@ async fn start_sync(
                     match network_event {
                         network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
                             let (id, requests) = sync_inner.add_source(peer_id.clone(), best_block_number, best_block_hash);
-                            peers_source_id_map.insert(peer_id.clone(), id);
-                            requests.extend(requests.into_iter());
+                            peers_source_id_map.insert(peer_id, id);
+                            requests_to_start.extend(requests.into_iter().map(|r| (id, r)));
                         },
                         network_service::Event::Disconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
@@ -314,8 +309,11 @@ async fn start_sync(
                             // TODO: use outcome
                             // TODO: stupid to re-encode
                             sync_inner.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best);
+                            todo!()
                         },
                     }
+
+                    sync = all::AllSync::Idle(sync_inner);
                 }
 
                 message = from_foreground.next() => {
@@ -348,7 +346,9 @@ async fn start_sync(
                             let current = sync_inner.best_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
-                    }
+                    };
+
+                    sync = all::AllSync::Idle(sync_inner);
                 },
 
                 (request_id, result) = pending_block_requests.select_next_some() => {
@@ -356,13 +356,17 @@ async fn start_sync(
                     // machine.
                     if let Ok(result) = result {
                         let result = result.map_err(|_| ());
-                        let _ = sync.finish_request(request_id, result.map(|v| v.into_iter().map(|block| optimistic::RequestSuccessBlock {
+                        // TODO: use outcome
+                        let _ = sync_inner.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
                             scale_encoded_extrinsics: Vec::new(),
                             user_data: (),
-                        })).map_err(|()| optimistic::RequestFail::BlocksUnavailable));
+                        })));
+                        todo!()
                     }
+
+                    sync = all::AllSync::Idle(sync_inner);
                 },
             }
         }
