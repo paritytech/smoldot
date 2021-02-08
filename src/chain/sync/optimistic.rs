@@ -787,10 +787,10 @@ impl<TRq, TSrc, TBl> ProcessOne<TRq, TSrc, TBl> {
                                 (Some(wasm_code), Some(heap_pages)) => {
                                     let wasm_code =
                                         wasm_code.as_ref().expect("no runtime code?!?!"); // TODO: what to do?
-                                    let heap_pages = u64::from_le_bytes(
-                                        <[u8; 8]>::try_from(&heap_pages.as_ref().unwrap()[..])
-                                            .unwrap(), // TODO: don't unwrap
-                                    );
+                                    let heap_pages = executor::storage_heap_pages_to_value(
+                                        heap_pages.as_deref(),
+                                    )
+                                    .unwrap(); // TODO: don't unwrap
                                     host::HostVmPrototype::new(
                                         &wasm_code,
                                         heap_pages,
@@ -808,10 +808,10 @@ impl<TRq, TSrc, TBl> ProcessOne<TRq, TSrc, TBl> {
                                     });
                                 }
                                 (None, Some(heap_pages)) => {
-                                    let heap_pages = u64::from_le_bytes(
-                                        <[u8; 8]>::try_from(&heap_pages.as_ref().unwrap()[..])
-                                            .unwrap(), // TODO: don't unwrap
-                                    );
+                                    let heap_pages = executor::storage_heap_pages_to_value(
+                                        heap_pages.as_deref(),
+                                    )
+                                    .unwrap(); // TODO: don't unwrap
                                     return ProcessOne::FinalizedStorageGet(StorageGet {
                                         inner: StorageGetTarget::Runtime(req, heap_pages), // TODO: don't unwrap
                                         shared,
@@ -1080,7 +1080,10 @@ pub struct StorageGet<TRq, TSrc, TBl> {
 enum StorageGetTarget<TBl> {
     Storage(blocks_tree::StorageGet<Block<TBl>>),
     HeapPagesAndRuntime(blocks_tree::BodyVerifyRuntimeRequired<Block<TBl>>),
-    Runtime(blocks_tree::BodyVerifyRuntimeRequired<Block<TBl>>, u64),
+    Runtime(
+        blocks_tree::BodyVerifyRuntimeRequired<Block<TBl>>,
+        vm::HeapPages,
+    ),
     HeapPages(blocks_tree::BodyVerifyRuntimeRequired<Block<TBl>>, Vec<u8>),
 }
 
@@ -1122,13 +1125,7 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
                 ProcessOne::from(Inner::Step2(inner), self.shared)
             }
             StorageGetTarget::HeapPagesAndRuntime(inner) => {
-                let heap_pages = if let Some(value) = value {
-                    u64::from_le_bytes(
-                        <[u8; 8]>::try_from(&value[..]).unwrap(), // TODO: don't unwrap
-                    )
-                } else {
-                    executor::DEFAULT_HEAP_PAGES
-                };
+                let heap_pages = executor::storage_heap_pages_to_value(value.as_deref()).unwrap(); // TODO: don't unwrap
                 ProcessOne::FinalizedStorageGet(StorageGet {
                     inner: StorageGetTarget::Runtime(inner, heap_pages),
                     shared: self.shared,
@@ -1150,13 +1147,8 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
                 ProcessOne::from(Inner::Step2(inner), self.shared)
             }
             StorageGetTarget::HeapPages(inner, wasm_code) => {
-                let heap_pages = if let Some(value) = value {
-                    u64::from_le_bytes(
-                        <[u8; 8]>::try_from(&value[..]).unwrap(), // TODO: don't unwrap
-                    )
-                } else {
-                    executor::DEFAULT_HEAP_PAGES
-                };
+                // TODO: don't unwrap
+                let heap_pages = executor::storage_heap_pages_to_value(value).unwrap();
                 let wasm_vm = host::HostVmPrototype::new(
                     &wasm_code,
                     heap_pages,
@@ -1183,7 +1175,7 @@ pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
     /// Returns the prefix whose keys to load.
-    pub fn prefix(&self) -> &[u8] {
+    pub fn prefix<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         self.inner.prefix()
     }
 
@@ -1196,18 +1188,20 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
             .map(|k| k.as_ref().to_owned())
             .collect::<HashSet<_, fnv::FnvBuildHasher>>();
 
-        let prefix = self.inner.prefix();
-        for (k, v) in self
-            .shared
-            .inner
-            .best_to_finalized_storage_diff
-            .range(prefix.to_owned()..)
-            .take_while(|(k, _)| k.starts_with(prefix))
         {
-            if v.is_some() {
-                keys.insert(k.clone());
-            } else {
-                keys.remove(k);
+            let prefix = self.inner.prefix();
+            for (k, v) in self
+                .shared
+                .inner
+                .best_to_finalized_storage_diff
+                .range(prefix.as_ref().to_owned()..)
+                .take_while(|(k, _)| k.starts_with(prefix.as_ref()))
+            {
+                if v.is_some() {
+                    keys.insert(k.clone());
+                } else {
+                    keys.remove(k);
+                }
             }
         }
 
@@ -1228,12 +1222,11 @@ pub struct StorageNextKey<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
-    /// Returns the key whose next key must be passed back.
-    pub fn key(&self) -> &[u8] {
+    pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         if let Some(key_overwrite) = &self.key_overwrite {
-            key_overwrite
+            either::Left(key_overwrite)
         } else {
-            self.inner.key()
+            either::Right(self.inner.key())
         }
     }
 
@@ -1251,10 +1244,11 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         // `best_to_finalized_storage_diff` needs to be taken into account in order to provide
         // the next key in the best block instead.
 
+        let inner_key = self.inner.key();
         let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
             key_overwrite
         } else {
-            self.inner.key()
+            inner_key.as_ref()
         };
 
         if let Some(key) = key {
@@ -1282,6 +1276,7 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
                 // This `clone()` is necessary, as `b` borrows from
                 // `self.shared.best_to_finalized_storage_diff`.
                 let key_overwrite = Some(b.clone());
+                drop(inner_key); // Solves borrowing errors.
                 return ProcessOne::FinalizedStorageNextKey(StorageNextKey {
                     inner: self.inner,
                     shared: self.shared,
@@ -1298,6 +1293,7 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
             (None, None) => None,
         };
 
+        drop(inner_key); // Solves borrowing errors.
         let inner = self.inner.inject_key(outcome);
         ProcessOne::from(Inner::Step2(inner), self.shared)
     }

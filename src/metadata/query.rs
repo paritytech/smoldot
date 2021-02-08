@@ -49,7 +49,10 @@ use alloc::vec::Vec;
 /// >           where the overhead of the Wasm compilation is undesirable, you are encouraged to
 /// >           call [`metadata_from_virtual_machine_prototype`] instead.
 // TODO: document heap_pages
-pub fn metadata_from_runtime_code(wasm_code: &[u8], heap_pages: u64) -> Result<Vec<u8>, Error> {
+pub fn metadata_from_runtime_code(
+    wasm_code: &[u8],
+    heap_pages: vm::HeapPages,
+) -> Result<Vec<u8>, Error> {
     let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
         .map_err(Error::VmInitialization)?;
     let (out, _vm) = metadata_from_virtual_machine_prototype(vm)?;
@@ -71,7 +74,7 @@ pub fn metadata_from_virtual_machine_prototype(
         match vm {
             host::HostVm::ReadyToRun(r) => vm = r.run(),
             host::HostVm::Finished(finished) => {
-                let value = remove_length_prefix(finished.value())?.to_owned();
+                let value = remove_length_prefix(finished.value().as_ref())?.to_owned();
                 return Ok((value, finished.into_prototype()));
             }
             host::HostVm::Error { .. } => return Err(Error::Trapped),

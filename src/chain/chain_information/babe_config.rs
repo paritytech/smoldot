@@ -21,7 +21,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, num::NonZeroU64};
+use core::num::NonZeroU64;
 use parity_scale_codec::DecodeAll as _;
 
 /// BABE configuration of a chain, as extracted from the genesis block.
@@ -44,14 +44,9 @@ impl BabeGenesisConfiguration {
     ) -> Result<Self, FromGenesisStorageError> {
         let wasm_code =
             genesis_storage_access(b":code").ok_or(FromGenesisStorageError::RuntimeNotFound)?;
-        let heap_pages = if let Some(bytes) = genesis_storage_access(b":heappages") {
-            u64::from_le_bytes(
-                <[u8; 8]>::try_from(&bytes[..])
-                    .map_err(FromGenesisStorageError::HeapPagesDecode)?,
-            )
-        } else {
-            executor::DEFAULT_HEAP_PAGES
-        };
+        let heap_pages =
+            executor::storage_heap_pages_to_value(genesis_storage_access(b":heappages").as_deref())
+                .map_err(FromGenesisStorageError::HeapPagesDecode)?;
         let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
             .map_err(FromGenesisStorageError::VmInitialization)?;
         let (cfg, _) = Self::from_virtual_machine_prototype(vm, genesis_storage_access)
@@ -78,7 +73,8 @@ impl BabeGenesisConfiguration {
             match vm {
                 host::HostVm::ReadyToRun(r) => vm = r.run(),
                 host::HostVm::Finished(finished) => {
-                    break match OwnedGenesisConfiguration::decode_all(finished.value()) {
+                    let decoded = OwnedGenesisConfiguration::decode_all(finished.value().as_ref());
+                    break match decoded {
                         Ok(cfg) => (cfg, finished.into_prototype()),
                         Err(err) => return Err(FromVmPrototypeError::OutputDecode(err)),
                     };
@@ -86,7 +82,7 @@ impl BabeGenesisConfiguration {
                 host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let value = genesis_storage_access(req.key());
+                    let value = genesis_storage_access(req.key().as_ref());
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
@@ -128,10 +124,8 @@ impl BabeGenesisConfiguration {
 pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the genesis storage.
     RuntimeNotFound,
-    /// Number of heap pages couldn't be found in the genesis storage.
-    HeapPagesNotFound,
     /// Failed to decode heap pages from the genesis storage.
-    HeapPagesDecode(core::array::TryFromSliceError),
+    HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
     VmInitialization(host::NewErr),
     /// Error while executing the runtime.

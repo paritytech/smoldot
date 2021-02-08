@@ -84,6 +84,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
 pub struct Idle<TRq, TSrc, TBl> {
     inner: IdleInner<TRq, TSrc, TBl>,
+    sources: slab::Slab<SourceMapping>,
+    requests: slab::Slab<RequestMapping>,
 }
 
 enum IdleInner<TRq, TSrc, TBl> {
@@ -93,20 +95,35 @@ enum IdleInner<TRq, TSrc, TBl> {
     AllForks(all_forks::AllForksSync<TSrc, TBl>),
 }
 
+enum RequestMapping {
+    Optimistic(optimistic::RequestId),
+    GrandpaWarpSync(usize), // TODO:
+    AllForks(all_forks::SourceId),
+}
+
+enum SourceMapping {
+    Optimistic(optimistic::SourceId),
+    GrandpaWarpSync(usize), // TODO:
+    AllForks(all_forks::SourceId),
+}
+
 struct OptimisticSourceExtra<TSrc> {
     user_data: TSrc,
     best_block_hash: [u8; 32],
+    outer_source_id: SourceId,
 }
 
 /// Identifier for a source in the [`AllSync`].
 //
-// Implementation note: the `u64` values are never re-used.
+// Implementation note: this is an index in `Idle::sources`.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct SourceId(u64);
+pub struct SourceId(usize);
 
 /// Identifier for a request in the [`AllSync`].
+//
+// Implementation note: this is an index in `Idle::requests`.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct RequestId(u64);
+pub struct RequestId(usize);
 
 impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
@@ -128,6 +145,8 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 source_selection_randomness_seed: config.source_selection_randomness_seed,
                 full: config.full,
             })),
+            sources: slab::Slab::with_capacity(config.sources_capacity),
+            requests: slab::Slab::with_capacity(config.sources_capacity),
         }
     }
 
@@ -181,23 +200,29 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
                 waiting,
             )) => {
-                waiting.add_source(user_data);
+                //waiting.add_source(user_data);
                 todo!()
             }
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
                 waiting,
             )) => {
-                waiting.add_source(user_data);
+                //waiting.add_source(user_data);
                 todo!()
             }
             IdleInner::Optimistic(optimistic) => {
-                let source = optimistic.add_source(
+                let outer_source_id_entry = self.sources.vacant_entry();
+                let outer_source_id = SourceId(outer_source_id_entry.key());
+
+                let inner_source_id = optimistic.add_source(
                     OptimisticSourceExtra {
                         best_block_hash,
                         user_data,
+                        outer_source_id,
                     },
                     best_block_number,
                 );
+
+                outer_source_id_entry.insert(SourceMapping::Optimistic(inner_source_id));
 
                 optimistic.next_request_action();
             }
@@ -241,12 +266,14 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         self,
         request_id: RequestId,
     ) -> BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
-        match self.inner {
-            IdleInner::GrandpaWarpSync(_) => panic!(), // Grandpa warp sync never starts block requests.
-            IdleInner::Optimistic(sync) => {
+        let request = self.requests.remove(request_id.0);
+
+        match (self.inner, request) {
+            (IdleInner::GrandpaWarpSync(_), _) => panic!(), // Grandpa warp sync never starts block requests.
+            (IdleInner::Optimistic(sync), RequestMapping::Optimistic(request_id)) => {
                 let (_, outcome) = sync.finish_request(request_id, todo!());
             }
-            IdleInner::AllForks(sync) => {
+            (IdleInner::AllForks(sync), RequestMapping::AllForks(request_id)) => {
                 match sync.ancestry_search_response(source_id, scale_encoded_headers) {
                     all_forks::AncestrySearchResponseOutcome::Verify(verify) => {
                         BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
@@ -261,6 +288,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     } => BlocksRequestResponseOutcome::NotFinalizedChain {
                         sync: Idle {
                             inner: IdleInner::AllForks(sync),
+                            ..self
                         },
                         next_request: next_request
                             .into_iter()
@@ -277,6 +305,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     } => BlocksRequestResponseOutcome::Inconclusive {
                         sync: Idle {
                             inner: IdleInner::AllForks(sync),
+                            ..self
                         },
                         next_request: next_request
                             .into_iter()
@@ -292,6 +321,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     } => BlocksRequestResponseOutcome::AllAlreadyInChain {
                         sync: Idle {
                             inner: IdleInner::AllForks(sync),
+                            ..self
                         },
                         next_request: next_request
                             .into_iter()
@@ -352,6 +382,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         gp @ grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(_) => {
                             return AllSync::Idle(Idle {
                                 inner: IdleInner::GrandpaWarpSync(gp),
+                                ..self
                             })
                         }
                     }
@@ -377,12 +408,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     ) -> StorageGetResponseOutcome<TRq, TSrc, TBl> {
         // TODO: check request_id?!
         match self.inner {
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(
-                grandpa,
-            )) => {
+            /*IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(grandpa)) => {
                 AllSync::from_grandpa_inner(grandpa.inject_value(response));
-            }
-
+            }*/
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             _ => panic!(),
         }
