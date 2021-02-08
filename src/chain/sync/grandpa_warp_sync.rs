@@ -100,6 +100,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                             ..
                         } => (
                             slots_per_epoch,
+                            // TODO: /!\ /!\ shouldn't take the same configuration as the genesis; this is a hack while waiting for https://github.com/paritytech/substrate/issues/8060
                             finalized_next_epoch_transition.c,
                             finalized_next_epoch_transition.allowed_slots,
                         ),
