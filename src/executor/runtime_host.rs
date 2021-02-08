@@ -512,9 +512,11 @@ impl Inner {
                     self.top_trie_root_calculation_cache
                         .as_mut()
                         .unwrap()
-                        .storage_value_update(req.key(), req.value().is_some());
-                    self.top_trie_changes
-                        .insert(req.key().to_vec(), req.value().map(|v| v.to_vec()));
+                        .storage_value_update(req.key().as_ref(), req.value().is_some());
+                    self.top_trie_changes.insert(
+                        req.key().as_ref().to_vec(),
+                        req.value().map(|v| v.as_ref().to_vec()),
+                    );
                     self.vm = req.resume();
                 }
 

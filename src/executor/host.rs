@@ -722,11 +722,12 @@ impl ReadyToRun {
             // instead return an `ExternalVm` to the user.
             match host_fn {
                 HostFunction::ext_storage_set_version_1 => {
-                    let key = expect_pointer_size!(0);
-                    let value = expect_pointer_size!(1);
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(0);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(1);
                     return HostVm::ExternalStorageSet(ExternalStorageSet {
-                        key,
-                        value: Some(value),
+                        key_ptr,
+                        key_size,
+                        value: Some((value_ptr, value_size)),
                         inner: self.inner,
                     });
                 }
@@ -757,9 +758,10 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_storage_clear_version_1 => {
-                    let key = expect_pointer_size!(0);
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                     return HostVm::ExternalStorageSet(ExternalStorageSet {
-                        key,
+                        key_ptr,
+                        key_size,
                         value: None,
                         inner: self.inner,
                     });
@@ -1580,30 +1582,33 @@ impl fmt::Debug for ExternalStorageGet {
 pub struct ExternalStorageSet {
     inner: Inner,
 
-    /// Key whose value must be set.
-    // TODO: This should be a value length and pointer intead, so that we can read from the
-    //       VM's memory without copying. However the underlying Wasm VM code doesn't support
-    //       reading without copies.
-    key: Vec<u8>,
+    /// Pointer to the key whose value must be set. Guaranteed to be in range.
+    key_ptr: u32,
+    /// Size of the key whose value must be set. Guaranteed to be in range.
+    key_size: u32,
 
-    /// Value to set.
-    // TODO: This should be a value length and pointer intead, so that we can read from the
-    //       VM's memory without copying. However the underlying Wasm VM code doesn't support
-    //       reading without copies.
-    value: Option<Vec<u8>>,
+    /// Pointer and size of the value to set. `None` for clearing. Guaranteed to be in range.
+    value: Option<(u32, u32)>,
 }
 
 impl ExternalStorageSet {
     /// Returns the key whose value must be set.
-    pub fn key(&self) -> &[u8] {
-        &self.key
+    pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+        self.inner
+            .vm
+            .read_memory(self.key_ptr, self.key_size)
+            .unwrap()
     }
 
     /// Returns the value to set.
     ///
     /// If `None` is returned, the key should be removed from the storage entirely.
-    pub fn value(&self) -> Option<&[u8]> {
-        self.value.as_ref().map(|b| &b[..])
+    pub fn value<'a>(&'a self) -> Option<impl AsRef<[u8]> + 'a> {
+        if let Some((ptr, size)) = self.value {
+            Some(self.inner.vm.read_memory(ptr, size).unwrap())
+        } else {
+            None
+        }
     }
 
     /// Resumes execution after having set the value.
