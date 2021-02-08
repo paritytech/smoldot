@@ -373,10 +373,10 @@ fn start_sync(
                     }
                     optimistic::ProcessOne::FinalizedStoragePrefixKeys(req) => {
                         // TODO: to_vec() :-/
-                        let prefix = req.prefix().to_vec();
+                        let prefix = req.prefix().as_ref().to_vec();
                         // TODO: to_vec() :-/
                         let keys = finalized_block_storage
-                            .range(req.prefix().to_vec()..)
+                            .range(req.prefix().as_ref().to_vec()..)
                             .take_while(|(k, _)| k.starts_with(&prefix))
                             .map(|(k, _)| k);
                         process = req.inject_keys(keys);
