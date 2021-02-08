@@ -16,6 +16,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Background JSON-RPC service.
+//!
+//! The [`start`] function returns a future whose role is to pull events using
+//! [`ffi::next_json_rpc`] and send back answers using [`ffi::emit_json_rpc_response`].
+//!
+//! > **Note**: Because of the racy nature of these two functions, it is strongly discouraged to
+//! >           spawn multiple JSON-RPC services, especially if they don't use the same
+//! >           [`sync_service::SyncService`].
 
 // TODO: doc
 // TODO: re-review this once finished
@@ -72,12 +79,6 @@ pub struct Config {
 }
 
 /// Initializes the JSON-RPC service with the given configuration.
-///
-/// It will run in the background, pulling events using [`ffi::next_json_rpc`] and sending back
-/// answers using [`ffi::emit_json_rpc_response`].
-/// Because of the racy nature of these two functions, it is strongly discouraged to spawn
-/// multiple JSON-RPC services, especially if they don't use the same
-/// [`sync_service::SyncService`].
 pub async fn start(config: Config) {
     // TODO: remove; this BTreeMap serves no purpose except convenience
     let genesis_storage = config
@@ -190,6 +191,11 @@ pub async fn start(config: Config) {
             stream::once(future::ready(best_block_header)).chain(best_blocks_subscription)
         };
 
+        // Set to `true` when we expect the runtime in `latest_known_runtime` to match the runtime
+        // of the best block. Initially `false`, as `latest_known_runtime` uses the genesis
+        // runtime.
+        let mut runtime_matches_best_block = false;
+
         Box::pin(async move {
             futures::pin_mut!(blocks_stream);
 
@@ -273,15 +279,21 @@ pub async fn start(config: Config) {
                 if new_code == latest_known_runtime.runtime_code
                     && new_heap_pages == latest_known_runtime.heap_pages
                 {
+                    runtime_matches_best_block = true;
                     continue;
                 }
 
-                log::info!(
-                    target: "json-rpc",
-                    "New runtime code detected around block #{} (block number might be wrong)",
-                    new_best_block_decoded.number
-                );
+                // Don't notify the user of an upgrade if we didn't expect the runtime to match
+                // the best block in the first place.
+                if runtime_matches_best_block {
+                    log::info!(
+                        target: "json-rpc",
+                        "New runtime code detected around block #{} (block number might be wrong)",
+                        new_best_block_decoded.number
+                    );
+                }
 
+                runtime_matches_best_block = true;
                 latest_known_runtime.runtime_code = new_code;
                 latest_known_runtime.heap_pages = new_heap_pages;
                 latest_known_runtime.runtime = SuccessfulRuntime::from_params(
@@ -311,7 +323,7 @@ pub async fn start(config: Config) {
                         &subscription,
                         &notification_body,
                     );
-                    ffi::emit_json_rpc_response(&notification);
+                    client.send_back(&notification);
                 }
             }
         })
@@ -356,23 +368,11 @@ pub async fn start(config: Config) {
                 let (response1, response2) = client2.clone().handle_rpc(request_id, call).await;
 
                 if let Some(response1) = response1 {
-                    log::debug!(
-                        target: "json-rpc",
-                        "JSON-RPC <= {:?}{}",
-                        if response1.len() > 100 { &response1[..100] } else { &response1[..] },
-                        if response1.len() > 100 { "…" } else { "" }
-                    );
-                    ffi::emit_json_rpc_response(&response1);
+                    client2.send_back(&response1);
                 }
 
                 if let Some(response2) = response2 {
-                    log::debug!(
-                        target: "json-rpc",
-                        "JSON-RPC <= {:?}{}",
-                        if response2.len() > 100 { &response2[..100] } else { &response2[..] },
-                        if response2.len() > 100 { "…" } else { "" }
-                    );
-                    ffi::emit_json_rpc_response(&response2);
+                    client2.send_back(&response2);
                 }
             }));
         }
@@ -521,6 +521,21 @@ struct Blocks {
 }
 
 impl JsonRpcService {
+    /// Send back a response or a notification to the JSON-RPC client.
+    ///
+    /// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
+    /// >           in order to print a log message.
+    fn send_back(&self, message: &str) {
+        log::debug!(
+            target: "json-rpc",
+            "JSON-RPC <= {}{}",
+            if message.len() > 100 { &message[..100] } else { &message[..] },
+            if message.len() > 100 { "…" } else { "" }
+        );
+
+        ffi::emit_json_rpc_response(message);
+    }
+
     // TODO: remove second tuple item of the return value, once possible
     async fn handle_rpc(
         self: Arc<JsonRpcService>,
@@ -647,10 +662,12 @@ impl JsonRpcService {
                 let confirmation = methods::Response::chain_subscribeAllHeads(&subscription)
                     .to_json_response(request_id);
 
+                let client = self.clone();
+
                 // Spawn a separate task for the subscription.
                 (self.tasks_executor.lock().await)(Box::pin(async move {
                     // Send back to the user the confirmation of the registration.
-                    ffi::emit_json_rpc_response(&confirmation);
+                    client.send_back(&confirmation);
 
                     loop {
                         // Wait for either a new block, or for the subscription to be canceled.
@@ -659,7 +676,7 @@ impl JsonRpcService {
                         match future::select(next_block, &mut unsubscribe_rx).await {
                             future::Either::Left((block, _)) => {
                                 let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                                ffi::emit_json_rpc_response(
+                                client.send_back(
                                     &smoldot::json_rpc::parse::build_subscription_event(
                                         "chain_newHead",
                                         &subscription,
@@ -670,7 +687,7 @@ impl JsonRpcService {
                             future::Either::Right((Ok(unsub_request_id), _)) => {
                                 let response = methods::Response::chain_unsubscribeAllHeads(true)
                                     .to_json_response(&unsub_request_id);
-                                ffi::emit_json_rpc_response(&response);
+                                client.send_back(&response);
                                 break;
                             }
                             future::Either::Right((Err(_), _)) => break,
@@ -701,10 +718,12 @@ impl JsonRpcService {
                 let confirmation = methods::Response::chain_subscribeNewHeads(&subscription)
                     .to_json_response(request_id);
 
+                let client = self.clone();
+
                 // Spawn a separate task for the subscription.
                 (self.tasks_executor.lock().await)(Box::pin(async move {
                     // Send back to the user the confirmation of the registration.
-                    ffi::emit_json_rpc_response(&confirmation);
+                    client.send_back(&confirmation);
 
                     loop {
                         // Wait for either a new block, or for the subscription to be canceled.
@@ -713,7 +732,7 @@ impl JsonRpcService {
                         match future::select(next_block, &mut unsubscribe_rx).await {
                             future::Either::Left((block, _)) => {
                                 let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                                ffi::emit_json_rpc_response(
+                                client.send_back(
                                     &smoldot::json_rpc::parse::build_subscription_event(
                                         "chain_newHead",
                                         &subscription,
@@ -724,7 +743,7 @@ impl JsonRpcService {
                             future::Either::Right((Ok(unsub_request_id), _)) => {
                                 let response = methods::Response::chain_unsubscribeNewHeads(true)
                                     .to_json_response(&unsub_request_id);
-                                ffi::emit_json_rpc_response(&response);
+                                client.send_back(&response);
                                 break;
                             }
                             future::Either::Right((Err(_), _)) => break,
@@ -756,10 +775,12 @@ impl JsonRpcService {
                 let confirmation = methods::Response::chain_subscribeFinalizedHeads(&subscription)
                     .to_json_response(request_id);
 
+                let client = self.clone();
+
                 // Spawn a separate task for the subscription.
                 (self.tasks_executor.lock().await)(Box::pin(async move {
                     // Send back to the user the confirmation of the registration.
-                    ffi::emit_json_rpc_response(&confirmation);
+                    client.send_back(&confirmation);
 
                     loop {
                         // Wait for either a new block, or for the subscription to be canceled.
@@ -768,7 +789,7 @@ impl JsonRpcService {
                         match future::select(next_block, &mut unsubscribe_rx).await {
                             future::Either::Left((block, _)) => {
                                 let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                                ffi::emit_json_rpc_response(
+                                client.send_back(
                                     &smoldot::json_rpc::parse::build_subscription_event(
                                         "chain_finalizedHead",
                                         &subscription,
@@ -780,7 +801,7 @@ impl JsonRpcService {
                                 let response =
                                     methods::Response::chain_unsubscribeFinalizedHeads(true)
                                         .to_json_response(&unsub_request_id);
-                                ffi::emit_json_rpc_response(&response);
+                                client.send_back(&response);
                                 break;
                             }
                             future::Either::Right((Err(_), _)) => break,
@@ -1049,12 +1070,14 @@ impl JsonRpcService {
                 let confirmation = methods::Response::state_subscribeStorage(&subscription)
                     .to_json_response(request_id);
 
+                let client = self.clone();
+
                 // Spawn a separate task for the subscription.
                 (self.tasks_executor.lock().await)(Box::pin(async move {
                     futures::pin_mut!(storage_updates);
 
                     // Send back to the user the confirmation of the registration.
-                    ffi::emit_json_rpc_response(&confirmation);
+                    client.send_back(&confirmation);
 
                     loop {
                         // Wait for either a new storage update, or for the subscription to be canceled.
@@ -1062,7 +1085,7 @@ impl JsonRpcService {
                         futures::pin_mut!(next_block);
                         match future::select(next_block, &mut unsubscribe_rx).await {
                             future::Either::Left((changes, _)) => {
-                                ffi::emit_json_rpc_response(
+                                client.send_back(
                                     &smoldot::json_rpc::parse::build_subscription_event(
                                         "state_storage",
                                         &subscription,
@@ -1073,7 +1096,7 @@ impl JsonRpcService {
                             future::Either::Right((Ok(unsub_request_id), _)) => {
                                 let response = methods::Response::state_unsubscribeStorage(true)
                                     .to_json_response(&unsub_request_id);
-                                ffi::emit_json_rpc_response(&response);
+                                client.send_back(&response);
                                 break;
                             }
                             future::Either::Right((Err(_), _)) => break,
@@ -1318,7 +1341,7 @@ impl JsonRpcService {
                             );
                         }
 
-                        let return_value = success.virtual_machine.value().to_owned();
+                        let return_value = success.virtual_machine.value().as_ref().to_owned();
                         runtime.virtual_machine = Some(success.virtual_machine.into_prototype());
                         return Ok(return_value);
                     }
