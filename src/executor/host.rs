@@ -427,11 +427,24 @@ impl ReadyToRun {
                     let value_size = u32::try_from(ret >> 32).unwrap();
                     let value_ptr = u32::try_from(ret & 0xffffffff).unwrap();
 
-                    return HostVm::Finished(Finished {
-                        inner: self.inner,
-                        value_ptr,
-                        value_size,
-                    });
+                    if value_size.saturating_add(value_ptr) > self.inner.vm.memory_size() {
+                        return HostVm::Finished(Finished {
+                            inner: self.inner,
+                            value_ptr,
+                            value_size,
+                        });
+                    } else {
+                        let error = Error::ReturnedPtrOutOfRange {
+                            pointer: value_ptr,
+                            size: value_size,
+                            memory_size: self.inner.vm.memory_size(),
+                        };
+
+                        return HostVm::Error {
+                            prototype: self.inner.into_prototype(),
+                            error,
+                        };
+                    }
                 }
 
                 Ok(vm::ExecOutcome::Finished {
