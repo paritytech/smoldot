@@ -802,11 +802,13 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_storage_append_version_1 => {
-                    let key = expect_pointer_size!(0);
-                    let value = expect_pointer_size!(1);
+                    let (key_ptr, key_size) = expect_pointer_size_raw!(0);
+                    let (value_ptr, value_size) = expect_pointer_size_raw!(1);
                     return HostVm::ExternalStorageAppend(ExternalStorageAppend {
-                        key,
-                        value,
+                        key_ptr,
+                        key_size,
+                        value_ptr,
+                        value_size,
                         inner: self.inner,
                     });
                 }
@@ -1648,28 +1650,32 @@ impl fmt::Debug for ExternalStorageSet {
 pub struct ExternalStorageAppend {
     inner: Inner,
 
-    /// Key whose value must be set.
-    // TODO: This should be a value length and pointer intead, so that we can read from the
-    //       VM's memory without copying. However the underlying Wasm VM code doesn't support
-    //       reading without copies.
-    key: Vec<u8>,
+    /// Pointer to the key whose value must be set. Guaranteed to be in range.
+    key_ptr: u32,
+    /// Size of the key whose value must be set. Guaranteed to be in range.
+    key_size: u32,
 
-    /// Value to append to the entry.
-    // TODO: This should be a value length and pointer intead, so that we can read from the
-    //       VM's memory without copying. However the underlying Wasm VM code doesn't support
-    //       reading without copies.
-    value: Vec<u8>,
+    /// Pointer to the value to append. Guaranteed to be in range.
+    value_ptr: u32,
+    /// Size of the value to append. Guaranteed to be in range.
+    value_size: u32,
 }
 
 impl ExternalStorageAppend {
     /// Returns the key whose value must be set.
-    pub fn key(&self) -> &[u8] {
-        &self.key
+    pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+        self.inner
+            .vm
+            .read_memory(self.key_ptr, self.key_size)
+            .unwrap()
     }
 
     /// Returns the value to append.
-    pub fn value(&self) -> &[u8] {
-        &self.value
+    pub fn value<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+        self.inner
+            .vm
+            .read_memory(self.value_ptr, self.value_size)
+            .unwrap()
     }
 
     /// Resumes execution after having set the value.

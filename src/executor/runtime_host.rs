@@ -230,10 +230,10 @@ impl StorageGet {
             host::HostVm::ExternalStorageAppend(req) => {
                 // TODO: could be less overhead?
                 let mut value = value.unwrap_or_default();
-                append_to_storage_value(&mut value, req.value());
+                append_to_storage_value(&mut value, req.value().as_ref());
                 self.inner
                     .top_trie_changes
-                    .insert(req.key().to_vec(), Some(value));
+                    .insert(req.key().as_ref().to_vec(), Some(value));
                 self.inner.vm = req.resume();
             }
             host::HostVm::ExternalStorageRoot(_) => {
@@ -524,13 +524,14 @@ impl Inner {
                     self.top_trie_root_calculation_cache
                         .as_mut()
                         .unwrap()
-                        .storage_value_update(req.key(), true);
+                        .storage_value_update(req.key().as_ref(), true);
 
-                    if let Some(current_value) = self.top_trie_changes.get(req.key()) {
+                    let current_value = self.top_trie_changes.get(req.key().as_ref());
+                    if let Some(current_value) = current_value {
                         let mut current_value = current_value.clone().unwrap_or_default();
-                        append_to_storage_value(&mut current_value, req.value());
+                        append_to_storage_value(&mut current_value, req.value().as_ref());
                         self.top_trie_changes
-                            .insert(req.key().to_vec(), Some(current_value));
+                            .insert(req.key().as_ref().to_vec(), Some(current_value));
                         self.vm = req.resume();
                     } else {
                         self.vm = req.into();
