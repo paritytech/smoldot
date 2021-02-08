@@ -427,7 +427,7 @@ impl ReadyToRun {
                     let value_size = u32::try_from(ret >> 32).unwrap();
                     let value_ptr = u32::try_from(ret & 0xffffffff).unwrap();
 
-                    if value_size.saturating_add(value_ptr) > self.inner.vm.memory_size() {
+                    if value_size.saturating_add(value_ptr) <= self.inner.vm.memory_size() {
                         return HostVm::Finished(Finished {
                             inner: self.inner,
                             value_ptr,
