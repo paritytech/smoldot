@@ -16,7 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    chain::chain_information::BabeEpochInformation,
+    chain::chain_information::{
+        babe_config::{BabeGenesisConfiguration, FromVmPrototypeError},
+        BabeEpochInformation,
+    },
+    chain_spec::ChainSpec,
     executor::{host, read_only_runtime_host},
     header,
 };
@@ -39,10 +43,12 @@ pub struct Config {
     pub runtime: host::HostVmPrototype,
     /// The Babe epoch to fetch.
     pub epoch_to_fetch: BabeEpochToFetch,
+    /// The chain spec of the chain.
+    pub chain_spec: ChainSpec,
 }
 
 /// Problem encountered during a call to [`babe_fetch_epoch`].
-#[derive(Debug, Clone, derive_more::Display)]
+#[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
@@ -53,6 +59,7 @@ pub enum Error {
     /// Error while decoding the babe epoch.
     #[display(fmt = "{}", _0)]
     DecodeFailed(parity_scale_codec::Error),
+    BabeGenesisConfigurationFromVm(FromVmPrototypeError),
 }
 
 /// Fetches a Babe epoch using `BabeApi_current_epoch` or `BabeApi_next_epoch`.
@@ -62,15 +69,31 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
         BabeEpochToFetch::NextEpoch => "BabeApi_next_epoch",
     };
 
+    let genesis_storage = config.chain_spec.genesis_storage();
+
+    let result = BabeGenesisConfiguration::from_virtual_machine_prototype(config.runtime, |k| {
+        genesis_storage
+            .clone()
+            .find(|(k2, _)| *k2 == k)
+            .map(|(_, v)| v.to_owned())
+    });
+
+    let (babe_config, runtime) = match result {
+        Ok((babe_genesis_configuration, runtime)) => {
+            (babe_genesis_configuration.epoch0_configuration, runtime)
+        }
+        Err(error) => return Query::Finished(Err(Error::BabeGenesisConfigurationFromVm(error))),
+    };
+
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
-        virtual_machine: config.runtime,
+        virtual_machine: runtime,
         function_to_call,
         // The epoch functions don't take any parameters.
         parameter: core::iter::empty::<&[u8]>(),
     });
 
     match vm {
-        Ok(vm) => Query::from_inner(vm),
+        Ok(vm) => Query::from_inner(vm, babe_config),
         Err(err) => Query::Finished(Err(Error::WasmStart(err))),
     }
 }
@@ -87,7 +110,10 @@ pub enum Query {
 }
 
 impl Query {
-    fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
+    fn from_inner(
+        inner: read_only_runtime_host::RuntimeHostVm,
+        babe_config: header::BabeNextConfig,
+    ) -> Self {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 let decoded = DecodableBabeEpochInformation::decode(
@@ -98,7 +124,7 @@ impl Query {
                     Ok(epoch) => Query::Finished(Ok((
                         BabeEpochInformation {
                             epoch_index: epoch.epoch_index,
-                            start_slot_number: epoch.start_slot_number,
+                            start_slot_number: Some(epoch.start_slot_number),
                             authorities: epoch
                                 .authorities
                                 .into_iter()
@@ -108,8 +134,8 @@ impl Query {
                                 })
                                 .collect(),
                             randomness: epoch.randomness,
-                            c: epoch.c,
-                            allowed_slots: epoch.allowed_slots,
+                            c: babe_config.c,
+                            allowed_slots: babe_config.allowed_slots,
                         },
                         success.virtual_machine.into_prototype(),
                     ))),
@@ -120,44 +146,52 @@ impl Query {
                 Query::Finished(Err(Error::WasmVm(err)))
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(inner) => {
-                Query::StorageGet(StorageGet(inner))
+                Query::StorageGet(StorageGet { inner, babe_config })
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => Query::NextKey(NextKey(inner)),
+            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => {
+                Query::NextKey(NextKey { inner, babe_config })
+            }
         }
     }
 }
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(read_only_runtime_host::StorageGet);
+pub struct StorageGet {
+    inner: read_only_runtime_host::StorageGet,
+    babe_config: header::BabeNextConfig,
+}
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
-        self.0.key()
+        self.inner.key()
     }
 
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     ///
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
     pub fn key_as_vec(&self) -> Vec<u8> {
-        self.0.key_as_vec()
+        self.inner.key_as_vec()
     }
 
     /// Injects the corresponding storage value.
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
-        Query::from_inner(self.0.inject_value(value))
+        Query::from_inner(self.inner.inject_value(value), self.babe_config)
     }
 }
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(read_only_runtime_host::NextKey);
+pub struct NextKey {
+    inner: read_only_runtime_host::NextKey,
+    babe_config: header::BabeNextConfig,
+}
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
-        self.0.key()
+        self.inner.key()
     }
 
     /// Injects the key.
@@ -167,22 +201,68 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
-        Query::from_inner(self.0.inject_key(key))
+        Query::from_inner(self.inner.inject_key(key), self.babe_config)
     }
 }
 
 #[derive(Decode, Encode)]
 struct DecodableBabeEpochInformation {
     epoch_index: u64,
-    start_slot_number: Option<u64>,
+    start_slot_number: u64,
+    duration: u64,
     authorities: Vec<DecodableBabeAuthority>,
     randomness: [u8; 32],
-    c: (u64, u64),
-    allowed_slots: header::BabeAllowedSlots,
 }
 
 #[derive(Decode, Encode)]
 struct DecodableBabeAuthority {
     public_key: [u8; 32],
     weight: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use parity_scale_codec::DecodeAll;
+
+    #[test]
+    fn sample_decode() {
+        // Sample taken from an actual Westend block.
+        let sample_data = [
+            56, 28, 0, 0, 0, 0, 0, 0, 183, 64, 4, 16, 0, 0, 0, 0, 88, 2, 0, 0, 0, 0, 0, 0, 60, 60,
+            97, 197, 140, 161, 35, 106, 9, 104, 63, 251, 75, 144, 118, 18, 29, 88, 185, 48, 164,
+            143, 72, 93, 222, 75, 226, 200, 243, 57, 201, 118, 21, 1, 0, 0, 0, 0, 0, 0, 0, 72, 105,
+            150, 202, 243, 225, 149, 178, 90, 117, 160, 248, 93, 21, 236, 233, 121, 194, 129, 13,
+            194, 139, 82, 228, 203, 126, 230, 106, 158, 203, 20, 61, 1, 0, 0, 0, 0, 0, 0, 0, 120,
+            247, 35, 155, 29, 63, 210, 75, 46, 34, 22, 61, 148, 66, 136, 114, 59, 233, 15, 92, 58,
+            180, 145, 38, 15, 130, 239, 86, 184, 238, 37, 8, 1, 0, 0, 0, 0, 0, 0, 0, 244, 172, 144,
+            91, 15, 86, 0, 219, 89, 86, 154, 133, 200, 106, 49, 249, 156, 212, 209, 73, 49, 112,
+            157, 175, 95, 74, 111, 148, 136, 6, 150, 74, 1, 0, 0, 0, 0, 0, 0, 0, 36, 252, 143, 20,
+            44, 163, 149, 46, 24, 54, 105, 255, 34, 228, 9, 100, 92, 216, 80, 241, 158, 26, 136,
+            232, 203, 10, 189, 174, 210, 52, 117, 12, 1, 0, 0, 0, 0, 0, 0, 0, 226, 224, 72, 174,
+            181, 236, 236, 251, 33, 91, 57, 64, 68, 29, 57, 163, 3, 179, 240, 46, 143, 31, 221,
+            108, 128, 163, 149, 185, 92, 130, 172, 6, 1, 0, 0, 0, 0, 0, 0, 0, 54, 26, 79, 126, 74,
+            132, 12, 26, 50, 91, 228, 1, 140, 245, 62, 210, 228, 18, 216, 231, 183, 234, 134, 177,
+            12, 41, 50, 214, 88, 243, 93, 51, 1, 0, 0, 0, 0, 0, 0, 0, 178, 55, 231, 234, 22, 84,
+            107, 248, 251, 136, 165, 252, 218, 141, 73, 245, 149, 40, 114, 234, 243, 255, 249, 244,
+            48, 36, 75, 31, 28, 195, 136, 41, 1, 0, 0, 0, 0, 0, 0, 0, 224, 77, 167, 191, 55, 175,
+            174, 214, 210, 95, 118, 134, 197, 147, 96, 214, 90, 64, 233, 11, 207, 112, 72, 138,
+            230, 5, 131, 17, 114, 241, 240, 5, 1, 0, 0, 0, 0, 0, 0, 0, 174, 228, 151, 65, 101, 59,
+            215, 82, 126, 147, 118, 12, 49, 248, 100, 20, 126, 41, 16, 73, 162, 13, 223, 253, 34,
+            206, 207, 180, 97, 133, 93, 12, 1, 0, 0, 0, 0, 0, 0, 0, 198, 2, 2, 108, 95, 64, 139,
+            172, 245, 38, 202, 193, 153, 18, 232, 69, 112, 117, 104, 105, 190, 163, 81, 213, 184,
+            41, 188, 124, 206, 159, 158, 101, 1, 0, 0, 0, 0, 0, 0, 0, 134, 62, 201, 97, 144, 120,
+            161, 90, 90, 76, 111, 227, 172, 5, 230, 35, 178, 192, 59, 243, 42, 149, 243, 62, 215,
+            175, 28, 84, 192, 243, 7, 83, 1, 0, 0, 0, 0, 0, 0, 0, 6, 231, 39, 255, 69, 74, 142, 80,
+            58, 243, 174, 47, 127, 251, 19, 72, 239, 124, 172, 199, 80, 33, 232, 211, 51, 226, 180,
+            236, 131, 38, 146, 68, 1, 0, 0, 0, 0, 0, 0, 0, 100, 218, 128, 168, 54, 65, 39, 134,
+            166, 245, 23, 111, 67, 120, 237, 235, 96, 193, 163, 55, 230, 200, 73, 10, 35, 80, 68,
+            226, 135, 252, 65, 68, 1, 0, 0, 0, 0, 0, 0, 0, 4, 137, 113, 107, 23, 103, 214, 113,
+            181, 180, 178, 84, 240, 214, 246, 172, 192, 216, 253, 150, 200, 231, 45, 187, 242, 215,
+            236, 224, 104, 36, 94, 86, 1, 0, 0, 0, 0, 0, 0, 0, 158, 0, 242, 159, 152, 81, 251, 247,
+            62, 14, 42, 94, 43, 144, 26, 193, 253, 127, 175, 217, 134, 74, 124, 230, 87, 141, 242,
+            114, 212, 93, 3, 108,
+        ];
+
+        super::DecodableBabeEpochInformation::decode_all(&sample_data).unwrap();
+    }
 }

@@ -20,6 +20,7 @@ use crate::{
         babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
         ChainInformationFinality,
     },
+    chain_spec::ChainSpec,
     executor::{
         host::{HostVmPrototype, NewErr},
         vm::ExecHint,
@@ -52,12 +53,17 @@ pub struct Config {
     pub start_chain_information: ChainInformation,
     /// The initial capacity of the list of sources.
     pub sources_capacity: usize,
+    /// The chain spec of the chain.
+    pub chain_spec: ChainSpec,
 }
 
 /// Starts syncing via GrandPa warp sync.
 pub fn grandpa_warp_sync<TSrc>(config: Config) -> GrandpaWarpSync<TSrc> {
     GrandpaWarpSync::WaitingForSources(WaitingForSources {
-        start_chain_information: config.start_chain_information,
+        state: PreVerificationState {
+            start_chain_information: config.start_chain_information,
+            chain_spec: config.chain_spec,
+        },
         sources: Vec::with_capacity(config.sources_capacity),
         previous_verifier_values: None,
     })
@@ -114,6 +120,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                         runtime,
                         epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
+                        chain_spec: state.chain_spec.clone(),
                     });
                 Self::from_babe_fetch_epoch_query(babe_next_epoch_query, Some(current_epoch), state)
             }
@@ -224,10 +231,10 @@ impl<TSrc> NextKey<TSrc> {
 /// Verifying the warp sync response is required to continue.
 pub struct Verifier<TSrc> {
     verifier: warp_sync::Verifier,
-    start_chain_information: ChainInformation,
     warp_sync_source_index: usize,
     sources: Vec<TSrc>,
     final_set_of_fragments: bool,
+    state: PreVerificationState,
 }
 
 impl<TSrc> Verifier<TSrc> {
@@ -235,10 +242,10 @@ impl<TSrc> Verifier<TSrc> {
         match self.verifier.next() {
             Ok(warp_sync::Next::NotFinished(next_verifier)) => GrandpaWarpSync::Verifier(Self {
                 verifier: next_verifier,
-                start_chain_information: self.start_chain_information,
                 sources: self.sources,
                 warp_sync_source_index: self.warp_sync_source_index,
                 final_set_of_fragments: self.final_set_of_fragments,
+                state: self.state,
             }),
             Ok(warp_sync::Next::Success {
                 header,
@@ -249,7 +256,8 @@ impl<TSrc> Verifier<TSrc> {
                         state: PostVerificationState {
                             header,
                             chain_information_finality,
-                            start_chain_information: self.start_chain_information,
+                            chain_spec: self.state.chain_spec,
+                            start_chain_information: self.state.start_chain_information,
                             warp_sync_source: self.sources.remove(self.warp_sync_source_index),
                         },
                     })
@@ -257,7 +265,7 @@ impl<TSrc> Verifier<TSrc> {
                     GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
                         source_index: self.warp_sync_source_index,
                         sources: self.sources,
-                        start_chain_information: self.start_chain_information,
+                        state: self.state,
                         previous_verifier_values: Some((header, chain_information_finality)),
                     })
                 }
@@ -267,18 +275,24 @@ impl<TSrc> Verifier<TSrc> {
     }
 }
 
+struct PreVerificationState {
+    start_chain_information: ChainInformation,
+    chain_spec: ChainSpec,
+}
+
 struct PostVerificationState<TSrc> {
     header: Header,
     chain_information_finality: ChainInformationFinality,
     start_chain_information: ChainInformation,
     warp_sync_source: TSrc,
+    chain_spec: ChainSpec,
 }
 
 /// Requesting GrandPa warp sync data from a source is required to continue.
 pub struct WarpSyncRequest<TSrc> {
     source_index: usize,
     sources: Vec<TSrc>,
-    start_chain_information: ChainInformation,
+    state: PreVerificationState,
     previous_verifier_values: Option<(Header, ChainInformationFinality)>,
 }
 
@@ -292,7 +306,11 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
     pub fn start_block_hash(&self) -> [u8; 32] {
         match self.previous_verifier_values.as_ref() {
             Some((header, _)) => header.hash(),
-            None => self.start_chain_information.finalized_block_header.hash(),
+            None => self
+                .state
+                .start_chain_information
+                .finalized_block_header
+                .hash(),
         }
     }
 
@@ -315,14 +333,14 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
             if next_index == self.sources.len() {
                 GrandpaWarpSync::WaitingForSources(WaitingForSources {
                     sources: self.sources,
-                    start_chain_information: self.start_chain_information,
+                    state: self.state,
                     previous_verifier_values: self.previous_verifier_values,
                 })
             } else {
                 GrandpaWarpSync::WarpSyncRequest(Self {
                     source_index: next_index,
                     sources: self.sources,
-                    start_chain_information: self.start_chain_information,
+                    state: self.state,
                     previous_verifier_values: self.previous_verifier_values,
                 })
             }
@@ -369,7 +387,7 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
                         response_fragments,
                     ),
                     None => warp_sync::Verifier::new(
-                        (&self.start_chain_information.finality).into(),
+                        (&self.state.start_chain_information.finality).into(),
                         response_fragments,
                     ),
                 };
@@ -377,7 +395,7 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
                 GrandpaWarpSync::Verifier(Verifier {
                     final_set_of_fragments,
                     verifier,
-                    start_chain_information: self.start_chain_information,
+                    state: self.state,
                     sources: self.sources,
                     warp_sync_source_index: self.source_index,
                 })
@@ -385,12 +403,12 @@ impl<TSrc: PartialEq> WarpSyncRequest<TSrc> {
             None if next_index < self.sources.len() => GrandpaWarpSync::WarpSyncRequest(Self {
                 source_index: next_index,
                 sources: self.sources,
-                start_chain_information: self.start_chain_information,
+                state: self.state,
                 previous_verifier_values: self.previous_verifier_values,
             }),
             None => GrandpaWarpSync::WaitingForSources(WaitingForSources {
                 sources: self.sources,
-                start_chain_information: self.start_chain_information,
+                state: self.state,
                 previous_verifier_values: self.previous_verifier_values,
             }),
         }
@@ -437,6 +455,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                         runtime,
                         epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
+                        chain_spec: self.state.chain_spec.clone(),
                     });
 
                 GrandpaWarpSync::from_babe_fetch_epoch_query(
@@ -453,7 +472,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
 /// Adding more sources of GrandPa warp sync data to is required to continue.
 pub struct WaitingForSources<TSrc> {
     sources: Vec<TSrc>,
-    start_chain_information: ChainInformation,
+    state: PreVerificationState,
     previous_verifier_values: Option<(Header, ChainInformationFinality)>,
 }
 
@@ -467,7 +486,7 @@ impl<TSrc: PartialEq> WaitingForSources<TSrc> {
         GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
             source_index: self.sources.len() - 1,
             sources: self.sources,
-            start_chain_information: self.start_chain_information,
+            state: self.state,
             previous_verifier_values: self.previous_verifier_values,
         })
     }
