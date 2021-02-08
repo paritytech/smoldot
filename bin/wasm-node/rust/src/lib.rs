@@ -31,6 +31,7 @@ use std::{sync::Arc, time::Duration};
 
 pub mod ffi;
 
+mod grandpa_warp_sync_service;
 mod json_rpc_service;
 mod network_service;
 mod sync_service;
