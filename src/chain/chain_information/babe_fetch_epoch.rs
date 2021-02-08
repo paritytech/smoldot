@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    chain::chain_information::BabeEpochInformation,
     executor::{host, read_only_runtime_host},
     header,
 };
@@ -77,28 +76,10 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
 
 /// Partial information about a Babe epoch.
 pub struct PartialBabeEpochInformation {
-    epoch_index: u64,
-    start_slot_number: Option<u64>,
-    authorities: Vec<header::BabeAuthority>,
-    randomness: [u8; 32],
-}
-
-impl PartialBabeEpochInformation {
-    /// Complete the epoch information by supplying Babe configuration information.
-    pub fn complete(
-        self,
-        c: (u64, u64),
-        allowed_slots: header::BabeAllowedSlots,
-    ) -> BabeEpochInformation {
-        BabeEpochInformation {
-            epoch_index: self.epoch_index,
-            start_slot_number: self.start_slot_number,
-            authorities: self.authorities,
-            randomness: self.randomness,
-            c,
-            allowed_slots,
-        }
-    }
+    pub epoch_index: u64,
+    pub start_slot_number: Option<u64>,
+    pub authorities: Vec<header::BabeAuthority>,
+    pub randomness: [u8; 32],
 }
 
 /// Current state of the operation.

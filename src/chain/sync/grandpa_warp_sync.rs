@@ -18,7 +18,8 @@
 use crate::{
     chain::chain_information::{
         babe_fetch_epoch::{self, PartialBabeEpochInformation},
-        ChainInformation, ChainInformationConsensus, ChainInformationFinality,
+        BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+        ChainInformationFinality,
     },
     executor::{
         host::{HostVmPrototype, NewErr},
@@ -110,11 +111,22 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         finalized_block_header: state.header,
                         finality: state.chain_information_finality,
                         consensus: ChainInformationConsensus::Babe {
-                            finalized_block_epoch_information: Some(
-                                current_epoch.complete(babe_config_c, babe_config_allowed_slots),
-                            ),
-                            finalized_next_epoch_transition: next_epoch
-                                .complete(babe_config_c, babe_config_allowed_slots),
+                            finalized_block_epoch_information: Some(BabeEpochInformation {
+                                epoch_index: current_epoch.epoch_index,
+                                start_slot_number: current_epoch.start_slot_number,
+                                authorities: current_epoch.authorities,
+                                randomness: current_epoch.randomness,
+                                c: babe_config_c,
+                                allowed_slots: babe_config_allowed_slots,
+                            }),
+                            finalized_next_epoch_transition: BabeEpochInformation {
+                                epoch_index: next_epoch.epoch_index,
+                                start_slot_number: next_epoch.start_slot_number,
+                                authorities: next_epoch.authorities,
+                                randomness: next_epoch.randomness,
+                                c: babe_config_c,
+                                allowed_slots: babe_config_allowed_slots,
+                            },
                             slots_per_epoch,
                         },
                     },
