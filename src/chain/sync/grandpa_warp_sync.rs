@@ -17,18 +17,16 @@
 
 use crate::{
     chain::chain_information::{
-        babe_config::{BabeGenesisConfiguration, FromVmPrototypeError},
         babe_fetch_epoch::{self, PartialBabeEpochInformation},
         ChainInformation, ChainInformationConsensus, ChainInformationFinality,
     },
-    chain_spec::ChainSpec,
     executor::{
         host::{HostVmPrototype, NewErr},
         vm::ExecHint,
         DEFAULT_HEAP_PAGES,
     },
     finality::{grandpa::warp_sync, justification::verify},
-    header::{BabeNextConfig, Header, HeaderRef},
+    header::{Header, HeaderRef},
     network::protocol::GrandpaWarpSyncResponseFragment,
 };
 use core::convert::TryInto as _;
@@ -46,8 +44,6 @@ pub enum Error {
     BabeFetchEpoch(babe_fetch_epoch::Error),
     #[display(fmt = "{}", _0)]
     NewRuntime(NewErr),
-    #[display(fmt = "{}", _0)]
-    BabeGenesisConfigurationFromVm(FromVmPrototypeError),
 }
 
 /// The configuration for [`grandpa_warp_sync`].
