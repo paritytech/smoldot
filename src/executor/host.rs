@@ -779,9 +779,10 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_storage_clear_prefix_version_1 => {
-                    let prefix = expect_pointer_size!(0);
+                    let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
                     return HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
-                        prefix,
+                        prefix_ptr,
+                        prefix_size,
                         inner: self.inner,
                     });
                 }
@@ -1697,17 +1698,19 @@ impl fmt::Debug for ExternalStorageAppend {
 pub struct ExternalStorageClearPrefix {
     inner: Inner,
 
-    /// Prefix of the keys to remove.
-    // TODO: This should be a value length and pointer intead, so that we can read from the
-    //       VM's memory without copying. However the underlying Wasm VM code doesn't support
-    //       reading without copies.
-    prefix: Vec<u8>,
+    /// Pointer to the prefix to remove. Guaranteed to be in range.
+    prefix_ptr: u32,
+    /// Size of the prefix to remove. Guaranteed to be in range.
+    prefix_size: u32,
 }
 
 impl ExternalStorageClearPrefix {
     /// Returns the prefix whose keys must be removed.
-    pub fn prefix(&self) -> &[u8] {
-        &self.prefix
+    pub fn prefix<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+        self.inner
+            .vm
+            .read_memory(self.prefix_ptr, self.prefix_size)
+            .unwrap()
     }
 
     /// Resumes execution after having set the value.

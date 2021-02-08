@@ -780,7 +780,7 @@ pub struct StoragePrefixKeys<T> {
 
 impl<T> StoragePrefixKeys<T> {
     /// Returns the prefix whose keys to load.
-    pub fn prefix(&self) -> &[u8] {
+    pub fn prefix<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         self.inner.prefix()
     }
 

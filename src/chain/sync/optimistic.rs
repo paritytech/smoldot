@@ -1182,7 +1182,7 @@ pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
     /// Returns the prefix whose keys to load.
-    pub fn prefix(&self) -> &[u8] {
+    pub fn prefix<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         self.inner.prefix()
     }
 
@@ -1195,18 +1195,20 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
             .map(|k| k.as_ref().to_owned())
             .collect::<HashSet<_, fnv::FnvBuildHasher>>();
 
-        let prefix = self.inner.prefix();
-        for (k, v) in self
-            .shared
-            .inner
-            .best_to_finalized_storage_diff
-            .range(prefix.to_owned()..)
-            .take_while(|(k, _)| k.starts_with(prefix))
         {
-            if v.is_some() {
-                keys.insert(k.clone());
-            } else {
-                keys.remove(k);
+            let prefix = self.inner.prefix();
+            for (k, v) in self
+                .shared
+                .inner
+                .best_to_finalized_storage_diff
+                .range(prefix.as_ref().to_owned()..)
+                .take_while(|(k, _)| k.starts_with(prefix.as_ref()))
+            {
+                if v.is_some() {
+                    keys.insert(k.clone());
+                } else {
+                    keys.remove(k);
+                }
             }
         }
 

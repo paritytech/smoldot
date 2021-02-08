@@ -271,10 +271,10 @@ pub struct PrefixKeys {
 
 impl PrefixKeys {
     /// Returns the prefix whose keys to load.
-    pub fn prefix(&self) -> &[u8] {
+    pub fn prefix<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageClearPrefix(req) => req.prefix(),
-            host::HostVm::ExternalStorageRoot { .. } => &[],
+            host::HostVm::ExternalStorageClearPrefix(req) => either::Left(req.prefix()),
+            host::HostVm::ExternalStorageRoot { .. } => either::Right(&[]),
 
             // We only create a `PrefixKeys` if the state is one of the above.
             _ => unreachable!(),
@@ -300,7 +300,7 @@ impl PrefixKeys {
                 }
                 // TODO: O(n) complexity here
                 for (key, value) in self.inner.top_trie_changes.iter_mut() {
-                    if !key.starts_with(req.prefix()) {
+                    if !key.starts_with(req.prefix().as_ref()) {
                         continue;
                     }
                     if value.is_none() {

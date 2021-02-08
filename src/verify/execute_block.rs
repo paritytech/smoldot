@@ -202,7 +202,7 @@ pub struct PrefixKeys(runtime_host::PrefixKeys);
 
 impl PrefixKeys {
     /// Returns the prefix whose keys to load.
-    pub fn prefix(&self) -> &[u8] {
+    pub fn prefix<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         self.0.prefix()
     }
 
