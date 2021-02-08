@@ -171,7 +171,7 @@ pub struct NextKey {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&self) -> &[u8] {
+    pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         match &self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => req.key(),
             _ => unreachable!(),

@@ -365,13 +365,13 @@ pub struct NextKey {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key(&self) -> &[u8] {
+    pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
         if let Some(key_overwrite) = &self.key_overwrite {
-            return key_overwrite;
+            return either::Left(key_overwrite);
         }
 
         match &self.inner.vm {
-            host::HostVm::ExternalStorageNextKey(req) => req.key(),
+            host::HostVm::ExternalStorageNextKey(req) => either::Right(req.key()),
             _ => unreachable!(),
         }
     }
@@ -387,10 +387,11 @@ impl NextKey {
 
         match self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => {
+                let req_key = req.key();
                 let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
                     &key_overwrite[..]
                 } else {
-                    req.key()
+                    req_key.as_ref()
                 };
 
                 if let Some(key) = key {
@@ -422,6 +423,7 @@ impl NextKey {
                         // This `clone()` is necessary, as `b` borrows from
                         // `self.inner.top_trie_changes`.
                         let key_overwrite = Some(b.clone());
+                        drop(req_key); // Solves borrowing errors.
                         self.inner.vm = host::HostVm::ExternalStorageNextKey(req);
                         return RuntimeHostVm::NextKey(NextKey {
                             inner: self.inner,
@@ -438,6 +440,7 @@ impl NextKey {
                     (None, None) => None,
                 };
 
+                drop(req_key); // Solves borrowing errors.
                 self.inner.vm = req.resume(outcome.as_ref().map(|v| &v[..]));
             }
 
@@ -596,8 +599,10 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    self.offchain_storage_changes
-                        .insert(req.key().to_vec(), req.value().map(|v| v.to_vec()));
+                    self.offchain_storage_changes.insert(
+                        req.key().as_ref().to_vec(),
+                        req.value().map(|v| v.as_ref().to_vec()),
+                    );
                     self.vm = req.resume();
                 }
 
