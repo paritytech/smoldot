@@ -124,7 +124,7 @@
 //! ## Example
 //!
 //! ```
-//! use smoldot::executor::host::{HostVm, HostVmPrototype};
+//! use smoldot::executor::{host::{HostVm, HostVmPrototype}, vm::HeapPages};
 //!
 //! # let wasm_binary_code: &[u8] = return;
 //!
@@ -132,7 +132,7 @@
 //! let mut vm: HostVm = {
 //!     let prototype = HostVmPrototype::new(
 //!         &wasm_binary_code,
-//!         1024,
+//!         HeapPages::from(1024),
 //!         smoldot::executor::vm::ExecHint::Oneshot
 //!     ).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
