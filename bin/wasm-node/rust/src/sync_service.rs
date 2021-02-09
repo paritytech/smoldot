@@ -199,7 +199,7 @@ async fn start_sync(
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
 
         // If non-empty, contains a request that the sync state machine wants to start on a source.
-        let mut requests_to_start = Vec::<all::Request>::with_capacity(16);
+        let mut requests_to_start = Vec::<all::Action>::with_capacity(16);
 
         // Main loop of the syncing logic.
         loop {
@@ -215,15 +215,15 @@ async fn start_sync(
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
                                 sync: sync_idle,
-                                next_requests,
+                                next_actions,
                                 ..
                             } => {
-                                requests_to_start.extend(next_requests);
+                                requests_to_start.extend(next_actions);
                                 sync = sync_idle.into();
                             }
                             all::HeaderVerifyOutcome::Error {
                                 sync: sync_idle,
-                                next_requests,
+                                next_actions,
                                 error,
                                 ..
                             } => {
@@ -232,7 +232,7 @@ async fn start_sync(
                                     "Error while verifying header: {}",
                                     error
                                 );
-                                requests_to_start.extend(next_requests);
+                                requests_to_start.extend(next_actions);
                                 sync = sync_idle.into();
                             }
                         }
@@ -249,7 +249,7 @@ async fn start_sync(
             // TODO: do this earlier, before the verifications
             for request in requests_to_start.drain(..) {
                 match request {
-                    all::Request {
+                    all::Action {
                         source_id,
                         request_id: id,
                         detail:
@@ -259,6 +259,7 @@ async fn start_sync(
                                 num_blocks,
                                 request_headers,
                                 request_bodies,
+                                request_justification,
                             },
                     } => {
                         let peer_id = sync_idle.source_user_data_mut(source_id).clone();
@@ -287,7 +288,7 @@ async fn start_sync(
                                 fields: network::protocol::BlocksRequestFields {
                                     header: request_headers,
                                     body: request_bodies,
-                                    justification: false,
+                                    justification: request_justification,
                                 },
                             },
                         );
@@ -297,7 +298,7 @@ async fn start_sync(
 
                         pending_block_requests.push(async move { (id, block_request.await) });
                     }
-                    all::Request {
+                    all::Action {
                         source_id,
                         request_id: id,
                         detail:
@@ -307,7 +308,7 @@ async fn start_sync(
                     } => {
                         todo!()
                     }
-                    all::Request {
+                    all::Action {
                         source_id,
                         request_id: id,
                         detail:
@@ -369,8 +370,8 @@ async fn start_sync(
                                 all::BlockAnnounceOutcome::NotFinalizedChain(idle) => {
                                     sync = idle.into();
                                 },
-                                all::BlockAnnounceOutcome::Disjoint { sync: sync_idle, next_requests, .. } => {
-                                    requests_to_start.extend(next_requests);
+                                all::BlockAnnounceOutcome::Disjoint { sync: sync_idle, next_actions, .. } => {
+                                    requests_to_start.extend(next_actions);
                                     sync = sync_idle.into();
                                 },
                                 all::BlockAnnounceOutcome::InvalidHeader { sync: sync_idle, .. } => {
@@ -445,20 +446,20 @@ async fn start_sync(
                             all::BlocksRequestResponseOutcome::VerifyHeader(verify) => {
                                 sync = verify.into();
                             },
-                            all::BlocksRequestResponseOutcome::Queued { sync: sync_idle, next_requests } => {
-                                requests_to_start.extend(next_requests);
+                            all::BlocksRequestResponseOutcome::Queued { sync: sync_idle, next_actions } => {
+                                requests_to_start.extend(next_actions);
                                 sync = sync_idle.into();
                             },
-                            all::BlocksRequestResponseOutcome::NotFinalizedChain { sync: sync_idle, next_requests, .. } => {
-                                requests_to_start.extend(next_requests);
+                            all::BlocksRequestResponseOutcome::NotFinalizedChain { sync: sync_idle, next_actions, .. } => {
+                                requests_to_start.extend(next_actions);
                                 sync = sync_idle.into();
                             },
-                            all::BlocksRequestResponseOutcome::Inconclusive { sync: sync_idle, next_requests, .. } => {
-                                requests_to_start.extend(next_requests);
+                            all::BlocksRequestResponseOutcome::Inconclusive { sync: sync_idle, next_actions, .. } => {
+                                requests_to_start.extend(next_actions);
                                 sync = sync_idle.into();
                             },
-                            all::BlocksRequestResponseOutcome::AllAlreadyInChain { sync: sync_idle, next_requests, .. } => {
-                                requests_to_start.extend(next_requests);
+                            all::BlocksRequestResponseOutcome::AllAlreadyInChain { sync: sync_idle, next_actions, .. } => {
+                                requests_to_start.extend(next_actions);
                                 sync = sync_idle.into();
                             },
                         }
