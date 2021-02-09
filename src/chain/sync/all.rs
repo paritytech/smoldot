@@ -141,6 +141,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
+                highest_block_on_network: 0,
             },
             marker: Default::default(),
         }
@@ -212,6 +213,10 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> (SourceId, Vec<Action>) {
+        if best_block_number > self.shared.highest_block_on_network {
+            self.shared.highest_block_on_network = best_block_number;
+        }
+
         match &mut self.inner {
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
                 waiting,
@@ -304,6 +309,12 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> BlockAnnounceOutcome<TRq, TSrc, TBl> {
+        if let Ok(header) = header::decode(&announced_scale_encoded_header) {
+            if header.number > self.shared.highest_block_on_network {
+                self.shared.highest_block_on_network = header.number;
+            }
+        }
+
         let source_id = self.shared.sources.get(source_id.0).unwrap();
 
         match (self.inner, source_id) {
@@ -771,8 +782,8 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     _ => unreachable!(),
                 };
 
-                if new_best_number >= 4310000 {
-                    // TODO: lol ^
+                if new_best_number >= self.shared.highest_block_on_network - 1024 {
+                    // TODO: do this better ^
                     let (all_forks, next_actions) =
                         self.shared.transition_optimistic_all_forks(sync);
                     return HeaderVerifyOutcome::Success {
@@ -931,6 +942,8 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
 struct Shared {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping>,
+    // TODO: this is an insecure way to do things; see https://github.com/paritytech/smoldot/issues/490
+    highest_block_on_network: u64,
 }
 
 impl Shared {
