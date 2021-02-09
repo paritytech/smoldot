@@ -74,6 +74,7 @@ pub struct Config {
     pub full: bool,
 }
 
+#[derive(derive_more::From)]
 pub enum AllSync<TRq, TSrc, TBl> {
     Idle(Idle<TRq, TSrc, TBl>),
     HeaderVerify(HeaderVerify<TRq, TSrc, TBl>),
@@ -703,21 +704,34 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { sync, .. }) => {
                 match sync.process_one(now_from_unix_epoch) {
                     optimistic::ProcessOne::Idle { sync } => {
+                        let mut next_requests = Vec::new();
+                        // TODO:
+                        /*while let Some(action) = sync.next_request_action() {
+                            next_requests.push((source_id, Request {
+                                id,
+                                detail: match action {
+                                    optimistic::RequestAction::Start {  }
+                                }
+                            }))
+                        }*/
+
                         HeaderVerifyOutcome::Success {
                             is_new_best: true,
                             sync: Idle {
                                 inner: IdleInner::Optimistic(sync),
                                 marker: Default::default(),
                                 shared: self.shared,
-                            },
-                            next_requests: Vec::new(), // TODO:
+                            }
+                            .into(),
+                            next_requests,
                         }
                     }
                     other => {
                         self.inner = HeaderVerifyInner::Optimistic(other);
-                        HeaderVerifyOutcome::SuccessContinue {
+                        HeaderVerifyOutcome::Success {
                             is_new_best: true,
-                            next_block: self,
+                            sync: self.into(),
+                            next_requests: Vec::new(),
                         }
                     }
                 }
@@ -743,38 +757,20 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
         /// State machine yielded back. Use to continue the processing.
-        sync: Idle<TRq, TSrc, TBl>,
+        sync: AllSync<TRq, TSrc, TBl>,
         /// Next requests that must be started.
         next_requests: Vec<(SourceId, Request)>,
-    },
-
-    /// Header has been successfully verified. A follow-up header is ready to be verified.
-    SuccessContinue {
-        /// True if the newly-verified block is considered the new best block.
-        is_new_best: bool,
-        /// Next verification.
-        next_block: HeaderVerify<TRq, TSrc, TBl>,
     },
 
     /// Header verification failed.
     Error {
         /// State machine yielded back. Use to continue the processing.
-        sync: Idle<TRq, TSrc, TBl>,
+        sync: AllSync<TRq, TSrc, TBl>,
         /// Error that happened.
         error: verify::header_only::Error,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
         /// Next requests that must be started.
         next_requests: Vec<(SourceId, Request)>,
-    },
-
-    /// Header verification failed. A follow-up header is ready to be verified.
-    ErrorContinue {
-        /// Next verification.
-        next_block: HeaderVerify<TRq, TSrc, TBl>,
-        /// Error that happened.
-        error: verify::header_only::Error,
-        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
-        user_data: TBl,
     },
 }

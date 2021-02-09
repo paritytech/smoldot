@@ -201,39 +201,52 @@ async fn start_sync(
         // If non-empty, contains a request that the sync state machine wants to start on a source.
         let mut requests_to_start = Vec::<(all::SourceId, all::Request)>::with_capacity(16);
 
+        // Main loop of the syncing logic.
         loop {
-            let mut sync_inner = loop {
+            // The sync state machine can be in a few various states. At the time of writing:
+            // idle, verifying header, verifying block, verifying grandpa warp sync proof,
+            // verifying storage proof.
+            // If the state is one of the "verifying" states, perform the actual verification and
+            // loop again until the sync is in an idle state.
+            let mut sync_idle: all::Idle<_, _, _> = loop {
                 match sync {
                     all::AllSync::Idle(idle) => break idle,
                     all::AllSync::HeaderVerify(verify) => {
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
-                                sync: sync_inner,
+                                sync: sync_idle,
                                 next_requests,
                                 ..
                             } => {
                                 requests_to_start.extend(next_requests);
-                                sync = all::AllSync::Idle(sync_inner);
-                            }
-                            all::HeaderVerifyOutcome::SuccessContinue { next_block, .. } => {
-                                sync = all::AllSync::HeaderVerify(next_block);
+                                sync = sync_idle.into();
                             }
                             all::HeaderVerifyOutcome::Error {
-                                sync: sync_inner,
+                                sync: sync_idle,
                                 next_requests,
+                                error,
                                 ..
                             } => {
+                                log::warn!(
+                                    target: "sync-verify",
+                                    "Error while verifying header: {}",
+                                    error
+                                );
                                 requests_to_start.extend(next_requests);
-                                sync = all::AllSync::Idle(sync_inner);
-                            }
-                            all::HeaderVerifyOutcome::ErrorContinue { next_block, .. } => {
-                                sync = all::AllSync::HeaderVerify(next_block);
+                                sync = sync_idle.into();
                             }
                         }
                     }
                 }
             };
 
+            // `sync_idle` is now an `Idle` that has been extracted from `sync`.
+            // All the code paths below will need to put back `sync_idle` into `sync` before
+            // looping again.
+
+            // Drain the content of `requests_to_start` to actually start the requests that have
+            // been queued by the previous iteration of the main loop.
+            // TODO: do this earlier, before the verifications
             for request in requests_to_start.drain(..) {
                 match request {
                     (
@@ -250,7 +263,7 @@ async fn start_sync(
                                 },
                         },
                     ) => {
-                        let peer_id = sync_inner.source_user_data_mut(source_id).clone();
+                        let peer_id = sync_idle.source_user_data_mut(source_id).clone();
 
                         println!("blocks request: {:?} {:?}", first_block, num_blocks); // TODO: remove
                         let block_request = network_service.clone().blocks_request(
@@ -313,53 +326,60 @@ async fn start_sync(
                 }
             }
 
+            // The sync state machine is idle, and all requests have been started.
+            // Now waiting for some event to happen: a network event, a request from the frontend
+            // of the sync service, or a request being finished.
             futures::select! {
                 network_event = from_network_service.next() => {
+                    // Something happened on the network.
+
                     let network_event = match network_event {
                         Some(m) => m,
                         None => {
+                            // The channel from the network service has been closed. Closing the
+                            // sync background task as well.
                             return
                         },
                     };
 
                     match network_event {
                         network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
-                            let (id, requests) = sync_inner.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let (id, requests) = sync_idle.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
                             requests_to_start.extend(requests.into_iter().map(|r| (id, r)));
-                            sync = all::AllSync::Idle(sync_inner);
+                            sync = sync_idle.into();
                         },
                         network_service::Event::Disconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let rq_list = sync_inner.remove_source(id);
+                            let rq_list = sync_idle.remove_source(id);
                             // TODO:
                             /*for (_, rq) in rq_list {
                                 rq.abort();
                             }*/
-                            sync = all::AllSync::Idle(sync_inner);
+                            sync = sync_idle.into();
                         },
                         network_service::Event::BlockAnnounce { peer_id, announce } => {
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: stupid to re-encode
-                            match sync_inner.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                            match sync_idle.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify(verify) => {
-                                    sync = all::AllSync::HeaderVerify(verify)
+                                    sync = verify.into();
                                 },
                                 all::BlockAnnounceOutcome::TooOld(idle) => {
-                                    sync = all::AllSync::Idle(idle);
+                                    sync = idle.into();
                                 },
                                 all::BlockAnnounceOutcome::AlreadyInChain(idle) => {
-                                    sync = all::AllSync::Idle(idle);
+                                    sync = idle.into();
                                 },
                                 all::BlockAnnounceOutcome::NotFinalizedChain(idle) => {
-                                    sync = all::AllSync::Idle(idle);
+                                    sync = idle.into();
                                 },
-                                all::BlockAnnounceOutcome::Disjoint { sync: sync_inner, .. } => {
-                                    sync = all::AllSync::Idle(sync_inner);
+                                all::BlockAnnounceOutcome::Disjoint { sync: sync_idle, .. } => {
+                                    sync = sync_idle.into();
                                 },
-                                all::BlockAnnounceOutcome::InvalidHeader { sync: sync_inner, .. } => {
-                                    sync = all::AllSync::Idle(sync_inner);
+                                all::BlockAnnounceOutcome::InvalidHeader { sync: sync_idle, .. } => {
+                                    sync = sync_idle.into();
                                 },
                             }
                         },
@@ -368,16 +388,19 @@ async fn start_sync(
                 }
 
                 message = from_foreground.next() => {
+                    // Received message from the front `SyncService`.
                     let message = match message {
                         Some(m) => m,
                         None => {
+                            // The channel with the frontend sync service has been closed.
+                            // Closing the sync background task as a result.
                             return
                         },
                     };
 
                     match message {
                         ToBackground::Serialize { send_back } => {
-                            let chain = sync_inner.as_chain_information();
+                            let chain = sync_idle.as_chain_information();
                             let serialized = smoldot::database::finalized_serialize::encode_chain_information(chain);
                             let _ = send_back.send(serialized);
                         }
@@ -388,55 +411,64 @@ async fn start_sync(
                         ToBackground::SubscribeFinalized { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             finalized_notifications.push(tx);
-                            let current = sync_inner.finalized_block_header().scale_encoding_vec();
+                            let current = sync_idle.finalized_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
                         ToBackground::SubscribeBest { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             best_notifications.push(tx);
-                            let current = sync_inner.best_block_header().scale_encoding_vec();
+                            let current = sync_idle.best_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
                     };
 
-                    sync = all::AllSync::Idle(sync_inner);
+                    sync = sync_idle.into();
                 },
 
                 (request_id, result) = pending_block_requests.select_next_some() => {
+                    // A request (e.g. a block request, warp sync request, etc.) has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
-                        let result = result.map_err(|_| ());
-                        // TODO: use outcome
-                        let outcome = sync_inner.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
-                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justification: block.justification,
-                            scale_encoded_extrinsics: Vec::new(),
-                            user_data: (),
-                        })), ffi::unix_time());
+                        // Inject the result of the request into the sync state machine.
+                        let outcome = sync_idle.blocks_request_response(
+                            request_id,
+                            result.map_err(|_| ()).map(|v| {
+                                v.into_iter().filter_map(|block| {
+                                    Some(all::BlockRequestSuccessBlock {
+                                        scale_encoded_header: block.header?,
+                                        scale_encoded_justification: block.justification,
+                                        scale_encoded_extrinsics: Vec::new(),
+                                        user_data: (),
+                                    })
+                                })
+                            }),
+                            ffi::unix_time(),
+                        );
 
                         match outcome {
                             all::BlocksRequestResponseOutcome::VerifyHeader(verify) => {
-                                sync = all::AllSync::HeaderVerify(verify);
+                                sync = verify.into();
                             },
-                            all::BlocksRequestResponseOutcome::Queued(sync_inner) => {
-                                sync = all::AllSync::Idle(sync_inner);
+                            all::BlocksRequestResponseOutcome::Queued(sync_idle) => {
+                                sync = sync_idle.into();
                             },
-                            all::BlocksRequestResponseOutcome::NotFinalizedChain { sync: sync_inner, .. } => {
+                            all::BlocksRequestResponseOutcome::NotFinalizedChain { sync: sync_idle, .. } => {
                                 // TODO: use next_request
-                                sync = all::AllSync::Idle(sync_inner);
+                                sync = sync_idle.into();
                             },
-                            all::BlocksRequestResponseOutcome::Inconclusive { sync: sync_inner, .. } => {
+                            all::BlocksRequestResponseOutcome::Inconclusive { sync: sync_idle, .. } => {
                                 // TODO: use next_request
-                                sync = all::AllSync::Idle(sync_inner);
+                                sync = sync_idle.into();
                             },
-                            all::BlocksRequestResponseOutcome::AllAlreadyInChain { sync: sync_inner, .. } => {
+                            all::BlocksRequestResponseOutcome::AllAlreadyInChain { sync: sync_idle, .. } => {
                                 // TODO: use next_request
-                                sync = all::AllSync::Idle(sync_inner);
+                                sync = sync_idle.into();
                             },
                         }
                     } else {
-                        sync = all::AllSync::Idle(sync_inner);
+                        // The sync state machine was no longer interested in the response.
+                        sync = sync_idle.into();
                     }
                 },
             }
