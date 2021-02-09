@@ -268,6 +268,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             (IdleInner::Optimistic(sync), SourceMapping::Optimistic(src)) => {
                 &mut sync.source_user_data_mut(*src).user_data
             }
+            (IdleInner::AllForks(sync), SourceMapping::AllForks(src)) => {
+                sync.source_mut(*src).unwrap().into_user_data()
+            }
             _ => panic!(), // TODO:
         }
     }
@@ -318,6 +321,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         blocks: Result<impl Iterator<Item = BlockRequestSuccessBlock<TBl>>, ()>,
         now_from_unix_epoch: Duration, // TODO: remove
     ) -> BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
+        debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
 
         match (self.inner, request) {
@@ -684,8 +688,8 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 new_best_number,
                 ..
             }) => {
-                if new_best_number >= 4000000 {
-                    // TODO: lol
+                if new_best_number >= 3140000 {
+                    // TODO: lol ^
                     let (all_forks, next_requests) =
                         self.shared.transition_optimistic_all_forks(sync);
                     return HeaderVerifyOutcome::Success {
@@ -860,6 +864,15 @@ impl Shared {
         &mut self,
         optimistic: optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>,
     ) -> (all_forks::AllForksSync<TSrc, TBl>, Vec<Request>) {
+        debug_assert!(self
+            .requests
+            .iter()
+            .all(|(_, s)| matches!(s, RequestMapping::Optimistic(_))));
+        debug_assert!(self
+            .sources
+            .iter()
+            .all(|(_, s)| matches!(s, SourceMapping::Optimistic(_))));
+
         let disassembled = optimistic.disassemble();
         // TODO: need to cancel the requests as well
 
@@ -895,6 +908,12 @@ impl Shared {
                 all_forks_demands.push((updated_source_id, request));
             }
         }
+
+        self.requests.clear();
+        debug_assert!(self
+            .sources
+            .iter()
+            .all(|(_, s)| matches!(s, SourceMapping::AllForks(_))));
 
         let mut next_requests = Vec::with_capacity(all_forks_demands.len());
         for (source_id, demand) in all_forks_demands {
