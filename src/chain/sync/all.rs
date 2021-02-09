@@ -754,7 +754,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     _ => unreachable!(),
                 };
 
-                if new_best_number >= 4000000 {
+                if new_best_number >= 4310000 {
                     // TODO: lol ^
                     let (all_forks, next_actions) =
                         self.shared.transition_optimistic_all_forks(sync);

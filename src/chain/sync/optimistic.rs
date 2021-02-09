@@ -949,6 +949,9 @@ impl<TRq, TSrc, TBl> ProcessOne<TRq, TSrc, TBl> {
                         debug_assert!(chain.is_empty());
                         shared.inner.best_to_finalized_storage_diff.clear();
 
+                        shared.inner.finalized_chain_information.chain_information =
+                            chain.as_chain_information().into();
+
                         break ProcessOne::Finalized {
                             sync: OptimisticSync {
                                 chain,
