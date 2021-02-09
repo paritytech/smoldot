@@ -679,7 +679,27 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         match self.inner {
             // TODO: the verification in the optimistic is immediate ; change that
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Idle { .. }) => unreachable!(),
-            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { mut sync, .. }) => {
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest {
+                mut sync,
+                new_best_number,
+                ..
+            }) => {
+                if new_best_number >= 4000000 {
+                    // TODO: lol
+                    let (all_forks, next_requests) =
+                        self.shared.transition_optimistic_all_forks(sync);
+                    return HeaderVerifyOutcome::Success {
+                        is_new_best: true,
+                        sync: Idle {
+                            inner: IdleInner::AllForks(all_forks),
+                            marker: Default::default(),
+                            shared: self.shared,
+                        }
+                        .into(),
+                        next_requests,
+                    };
+                }
+
                 let mut next_requests = Vec::new();
                 while let Some(action) = sync.next_request_action() {
                     next_requests.push(self.shared.optimistic_action_to_request(action));
