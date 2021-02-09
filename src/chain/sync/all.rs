@@ -768,10 +768,10 @@ impl Shared {
                         .insert(RequestMapping::Optimistic(start.start(()))),
                 );
 
-                debug_assert!(matches!(
+                debug_assert_eq!(
                     self.sources[source.outer_source_id.0],
                     SourceMapping::Optimistic(source_id)
-                ));
+                );
 
                 Request {
                     request_id,
@@ -788,14 +788,111 @@ impl Shared {
             _ => unreachable!(),
         }
     }
+
+    fn all_forks_request_to_request(
+        &mut self,
+        source_id: all_forks::SourceId,
+        request: all_forks::Request,
+    ) -> Request {
+        let request_id = RequestId(self.requests.insert(RequestMapping::AllForks(source_id)));
+
+        // TODO: O(n), should store id in user data instead
+        let outer_source_id = self
+            .sources
+            .iter()
+            .find(|(id, s)| **s == SourceMapping::AllForks(source_id))
+            .map(|(id, _)| SourceId(id))
+            .unwrap();
+
+        match request {
+            all_forks::Request::AncestrySearch {
+                first_block_hash,
+                num_blocks,
+            } => Request {
+                request_id,
+                source_id: outer_source_id,
+                detail: RequestDetail::BlocksRequest {
+                    first_block: BlocksRequestFirstBlock::Hash(first_block_hash),
+                    ascending: false,
+                    num_blocks,
+                    request_bodies: false,
+                    request_headers: true,
+                },
+            },
+            all_forks::Request::HeaderRequest { hash, .. } => Request {
+                request_id,
+                source_id: outer_source_id,
+                detail: RequestDetail::BlocksRequest {
+                    first_block: BlocksRequestFirstBlock::Hash(hash),
+                    ascending: true,
+                    num_blocks: NonZeroU64::new(1).unwrap(),
+                    request_bodies: false,
+                    request_headers: true,
+                },
+            },
+            all_forks::Request::BodyRequest { .. } => todo!(),
+        }
+    }
+
+    /// Transitions the sync state machine from the optimistic strategy to the "all-forks"
+    /// strategy.
+    fn transition_optimistic_all_forks<TSrc, TBl>(
+        &mut self,
+        optimistic: optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>,
+    ) -> (all_forks::AllForksSync<TSrc, TBl>, Vec<Request>) {
+        let disassembled = optimistic.disassemble();
+        // TODO: need to cancel the requests as well
+
+        // TODO: arbitrary config
+        let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
+            chain_information: disassembled.chain_information,
+            sources_capacity: 1024,
+            blocks_capacity: 1024,
+            max_disjoint_headers: 1024,
+            max_requests_per_block: NonZeroU32::new(128).unwrap(),
+            full: false,
+        });
+
+        let mut all_forks_demands = Vec::with_capacity(disassembled.sources.len());
+
+        for source in disassembled.sources {
+            let (updated_source_id, request) = all_forks.add_source(
+                source.user_data.user_data,
+                source.best_block_number,
+                source.user_data.best_block_hash,
+            );
+            let updated_source_id = updated_source_id.id();
+
+            debug_assert_eq!(
+                self.sources[source.user_data.outer_source_id.0],
+                SourceMapping::Optimistic(source.id)
+            );
+
+            self.sources[source.user_data.outer_source_id.0] =
+                SourceMapping::AllForks(updated_source_id);
+
+            if let Some(request) = request {
+                all_forks_demands.push((updated_source_id, request));
+            }
+        }
+
+        let mut next_requests = Vec::with_capacity(all_forks_demands.len());
+        for (source_id, demand) in all_forks_demands {
+            next_requests.push(self.all_forks_request_to_request(source_id, demand));
+        }
+
+        (all_forks, next_requests)
+    }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestMapping {
     Optimistic(optimistic::RequestId),
     GrandpaWarpSync(usize), // TODO:
     AllForks(all_forks::SourceId),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SourceMapping {
     Optimistic(optimistic::SourceId),
     GrandpaWarpSync(usize), // TODO:

@@ -143,7 +143,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// value has been erased from the storage.
     best_to_finalized_storage_diff: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
-    /// Compiled runtime code of the best block block.
+    /// Compiled runtime code of the best block.
     /// This field is a cache. As such, it will stay at `None` until this value has been needed
     /// for the first time.
     runtime_code_cache: Option<host::HostVmPrototype>,
@@ -317,6 +317,40 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// >           best block might be reverted in the future.
     pub fn best_block_hash(&self) -> [u8; 32] {
         self.chain.best_block_hash()
+    }
+
+    /// Disassembles the state machine into its raw components.
+    pub fn disassemble(self) -> Disassemble<TRq, TSrc> {
+        Disassemble {
+            chain_information: self.inner.finalized_chain_information.chain_information,
+            sources: self
+                .inner
+                .sources
+                .into_iter()
+                .map(|(id, source)| DisassembleSource {
+                    id,
+                    user_data: source.user_data,
+                    best_block_number: source.best_block_number,
+                })
+                .collect(),
+            requests: self
+                .inner
+                .verification_queue
+                .into_iter()
+                .filter_map(|queue_elem| {
+                    if let VerificationQueueEntryTy::Requested {
+                        id,
+                        source,
+                        user_data,
+                    } = queue_elem.ty
+                    {
+                        Some((id, user_data))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
     }
 
     /// Inform the [`OptimisticSync`] of a new potential source of blocks.
@@ -1453,4 +1487,31 @@ pub enum ResetCause {
         /// Number of the block that was verified.
         actual: u64,
     },
+}
+
+/// Output of [`OptimisticSync::disassemble`].
+#[derive(Debug)]
+pub struct Disassemble<TRq, TSrc> {
+    /// Information about the latest finalized block and its ancestors.
+    pub chain_information: chain_information::ChainInformation,
+
+    /// List of sources that were within the state machine.
+    pub sources: Vec<DisassembleSource<TSrc>>,
+
+    /// List of the requests that were active.
+    pub requests: Vec<(RequestId, TRq)>,
+    // TODO: add non-finalized blocks?
+}
+
+/// See [`Disassemble::sources`].
+#[derive(Debug)]
+pub struct DisassembleSource<TSrc> {
+    /// Identifier that the source had.
+    pub id: SourceId,
+
+    /// Opaque value passed to [`OptimisticSync::add_source`].
+    pub user_data: TSrc,
+
+    /// Best block that the source has reported having.
+    pub best_block_number: u64,
 }
