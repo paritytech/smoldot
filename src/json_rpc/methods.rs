@@ -438,15 +438,22 @@ impl serde::Serialize for Block {
     {
         #[derive(serde::Serialize)]
         struct SerdeBlock<'a> {
+            block: SerdeBlockInner<'a>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct SerdeBlockInner<'a> {
             extrinsics: &'a [Extrinsic],
             header: &'a Header,
             justification: Option<&'a HexString>, // TODO: unsure of the type
         }
 
         SerdeBlock {
-            extrinsics: &self.extrinsics,
-            header: &self.header,
-            justification: self.justification.as_ref(),
+            block: SerdeBlockInner {
+                extrinsics: &self.extrinsics,
+                header: &self.header,
+                justification: self.justification.as_ref(),
+            },
         }
         .serialize(serializer)
     }

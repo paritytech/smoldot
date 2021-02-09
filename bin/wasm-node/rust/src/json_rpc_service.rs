@@ -778,11 +778,33 @@ impl JsonRpcService {
                 let mut blocks = self.blocks.lock().await;
                 let blocks = &mut *blocks;
                 let hash = hash.as_ref().map(|h| &h.0).unwrap_or(&blocks.best_block);
+
                 self.send_back(&if let Some(header) = blocks.known_blocks.get(hash) {
                     methods::Response::chain_getHeader(header_conv(header))
                         .to_json_response(request_id)
                 } else {
-                    json_rpc::parse::build_success_response(request_id, "null")
+                    // Header isn't known locally. Ask the network.
+                    let result = self
+                        .network_service
+                        .clone()
+                        .block_query(
+                            *hash,
+                            protocol::BlocksRequestFields {
+                                header: true,
+                                body: false,
+                                justification: false,
+                            },
+                        )
+                        .await;
+                    // Note that the `block_query` method guarantees that the header is present
+                    // and valid.
+                    if let Ok(block) = result {
+                        let decoded = header::decode(block.header.as_ref().unwrap()).unwrap();
+                        methods::Response::chain_getHeader(header_conv(decoded))
+                            .to_json_response(request_id)
+                    } else {
+                        json_rpc::parse::build_success_response(request_id, "null")
+                    }
                 });
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
