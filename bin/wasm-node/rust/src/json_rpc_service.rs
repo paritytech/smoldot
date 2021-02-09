@@ -775,36 +775,19 @@ impl JsonRpcService {
                 );
             }
             methods::MethodCall::chain_getHeader { hash } => {
-                let mut blocks = self.blocks.lock().await;
-                let blocks = &mut *blocks;
-                let hash = hash.as_ref().map(|h| &h.0).unwrap_or(&blocks.best_block);
+                let hash = match hash {
+                    Some(h) => h.0,
+                    None => self.blocks.lock().await.best_block,
+                };
 
-                self.send_back(&if let Some(header) = blocks.known_blocks.get(hash) {
-                    methods::Response::chain_getHeader(header_conv(header))
-                        .to_json_response(request_id)
-                } else {
-                    // Header isn't known locally. Ask the network.
-                    let result = self
-                        .network_service
-                        .clone()
-                        .block_query(
-                            *hash,
-                            protocol::BlocksRequestFields {
-                                header: true,
-                                body: false,
-                                justification: false,
-                            },
-                        )
-                        .await;
-                    // Note that the `block_query` method guarantees that the header is present
-                    // and valid.
-                    if let Ok(block) = result {
-                        let decoded = header::decode(block.header.as_ref().unwrap()).unwrap();
+                self.send_back(&match self.header_query(&hash).await {
+                    Ok(header) => {
+                        let decoded = header::decode(&header).unwrap();
                         methods::Response::chain_getHeader(header_conv(decoded))
                             .to_json_response(request_id)
-                    } else {
-                        json_rpc::parse::build_success_response(request_id, "null")
                     }
+                    // TODO: error or null?
+                    Err(()) => json_rpc::parse::build_success_response(request_id, "null"),
                 });
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
@@ -1405,12 +1388,11 @@ impl JsonRpcService {
         hash: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, StorageQueryError> {
         // TODO: risk of deadlock here?
-        let trie_root_hash = if let Some(header) = self.blocks.lock().await.known_blocks.get(hash) {
-            header.state_root
-        } else {
-            // TODO: should make a block request towards a node
-            return Err(StorageQueryError::FindStorageRootHashError);
-        };
+        let header = self
+            .header_query(hash)
+            .await
+            .map_err(|_| StorageQueryError::FindStorageRootHashError)?;
+        let trie_root_hash = header::decode(&header).unwrap().state_root;
 
         let mut result = self
             .network_service
@@ -1419,6 +1401,38 @@ impl JsonRpcService {
             .await
             .map_err(StorageQueryError::StorageRetrieval)?;
         Ok(result.pop().unwrap())
+    }
+
+    async fn header_query(self: &Arc<JsonRpcService>, hash: &[u8; 32]) -> Result<Vec<u8>, ()> {
+        // TODO: risk of deadlock here?
+        let mut blocks = self.blocks.lock().await;
+        let blocks = &mut *blocks;
+
+        if let Some(header) = blocks.known_blocks.get(hash) {
+            Ok(header.scale_encoding_vec())
+        } else {
+            // Header isn't known locally. Ask the network.
+            let result = self
+                .network_service
+                .clone()
+                .block_query(
+                    *hash,
+                    protocol::BlocksRequestFields {
+                        header: true,
+                        body: false,
+                        justification: false,
+                    },
+                )
+                .await;
+
+            // Note that the `block_query` method guarantees that the header is present
+            // and valid.
+            if let Ok(block) = result {
+                Ok(block.header.unwrap())
+            } else {
+                Err(())
+            }
+        }
     }
 
     /// Performs a runtime call using the best block, or a recent best block.
