@@ -93,68 +93,11 @@ pub struct Idle<TRq, TSrc, TBl> {
     marker: core::marker::PhantomData<TRq>, // TODO: remove
 }
 
-struct Shared {
-    sources: slab::Slab<SourceMapping>,
-    requests: slab::Slab<RequestMapping>,
-}
-
-impl Shared {
-    fn optimistic_action_to_request<TSrc, TBl>(
-        &mut self,
-        action: optimistic::RequestAction<(), OptimisticSourceExtra<TSrc>, TBl>,
-    ) -> Request {
-        match action {
-            optimistic::RequestAction::Start {
-                block_height,
-                num_blocks,
-                start,
-                source,
-                source_id,
-            } => {
-                let request_id = RequestId(
-                    self.requests
-                        .insert(RequestMapping::Optimistic(start.start(()))),
-                );
-
-                debug_assert!(matches!(
-                    self.sources[source.outer_source_id.0],
-                    SourceMapping::Optimistic(source_id)
-                ));
-
-                Request {
-                    request_id,
-                    source_id: source.outer_source_id,
-                    detail: RequestDetail::BlocksRequest {
-                        first_block: BlocksRequestFirstBlock::Number(block_height),
-                        ascending: true,
-                        num_blocks: NonZeroU64::from(num_blocks),
-                        request_bodies: true, // TODO: ?!
-                        request_headers: true,
-                    },
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
 enum IdleInner<TSrc, TBl> {
     Optimistic(optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>),
     /// > **Note**: Must never contain [`grandpa_warp_sync::GrandpaWarpSync::Finished`].
     GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync<TSrc>),
     AllForks(all_forks::AllForksSync<TSrc, TBl>),
-}
-
-enum RequestMapping {
-    Optimistic(optimistic::RequestId),
-    GrandpaWarpSync(usize), // TODO:
-    AllForks(all_forks::SourceId),
-}
-
-enum SourceMapping {
-    Optimistic(optimistic::SourceId),
-    GrandpaWarpSync(usize), // TODO:
-    AllForks(all_forks::SourceId),
 }
 
 struct OptimisticSourceExtra<TSrc> {
@@ -800,4 +743,61 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         /// Next requests that must be started.
         next_requests: Vec<Request>,
     },
+}
+
+struct Shared {
+    sources: slab::Slab<SourceMapping>,
+    requests: slab::Slab<RequestMapping>,
+}
+
+impl Shared {
+    fn optimistic_action_to_request<TSrc, TBl>(
+        &mut self,
+        action: optimistic::RequestAction<(), OptimisticSourceExtra<TSrc>, TBl>,
+    ) -> Request {
+        match action {
+            optimistic::RequestAction::Start {
+                block_height,
+                num_blocks,
+                start,
+                source,
+                source_id,
+            } => {
+                let request_id = RequestId(
+                    self.requests
+                        .insert(RequestMapping::Optimistic(start.start(()))),
+                );
+
+                debug_assert!(matches!(
+                    self.sources[source.outer_source_id.0],
+                    SourceMapping::Optimistic(source_id)
+                ));
+
+                Request {
+                    request_id,
+                    source_id: source.outer_source_id,
+                    detail: RequestDetail::BlocksRequest {
+                        first_block: BlocksRequestFirstBlock::Number(block_height),
+                        ascending: true,
+                        num_blocks: NonZeroU64::from(num_blocks),
+                        request_bodies: true, // TODO: ?!
+                        request_headers: true,
+                    },
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+enum RequestMapping {
+    Optimistic(optimistic::RequestId),
+    GrandpaWarpSync(usize), // TODO:
+    AllForks(all_forks::SourceId),
+}
+
+enum SourceMapping {
+    Optimistic(optimistic::SourceId),
+    GrandpaWarpSync(usize), // TODO:
+    AllForks(all_forks::SourceId),
 }

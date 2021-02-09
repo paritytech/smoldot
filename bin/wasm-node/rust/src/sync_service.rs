@@ -212,7 +212,6 @@ async fn start_sync(
                 match sync {
                     all::AllSync::Idle(idle) => break idle,
                     all::AllSync::HeaderVerify(verify) => {
-                        println!("verifying");
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
                                 sync: sync_idle,
@@ -426,7 +425,6 @@ async fn start_sync(
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
-                        println!("response!");
                         // Inject the result of the request into the sync state machine.
                         let outcome = sync_idle.blocks_request_response(
                             request_id,
