@@ -240,13 +240,30 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
 
                 outer_source_id_entry.insert(SourceMapping::Optimistic(inner_source_id));
 
-                let mut requests_to_start = Vec::new();
-
+                let mut next_actions = Vec::new();
                 while let Some(action) = optimistic.next_request_action() {
-                    requests_to_start.push(self.shared.optimistic_action_to_request(action));
+                    next_actions.push(self.shared.optimistic_action_to_request(action));
                 }
 
-                (outer_source_id, requests_to_start)
+                (outer_source_id, next_actions)
+            }
+            IdleInner::AllForks(all_forks) => {
+                let outer_source_id_entry = self.shared.sources.vacant_entry();
+                let outer_source_id = SourceId(outer_source_id_entry.key());
+
+                let (source, request) =
+                    all_forks.add_source(user_data, best_block_number, best_block_hash);
+                outer_source_id_entry.insert(SourceMapping::AllForks(source.id()));
+
+                let next_actions = if let Some(request) = request {
+                    vec![self
+                        .shared
+                        .all_forks_request_to_request(source.id(), request)]
+                } else {
+                    Vec::new()
+                };
+
+                (outer_source_id, next_actions)
             }
             _ => todo!(),
         }
@@ -803,6 +820,83 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 _,
             )) => {
                 unreachable!()
+            }
+            HeaderVerifyInner::AllForks(verify) => {
+                let source_id = verify.source_id();
+                match verify.perform(now_from_unix_epoch, user_data) {
+                    all_forks::HeaderVerifyOutcome::Success {
+                        is_new_best,
+                        sync,
+                        next_request,
+                    } => {
+                        let next_actions = if let Some(request) = next_request {
+                            vec![self.shared.all_forks_request_to_request(source_id, request)]
+                        } else {
+                            Vec::new()
+                        };
+                        HeaderVerifyOutcome::Success {
+                            is_new_best,
+                            sync: Idle {
+                                inner: IdleInner::AllForks(sync),
+                                marker: Default::default(),
+                                shared: self.shared,
+                            }
+                            .into(),
+                            next_actions,
+                        }
+                    }
+                    all_forks::HeaderVerifyOutcome::SuccessContinue {
+                        is_new_best,
+                        next_block,
+                    } => HeaderVerifyOutcome::Success {
+                        is_new_best,
+                        sync: HeaderVerify {
+                            inner: HeaderVerifyInner::AllForks(next_block),
+                            shared: self.shared,
+                            marker: Default::default(),
+                        }
+                        .into(),
+                        next_actions: Vec::new(),
+                    },
+                    all_forks::HeaderVerifyOutcome::Error {
+                        sync,
+                        error,
+                        user_data,
+                        next_request,
+                    } => {
+                        let next_actions = if let Some(request) = next_request {
+                            vec![self.shared.all_forks_request_to_request(source_id, request)]
+                        } else {
+                            Vec::new()
+                        };
+                        HeaderVerifyOutcome::Error {
+                            sync: Idle {
+                                inner: IdleInner::AllForks(sync),
+                                marker: Default::default(),
+                                shared: self.shared,
+                            }
+                            .into(),
+                            error,
+                            user_data,
+                            next_actions,
+                        }
+                    }
+                    all_forks::HeaderVerifyOutcome::ErrorContinue {
+                        next_block,
+                        error,
+                        user_data,
+                    } => HeaderVerifyOutcome::Error {
+                        sync: HeaderVerify {
+                            inner: HeaderVerifyInner::AllForks(next_block),
+                            shared: self.shared,
+                            marker: Default::default(),
+                        }
+                        .into(),
+                        next_actions: Vec::new(),
+                        error,
+                        user_data,
+                    },
+                }
             }
             _ => todo!(),
         }

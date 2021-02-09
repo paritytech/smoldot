@@ -917,6 +917,11 @@ pub struct HeaderVerify<TSrc, TBl> {
 }
 
 impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
+    /// Source the blocks to verify belong to.
+    pub fn source_id(&self) -> SourceId {
+        self.source_id
+    }
+
     /// Perform the verification.
     pub fn perform(
         mut self,
