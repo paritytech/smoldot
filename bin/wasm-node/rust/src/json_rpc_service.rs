@@ -898,7 +898,8 @@ impl JsonRpcService {
             }
             methods::MethodCall::system_name {} => {
                 self.send_back(
-                    &methods::Response::system_name("smoldot").to_json_response(request_id),
+                    &methods::Response::system_name(env!("CARGO_PKG_NAME"))
+                        .to_json_response(request_id),
                 );
             }
             methods::MethodCall::system_peers {} => {
@@ -929,7 +930,8 @@ impl JsonRpcService {
             }
             methods::MethodCall::system_version {} => {
                 self.send_back(
-                    &methods::Response::system_version("1.0.0").to_json_response(request_id),
+                    &methods::Response::system_version(env!("CARGO_PKG_VERSION"))
+                        .to_json_response(request_id),
                 );
             }
             _method => {
