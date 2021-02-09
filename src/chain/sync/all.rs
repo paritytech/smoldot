@@ -165,7 +165,10 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
     pub fn as_chain_information(&self) -> chain_information::ChainInformationRef {
-        todo!()
+        match &self.inner {
+            IdleInner::Optimistic(sync) => sync.as_chain_information(),
+            _ => todo!(),
+        }
     }
 
     /// Returns the header of the finalized block.
@@ -321,7 +324,24 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> BlockAnnounceOutcome<TRq, TSrc, TBl> {
-        todo!()
+        let source_id = self.shared.sources.get(source_id.0).unwrap();
+
+        match (self.inner, source_id) {
+            (IdleInner::Optimistic(mut sync), &SourceMapping::Optimistic(source_id)) => {
+                let decoded = header::decode(&announced_scale_encoded_header).unwrap();
+                sync.source_user_data_mut(source_id).best_block_hash =
+                    header::hash_from_scale_encoded_header(&announced_scale_encoded_header);
+                sync.raise_source_best_block(source_id, decoded.number);
+                BlockAnnounceOutcome::Disjoint {
+                    sync: Idle {
+                        inner: IdleInner::Optimistic(sync),
+                        ..self
+                    },
+                    next_request: Vec::new(), // TODO:
+                }
+            }
+            _ => todo!(),
+        }
     }
 
     /// Inject a response to a previously-emitted blocks request.
@@ -342,7 +362,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match (self.inner, request) {
             (IdleInner::GrandpaWarpSync(_), _) => panic!(), // Grandpa warp sync never starts block requests.
             (IdleInner::Optimistic(mut sync), RequestMapping::Optimistic(request_id)) => {
-                let (_, outcome) = sync.finish_request(
+                let _ = sync.finish_request(
                     request_id,
                     blocks
                         .map(|iter| {
@@ -681,14 +701,25 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
             // TODO: the verification in the optimistic is immediate ; change that
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Idle { .. }) => unreachable!(),
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { sync, .. }) => {
-                HeaderVerifyOutcome::Success {
-                    is_new_best: true,
-                    sync: Idle {
-                        inner: IdleInner::Optimistic(sync),
-                        marker: Default::default(),
-                        shared: self.shared,
-                    },
-                    next_request: todo!(),
+                match sync.process_one(now_from_unix_epoch) {
+                    optimistic::ProcessOne::Idle { sync } => {
+                        HeaderVerifyOutcome::Success {
+                            is_new_best: true,
+                            sync: Idle {
+                                inner: IdleInner::Optimistic(sync),
+                                marker: Default::default(),
+                                shared: self.shared,
+                            },
+                            next_requests: Vec::new(), // TODO:
+                        }
+                    }
+                    other => {
+                        self.inner = HeaderVerifyInner::Optimistic(other);
+                        HeaderVerifyOutcome::SuccessContinue {
+                            is_new_best: true,
+                            next_block: self,
+                        }
+                    }
                 }
             }
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Reset { sync, .. }) => todo!(),
@@ -713,8 +744,8 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         is_new_best: bool,
         /// State machine yielded back. Use to continue the processing.
         sync: Idle<TRq, TSrc, TBl>,
-        /// Next request that must be performed on the source.
-        next_request: Option<Request>,
+        /// Next requests that must be started.
+        next_requests: Vec<(SourceId, Request)>,
     },
 
     /// Header has been successfully verified. A follow-up header is ready to be verified.
@@ -733,8 +764,8 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         error: verify::header_only::Error,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
-        /// Next request that must be performed on the source.
-        next_request: Option<Request>,
+        /// Next requests that must be started.
+        next_requests: Vec<(SourceId, Request)>,
     },
 
     /// Header verification failed. A follow-up header is ready to be verified.

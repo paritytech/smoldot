@@ -208,19 +208,22 @@ async fn start_sync(
                     all::AllSync::HeaderVerify(verify) => {
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
-                                sync: sync_inner, ..
+                                sync: sync_inner,
+                                next_requests,
+                                ..
                             } => {
-                                // TODO: use next_request
+                                requests_to_start.extend(next_requests);
                                 sync = all::AllSync::Idle(sync_inner);
                             }
                             all::HeaderVerifyOutcome::SuccessContinue { next_block, .. } => {
-                                // TODO: use next_request
                                 sync = all::AllSync::HeaderVerify(next_block);
                             }
                             all::HeaderVerifyOutcome::Error {
-                                sync: sync_inner, ..
+                                sync: sync_inner,
+                                next_requests,
+                                ..
                             } => {
-                                // TODO: use next_request
+                                requests_to_start.extend(next_requests);
                                 sync = all::AllSync::Idle(sync_inner);
                             }
                             all::HeaderVerifyOutcome::ErrorContinue { next_block, .. } => {
@@ -324,6 +327,7 @@ async fn start_sync(
                             let (id, requests) = sync_inner.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
                             requests_to_start.extend(requests.into_iter().map(|r| (id, r)));
+                            sync = all::AllSync::Idle(sync_inner);
                         },
                         network_service::Event::Disconnected(peer_id) => {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
@@ -332,18 +336,35 @@ async fn start_sync(
                             /*for (_, rq) in rq_list {
                                 rq.abort();
                             }*/
+                            sync = all::AllSync::Idle(sync_inner);
                         },
                         network_service::Event::BlockAnnounce { peer_id, announce } => {
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
-                            // TODO: use outcome
                             // TODO: stupid to re-encode
-                            sync_inner.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best);
-                            todo!()
+                            match sync_inner.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                                all::BlockAnnounceOutcome::HeaderVerify(verify) => {
+                                    sync = all::AllSync::HeaderVerify(verify)
+                                },
+                                all::BlockAnnounceOutcome::TooOld(idle) => {
+                                    sync = all::AllSync::Idle(idle);
+                                },
+                                all::BlockAnnounceOutcome::AlreadyInChain(idle) => {
+                                    sync = all::AllSync::Idle(idle);
+                                },
+                                all::BlockAnnounceOutcome::NotFinalizedChain(idle) => {
+                                    sync = all::AllSync::Idle(idle);
+                                },
+                                all::BlockAnnounceOutcome::Disjoint { sync: sync_inner, .. } => {
+                                    sync = all::AllSync::Idle(sync_inner);
+                                },
+                                all::BlockAnnounceOutcome::InvalidHeader { sync: sync_inner, .. } => {
+                                    sync = all::AllSync::Idle(sync_inner);
+                                },
+                            }
                         },
                     }
 
-                    sync = all::AllSync::Idle(sync_inner);
                 }
 
                 message = from_foreground.next() => {
