@@ -98,6 +98,46 @@ struct Shared {
     requests: slab::Slab<RequestMapping>,
 }
 
+impl Shared {
+    fn optimistic_action_to_request<TSrc, TBl>(
+        &mut self,
+        action: optimistic::RequestAction<(), OptimisticSourceExtra<TSrc>, TBl>,
+    ) -> Request {
+        match action {
+            optimistic::RequestAction::Start {
+                block_height,
+                num_blocks,
+                start,
+                source,
+                source_id,
+            } => {
+                let request_id = RequestId(
+                    self.requests
+                        .insert(RequestMapping::Optimistic(start.start(()))),
+                );
+
+                debug_assert!(matches!(
+                    self.sources[source.outer_source_id.0],
+                    SourceMapping::Optimistic(source_id)
+                ));
+
+                Request {
+                    request_id,
+                    source_id: source.outer_source_id,
+                    detail: RequestDetail::BlocksRequest {
+                        first_block: BlocksRequestFirstBlock::Number(block_height),
+                        ascending: true,
+                        num_blocks: NonZeroU64::from(num_blocks),
+                        request_bodies: true, // TODO: ?!
+                        request_headers: true,
+                    },
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 enum IdleInner<TSrc, TBl> {
     Optimistic(optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>),
     /// > **Note**: Must never contain [`grandpa_warp_sync::GrandpaWarpSync::Finished`].
@@ -255,36 +295,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let mut requests_to_start = Vec::new();
 
                 while let Some(action) = optimistic.next_request_action() {
-                    // Actions requested by the optimistic syncing are pulled as often as
-                    // they might appear. As such, the only actions pullable now are the
-                    // consequence of the new source, and necessarily concern the new source.
-                    match action {
-                        optimistic::RequestAction::Start {
-                            source_id,
-                            block_height,
-                            num_blocks,
-                            start,
-                            ..
-                        } if source_id == inner_source_id => {
-                            let request_id = RequestId(
-                                self.shared
-                                    .requests
-                                    .insert(RequestMapping::Optimistic(start.start(()))),
-                            );
-
-                            requests_to_start.push(Request {
-                                id: request_id,
-                                detail: RequestDetail::BlocksRequest {
-                                    first_block: BlocksRequestFirstBlock::Number(block_height),
-                                    ascending: true,
-                                    num_blocks: NonZeroU64::from(num_blocks),
-                                    request_bodies: true, // TODO: ?!
-                                    request_headers: true,
-                                },
-                            });
-                        }
-                        _ => unreachable!(),
-                    }
+                    requests_to_start.push(self.shared.optimistic_action_to_request(action));
                 }
 
                 (outer_source_id, requests_to_start)
@@ -302,7 +313,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`SourceId`] doesn't correspond to a valid source.
     ///
-    pub fn remove_source(&mut self, source_id: SourceId) -> Vec<RequestId> {
+    pub fn remove_source(&mut self, source_id: SourceId) -> Vec<(RequestId, TRq)> {
         todo!()
     }
 
@@ -320,7 +331,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
 
     /// Injects a block announcement made by a source into the state machine.
     pub fn block_announce(
-        self,
+        mut self,
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
@@ -333,12 +344,18 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 sync.source_user_data_mut(source_id).best_block_hash =
                     header::hash_from_scale_encoded_header(&announced_scale_encoded_header);
                 sync.raise_source_best_block(source_id, decoded.number);
+
+                let mut next_requests = Vec::new();
+                while let Some(action) = sync.next_request_action() {
+                    next_requests.push(self.shared.optimistic_action_to_request(action));
+                }
+
                 BlockAnnounceOutcome::Disjoint {
                     sync: Idle {
                         inner: IdleInner::Optimistic(sync),
                         ..self
                     },
-                    next_request: Vec::new(), // TODO:
+                    next_requests,
                 }
             }
             _ => todo!(),
@@ -378,12 +395,20 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 );
 
                 match sync.process_one(now_from_unix_epoch) {
-                    optimistic::ProcessOne::Idle { sync } => {
-                        BlocksRequestResponseOutcome::Queued(Idle {
-                            inner: IdleInner::Optimistic(sync),
-                            marker: Default::default(),
-                            shared: self.shared,
-                        })
+                    optimistic::ProcessOne::Idle { mut sync } => {
+                        let mut next_requests = Vec::new();
+                        while let Some(action) = sync.next_request_action() {
+                            next_requests.push(self.shared.optimistic_action_to_request(action));
+                        }
+
+                        BlocksRequestResponseOutcome::Queued {
+                            sync: Idle {
+                                inner: IdleInner::Optimistic(sync),
+                                marker: Default::default(),
+                                shared: self.shared,
+                            },
+                            next_requests,
+                        }
                     }
                     other => BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
                         inner: HeaderVerifyInner::Optimistic(other),
@@ -413,10 +438,11 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                             inner: IdleInner::AllForks(sync),
                             ..self
                         },
-                        next_request: next_request
+                        next_requests: next_request
                             .into_iter()
                             .map(|req| Request {
-                                id: todo!(),
+                                request_id: todo!(),
+                                source_id: todo!(),
                                 detail: todo!(),
                             })
                             .collect(),
@@ -430,10 +456,11 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                             inner: IdleInner::AllForks(sync),
                             ..self
                         },
-                        next_request: next_request
+                        next_requests: next_request
                             .into_iter()
                             .map(|req| Request {
-                                id: todo!(),
+                                request_id: todo!(),
+                                source_id: todo!(),
                                 detail: todo!(),
                             })
                             .collect(),
@@ -446,10 +473,11 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                             inner: IdleInner::AllForks(sync),
                             ..self
                         },
-                        next_request: next_request
+                        next_requests: next_request
                             .into_iter()
                             .map(|req| Request {
-                                id: todo!(),
+                                request_id: todo!(),
+                                source_id: todo!(),
                                 detail: todo!(),
                             })
                             .collect(),
@@ -546,7 +574,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
 #[derive(Debug, Clone)]
 pub struct Request {
     /// Identifier of the request to pass back later in order to indicate a response.
-    pub id: RequestId,
+    pub request_id: RequestId,
+    /// Identifier of the source that must perform the request.
+    pub source_id: SourceId,
     /// Actual details of the request to perform.
     pub detail: RequestDetail,
 }
@@ -626,7 +656,7 @@ pub enum BlockAnnounceOutcome<TRq, TSrc, TBl> {
     Disjoint {
         sync: Idle<TRq, TSrc, TBl>,
         /// Next requests that the same source should now perform.
-        next_request: Vec<Request>,
+        next_requests: Vec<Request>,
     },
     /// Failed to decode announce header.
     InvalidHeader {
@@ -641,7 +671,12 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
     VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
 
     /// Blocks have been queued and will be processed later.
-    Queued(Idle<TRq, TSrc, TBl>),
+    Queued {
+        sync: Idle<TRq, TSrc, TBl>,
+
+        /// Next requests that must be started.
+        next_requests: Vec<Request>,
+    },
 
     /// Source has given blocks that aren't part of the finalized chain.
     ///
@@ -651,8 +686,8 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
     NotFinalizedChain {
         sync: Idle<TRq, TSrc, TBl>,
 
-        /// Next requests that the same source should now perform.
-        next_request: Vec<Request>,
+        /// Next requests that must be started.
+        next_requests: Vec<Request>,
 
         /// List of block headers that were pending verification and that have now been discarded
         /// since it has been found out that they don't belong to the finalized chain.
@@ -664,8 +699,8 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
     Inconclusive {
         sync: Idle<TRq, TSrc, TBl>,
 
-        /// Next request that the same source should now perform.
-        next_request: Vec<Request>,
+        /// Next requests that must be started.
+        next_requests: Vec<Request>,
     },
 
     /// All blocks in the ancestry search response were already in the list of verified blocks.
@@ -675,8 +710,8 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
     AllAlreadyInChain {
         sync: Idle<TRq, TSrc, TBl>,
 
-        /// Next request that the same source should now perform.
-        next_request: Vec<Request>,
+        /// Next requests that must be started.
+        next_requests: Vec<Request>,
     },
 }
 
@@ -701,42 +736,34 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         match self.inner {
             // TODO: the verification in the optimistic is immediate ; change that
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Idle { .. }) => unreachable!(),
-            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { sync, .. }) => {
-                match sync.process_one(now_from_unix_epoch) {
-                    optimistic::ProcessOne::Idle { sync } => {
-                        let mut next_requests = Vec::new();
-                        // TODO:
-                        /*while let Some(action) = sync.next_request_action() {
-                            next_requests.push((source_id, Request {
-                                id,
-                                detail: match action {
-                                    optimistic::RequestAction::Start {  }
-                                }
-                            }))
-                        }*/
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { mut sync, .. }) => {
+                let mut next_requests = Vec::new();
+                while let Some(action) = sync.next_request_action() {
+                    next_requests.push(self.shared.optimistic_action_to_request(action));
+                }
 
-                        HeaderVerifyOutcome::Success {
-                            is_new_best: true,
-                            sync: Idle {
-                                inner: IdleInner::Optimistic(sync),
-                                marker: Default::default(),
-                                shared: self.shared,
-                            }
-                            .into(),
-                            next_requests,
+                match sync.process_one(now_from_unix_epoch) {
+                    optimistic::ProcessOne::Idle { sync } => HeaderVerifyOutcome::Success {
+                        is_new_best: true,
+                        sync: Idle {
+                            inner: IdleInner::Optimistic(sync),
+                            marker: Default::default(),
+                            shared: self.shared,
                         }
-                    }
+                        .into(),
+                        next_requests,
+                    },
                     other => {
                         self.inner = HeaderVerifyInner::Optimistic(other);
                         HeaderVerifyOutcome::Success {
                             is_new_best: true,
                             sync: self.into(),
-                            next_requests: Vec::new(),
+                            next_requests,
                         }
                     }
                 }
             }
-            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Reset { sync, .. }) => todo!(),
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Reset { .. }) => todo!(),
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Finalized { .. }) => todo!(),
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageGet(_))
             | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageNextKey(_))
@@ -759,7 +786,7 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
         /// Next requests that must be started.
-        next_requests: Vec<(SourceId, Request)>,
+        next_requests: Vec<Request>,
     },
 
     /// Header verification failed.
@@ -771,6 +798,6 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
         /// Next requests that must be started.
-        next_requests: Vec<(SourceId, Request)>,
+        next_requests: Vec<Request>,
     },
 }
