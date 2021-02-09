@@ -198,11 +198,15 @@ async fn start_sync(
         // TODO: remove; should store the aborthandle in the TRq user data instead
         let mut pending_requests = HashMap::new();
 
+        // TODO: finalized isn't notified
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
 
         // If non-empty, contains a request that the sync state machine wants to start on a source.
         let mut requests_to_start = Vec::<all::Action>::with_capacity(16);
+
+        // TODO: crappy way to handle that
+        let mut has_new_best = false;
 
         // Main loop of the syncing logic.
         loop {
@@ -219,9 +223,15 @@ async fn start_sync(
                             all::HeaderVerifyOutcome::Success {
                                 sync: sync_idle,
                                 next_actions,
+                                is_new_best,
                                 ..
                             } => {
                                 requests_to_start.extend(next_actions);
+
+                                if is_new_best {
+                                    has_new_best = true;
+                                }
+
                                 sync = sync_idle.into();
                             }
                             all::HeaderVerifyOutcome::Error {
@@ -242,6 +252,15 @@ async fn start_sync(
                     }
                 }
             };
+
+            // TODO: handle this differently
+            if has_new_best {
+                let scale_encoded_header = sync_idle.best_block_header().scale_encoding_vec();
+                // TODO: remove expired senders
+                for notif in &mut best_notifications {
+                    let _ = notif.send(scale_encoded_header.clone());
+                }
+            }
 
             // `sync_idle` is now an `Idle` that has been extracted from `sync`.
             // All the code paths below will need to put back `sync_idle` into `sync` before
