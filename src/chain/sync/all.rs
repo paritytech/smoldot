@@ -609,7 +609,7 @@ pub enum Action {
     Cancel(RequestId),
 }
 
-/// See [`Request::detail`].
+/// See [`Action::Start::detail`].
 #[derive(Debug, Clone)]
 #[must_use]
 pub enum RequestDetail {
