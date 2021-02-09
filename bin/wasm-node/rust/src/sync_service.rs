@@ -504,7 +504,7 @@ async fn start_sync(
 enum ToBackground {
     /// See [`SyncService::serialize_chain`].
     Serialize { send_back: oneshot::Sender<String> },
-    /// See [`SyncService::is_above_network_finalized`].
+    /// See [`SyncService::is_near_head_of_chain_heuristic`].
     IsNearHeadOfChainHeuristic { send_back: oneshot::Sender<bool> },
     /// See [`SyncService::subscribe_finalized`].
     SubscribeFinalized {
