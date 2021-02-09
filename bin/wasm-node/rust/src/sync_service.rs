@@ -286,7 +286,6 @@ async fn start_sync(
                     } => {
                         let peer_id = sync_idle.source_user_data_mut(source_id).clone();
 
-                        println!("blocks request: {:?} {:?}", first_block, num_blocks); // TODO: remove
                         let block_request = network_service.clone().blocks_request(
                             peer_id.clone(),
                             network::protocol::BlocksRequestConfig {
