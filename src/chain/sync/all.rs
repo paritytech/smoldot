@@ -151,6 +151,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     pub fn as_chain_information(&self) -> chain_information::ChainInformationRef {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.as_chain_information(),
+            IdleInner::AllForks(sync) => sync.as_chain_information(),
             _ => todo!(),
         }
     }
@@ -159,6 +160,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     pub fn finalized_block_header(&self) -> header::HeaderRef {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.finalized_block_header(),
+            IdleInner::AllForks(sync) => sync.finalized_block_header(),
             _ => todo!(),
         }
     }
@@ -170,6 +172,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     pub fn best_block_header(&self) -> header::HeaderRef {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_header(),
+            IdleInner::AllForks(sync) => sync.best_block_header(),
             _ => todo!(),
         }
     }
@@ -181,6 +184,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     pub fn best_block_number(&self) -> u64 {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_number(),
+            IdleInner::AllForks(sync) => sync.best_block_number(),
             _ => todo!(),
         }
     }
@@ -192,6 +196,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     pub fn best_block_hash(&self) -> [u8; 32] {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_hash(),
+            IdleInner::AllForks(sync) => sync.best_block_hash(),
             _ => todo!(),
         }
     }
@@ -304,9 +309,46 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     next_actions,
                 }
             }
-            /*(IdleInner::AllForks(mut sync), &SourceMapping::AllForks(source_id)) => {
-
-            }*/
+            (IdleInner::AllForks(sync), &SourceMapping::AllForks(source_id)) => {
+                match sync.block_announce(source_id, announced_scale_encoded_header, is_best) {
+                    all_forks::BlockAnnounceOutcome::HeaderVerify(verify) => {
+                        BlockAnnounceOutcome::HeaderVerify(HeaderVerify {
+                            inner: HeaderVerifyInner::AllForks(verify),
+                            shared: self.shared,
+                            marker: Default::default(),
+                        })
+                    }
+                    all_forks::BlockAnnounceOutcome::TooOld(sync) => {
+                        self.inner = IdleInner::AllForks(sync);
+                        BlockAnnounceOutcome::TooOld(self)
+                    }
+                    all_forks::BlockAnnounceOutcome::AlreadyInChain(sync) => {
+                        self.inner = IdleInner::AllForks(sync);
+                        BlockAnnounceOutcome::AlreadyInChain(self)
+                    }
+                    all_forks::BlockAnnounceOutcome::NotFinalizedChain(sync) => {
+                        self.inner = IdleInner::AllForks(sync);
+                        BlockAnnounceOutcome::NotFinalizedChain(self)
+                    }
+                    all_forks::BlockAnnounceOutcome::Disjoint { sync, next_request } => {
+                        self.inner = IdleInner::AllForks(sync);
+                        let next_actions = match next_request {
+                            Some(nr) => {
+                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                            }
+                            None => Vec::new(),
+                        };
+                        BlockAnnounceOutcome::Disjoint {
+                            sync: self,
+                            next_actions,
+                        }
+                    }
+                    all_forks::BlockAnnounceOutcome::InvalidHeader { sync, error } => {
+                        self.inner = IdleInner::AllForks(sync);
+                        BlockAnnounceOutcome::InvalidHeader { sync: self, error }
+                    }
+                }
+            }
             _ => todo!(),
         }
     }
@@ -383,55 +425,58 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         sync,
                         next_request,
                         discarded_unverified_block_headers,
-                    } => BlocksRequestResponseOutcome::NotFinalizedChain {
-                        sync: Idle {
-                            inner: IdleInner::AllForks(sync),
-                            ..self
-                        },
-                        next_actions: next_request
-                            .into_iter()
-                            .map(|req| Action::Start {
-                                request_id: todo!(),
-                                source_id: todo!(),
-                                detail: todo!(),
-                            })
-                            .collect(),
-                        discarded_unverified_block_headers,
-                    },
+                    } => {
+                        let next_actions = match next_request {
+                            Some(nr) => {
+                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                            }
+                            None => Vec::new(),
+                        };
+                        BlocksRequestResponseOutcome::NotFinalizedChain {
+                            sync: Idle {
+                                inner: IdleInner::AllForks(sync),
+                                ..self
+                            },
+                            next_actions,
+                            discarded_unverified_block_headers,
+                        }
+                    }
                     all_forks::AncestrySearchResponseOutcome::Inconclusive {
                         sync,
                         next_request,
-                    } => BlocksRequestResponseOutcome::Inconclusive {
-                        sync: Idle {
-                            inner: IdleInner::AllForks(sync),
-                            ..self
-                        },
-                        next_actions: next_request
-                            .into_iter()
-                            .map(|req| Action::Start {
-                                request_id: todo!(),
-                                source_id: todo!(),
-                                detail: todo!(),
-                            })
-                            .collect(),
-                    },
+                    } => {
+                        let next_actions = match next_request {
+                            Some(nr) => {
+                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                            }
+                            None => Vec::new(),
+                        };
+                        BlocksRequestResponseOutcome::Inconclusive {
+                            sync: Idle {
+                                inner: IdleInner::AllForks(sync),
+                                ..self
+                            },
+                            next_actions,
+                        }
+                    }
                     all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain {
                         sync,
                         next_request,
-                    } => BlocksRequestResponseOutcome::AllAlreadyInChain {
-                        sync: Idle {
-                            inner: IdleInner::AllForks(sync),
-                            ..self
-                        },
-                        next_actions: next_request
-                            .into_iter()
-                            .map(|req| Action::Start {
-                                request_id: todo!(),
-                                source_id: todo!(),
-                                detail: todo!(),
-                            })
-                            .collect(),
-                    },
+                    } => {
+                        let next_actions = match next_request {
+                            Some(nr) => {
+                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                            }
+                            None => Vec::new(),
+                        };
+                        BlocksRequestResponseOutcome::AllAlreadyInChain {
+                            sync: Idle {
+                                inner: IdleInner::AllForks(sync),
+                                ..self
+                            },
+                            next_actions,
+                        }
+                    }
                 }
             }
             // TODO: not all variants implemented
