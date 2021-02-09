@@ -738,12 +738,23 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         match self.inner {
             // TODO: the verification in the optimistic is immediate ; change that
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Idle { .. }) => unreachable!(),
-            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest {
-                mut sync,
-                new_best_number,
-                ..
-            }) => {
-                if new_best_number >= 3130000 {
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { .. })
+            | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Finalized { .. }) => {
+                let (mut sync, new_best_number) = match self.inner {
+                    HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest {
+                        sync,
+                        new_best_number,
+                        ..
+                    }) => (sync, new_best_number),
+                    HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Finalized {
+                        sync,
+                        finalized_blocks,
+                        ..
+                    }) => (sync, finalized_blocks.last().unwrap().header.number),
+                    _ => unreachable!(),
+                };
+
+                if new_best_number >= 4000000 {
                     // TODO: lol ^
                     let (all_forks, next_actions) =
                         self.shared.transition_optimistic_all_forks(sync);
@@ -786,7 +797,6 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 }
             }
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Reset { .. }) => todo!(),
-            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Finalized { .. }) => todo!(),
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageGet(_))
             | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageNextKey(_))
             | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStoragePrefixKeys(
@@ -861,11 +871,21 @@ impl Shared {
                         num_blocks: NonZeroU64::from(num_blocks),
                         request_bodies: true, // TODO: ?!
                         request_headers: true,
-                        request_justification: false, // TODO: should be true, but "finalized" panics now
+                        request_justification: true,
                     },
                 }
             }
-            _ => unreachable!(),
+            optimistic::RequestAction::Cancel { request_id, .. } => {
+                // TODO: O(n); store the outer ID in the user data instead
+                let outer_request_id = self
+                    .requests
+                    .iter()
+                    .find(|(id, s)| **s == RequestMapping::Optimistic(request_id))
+                    .map(|(id, _)| RequestId(id))
+                    .unwrap();
+                self.requests.remove(outer_request_id.0);
+                Action::Cancel(outer_request_id)
+            }
         }
     }
 
