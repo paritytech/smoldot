@@ -304,6 +304,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     next_actions,
                 }
             }
+            /*(IdleInner::AllForks(mut sync), &SourceMapping::AllForks(source_id)) => {
+
+            }*/
             _ => todo!(),
         }
     }
@@ -387,7 +390,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         },
                         next_actions: next_request
                             .into_iter()
-                            .map(|req| Action {
+                            .map(|req| Action::Start {
                                 request_id: todo!(),
                                 source_id: todo!(),
                                 detail: todo!(),
@@ -405,7 +408,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         },
                         next_actions: next_request
                             .into_iter()
-                            .map(|req| Action {
+                            .map(|req| Action::Start {
                                 request_id: todo!(),
                                 source_id: todo!(),
                                 detail: todo!(),
@@ -422,7 +425,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         },
                         next_actions: next_request
                             .into_iter()
-                            .map(|req| Action {
+                            .map(|req| Action::Start {
                                 request_id: todo!(),
                                 source_id: todo!(),
                                 detail: todo!(),
@@ -517,15 +520,20 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     }*/
 }
 
-/// Request that should be performed towards a source.
+/// Start or cancel a request.
 #[derive(Debug, Clone)]
-pub struct Action {
-    /// Identifier of the request to pass back later in order to indicate a response.
-    pub request_id: RequestId,
-    /// Identifier of the source that must perform the request.
-    pub source_id: SourceId,
-    /// Actual details of the request to perform.
-    pub detail: RequestDetail,
+pub enum Action {
+    /// Start a request towards a source.
+    Start {
+        /// Identifier of the request to pass back later in order to indicate a response.
+        request_id: RequestId,
+        /// Identifier of the source that must perform the request.
+        source_id: SourceId,
+        /// Actual details of the request to perform.
+        detail: RequestDetail,
+    },
+    /// Cancel a previously-emitted request.
+    Cancel(RequestId),
 }
 
 /// See [`Request::detail`].
@@ -690,7 +698,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 new_best_number,
                 ..
             }) => {
-                if new_best_number >= 3140000 {
+                if new_best_number >= 3130000 {
                     // TODO: lol ^
                     let (all_forks, next_actions) =
                         self.shared.transition_optimistic_all_forks(sync);
@@ -799,7 +807,7 @@ impl Shared {
                     SourceMapping::Optimistic(source_id)
                 );
 
-                Action {
+                Action::Start {
                     request_id,
                     source_id: source.outer_source_id,
                     detail: RequestDetail::BlocksRequest {
@@ -835,7 +843,7 @@ impl Shared {
             all_forks::Request::AncestrySearch {
                 first_block_hash,
                 num_blocks,
-            } => Action {
+            } => Action::Start {
                 request_id,
                 source_id: outer_source_id,
                 detail: RequestDetail::BlocksRequest {
@@ -847,7 +855,7 @@ impl Shared {
                     request_justification: false,
                 },
             },
-            all_forks::Request::HeaderRequest { hash, .. } => Action {
+            all_forks::Request::HeaderRequest { hash, .. } => Action::Start {
                 request_id,
                 source_id: outer_source_id,
                 detail: RequestDetail::BlocksRequest {
@@ -879,7 +887,6 @@ impl Shared {
             .all(|(_, s)| matches!(s, SourceMapping::Optimistic(_))));
 
         let disassembled = optimistic.disassemble();
-        // TODO: need to cancel the requests as well
 
         // TODO: arbitrary config
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
@@ -914,13 +921,16 @@ impl Shared {
             }
         }
 
-        self.requests.clear();
         debug_assert!(self
             .sources
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::AllForks(_))));
 
-        let mut next_actions = Vec::with_capacity(all_forks_demands.len());
+        let mut next_actions = Vec::with_capacity(self.requests.len() + all_forks_demands.len());
+        for (request_id, _) in self.requests.iter() {
+            next_actions.push(Action::Cancel(RequestId(request_id)));
+        }
+        self.requests.clear();
         for (source_id, demand) in all_forks_demands {
             next_actions.push(self.all_forks_request_to_request(source_id, demand));
         }

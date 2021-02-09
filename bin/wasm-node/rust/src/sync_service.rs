@@ -195,6 +195,9 @@ async fn start_sync(
         // List of block requests currently in progress.
         let mut pending_block_requests = stream::FuturesUnordered::new();
 
+        // TODO: remove; should store the aborthandle in the TRq user data instead
+        let mut pending_requests = HashMap::new();
+
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
 
@@ -249,9 +252,9 @@ async fn start_sync(
             // TODO: do this earlier, before the verifications
             for request in requests_to_start.drain(..) {
                 match request {
-                    all::Action {
+                    all::Action::Start {
                         source_id,
-                        request_id: id,
+                        request_id,
                         detail:
                             all::RequestDetail::BlocksRequest {
                                 first_block,
@@ -293,12 +296,13 @@ async fn start_sync(
                             },
                         );
 
-                        // TODO: use this abort
                         let (block_request, abort) = future::abortable(block_request);
+                        pending_requests.insert(request_id, abort);
 
-                        pending_block_requests.push(async move { (id, block_request.await) });
+                        pending_block_requests
+                            .push(async move { (request_id, block_request.await) });
                     }
-                    all::Action {
+                    all::Action::Start {
                         source_id,
                         request_id: id,
                         detail:
@@ -308,7 +312,7 @@ async fn start_sync(
                     } => {
                         todo!()
                     }
-                    all::Action {
+                    all::Action::Start {
                         source_id,
                         request_id: id,
                         detail:
@@ -318,6 +322,9 @@ async fn start_sync(
                                 key,
                             },
                     } => todo!(),
+                    all::Action::Cancel(request_id) => {
+                        pending_requests.remove(&request_id).unwrap().abort();
+                    }
                 }
             }
 
@@ -422,6 +429,8 @@ async fn start_sync(
                 },
 
                 (request_id, result) = pending_block_requests.select_next_some() => {
+                    pending_requests.remove(&request_id);
+
                     // A request (e.g. a block request, warp sync request, etc.) has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
@@ -464,7 +473,8 @@ async fn start_sync(
                             },
                         }
                     } else {
-                        // The sync state machine was no longer interested in the response.
+                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
+                        // thus no longer interested in the response.
                         sync = sync_idle.into();
                     }
                 },
