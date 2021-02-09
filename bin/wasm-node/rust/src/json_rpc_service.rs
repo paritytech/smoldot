@@ -682,6 +682,46 @@ impl JsonRpcService {
                 } else {
                 }
             }
+            methods::MethodCall::chain_getBlock { hash } => {
+                // `hash` equal to `None` means "the current best block".
+                let hash = match hash {
+                    Some(h) => h.0,
+                    None => self.blocks.lock().await.best_block,
+                };
+
+                // Block bodies and justifications aren't stored locally. Ask the network.
+                let result = self
+                    .network_service
+                    .clone()
+                    .block_query(
+                        hash,
+                        protocol::BlocksRequestFields {
+                            header: true,
+                            body: true,
+                            justification: true,
+                        },
+                    )
+                    .await;
+
+                // The `block_query` function guarantees that the header and body are present and
+                // are correct.
+
+                self.send_back(&if let Ok(block) = result {
+                    methods::Response::chain_getBlock(methods::Block {
+                        extrinsics: block
+                            .body
+                            .unwrap()
+                            .into_iter()
+                            .map(methods::Extrinsic)
+                            .collect(),
+                        header: header_conv(header::decode(&block.header.unwrap()).unwrap()),
+                        justification: block.justification.map(methods::HexString),
+                    })
+                    .to_json_response(request_id)
+                } else {
+                    "null".to_owned()
+                });
+            }
             methods::MethodCall::chain_getBlockHash { height } => {
                 let mut blocks = self.blocks.lock().await;
                 let blocks = &mut *blocks;
