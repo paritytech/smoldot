@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 declare class SmoldotError extends Error {
-  constructor(message: string) {}
+  constructor(message: string);
 }
 
 export interface SmoldotClient {
@@ -37,6 +37,6 @@ export interface Smoldot {
   start(options: SmoldotOptions): Promise<SmoldotClient>;
 }
 
-export var smoldot: Smoldot;
+export const smoldot: Smoldot;
 
 export default smoldot;
