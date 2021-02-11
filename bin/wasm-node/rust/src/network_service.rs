@@ -691,7 +691,9 @@ impl StorageQueryError {
             StorageQueryErrorDetail::Network(service::StorageProofRequestError::Request(_)) => true,
             StorageQueryErrorDetail::Network(service::StorageProofRequestError::Decode(_)) => false,
             // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
-            StorageQueryErrorDetail::ProofVerification(proof_verify::Error::TrieRootNotFound) => true,
+            StorageQueryErrorDetail::ProofVerification(proof_verify::Error::TrieRootNotFound) => {
+                true
+            }
             StorageQueryErrorDetail::ProofVerification(_) => false,
         })
     }
