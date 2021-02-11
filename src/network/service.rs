@@ -481,7 +481,8 @@ where
                             .libp2p
                             .request_response_protocols()
                             .filter(|p| p.inbound_allowed)
-                            .map(|p| &p.name[..]),
+                            .map(|p| &p.name[..])
+                            .chain(self.libp2p.overlay_networks().map(|p| &p.protocol_name[..])),
                     })
                     .fold(Vec::new(), |mut a, b| {
                         a.extend_from_slice(b.as_ref());

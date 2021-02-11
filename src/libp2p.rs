@@ -299,6 +299,11 @@ where
         &self.noise_key
     }
 
+    /// Returns the list the overlay networks originally passed as [`Config::overlay_networks`].
+    pub fn overlay_networks(&self) -> impl ExactSizeIterator<Item = &OverlayNetwork> {
+        self.overlay_networks.iter()
+    }
+
     /// Returns the list the request-response protocols originally passed as
     /// [`Config::request_response_protocols`].
     pub fn request_response_protocols(
