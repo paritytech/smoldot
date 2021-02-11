@@ -18,7 +18,7 @@
 use crate::header::BabeNextConfig;
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use parity_scale_codec::{DecodeAll as _, Decode, Encode};
+use parity_scale_codec::{Decode, DecodeAll as _, Encode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +41,8 @@ impl LightSyncState {
             finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
                 .unwrap()
                 .into(),
-            grandpa_authority_set: AuthoritySet::decode_all(&mut grandpa_authority_set_slice).unwrap(),
+            grandpa_authority_set: AuthoritySet::decode_all(&mut grandpa_authority_set_slice)
+                .unwrap(),
             babe_epoch_changes: EpochChanges::decode_all(&mut babe_epoch_changes_slice).unwrap(),
         };
 
