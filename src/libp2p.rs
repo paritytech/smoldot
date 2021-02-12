@@ -694,7 +694,9 @@ where
         }
 
         if let Some(connection) = connection_lock.connection.as_alive() {
-            // Ignore the error where the substream has already been closed.
+            // As explained in the documentation, ignore the error where the substream has
+            // already been closed. This is a normal situation caused by the racy nature of the
+            // API.
             match connection.respond_in_request(substream_id, response) {
                 Ok(()) => {}
                 Err(established::RespondInRequestError::SubstreamClosed) => {}
