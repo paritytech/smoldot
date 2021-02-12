@@ -663,7 +663,8 @@ where
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
     ///
-    /// Passing an `Err` corresponds, on the other side, to a [`RequestError::SubstreamClosed`].
+    /// Passing an `Err` corresponds, on the other side, to a
+    /// [`established::RequestError::SubstreamClosed`].
     ///
     /// Has no effect if the connection has been closed in the meanwhile.
     pub async fn respond_in_request(
