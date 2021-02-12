@@ -870,7 +870,11 @@ where
         substream_id: SubstreamId,
         response: Result<Vec<u8>, ()>,
     ) -> Result<(), RespondInRequestError> {
-        let mut substream = self.inner.yamux.substream_by_id(substream_id.0).ok_or(RespondInRequestError::SubstreamClosed)?;
+        let mut substream = self
+            .inner
+            .yamux
+            .substream_by_id(substream_id.0)
+            .ok_or(RespondInRequestError::SubstreamClosed)?;
 
         match substream.user_data() {
             Substream::RequestInSend => {
