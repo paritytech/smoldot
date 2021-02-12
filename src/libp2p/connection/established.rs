@@ -863,11 +863,7 @@ where
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
     ///
     /// Passing an `Err` corresponds, on the other side, to a [`RequestError::SubstreamClosed`].
-    pub fn respond_in_request(
-        &mut self,
-        substream_id: SubstreamId,
-        response: Result<Vec<u8>, ()>,
-    ) {
+    pub fn respond_in_request(&mut self, substream_id: SubstreamId, response: Result<Vec<u8>, ()>) {
         let mut substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
 
         match substream.user_data() {

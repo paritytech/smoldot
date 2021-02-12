@@ -225,9 +225,7 @@ impl NetworkService {
                                 debug_assert_eq!(chain_index, 0);
                                 break Event::Disconnected(peer_id);
                             }
-                            service::Event::IdentifyRequestIn {
-                                peer_id, request
-                            } => {
+                            service::Event::IdentifyRequestIn { peer_id, request } => {
                                 log::debug!(
                                     target: "network",
                                     "Connection({}) => IdentifyRequest",
