@@ -96,21 +96,32 @@ impl<T> NonFinalizedTreeInner<T> {
                     }
                 };
 
-                // If any block between the latest finalized one and the target block trigger any GrandPa
-                // authorities change, then we need to finalize that triggering block (or any block
-                // after or including the one that schedules these changes) before finalizing the one
-                // targeted by the justification.
-                // TODO: rethink and reexplain this ^
+                // If any block, between the latest finalized one and the target block, trigger
+                // any GrandPa authorities change, then we need to finalize that triggering block
+                // (or any block after or including the one that schedules these changes)
+                // beforehand.
+                //
+                // In other words, the situation below should result in an error, because
+                // the "authorities change" block first need to be finalized:
+                //
+                //                          authorities                    justification
+                //     finalized              change                          target
+                //         +                    +                               +
+                //         v                    v                               v
+                //         +----------------------------------------------------+
 
                 // Find out the next block height where an authority change will be triggered.
+                let mut overwrite_authorities = None;
                 let earliest_trigger = {
+                    // TODO: this code is clumbsy; rules aren't necessarily respected properly; review and improve
                     // Scheduled change that is already finalized.
                     let scheduled = finalized_scheduled_change.as_ref().map(|(n, _)| *n);
+
+                    let mut forced_change = false;
 
                     // First change that would be scheduled if we finalize the target block.
                     let would_happen = {
                         let mut trigger_height = None;
-                        // TODO: lot of boilerplate code here
                         for node in self.blocks.root_to_node_path(block_index) {
                             let header = &self.blocks.get(node).unwrap().header;
                             for grandpa_digest_item in
@@ -119,8 +130,25 @@ impl<T> NonFinalizedTreeInner<T> {
                                     _ => None,
                                 })
                             {
+                                if let header::GrandpaConsensusLogRef::ForcedChange {
+                                    change, ..
+                                } = &grandpa_digest_item
+                                {
+                                    overwrite_authorities = Some(
+                                        change
+                                            .next_authorities
+                                            .clone()
+                                            .map(header::GrandpaAuthority::from)
+                                            .collect(),
+                                    );
+                                    forced_change = true;
+                                }
+
                                 match grandpa_digest_item {
-                                    header::GrandpaConsensusLogRef::ScheduledChange(change) => {
+                                    header::GrandpaConsensusLogRef::ScheduledChange(change)
+                                    | header::GrandpaConsensusLogRef::ForcedChange {
+                                        change, ..
+                                    } => {
                                         let trigger_block_height = header
                                             .number
                                             .checked_add(u64::from(change.delay))
@@ -133,15 +161,25 @@ impl<T> NonFinalizedTreeInner<T> {
                                     _ => {} // TODO: unimplemented
                                 }
                             }
+
+                            if trigger_height.is_some() {
+                                break;
+                            }
                         }
                         trigger_height
                     };
 
-                    match (scheduled, would_happen) {
-                        (Some(a), Some(b)) => Some(cmp::min(a, b)),
-                        (Some(a), None) => Some(a),
-                        (None, Some(b)) => Some(b),
-                        (None, None) => None,
+                    // TODO: This `forced_change` mechanism is unsafe because it is naive. Since
+                    //       only headers are modified, one single malicious validator can bypass
+                    //       our finality checks by emitting an invalid block. This problem
+                    //       definitely isn't easy to solve and needs brainstorming.
+
+                    match (forced_change, scheduled, would_happen) {
+                        (true, _, _) => None,
+                        (false, Some(a), Some(b)) => Some(cmp::min(a, b)),
+                        (false, Some(a), None) => Some(a),
+                        (false, None, Some(b)) => Some(b),
+                        (false, None, None) => None,
                     }
                 };
 
@@ -172,13 +210,18 @@ impl<T> NonFinalizedTreeInner<T> {
                 }
 
                 // Find which authorities are supposed to finalize the target block.
-                let authorities_list = finalized_scheduled_change
-                    .as_ref()
-                    .filter(|(trigger_height, _)| {
-                        *trigger_height < u64::from(decoded.target_number)
-                    })
-                    .map(|(_, list)| list)
-                    .unwrap_or(finalized_triggered_authorities);
+                let authorities_list =
+                    if let Some(overwrite_authorities) = overwrite_authorities.as_ref() {
+                        overwrite_authorities
+                    } else {
+                        finalized_scheduled_change
+                            .as_ref()
+                            .filter(|(trigger_height, _)| {
+                                *trigger_height < u64::from(decoded.target_number)
+                            })
+                            .map(|(_, list)| list)
+                            .unwrap_or(finalized_triggered_authorities)
+                    };
 
                 // As per above check, we know that the authorities of the target block are either the
                 // same as the ones of the latest finalized block, or the ones contained in the header of
@@ -223,6 +266,7 @@ impl<T> NonFinalizedTreeInner<T> {
                         header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                         _ => None,
                     }) {
+                        // TODO: this code is clumbsy; rules aren't necessarily respected properly; review and improve
                         match grandpa_digest_item {
                             header::GrandpaConsensusLogRef::ScheduledChange(change) => {
                                 let trigger_block_height = node
@@ -230,6 +274,25 @@ impl<T> NonFinalizedTreeInner<T> {
                                     .number
                                     .checked_add(u64::from(change.delay))
                                     .unwrap();
+                                // TODO: might override a forced change?
+                                if trigger_block_height > target_block_height {
+                                    *finalized_scheduled_change = Some((
+                                        trigger_block_height,
+                                        change.next_authorities.map(Into::into).collect(),
+                                    ));
+                                } else {
+                                    *finalized_triggered_authorities =
+                                        change.next_authorities.map(Into::into).collect();
+                                    *after_finalized_block_authorities_set_id += 1;
+                                }
+                            }
+                            header::GrandpaConsensusLogRef::ForcedChange {
+                                reset_block_height,
+                                change,
+                            } => {
+                                let trigger_block_height = u64::from(
+                                    reset_block_height.checked_add(change.delay).unwrap(),
+                                );
                                 if trigger_block_height > target_block_height {
                                     *finalized_scheduled_change = Some((
                                         trigger_block_height,

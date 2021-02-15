@@ -922,7 +922,7 @@ impl<TRq, TSrc, TBl> ProcessOne<TRq, TSrc, TBl> {
                     if let Some(justification) = shared.pending_encoded_justification.take() {
                         let mut apply = match chain.verify_justification(&justification) {
                             Ok(a) => a,
-                            Err(_) => todo!(), // TODO:
+                            Err(_err) => todo!("{:?}", _err), // TODO:
                         };
 
                         assert!(apply.is_current_best_block()); // TODO: can legitimately fail in case of malicious node
