@@ -58,6 +58,10 @@ pub struct CliOptions {
     /// Do not load or store anything on disk.
     #[structopt(long)]
     pub tmp: bool,
+    /// Path to an SQLite database where, for each block, events will be written.
+    #[structopt(long)]
+    #[cfg(feature = "events-export")]
+    pub major_sync_export_events_sqlite: Option<PathBuf>,
 }
 
 #[derive(Debug)]

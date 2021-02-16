@@ -157,6 +157,37 @@ async fn async_main() {
         None
     };
 
+    #[cfg(feature = "events-export")]
+    let major_sync_export_events_sqlite =
+        if let Some(path) = cli_options.major_sync_export_events_sqlite {
+            let flags = sqlite::OpenFlags::new()
+                .set_full_mutex() // It is unclear whether this is needed for safety.
+                .set_create()
+                .set_read_write();
+            let connection = sqlite::Connection::open_with_flags(path, flags)
+                .expect("Failed to open events-export SQLite database: ");
+            connection
+                .execute(
+                    r#"
+                CREATE TABLE IF NOT EXISTS metadata(
+                    runtime_version INTEGER NOT NULL PRIMARY KEY,
+                    metadata BLOB NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS events(
+                    block_height INTEGER NOT NULL PRIMARY KEY,
+                    runtime_version INTEGER NOT NULL,
+                    events_storage BLOB NOT NULL,
+                    FOREIGN KEY(runtime_version) REFERENCES metadata(runtime_version)
+                );
+            "#,
+                )
+                .expect("Failed to initialize SQLite database: ");
+            Some(connection)
+        } else {
+            None
+        };
+
     // TODO: remove; just for testing
     /*let metadata = smoldot::metadata::metadata_from_runtime_code(
         chain_spec
@@ -255,6 +286,8 @@ async fn async_main() {
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
         database,
+        #[cfg(feature = "events-export")]
+        major_sync_export_events_sqlite,
     })
     .instrument(tracing::debug_span!("sync-service-init"))
     .await;
@@ -267,6 +300,8 @@ async fn async_main() {
                     Box::new(move |task| threads_pool.spawn_ok(task))
                 },
                 database: relay_chain_database,
+                #[cfg(feature = "events-export")]
+                major_sync_export_events_sqlite: None,
             })
             .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
             .await,

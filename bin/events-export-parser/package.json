@@ -1,0 +1,14 @@
+{
+  "name": "smoldot-events-export-parser",
+  "version": "1.0.0",
+  "description": "Parse events exported using the full node",
+  "main": "index.js",
+  "author": "Parity Technologies <admin@parity.io>",
+  "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
+  "dependencies": {
+    "@polkadot/metadata": "^3.9.3",
+    "@polkadot/types": "^3.9.3",
+    "better-sqlite3": "^7.1.2"
+  },
+  "type": "module"
+}

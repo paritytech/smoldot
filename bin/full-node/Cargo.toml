@@ -13,6 +13,11 @@ default-run = "full-node"
 name = "full-node"
 path = "src/main.rs"
 
+[features]
+default = ["events-export"]  # TODO: empty
+# Enables the `--major-sync-export-events-sqlite` CLI option.
+events-export = ["sqlite"]
+
 [dependencies]
 app_dirs = "1.2.1"
 async-std = "1.9.0"
@@ -30,6 +35,7 @@ pin-project = "1.0.4"
 rand = "0.8.3"
 slab = "0.4.2"
 smoldot = { path = "../..", default-features = false, features = ["database-sled", "std"] }
+sqlite = { version = "0.25.3", optional = true }
 structopt = { version = "0.3.21", default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = "0.1.16"
 tracing = { version = "0.1.21", features = ["attributes"] }
