@@ -113,7 +113,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 // Find out the next block height where an authority change will be triggered.
                 let mut overwrite_authorities = None;
                 let earliest_trigger = {
-                    // TODO: this code is clumbsy; rules aren't necessarily respected properly; review and improve
+                    // TODO: this code is clumsy; rules aren't necessarily respected properly; review and improve
                     // Scheduled change that is already finalized.
                     let scheduled = finalized_scheduled_change.as_ref().map(|(n, _)| *n);
 
@@ -266,7 +266,7 @@ impl<T> NonFinalizedTreeInner<T> {
                         header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                         _ => None,
                     }) {
-                        // TODO: this code is clumbsy; rules aren't necessarily respected properly; review and improve
+                        // TODO: this code is clumsy; rules aren't necessarily respected properly; review and improve
                         match grandpa_digest_item {
                             header::GrandpaConsensusLogRef::ScheduledChange(change) => {
                                 let trigger_block_height = node
