@@ -131,11 +131,14 @@ impl NetworkService {
 
         let num_chains = config.chains.len();
         let mut chains = Vec::with_capacity(num_chains);
+        // TODO: this `bootstrap_nodes` field is weird ; should we de-duplicate entry in known_nodes?
         let mut known_nodes = Vec::new();
 
         for chain in config.chains {
             chains.push(service::ChainConfig {
-                bootstrap_nodes: (0..chain.bootstrap_nodes.len()).collect(),
+                bootstrap_nodes: (known_nodes.len()
+                    ..(known_nodes.len() + chain.bootstrap_nodes.len()))
+                    .collect(),
                 in_slots: 25,
                 out_slots: 25,
                 has_grandpa_protocol: chain.has_grandpa_protocol,
