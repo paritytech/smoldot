@@ -317,33 +317,9 @@ impl NetworkService {
 
                         // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
                         // into a `Future<dyn Output = Result<TcpStream, ...>>`.
-                        let socket = match multiaddr_to_url(&start_connect.multiaddr) {
-                            Ok(url) => {
-                                log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, url);
-                                ffi::WebSocket::connect(&url)
-                            }
-                            Err(()) => {
-                                if is_important_peer {
-                                    log::warn!(
-                                        target: "connections",
-                                        "Unsupported multiaddr ({}) when trying to connect to {}",
-                                        start_connect.multiaddr,
-                                        start_connect.expected_peer_id
-                                    );
-                                } else {
-                                    log::debug!(
-                                        target: "connections",
-                                        "Unsupported multiaddr: {}",
-                                        start_connect.multiaddr
-                                    );
-                                }
-
-                                network_service
-                                    .network
-                                    .pending_outcome_err(start_connect.id)
-                                    .await;
-                                continue;
-                            }
+                        let socket = {
+                            log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
+                            ffi::WebSocket::connect(&start_connect.multiaddr.to_string())
                         };
 
                         // TODO: handle dialing timeout here
