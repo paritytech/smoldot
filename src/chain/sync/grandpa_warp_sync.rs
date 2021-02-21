@@ -362,6 +362,7 @@ impl<TSrc> WarpSyncRequest<TSrc> {
             let removed = self.sources.remove(to_remove.0).user_data;
 
             let next_state = if let Some(next_id) = next_id {
+                self.sources[next_id.0].already_tried = true;
                 GrandpaWarpSync::WarpSyncRequest(Self {
                     source_id: next_id,
                     sources: self.sources,
@@ -385,7 +386,7 @@ impl<TSrc> WarpSyncRequest<TSrc> {
 
     /// Submit a GrandPa warp sync response if the request succeeded or `None` if it did not.
     pub fn handle_response(
-        self,
+        mut self,
         mut response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
     ) -> GrandpaWarpSync<TSrc> {
         // Count a response of 0 fragments as a failed response.
@@ -428,6 +429,7 @@ impl<TSrc> WarpSyncRequest<TSrc> {
                     .map(|(id, _)| SourceId(id));
 
                 if let Some(next_id) = next_id {
+                    self.sources[next_id.0].already_tried = true;
                     GrandpaWarpSync::WarpSyncRequest(Self {
                         source_id: next_id,
                         sources: self.sources,
