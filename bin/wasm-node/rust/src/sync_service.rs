@@ -44,6 +44,7 @@ pub use lossy_channel::Receiver as NotificationsReceiver;
 /// Configuration for a [`SyncService`].
 pub struct Config {
     /// State of the finalized chain.
+    // TODO: not needed for parachains
     pub chain_information: chain::chain_information::ChainInformation,
 
     /// Closure that spawns background tasks.
@@ -56,6 +57,29 @@ pub struct Config {
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
     pub network_events_receiver: mpsc::Receiver<network_service::Event>,
+
+    /// Extra fields used when the chain is a parachain.
+    /// If `None`, this chain is a standalone chain or a relay chain.
+    pub parachain: Option<ConfigParachain>,
+}
+
+/// See [`Config::parachain`].
+pub struct ConfigParachain {
+    /// Sync service that synchronizes the relay chain of this parachain.
+    pub relay_chain_sync: Arc<SyncService>,
+
+    /// Index in the network service of [`Config::network_service`] of the relay chain of this
+    /// parachain.
+    pub relay_network_chain_index: usize,
+
+    /// Id of the parachain within the relay chain.
+    ///
+    /// This is an arbitrary number used to identify the parachain within the storage of the
+    /// relay chain.
+    ///
+    /// > **Note**: This information is normally found in the chain specification of the
+    /// >           parachain.
+    pub parachain_id: u32,
 }
 
 /// Identifier for a blocks request to be performed.
@@ -71,16 +95,26 @@ impl SyncService {
     pub async fn new(mut config: Config) -> Self {
         let (to_background, from_foreground) = mpsc::channel(16);
 
-        (config.tasks_executor)(Box::pin(
-            start_sync(
-                config.chain_information,
+        if let Some(config_parachain) = config.parachain {
+            (config.tasks_executor)(Box::pin(start_parachain(
                 from_foreground,
                 config.network_service.0,
                 config.network_service.1,
                 config.network_events_receiver,
-            )
-            .await,
-        ));
+                config_parachain,
+            )));
+        } else {
+            (config.tasks_executor)(Box::pin(
+                start_relay_chain(
+                    config.chain_information,
+                    from_foreground,
+                    config.network_service.0,
+                    config.network_service.1,
+                    config.network_events_receiver,
+                )
+                .await,
+            ));
+        }
 
         SyncService {
             to_background: Mutex::new(to_background),
@@ -156,7 +190,7 @@ impl SyncService {
     }
 }
 
-async fn start_sync(
+async fn start_relay_chain(
     chain_information: chain::chain_information::ChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService>,
@@ -515,6 +549,46 @@ async fn start_sync(
                         sync = sync_idle.into();
                     }
                 },
+            }
+        }
+    }
+}
+
+async fn start_parachain(
+    mut from_foreground: mpsc::Receiver<ToBackground>,
+    network_service: Arc<network_service::NetworkService>,
+    network_chain_index: usize,
+    mut from_network_service: mpsc::Receiver<network_service::Event>,
+    parachain_config: ConfigParachain,
+) {
+    let (_relay_finalized_block_header, mut relay_finalized_blocks_subscription) =
+        parachain_config.relay_chain_sync.subscribe_best().await;
+    let (relay_best_block_header, mut relay_best_blocks_subscription) =
+        parachain_config.relay_chain_sync.subscribe_best().await;
+
+    loop {
+        futures::select! {
+            message = from_foreground.next().fuse() => {
+                // Terminating the parachain sync task if the foreground has closed.
+                let message = match message {
+                    Some(m) => m,
+                    None => return,
+                };
+
+                match message {
+                    ToBackground::Serialize { send_back } => todo!(),
+                    ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
+                        todo!()
+                    },
+                    ToBackground::SubscribeFinalized { send_back } => todo!(),
+                    ToBackground::SubscribeBest { send_back } => todo!(),
+                }
+            },
+            relay_finalized_block = relay_finalized_blocks_subscription.next().fuse() => {
+
+            },
+            relay_best_block = relay_best_blocks_subscription.next().fuse() => {
+
             }
         }
     }

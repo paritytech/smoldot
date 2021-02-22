@@ -321,6 +321,15 @@ pub async fn start_client(
                             }),
                             network_service: (network_service.clone(), chain_index),
                             network_events_receiver: network_event_receivers.pop().unwrap(),
+                            parachain: if let Some((relay_chain_name, parachain_id))  = chain_spec.relay_chain() {
+                                Some(sync_service::ConfigParachain {
+                                    relay_chain_sync: ,
+                                    relay_network_chain_index: ,
+                                    parachain_id,
+                                })
+                            } else {
+                                None
+                            },
                         })
                         .await,
                     );
