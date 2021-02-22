@@ -362,7 +362,6 @@ impl<TSrc> WarpSyncRequest<TSrc> {
             let removed = self.sources.remove(to_remove.0).user_data;
 
             let next_state = if let Some(next_id) = next_id {
-                self.sources[next_id.0].already_tried = true;
                 GrandpaWarpSync::WarpSyncRequest(Self {
                     source_id: next_id,
                     sources: self.sources,
@@ -389,6 +388,8 @@ impl<TSrc> WarpSyncRequest<TSrc> {
         mut self,
         mut response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
     ) -> GrandpaWarpSync<TSrc> {
+        self.sources[self.source_id.0].already_tried = true;
+
         // Count a response of 0 fragments as a failed response.
         if response
             .as_ref()
@@ -429,7 +430,6 @@ impl<TSrc> WarpSyncRequest<TSrc> {
                     .map(|(id, _)| SourceId(id));
 
                 if let Some(next_id) = next_id {
-                    self.sources[next_id.0].already_tried = true;
                     GrandpaWarpSync::WarpSyncRequest(Self {
                         source_id: next_id,
                         sources: self.sources,
@@ -510,7 +510,7 @@ impl<TSrc> WaitingForSources<TSrc> {
     pub fn add_source(mut self, user_data: TSrc) -> GrandpaWarpSync<TSrc> {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
-            already_tried: true,
+            already_tried: false,
         }));
 
         GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
@@ -525,6 +525,7 @@ impl<TSrc> WaitingForSources<TSrc> {
 #[derive(Debug, Copy, Clone)]
 struct Source<TSrc> {
     user_data: TSrc,
-    /// `True` if this source has ever been in a `WarpSyncRequest` returned to the API user.
+    /// `true` if this source has been in a past `WarpSyncRequest`. `false` if the source is
+    /// currently in a `WarpSyncRequest`.
     already_tried: bool,
 }
