@@ -387,7 +387,7 @@ impl Connection {
         };
     }
 
-    /// Queues the given buffer. For WebSocket connections, queries it as a binary frame.
+    /// Queues the given buffer. For WebSocket connections, queues it as a binary frame.
     pub fn send(self: &mut Pin<Box<Self>>, data: &[u8]) {
         unsafe {
             let this = Pin::get_unchecked_mut(self.as_mut());
