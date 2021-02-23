@@ -17,6 +17,8 @@
 
 //! All syncing strategies (optimistic, warp sync, all forks) grouped together.
 
+// TODO: this module needs considerable clean-up
+
 use crate::{
     chain::{
         chain_information,
@@ -26,6 +28,7 @@ use crate::{
 };
 
 use core::{
+    mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
@@ -88,22 +91,33 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 }
 
 pub struct Idle<TRq, TSrc, TBl> {
-    inner: IdleInner<TSrc, TBl>,
+    inner: IdleInner<TRq, TSrc, TBl>,
     shared: Shared,
-    marker: core::marker::PhantomData<TRq>, // TODO: remove
 }
 
-enum IdleInner<TSrc, TBl> {
+enum IdleInner<TRq, TSrc, TBl> {
     Optimistic(optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>),
     /// > **Note**: Must never contain [`grandpa_warp_sync::GrandpaWarpSync::Finished`].
-    GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync<TSrc>),
-    AllForks(all_forks::AllForksSync<TSrc, TBl>),
+    GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>),
+    AllForks(all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>),
+    Poisoned,
 }
 
 struct OptimisticSourceExtra<TSrc> {
     user_data: TSrc,
     best_block_hash: [u8; 32],
     outer_source_id: SourceId,
+}
+
+struct AllForksSourceExtra<TRq, TSrc> {
+    outer_source_id: SourceId,
+    request_user_data: Option<TRq>,
+    user_data: TSrc,
+}
+
+struct GrandpaWarpSyncSourceExtra<TSrc> {
+    outer_source_id: SourceId,
+    user_data: TSrc,
 }
 
 /// Identifier for a source in the [`AllSync`].
@@ -122,28 +136,30 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
         Idle {
-            /*// TODO: use GrandPa warp sync instead
-            inner: IdleInner::GrandpaWarpSync(grandpa_warp_sync::grandpa_warp_sync(
-                grandpa_warp_sync::Config {
-                    start_chain_information: config.chain_information,
+            inner: if true || config.full {
+                // TODO: remove this `true ||` when GP warp sync is ready
+                IdleInner::Optimistic(optimistic::OptimisticSync::new(optimistic::Config {
+                    chain_information: config.chain_information,
                     sources_capacity: config.sources_capacity,
-                },
-            )),*/
-            inner: IdleInner::Optimistic(optimistic::OptimisticSync::new(optimistic::Config {
-                chain_information: config.chain_information,
-                sources_capacity: config.sources_capacity,
-                blocks_capacity: config.blocks_capacity,
-                blocks_request_granularity: config.blocks_request_granularity,
-                download_ahead_blocks: config.download_ahead_blocks,
-                source_selection_randomness_seed: config.source_selection_randomness_seed,
-                full: config.full,
-            })),
+                    blocks_capacity: config.blocks_capacity,
+                    blocks_request_granularity: config.blocks_request_granularity,
+                    download_ahead_blocks: config.download_ahead_blocks,
+                    source_selection_randomness_seed: config.source_selection_randomness_seed,
+                    full: config.full,
+                }))
+            } else {
+                IdleInner::GrandpaWarpSync(grandpa_warp_sync::grandpa_warp_sync(
+                    grandpa_warp_sync::Config {
+                        start_chain_information: config.chain_information,
+                        sources_capacity: config.sources_capacity,
+                    },
+                ))
+            },
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
                 highest_block_on_network: 0,
             },
-            marker: Default::default(),
         }
     }
 
@@ -153,7 +169,28 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.as_chain_information(),
             IdleInner::AllForks(sync) => sync.as_chain_information(),
-            _ => todo!(),
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
+                unreachable!()
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(sync)) => {
+                sync.as_chain_information()
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::NextKey(sync)) => {
+                sync.as_chain_information()
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Verifier(sync)) => {
+                sync.as_chain_information()
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
+                sync,
+            )) => sync.as_chain_information(),
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(sync),
+            ) => sync.as_chain_information(),
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
+                sync,
+            )) => sync.as_chain_information(),
+            IdleInner::Poisoned => unreachable!(),
         }
     }
 
@@ -162,7 +199,28 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.finalized_block_header(),
             IdleInner::AllForks(sync) => sync.finalized_block_header(),
-            _ => todo!(),
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
+                unreachable!()
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(sync)) => {
+                sync.as_chain_information().finalized_block_header
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::NextKey(sync)) => {
+                sync.as_chain_information().finalized_block_header
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Verifier(sync)) => {
+                sync.as_chain_information().finalized_block_header
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
+                sync,
+            )) => sync.as_chain_information().finalized_block_header,
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(sync),
+            ) => sync.as_chain_information().finalized_block_header,
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
+                sync,
+            )) => sync.as_chain_information().finalized_block_header,
+            IdleInner::Poisoned => unreachable!(),
         }
     }
 
@@ -174,7 +232,8 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_header(),
             IdleInner::AllForks(sync) => sync.best_block_header(),
-            _ => todo!(),
+            IdleInner::GrandpaWarpSync(_) => self.finalized_block_header(),
+            IdleInner::Poisoned => unreachable!(),
         }
     }
 
@@ -186,7 +245,11 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_number(),
             IdleInner::AllForks(sync) => sync.best_block_number(),
-            _ => todo!(),
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
+                unreachable!()
+            }
+            IdleInner::GrandpaWarpSync(_) => self.best_block_header().number,
+            IdleInner::Poisoned => unreachable!(),
         }
     }
 
@@ -198,7 +261,11 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_hash(),
             IdleInner::AllForks(sync) => sync.best_block_hash(),
-            _ => todo!(),
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
+                unreachable!()
+            }
+            IdleInner::GrandpaWarpSync(_) => self.best_block_header().hash(),
+            IdleInner::Poisoned => unreachable!(),
         }
     }
 
@@ -211,6 +278,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             IdleInner::Optimistic(_) => false,
             IdleInner::AllForks(_) => true,
             IdleInner::GrandpaWarpSync(_) => false,
+            IdleInner::Poisoned => unreachable!(),
         }
     }
 
@@ -229,20 +297,48 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             self.shared.highest_block_on_network = best_block_number;
         }
 
-        match &mut self.inner {
+        // `inner` is temporarily replaced with `Poisoned`. A new value must be put back before
+        // returning.
+        match mem::replace(&mut self.inner, IdleInner::Poisoned) {
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
                 waiting,
             )) => {
-                //waiting.add_source(user_data);
-                todo!()
+                let outer_source_id_entry = self.shared.sources.vacant_entry();
+                let outer_source_id = SourceId(outer_source_id_entry.key());
+
+                let warp_sync_request = waiting.add_source(GrandpaWarpSyncSourceExtra {
+                    user_data,
+                    outer_source_id,
+                });
+
+                let inner_source_id = warp_sync_request.current_source().0;
+
+                outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
+
+                let action = self
+                    .shared
+                    .grandpa_warp_sync_request_to_request(&warp_sync_request);
+
+                self.inner = IdleInner::GrandpaWarpSync(warp_sync_request.into());
+                (outer_source_id, vec![action])
             }
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
-                waiting,
+                mut ongoing_request,
             )) => {
-                //waiting.add_source(user_data);
-                todo!()
+                let outer_source_id_entry = self.shared.sources.vacant_entry();
+                let outer_source_id = SourceId(outer_source_id_entry.key());
+
+                let inner_source_id = ongoing_request.add_source(GrandpaWarpSyncSourceExtra {
+                    user_data,
+                    outer_source_id,
+                });
+
+                outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
+
+                self.inner = IdleInner::GrandpaWarpSync(ongoing_request.into());
+                (outer_source_id, Vec::new())
             }
-            IdleInner::Optimistic(optimistic) => {
+            IdleInner::Optimistic(mut optimistic) => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
@@ -262,26 +358,39 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     next_actions.push(self.shared.optimistic_action_to_request(action));
                 }
 
+                self.inner = IdleInner::Optimistic(optimistic);
                 (outer_source_id, next_actions)
             }
-            IdleInner::AllForks(all_forks) => {
+            IdleInner::AllForks(mut all_forks) => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
-                let (source, request) =
-                    all_forks.add_source(user_data, best_block_number, best_block_hash);
-                outer_source_id_entry.insert(SourceMapping::AllForks(source.id()));
+                let (source, request) = all_forks.add_source(
+                    AllForksSourceExtra {
+                        user_data,
+                        outer_source_id,
+                        request_user_data: None,
+                    },
+                    best_block_number,
+                    best_block_hash,
+                );
+                let source_id = source.id();
+                outer_source_id_entry.insert(SourceMapping::AllForks(source_id));
 
                 let next_actions = if let Some(request) = request {
-                    vec![self
-                        .shared
-                        .all_forks_request_to_request(source.id(), request)]
+                    vec![self.shared.all_forks_request_to_request(
+                        &mut all_forks,
+                        source_id,
+                        request,
+                    )]
                 } else {
                     Vec::new()
                 };
 
+                self.inner = IdleInner::AllForks(all_forks);
                 (outer_source_id, next_actions)
             }
+            IdleInner::Poisoned => unreachable!(),
             _ => todo!(),
         }
     }
@@ -299,6 +408,12 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         todo!()
     }
 
+    /// Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
     pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         match (
             &mut self.inner,
@@ -308,9 +423,25 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 &mut sync.source_user_data_mut(*src).user_data
             }
             (IdleInner::AllForks(sync), SourceMapping::AllForks(src)) => {
-                sync.source_mut(*src).unwrap().into_user_data()
+                &mut sync.source_mut(*src).unwrap().into_user_data().user_data
             }
-            _ => panic!(), // TODO:
+            (IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)), _) => {
+                unreachable!()
+            }
+            (
+                IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
+                    sync,
+                )),
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => &mut sync.source_user_data_mut(*source_id).user_data,
+            (
+                IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
+                    sync,
+                )),
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => &mut sync.source_user_data_mut(*source_id).user_data,
+            (IdleInner::Poisoned, _) => unreachable!(),
+            _ => todo!(), // TODO: !
         }
     }
 
@@ -355,7 +486,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         BlockAnnounceOutcome::HeaderVerify(HeaderVerify {
                             inner: HeaderVerifyInner::AllForks(verify),
                             shared: self.shared,
-                            marker: Default::default(),
                         })
                     }
                     all_forks::BlockAnnounceOutcome::TooOld(sync) => {
@@ -370,14 +500,19 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         self.inner = IdleInner::AllForks(sync);
                         BlockAnnounceOutcome::NotFinalizedChain(self)
                     }
-                    all_forks::BlockAnnounceOutcome::Disjoint { sync, next_request } => {
-                        self.inner = IdleInner::AllForks(sync);
+                    all_forks::BlockAnnounceOutcome::Disjoint {
+                        mut sync,
+                        next_request,
+                    } => {
                         let next_actions = match next_request {
                             Some(nr) => {
-                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                                vec![self
+                                    .shared
+                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
                             }
                             None => Vec::new(),
                         };
+                        self.inner = IdleInner::AllForks(sync);
                         BlockAnnounceOutcome::Disjoint {
                             sync: self,
                             next_actions,
@@ -389,7 +524,25 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     }
                 }
             }
-            _ => todo!(),
+            (IdleInner::GrandpaWarpSync(sync), &SourceMapping::GrandpaWarpSync(_)) => {
+                // TODO: block announces are simply ignored at the moment
+                self.inner = IdleInner::GrandpaWarpSync(sync);
+                BlockAnnounceOutcome::Disjoint {
+                    sync: self,
+                    next_actions: Vec::new(),
+                }
+            }
+            (IdleInner::Poisoned, _) => unreachable!(),
+
+            // Invalid combinations of syncing state machine and source id.
+            // This indicates a internal bug during the switch from one state machine to the
+            // other.
+            (IdleInner::Optimistic(_), SourceMapping::AllForks(_)) => unreachable!(),
+            (IdleInner::Optimistic(_), SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
+            (IdleInner::GrandpaWarpSync(_), SourceMapping::AllForks(_)) => unreachable!(),
+            (IdleInner::GrandpaWarpSync(_), SourceMapping::Optimistic(_)) => unreachable!(),
+            (IdleInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
+            (IdleInner::AllForks(_), SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
         }
     }
 
@@ -436,7 +589,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         BlocksRequestResponseOutcome::Queued {
                             sync: Idle {
                                 inner: IdleInner::Optimistic(sync),
-                                marker: Default::default(),
                                 shared: self.shared,
                             },
                             next_actions,
@@ -445,7 +597,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     other => BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
                         inner: HeaderVerifyInner::Optimistic(other),
                         shared: self.shared,
-                        marker: Default::default(),
                     }),
                 }
             }
@@ -458,17 +609,18 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
                             inner: HeaderVerifyInner::AllForks(verify),
                             shared: self.shared,
-                            marker: Default::default(),
                         })
                     }
                     all_forks::AncestrySearchResponseOutcome::NotFinalizedChain {
-                        sync,
+                        mut sync,
                         next_request,
                         discarded_unverified_block_headers,
                     } => {
                         let next_actions = match next_request {
                             Some(nr) => {
-                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                                vec![self
+                                    .shared
+                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
                             }
                             None => Vec::new(),
                         };
@@ -482,12 +634,14 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         }
                     }
                     all_forks::AncestrySearchResponseOutcome::Inconclusive {
-                        sync,
+                        mut sync,
                         next_request,
                     } => {
                         let next_actions = match next_request {
                             Some(nr) => {
-                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                                vec![self
+                                    .shared
+                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
                             }
                             None => Vec::new(),
                         };
@@ -500,12 +654,14 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         }
                     }
                     all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain {
-                        sync,
+                        mut sync,
                         next_request,
                     } => {
                         let next_actions = match next_request {
                             Some(nr) => {
-                                vec![self.shared.all_forks_request_to_request(source_id, nr)]
+                                vec![self
+                                    .shared
+                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
                             }
                             None => Vec::new(),
                         };
@@ -524,7 +680,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         }
     }
 
-    /*/// Inject a response to a previously-emitted GrandPa warp sync request.
+    /// Inject a response to a previously-emitted GrandPa warp sync request.
     ///
     /// # Panic
     ///
@@ -532,12 +688,16 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// of a different type.
     ///
     pub fn grandpa_warp_sync_response(
-        self,
+        mut self,
         request_id: RequestId,
         // TODO: don't use crate::network::protocol
-        response: Result<Vec<crate::network::protocol::GrandpaWarpSyncResponseFragment>, ()>,
+        // TODO: Result instead of Option?
+        response: Option<Vec<crate::network::protocol::GrandpaWarpSyncResponseFragment>>,
     ) -> AllSync<TRq, TSrc, TBl> {
-        // TODO: check request_id?!
+        debug_assert!(self.shared.requests.contains(request_id.0));
+        let request = self.shared.requests.remove(request_id.0);
+        assert!(matches!(request, RequestMapping::GrandpaWarpSync));
+
         match self.inner {
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
                 grandpa,
@@ -545,10 +705,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let mut grandpa_warp_sync = grandpa.handle_response(response);
                 loop {
                     match grandpa_warp_sync {
-                        grandpa_warp_sync::GrandpaWarpSync::Finished(Ok((
-                            chain_information,
-                            finalized_block_runtime,
-                        ))) => {}
+                        grandpa_warp_sync::GrandpaWarpSync::Finished(Ok(_)) => todo!(),
                         grandpa_warp_sync::GrandpaWarpSync::Finished(Err(_)) => {
                             todo!()
                         }
@@ -562,6 +719,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                             grandpa_warp_sync = verifier.next();
                         }
                         grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(rq) => {
+                            let action = self.shared.grandpa_warp_sync_request_to_request(&rq);
                             todo!()
                         }
                         grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(rq) => {
@@ -578,9 +736,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            _ => panic!(),
+            _ => unreachable!(),
         }
-    }*/
+    }
 
     /*/// Inject a response to a previously-emitted storage proof request.
     ///
@@ -649,8 +807,8 @@ pub enum RequestDetail {
 
     /// Sending a Grandpa warp sync request is requested.
     GrandpaWarpSync {
-        /// Height of the known finalized block. Starting point of the request.
-        local_finalized_block_height: u64,
+        /// Hash of the known finalized block. Starting point of the request.
+        sync_start_block_hash: [u8; 32],
     },
 
     /// Sending a storage query is requested.
@@ -758,13 +916,12 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
 }
 
 pub struct HeaderVerify<TRq, TSrc, TBl> {
-    inner: HeaderVerifyInner<TSrc, TBl>,
+    inner: HeaderVerifyInner<TRq, TSrc, TBl>,
     shared: Shared,
-    marker: core::marker::PhantomData<TRq>, // TODO: remove
 }
 
-enum HeaderVerifyInner<TSrc, TBl> {
-    AllForks(all_forks::HeaderVerify<TSrc, TBl>),
+enum HeaderVerifyInner<TRq, TSrc, TBl> {
+    AllForks(all_forks::HeaderVerify<AllForksSourceExtra<TRq, TSrc>, TBl>),
     Optimistic(optimistic::ProcessOne<(), OptimisticSourceExtra<TSrc>, TBl>),
 }
 
@@ -802,7 +959,6 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         is_new_best: true,
                         sync: Idle {
                             inner: IdleInner::AllForks(all_forks),
-                            marker: Default::default(),
                             shared: self.shared,
                         }
                         .into(),
@@ -820,7 +976,6 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         is_new_best: true,
                         sync: Idle {
                             inner: IdleInner::Optimistic(sync),
-                            marker: Default::default(),
                             shared: self.shared,
                         }
                         .into(),
@@ -849,11 +1004,13 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 match verify.perform(now_from_unix_epoch, user_data) {
                     all_forks::HeaderVerifyOutcome::Success {
                         is_new_best,
-                        sync,
+                        mut sync,
                         next_request,
                     } => {
                         let next_actions = if let Some(request) = next_request {
-                            vec![self.shared.all_forks_request_to_request(source_id, request)]
+                            vec![self
+                                .shared
+                                .all_forks_request_to_request(&mut sync, source_id, request)]
                         } else {
                             Vec::new()
                         };
@@ -861,7 +1018,6 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                             is_new_best,
                             sync: Idle {
                                 inner: IdleInner::AllForks(sync),
-                                marker: Default::default(),
                                 shared: self.shared,
                             }
                             .into(),
@@ -876,26 +1032,26 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         sync: HeaderVerify {
                             inner: HeaderVerifyInner::AllForks(next_block),
                             shared: self.shared,
-                            marker: Default::default(),
                         }
                         .into(),
                         next_actions: Vec::new(),
                     },
                     all_forks::HeaderVerifyOutcome::Error {
-                        sync,
+                        mut sync,
                         error,
                         user_data,
                         next_request,
                     } => {
                         let next_actions = if let Some(request) = next_request {
-                            vec![self.shared.all_forks_request_to_request(source_id, request)]
+                            vec![self
+                                .shared
+                                .all_forks_request_to_request(&mut sync, source_id, request)]
                         } else {
                             Vec::new()
                         };
                         HeaderVerifyOutcome::Error {
                             sync: Idle {
                                 inner: IdleInner::AllForks(sync),
-                                marker: Default::default(),
                                 shared: self.shared,
                             }
                             .into(),
@@ -912,7 +1068,6 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         sync: HeaderVerify {
                             inner: HeaderVerifyInner::AllForks(next_block),
                             shared: self.shared,
-                            marker: Default::default(),
                         }
                         .into(),
                         next_actions: Vec::new(),
@@ -921,7 +1076,6 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     },
                 }
             }
-            _ => todo!(),
         }
     }
 }
@@ -1008,20 +1162,20 @@ impl Shared {
         }
     }
 
-    fn all_forks_request_to_request(
+    // TODO: don't take the AllForksSync by &mut but by &
+    fn all_forks_request_to_request<TRq, TSrc, TBl>(
         &mut self,
+        all_forks: &mut all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>,
         source_id: all_forks::SourceId,
         request: all_forks::Request,
     ) -> Action {
         let request_id = RequestId(self.requests.insert(RequestMapping::AllForks(source_id)));
 
-        // TODO: O(n), should store id in user data instead
-        let outer_source_id = self
-            .sources
-            .iter()
-            .find(|(id, s)| **s == SourceMapping::AllForks(source_id))
-            .map(|(id, _)| SourceId(id))
-            .unwrap();
+        let outer_source_id = all_forks
+            .source_mut(source_id)
+            .unwrap()
+            .into_user_data()
+            .outer_source_id;
 
         match request {
             all_forks::Request::AncestrySearch {
@@ -1055,12 +1209,30 @@ impl Shared {
         }
     }
 
+    fn grandpa_warp_sync_request_to_request<TSrc>(
+        &mut self,
+        grandpa_warp_sync: &grandpa_warp_sync::WarpSyncRequest<GrandpaWarpSyncSourceExtra<TSrc>>,
+    ) -> Action {
+        let request_id = RequestId(self.requests.insert(RequestMapping::GrandpaWarpSync));
+        let outer_source_id = grandpa_warp_sync.current_source().1.outer_source_id;
+        Action::Start {
+            request_id,
+            source_id: outer_source_id,
+            detail: RequestDetail::GrandpaWarpSync {
+                sync_start_block_hash: grandpa_warp_sync.start_block_hash(),
+            },
+        }
+    }
+
     /// Transitions the sync state machine from the optimistic strategy to the "all-forks"
     /// strategy.
-    fn transition_optimistic_all_forks<TSrc, TBl>(
+    fn transition_optimistic_all_forks<TRq, TSrc, TBl>(
         &mut self,
         optimistic: optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>,
-    ) -> (all_forks::AllForksSync<TSrc, TBl>, Vec<Action>) {
+    ) -> (
+        all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>,
+        Vec<Action>,
+    ) {
         debug_assert!(self
             .requests
             .iter()
@@ -1086,7 +1258,11 @@ impl Shared {
 
         for source in disassembled.sources {
             let (updated_source_id, request) = all_forks.add_source(
-                source.user_data.user_data,
+                AllForksSourceExtra {
+                    user_data: source.user_data.user_data,
+                    outer_source_id: source.user_data.outer_source_id,
+                    request_user_data: None,
+                },
                 source.best_block_number,
                 source.user_data.best_block_hash,
             );
@@ -1116,7 +1292,7 @@ impl Shared {
         }
         self.requests.clear();
         for (source_id, demand) in all_forks_demands {
-            next_actions.push(self.all_forks_request_to_request(source_id, demand));
+            next_actions.push(self.all_forks_request_to_request(&mut all_forks, source_id, demand));
         }
 
         (all_forks, next_actions)
@@ -1126,13 +1302,13 @@ impl Shared {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestMapping {
     Optimistic(optimistic::RequestId),
-    GrandpaWarpSync(usize), // TODO:
+    GrandpaWarpSync,
     AllForks(all_forks::SourceId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SourceMapping {
     Optimistic(optimistic::SourceId),
-    GrandpaWarpSync(usize), // TODO:
+    GrandpaWarpSync(grandpa_warp_sync::SourceId),
     AllForks(all_forks::SourceId),
 }
