@@ -21,7 +21,7 @@
 //! Importantly, its design is oriented towards the particular use case of the light client.
 //!
 //! The [`NetworkService`] spawns one background task (using the [`Config::tasks_executor`]) for
-//! each active WebSocket.
+//! each active connection.
 //!
 //! The objective of the [`NetworkService`] in general is to try stay connected as much as
 //! possible to the nodes of the peer-to-peer network of the chain, and maintain open substreams
@@ -319,7 +319,7 @@ impl NetworkService {
                         // into a `Future<dyn Output = Result<TcpStream, ...>>`.
                         let socket = {
                             log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
-                            ffi::WebSocket::connect(&start_connect.multiaddr.to_string())
+                            ffi::Connection::connect(&start_connect.multiaddr.to_string())
                         };
 
                         // TODO: handle dialing timeout here
@@ -788,11 +788,11 @@ impl fmt::Display for CallProofQueryError {
     }
 }
 
-/// Asynchronous task managing a specific WebSocket connection.
+/// Asynchronous task managing a specific connection.
 ///
 /// `is_important_peer` controls the log level used for problems that happen on this connection.
 async fn connection_task(
-    websocket: impl Future<Output = Result<Pin<Box<ffi::WebSocket>>, ()>>,
+    websocket: impl Future<Output = Result<Pin<Box<ffi::Connection>>, ()>>,
     network_service: Arc<NetworkService>,
     pending_id: service::PendingId,
     expected_peer_id: PeerId,

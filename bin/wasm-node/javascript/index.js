@@ -19,6 +19,7 @@ import { Buffer } from 'buffer';
 import { default as now } from 'performance-now';
 import { default as randombytes } from 'randombytes';
 import Websocket from 'websocket';
+import { default as net } from './tcp-nodejs.js';
 
 import { default as wasm_base64 } from './autogen/wasm.js';
 
@@ -83,14 +84,15 @@ export async function start(config) {
         has_thrown = true;
 
         Object.values(connections).forEach(connection => {
-          // TODO: only for WebSockets
-          connection.onopen = null;
-          connection.onclose = null;
-          connection.onmessage = null;
-          connection.onerror = null;
           if (connection.close) {
+            // WebSocket
+            connection.onopen = null;
+            connection.onclose = null;
+            connection.onmessage = null;
+            connection.onerror = null;
             connection.close();
           } else {
+            // TCP
             connection.destroy();
           }
         });
@@ -208,7 +210,6 @@ export async function start(config) {
             };
 
           } else if (tcp_parsed != null) {
-            const net = require('net');  // TODO: `require` not defined
             if (!net) {
               // `net` module not available, most likely because we're not in NodeJS.
               return 1;
@@ -221,12 +222,15 @@ export async function start(config) {
             connection.setNoDelay();
 
             connection.addEventListener('connect', () => {
+              if (connection.destroyed) return;
               module.exports.connection_open(id);
             });
             connection.addEventListener('close', () => {
+              if (connection.destroyed) return;
               module.exports.connection_closed(id);
             });
             connection.addEventListener('data', (message) => {
+              if (connection.destroyed) return;
               let ptr = module.exports.alloc(message.length);
               message.copy(Buffer.from(module.exports.memory.buffer), ptr);
               module.exports.connection_message(id, ptr, message.length);
@@ -247,14 +251,15 @@ export async function start(config) {
       // Must close and destroy the connection object.
       connection_close: (id) => {
         let connection = connections[id];
-        // TODO: only for WebSockets
-        connection.onopen = null;
-        connection.onclose = null;
-        connection.onmessage = null;
-        connection.onerror = null;
         if (connection.close) {
+          // WebSocket
+          connection.onopen = null;
+          connection.onclose = null;
+          connection.onmessage = null;
+          connection.onerror = null;
           connection.close();
         } else {
+          // TCP
           connection.destroy();
         }
         connections[id] = undefined;
@@ -264,10 +269,12 @@ export async function start(config) {
       // that this function is called only when the connection is in an open state.
       connection_send: (id, ptr, len) => {
         let data = Buffer.from(module.exports.memory.buffer).slice(ptr, ptr + len);
-        let connection = connections[id].send;
+        let connection = connections[id];
         if (connection.send) {
+          // WebSocket
           connection.send(data);
         } else {
+          // TCP
           connection.write(data);
         }
       }
