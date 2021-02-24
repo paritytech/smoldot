@@ -1218,3 +1218,8 @@ fn decode_item_from_parts<'a>(
         _ => unreachable!(),
     })
 }
+
+/// Decodes a SCALE-encoded transaction bytes.
+pub fn transaction_decode(mut bytes: &[u8]) -> Result<Vec<u8>, parity_scale_codec::Error> {
+    parity_scale_codec::Decode::decode(&mut bytes)
+}
