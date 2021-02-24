@@ -22,6 +22,14 @@ use crate::finality::justification::verify::{
 use crate::header::{DigestItemRef, GrandpaConsensusLogRef, Header};
 use crate::network::protocol::GrandpaWarpSyncResponseFragment;
 
+#[derive(Debug, derive_more::Display)]
+pub enum Error {
+    #[display(fmt = "{}", _0)]
+    Verify(VerifyError),
+    #[display(fmt = "Justification target hash doesn't match the hash of the associated header.")]
+    TargetHashMismatch,
+}
+
 #[derive(Debug)]
 pub struct Verifier {
     index: usize,
@@ -60,14 +68,19 @@ impl Verifier {
         }
     }
 
-    pub fn next(mut self) -> Result<Next, VerifyError> {
+    pub fn next(mut self) -> Result<Next, Error> {
         let fragment = &self.fragments[self.index];
+
+        if fragment.justification.target_hash != fragment.header.hash() {
+            return Err(Error::TargetHashMismatch);
+        }
 
         verify(VerifyConfig {
             justification: (&fragment.justification).into(),
             authorities_list: self.authorities_list.iter(),
             authorities_set_id: self.authorities_set_id,
-        })?;
+        })
+        .map_err(Error::Verify)?;
 
         self.authorities_list = fragment
             .header
