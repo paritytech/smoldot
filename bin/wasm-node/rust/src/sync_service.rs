@@ -49,8 +49,9 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
-    /// Access to the network.
-    pub network_service: Arc<network_service::NetworkService>,
+    /// Access to the network, and index of the chain to sync from the point of view of the
+    /// network service.
+    pub network_service: (Arc<network_service::NetworkService>, usize),
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
@@ -74,7 +75,8 @@ impl SyncService {
             start_sync(
                 config.chain_information,
                 from_foreground,
-                config.network_service,
+                config.network_service.0,
+                config.network_service.1,
                 config.network_events_receiver,
             )
             .await,
@@ -158,6 +160,7 @@ async fn start_sync(
     chain_information: chain::chain_information::ChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService>,
+    network_chain_index: usize,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
     // TODO: implicit generics
@@ -195,6 +198,8 @@ async fn start_sync(
 
         // List of block requests currently in progress.
         let mut pending_block_requests = stream::FuturesUnordered::new();
+        // List of grandpa warp sync requests currently in progress.
+        let mut pending_grandpa_requests = stream::FuturesUnordered::new();
 
         // TODO: remove; should store the aborthandle in the TRq user data instead
         let mut pending_requests = HashMap::new();
@@ -239,6 +244,7 @@ async fn start_sync(
 
                             let block_request = network_service.clone().blocks_request(
                                 peer_id.clone(),
+                                network_chain_index,
                                 network::protocol::BlocksRequestConfig {
                                     start: match first_block {
                                         all::BlocksRequestFirstBlock::Hash(h) => {
@@ -273,13 +279,26 @@ async fn start_sync(
                         }
                         all::Action::Start {
                             source_id,
-                            request_id: id,
+                            request_id,
                             detail:
                                 all::RequestDetail::GrandpaWarpSync {
-                                    local_finalized_block_height,
+                                    sync_start_block_hash,
                                 },
                         } => {
-                            todo!()
+                            let peer_id = sync_idle.source_user_data_mut(source_id).clone();
+
+                            let grandpa_request =
+                                network_service.clone().grandpa_warp_sync_request(
+                                    peer_id.clone(),
+                                    network_chain_index,
+                                    sync_start_block_hash,
+                                );
+
+                            let (grandpa_request, abort) = future::abortable(grandpa_request);
+                            pending_requests.insert(request_id, abort);
+
+                            pending_grandpa_requests
+                                .push(async move { (request_id, grandpa_request.await) });
                         }
                         all::Action::Start {
                             source_id,
@@ -369,13 +388,17 @@ async fn start_sync(
                     };
 
                     match network_event {
-                        network_service::Event::Connected { peer_id, best_block_number, best_block_hash } => {
+                        network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
+                            if chain_index == network_chain_index =>
+                        {
                             let (id, requests) = sync_idle.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
                             requests_to_start.extend(requests);
                             sync = sync_idle.into();
                         },
-                        network_service::Event::Disconnected(peer_id) => {
+                        network_service::Event::Disconnected { peer_id, chain_index }
+                            if chain_index == network_chain_index =>
+                        {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let rq_list = sync_idle.remove_source(id);
                             // TODO:
@@ -384,7 +407,9 @@ async fn start_sync(
                             }*/
                             sync = sync_idle.into();
                         },
-                        network_service::Event::BlockAnnounce { peer_id, announce } => {
+                        network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
+                            if chain_index == network_chain_index =>
+                        {
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: stupid to re-encode
@@ -410,6 +435,10 @@ async fn start_sync(
                                 },
                             }
                         },
+                        _ => {
+                            // Different chain index.
+                            sync = sync_idle.into();
+                        }
                     }
 
                 }
@@ -428,7 +457,7 @@ async fn start_sync(
                     match message {
                         ToBackground::Serialize { send_back } => {
                             let chain = sync_idle.as_chain_information();
-                            let serialized = smoldot::database::finalized_serialize::encode_chain_information(chain);
+                            let serialized = smoldot::database::finalized_serialize::encode_chain(chain);
                             let _ = send_back.send(serialized);
                         }
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
@@ -454,7 +483,7 @@ async fn start_sync(
                 (request_id, result) = pending_block_requests.select_next_some() => {
                     pending_requests.remove(&request_id);
 
-                    // A request (e.g. a block request, warp sync request, etc.) has been finished.
+                    // A block(s) request has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
@@ -495,6 +524,27 @@ async fn start_sync(
                                 sync = sync_idle.into();
                             },
                         }
+                    } else {
+                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
+                        // thus no longer interested in the response.
+                        sync = sync_idle.into();
+                    }
+                },
+
+                (request_id, result) = pending_grandpa_requests.select_next_some() => {
+                    pending_requests.remove(&request_id);
+
+                    // A GrandPa warp sync request has been finished.
+                    // `result` is an error if the block request got cancelled by the sync state
+                    // machine.
+                    if let Ok(result) = result {
+                        // Inject the result of the request into the sync state machine.
+                        let new_sync = sync_idle.grandpa_warp_sync_response(
+                            request_id,
+                            result.ok(),
+                        );
+
+                        sync = new_sync;
                     } else {
                         // The sync state machine has emitted a `Action::Cancel` earlier, and is
                         // thus no longer interested in the response.

@@ -29,7 +29,11 @@
 
 use crate::{ffi, network_service, sync_service, transactions_service};
 
-use futures::{channel::oneshot, lock::Mutex, prelude::*};
+use futures::{
+    channel::oneshot,
+    lock::{Mutex, MutexGuard},
+    prelude::*,
+};
 use methods::MethodCall;
 use smoldot::{
     chain_spec, executor, header,
@@ -39,7 +43,7 @@ use smoldot::{
     trie::proof_verify,
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     convert::TryFrom as _,
     iter,
     pin::Pin,
@@ -52,8 +56,9 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
-    /// Service responsible for the networking of the chain.
-    pub network_service: Arc<network_service::NetworkService>,
+    /// Service responsible for the networking of the chain, and index of the chain within the
+    /// network service to handle.
+    pub network_service: (Arc<network_service::NetworkService>, usize),
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
@@ -83,22 +88,48 @@ pub struct Config {
 
 /// Initializes the JSON-RPC service with the given configuration.
 pub async fn start(config: Config) {
-    // TODO: remove; this BTreeMap serves no purpose except convenience
-    let genesis_storage = config
-        .chain_spec
-        .genesis_storage()
-        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-        .collect::<BTreeMap<_, _>>();
-
     let latest_known_runtime = {
-        let code = genesis_storage.get(&b":code"[..]).map(|v| v.to_vec());
-        let heap_pages = genesis_storage.get(&b":heappages"[..]).map(|v| v.to_vec());
+        let code = config
+            .chain_spec
+            .genesis_storage()
+            .find(|(k, _)| k == b":code")
+            .map(|(_, v)| v.to_vec());
+        let heap_pages = config
+            .chain_spec
+            .genesis_storage()
+            .find(|(k, _)| k == b":heappages")
+            .map(|(_, v)| v.to_vec());
 
         // Note that in the absolute we don't need to panic in case of a problem, and could simply
         // store an `Err` and continue running.
         // However, in practice, it seems more sane to detect problems in the genesis block.
-        let runtime = SuccessfulRuntime::from_params(&code, &heap_pages)
+        let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages)
             .expect("invalid runtime at genesis block");
+
+        // As documented in the `metadata` field, we must fill it using the genesis storage.
+        let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
+        loop {
+            match query {
+                metadata::Query::Finished(Ok((metadata, vm))) => {
+                    runtime.virtual_machine = Some(vm);
+                    runtime.metadata = Some(metadata);
+                    break;
+                }
+                metadata::Query::StorageGet(get) => {
+                    let key = get.key_as_vec();
+                    let value = config
+                        .chain_spec
+                        .genesis_storage()
+                        .find(|(k, _)| &**k == key)
+                        .map(|(_, v)| v);
+                    query = get.inject_value(value.map(iter::once));
+                }
+                metadata::Query::Finished(Err(err)) => {
+                    panic!("Unable to generate genesis metadata: {}", err)
+                }
+            }
+        }
+
         LatestKnownRuntime {
             runtime: Ok(runtime),
             runtime_code: code,
@@ -124,7 +155,8 @@ pub async fn start(config: Config) {
     let client = Arc::new(JsonRpcService {
         tasks_executor: Mutex::new(config.tasks_executor),
         chain_spec: config.chain_spec,
-        network_service: config.network_service,
+        network_service: config.network_service.0,
+        network_chain_index: config.network_service.1,
         sync_service: config.sync_service,
         transactions_service: config.transactions_service,
         blocks: Mutex::new(Blocks {
@@ -133,7 +165,6 @@ pub async fn start(config: Config) {
             finalized_block: best_block_hash,
         }),
         genesis_block: config.genesis_block_hash,
-        genesis_storage,
         latest_known_runtime: Mutex::new(latest_known_runtime),
         next_subscription: atomic::AtomicU64::new(0),
         all_heads: Mutex::new(HashMap::new()),
@@ -250,6 +281,7 @@ pub async fn start(config: Config) {
                         .network_service
                         .clone()
                         .storage_query(
+                            client.network_chain_index,
                             &new_best_block_hash,
                             new_best_block_decoded.state_root,
                             iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
@@ -385,6 +417,8 @@ struct JsonRpcService {
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService>,
+    /// See [`Config::network_service`].
+    network_chain_index: usize,
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
     /// See [`Config::transactions_service`].
@@ -397,9 +431,6 @@ struct JsonRpcService {
     /// Keeping the genesis block is important, as the genesis block hash is included in
     /// transaction signatures, and must therefore be queried by upper-level UIs.
     genesis_block: [u8; 32],
-
-    // TODO: remove; unnecessary
-    genesis_storage: BTreeMap<Vec<u8>, Vec<u8>>,
 
     /// Initially contains the runtime code of the genesis block. Whenever a best block is
     /// received, updated with the runtime of this new best block.
@@ -454,8 +485,23 @@ struct LatestKnownRuntime {
 }
 
 struct SuccessfulRuntime {
-    /// Metadata extracted from the runtime.
-    metadata: Vec<u8>,
+    /// Cache of the metadata extracted from the runtime. `None` if unknown.
+    ///
+    /// This cache is filled lazily whenever the JSON-RPC client requests it.
+    ///
+    /// Note that building the metadata might require access to the storage, just like obtaining
+    /// the runtime code. if the runtime code gets an update, we can reasonably assume that the
+    /// network is able to serve us the storage of recent blocks, and thus the changes of being
+    /// able to build the metadata are very high.
+    ///
+    /// If the runtime is the one found in the genesis storage, the metadata must have been been
+    /// filled using the genesis storage as well. If we build the metadata of the genesis runtime
+    /// lazily, chances are that the network wouldn't be able to serve the storage of blocks near
+    /// the genesis.
+    ///
+    /// As documented in the smoldot metadata module, the metadata might access the storage, but
+    /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
+    metadata: Option<Vec<u8>>,
 
     /// Runtime specs extracted from the runtime.
     runtime_spec: executor::CoreVersion,
@@ -492,20 +538,8 @@ impl SuccessfulRuntime {
             }
         };
 
-        let (metadata, vm) = match metadata::metadata_from_virtual_machine_prototype(vm) {
-            Ok(v) => v,
-            Err(error) => {
-                log::warn!(
-                    target: "json-rpc",
-                    "Failed to call Metadata_metadata on new runtime: {}",
-                    error
-                );
-                return Err(());
-            }
-        };
-
         Ok(SuccessfulRuntime {
-            metadata,
+            metadata: None,
             runtime_spec,
             virtual_machine: Some(vm),
         })
@@ -615,6 +649,7 @@ impl JsonRpcService {
                     .network_service
                     .clone()
                     .block_query(
+                        self.network_chain_index,
                         hash,
                         protocol::BlocksRequestFields {
                             header: true,
@@ -744,54 +779,75 @@ impl JsonRpcService {
                         .to_json_response(request_id),
                 );
             }
-            methods::MethodCall::state_getKeysPaged {
-                prefix,
-                count,
-                start_key,
-                hash,
-            } => {
-                assert!(hash.is_none()); // TODO:
-
-                let mut out = Vec::new();
-                // TODO: check whether start_key should be included of the set
-                for (k, _) in self
-                    .genesis_storage
-                    .range(start_key.map(|p| p.0).unwrap_or(Vec::new())..)
+            methods::MethodCall::state_getMetadata {} => {
+                // First, try the cache.
                 {
-                    if out.len() >= usize::try_from(count).unwrap_or(usize::max_value()) {
-                        break;
-                    }
-
-                    if prefix
+                    let latest_known_runtime_lock = self.latest_known_runtime.lock().await;
+                    if let Some(metadata) = latest_known_runtime_lock
+                        .runtime
                         .as_ref()
-                        .map_or(false, |prefix| !k.starts_with(&prefix.0))
+                        .ok()
+                        .and_then(|rt| rt.metadata.as_ref())
                     {
-                        break;
-                    }
+                        self.send_back(
+                            &methods::Response::state_getMetadata(methods::HexString(
+                                metadata.clone(),
+                            )) // TODO: clone :-/
+                            .to_json_response(request_id),
+                        );
 
-                    out.push(methods::HexString(k.to_vec()));
+                        return;
+                    }
                 }
 
-                self.send_back(
-                    &methods::Response::state_getKeysPaged(out).to_json_response(request_id),
-                );
-            }
-            methods::MethodCall::state_getMetadata {} => {
-                let latest_known_runtime = self.latest_known_runtime.lock().await;
+                // TODO: duplicated code compared to smoldot's metadata module
+                let response = match self
+                    .recent_best_block_runtime_call("Metadata_metadata", iter::empty::<Vec<u8>>())
+                    .await
+                {
+                    Ok((return_value, mut latest_known_runtime_lock)) => {
+                        match metadata::remove_metadata_length_prefix(&return_value) {
+                            Ok(metadata) => {
+                                // TODO: lot of cloning
+                                latest_known_runtime_lock.runtime.as_mut().unwrap().metadata =
+                                    Some(metadata.to_vec());
+                                methods::Response::state_getMetadata(methods::HexString(
+                                    metadata.to_vec(),
+                                ))
+                                .to_json_response(request_id)
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    target: "json-rpc",
+                                    "Failed to call Metadata_metadata on runtime: {}",
+                                    error
+                                );
+                                json_rpc::parse::build_error_response(
+                                    request_id,
+                                    json_rpc::parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        &error.to_string(),
+                                    ),
+                                    None,
+                                )
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            target: "json-rpc",
+                            "Failed to call Metadata_metadata on runtime: {}",
+                            error
+                        );
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                            None,
+                        )
+                    }
+                };
 
-                // `runtime` is `Ok` if the latest known runtime is valid, and `Err` if it isn't.
-                self.send_back(&if let Ok(runtime) = &latest_known_runtime.runtime {
-                    methods::Response::state_getMetadata(methods::HexString(
-                        runtime.metadata.clone(), // TODO: expensive clone
-                    ))
-                    .to_json_response(request_id)
-                } else {
-                    json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, "Invalid runtime"),
-                        None,
-                    )
-                });
+                self.send_back(&response);
             }
             methods::MethodCall::state_getStorage { key, hash } => {
                 let hash = hash
@@ -903,7 +959,7 @@ impl JsonRpcService {
                     )
                     .await
                 {
-                    Ok(return_value) => {
+                    Ok((return_value, _)) => {
                         // TODO: we get a u32 when expecting a u64; figure out problem
                         // TODO: don't unwrap
                         let index =
@@ -1330,7 +1386,12 @@ impl JsonRpcService {
                                 match client
                                     .network_service
                                     .clone()
-                                    .storage_query(&block_hash, state_trie_root, iter::once(&key.0))
+                                    .storage_query(
+                                        client.network_chain_index,
+                                        &block_hash,
+                                        state_trie_root,
+                                        iter::once(&key.0),
+                                    )
                                     .await
                                 {
                                     Ok(mut values) => {
@@ -1417,7 +1478,12 @@ impl JsonRpcService {
         let mut result = self
             .network_service
             .clone()
-            .storage_query(hash, &trie_root_hash, iter::once(key))
+            .storage_query(
+                self.network_chain_index,
+                hash,
+                &trie_root_hash,
+                iter::once(key),
+            )
             .await
             .map_err(StorageQueryError::StorageRetrieval)?;
         Ok(result.pop().unwrap())
@@ -1436,6 +1502,7 @@ impl JsonRpcService {
                 .network_service
                 .clone()
                 .block_query(
+                    self.network_chain_index,
                     *hash,
                     protocol::BlocksRequestFields {
                         header: true,
@@ -1461,11 +1528,18 @@ impl JsonRpcService {
     /// but doesn't know anything about the storage, which the runtime might have to access. In
     /// order to make this work, a "call proof" is performed on the network in order to obtain
     /// the storage values corresponding to this call.
-    async fn recent_best_block_runtime_call(
-        self: &Arc<JsonRpcService>,
+    ///
+    /// The latest known runtime might be updated during the execution of this function. If you
+    /// call this function, then re-lock the latest known runtime afterwards, you might not find
+    /// the same runtime as the one that has actually performed the call. To solve that, in
+    /// addition to the value generated by the runtime call, also returns a lock to the latest
+    /// known runtime. This can allow inspecting the runtime that has been used in order to
+    /// perform the call.
+    async fn recent_best_block_runtime_call<'a>(
+        self: &'a Arc<JsonRpcService>,
         method: &str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-    ) -> Result<Vec<u8>, RuntimeCallError> {
+    ) -> Result<(Vec<u8>, MutexGuard<'a, LatestKnownRuntime>), RuntimeCallError> {
         // `latest_known_runtime` should be kept locked as little as possible.
         // In order to handle the possibility a runtime upgrade happening during the operation,
         // every time `latest_known_runtime` is locked, we compare the runtime version stored in
@@ -1495,11 +1569,14 @@ impl JsonRpcService {
             let call_proof = self
                 .network_service
                 .clone()
-                .call_proof_query(protocol::CallProofRequestConfig {
-                    block_hash: runtime_block_hash,
-                    method,
-                    parameter_vectored: parameter_vectored.clone(),
-                })
+                .call_proof_query(
+                    self.network_chain_index,
+                    protocol::CallProofRequestConfig {
+                        block_hash: runtime_block_hash,
+                        method,
+                        parameter_vectored: parameter_vectored.clone(),
+                    },
+                )
                 .await
                 .unwrap_or(Vec::new());
 
@@ -1536,7 +1613,7 @@ impl JsonRpcService {
 
                         let return_value = success.virtual_machine.value().as_ref().to_owned();
                         runtime.virtual_machine = Some(success.virtual_machine.into_prototype());
-                        return Ok(return_value);
+                        return Ok((return_value, latest_known_runtime_lock));
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                         // TODO: put back virtual_machine /!\

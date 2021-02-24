@@ -44,26 +44,26 @@ derive_more = "0.99.11"
 ed25519-dalek = { version = "1.0.1", default-features = false, features = ["alloc", "batch", "u64_backend"] }
 either = { version = "1.6.1", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
-futures = "0.3.12"   # TODO: no-std-ize
+futures = "0.3.13"   # TODO: no-std-ize
 hashbrown = { version = "0.9.1", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.2", default-features = false }
 libsecp256k1 = { version = "0.3.5", default-features = false }
 # Reminder: `log` is forbidden
 merlin = { version = "2.0", default-features = false }
 multihash = "0.11.4"  # TODO: waiting for a crates.io publication of https://github.com/multiformats/rust-multihash/pull/82 that adds no_std support
-nom = { version = "6.1.0", default-features = false, features = ["alloc"] }
+nom = { version = "6.1.2", default-features = false, features = ["alloc"] }
 num-bigint = { version = "0.3.1", default-features = false }
 num-rational = { version = "0.3.2", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.14", default-features = false }
 parity-multiaddr = "0.9.6" # TODO: doesn't support no_std
-pin-project = "1.0.4"
+pin-project = "1.0.5"
 prost = { version = "0.7.0", default-features = false }
 rand = { version = "0.8.3", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.0", default-features = false }
 schnorrkel = { git = "https://github.com/w3f/schnorrkel", rev = "cfdbe9ae865a4d3ffa2566d896d4dbedf5107028", features = ["preaudit_deprecated"] } # TODO: waiting for a publication { version = "0.9.1", default-features = false, features = ["preaudit_deprecated"] }
 serde = { version = "1.0.123", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1.0.61", default-features = false, features = ["alloc", "raw_value"] }
-sha2 = { version = "0.9.2", default-features = false }
+serde_json = { version = "1.0.62", default-features = false, features = ["alloc", "raw_value"] }
+sha2 = { version = "0.9.3", default-features = false }
 slab = "0.4.2"  # TODO: doesn't support no_std and is unmaintained :-/
 smallvec = "1.6.1"
 snow = { version = "0.7.2", default-features = false, features = ["default-resolver"] }
@@ -86,7 +86,7 @@ parity-scale-codec = { version = "2.0.0", features = ["derive"] } # TODO: a lot 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
 corooteen = { git = "https://github.com/tomaka/corooteen", optional = true } # TODO: CRITICAL /!\ this code is veeery unsafe at the moment
-wasmtime = { version = "0.22.0", default-features = false, optional = true }
+wasmtime = { version = "0.23.0", default-features = false, optional = true }
 
 [build-dependencies]
 prost-build = "0.7.0"
