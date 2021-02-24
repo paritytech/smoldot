@@ -88,6 +88,7 @@ impl Verifier {
             .collect();
 
         self.index += 1;
+        self.authorities_set_id += 1;
 
         if self.index == self.fragments.len() {
             Ok(Next::Success {
@@ -119,7 +120,6 @@ impl Verifier {
                 },
             })
         } else {
-            self.authorities_set_id += 1;
             Ok(Next::NotFinished(self))
         }
     }

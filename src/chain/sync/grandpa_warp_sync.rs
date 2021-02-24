@@ -428,13 +428,26 @@ impl<TSrc> WarpSyncRequest<TSrc> {
     ) -> GrandpaWarpSync<TSrc> {
         self.sources[self.source_id.0].already_tried = true;
 
-        // Count a response of 0 fragments as a failed response.
         if response
             .as_ref()
             .map(|fragments| fragments.is_empty())
             .unwrap_or(false)
         {
-            response = None;
+            match self.previous_verifier_values {
+                Some((header, chain_information_finality)) => {
+                    return GrandpaWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+                        state: PostVerificationState {
+                            header,
+                            chain_information_finality,
+                            start_chain_information: self.state.start_chain_information,
+                            warp_sync_source: self.sources.remove(self.source_id.0).user_data,
+                        },
+                    })
+                }
+                // Count a response of 0 fragments as a failed response if we haven't previously
+                // received any fragments.
+                None => response = None,
+            }
         }
 
         match response {
