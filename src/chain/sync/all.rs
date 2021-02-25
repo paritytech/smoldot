@@ -848,7 +848,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         detail: RequestDetail::StorageGet {
                             block_hash: get.warp_sync_header().hash(),
                             state_trie_root: *get.warp_sync_header().state_root,
-                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                            keys: vec![get.key_as_vec()],
                         },
                     };
 
