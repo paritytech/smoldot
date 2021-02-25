@@ -51,7 +51,7 @@ pub fn decode_grandpa_warp_sync_response(
         )),
         |(fragments, is_finished)| GrandpaWarpSyncResponse {
             fragments,
-            is_finished: is_finished.map(|byte| byte == 1),
+            is_finished: is_finished.map(|byte| byte != 0),
         },
     )(bytes)
     .map(|(_, parse_result)| parse_result)
