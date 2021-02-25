@@ -736,7 +736,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         request_id: RequestId,
         // TODO: don't use crate::network::protocol
         // TODO: Result instead of Option?
-        response: Option<Vec<crate::network::protocol::GrandpaWarpSyncResponseFragment>>,
+        response: Option<crate::network::protocol::GrandpaWarpSyncResponse>,
     ) -> GrandpaWarpSyncResponseOutcome<TRq, TSrc, TBl> {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
