@@ -214,6 +214,25 @@ impl<TSrc> StorageGet<TSrc> {
         (&self.state.header).into()
     }
 
+    /// Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        debug_assert!(self.state.sources.contains(source_id.0));
+        &mut self.state.sources[source_id.0].user_data
+    }
+
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.state.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
+    }
+
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     ///
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
@@ -263,6 +282,25 @@ impl<TSrc> NextKey<TSrc> {
         (&self.state.header).into()
     }
 
+    /// Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        debug_assert!(self.state.sources.contains(source_id.0));
+        &mut self.state.sources[source_id.0].user_data
+    }
+
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.state.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
+    }
+
     /// Returns the chain information that is considered fully verified.
     pub fn as_chain_information(&self) -> ChainInformationRef {
         (&self.state.start_chain_information).into()
@@ -296,6 +334,25 @@ impl<TSrc> Verifier<TSrc> {
     /// Returns the chain information that is considered verified.
     pub fn as_chain_information(&self) -> ChainInformationRef {
         (&self.state.start_chain_information).into()
+    }
+
+    /// Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        debug_assert!(self.sources.contains(source_id.0));
+        &mut self.sources[source_id.0].user_data
+    }
+
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
     }
 
     pub fn next(self) -> GrandpaWarpSync<TSrc> {
@@ -528,12 +585,31 @@ pub struct VirtualMachineParamsGet<TSrc> {
 impl<TSrc> VirtualMachineParamsGet<TSrc> {
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
-        &self.state.warp_sync_source
+        &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
     /// Returns the header that we're warp syncing up to.
     pub fn warp_sync_header(&self) -> HeaderRef {
         (&self.state.header).into()
+    }
+
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.state.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
+    }
+
+    /// Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        debug_assert!(self.state.sources.contains(source_id.0));
+        &mut self.state.sources[source_id.0].user_data
     }
 
     /// Returns the chain information that is considered fully verified.

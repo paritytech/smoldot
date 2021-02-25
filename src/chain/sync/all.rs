@@ -326,22 +326,40 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 self.inner = IdleInner::GrandpaWarpSync(warp_sync_request.into());
                 (outer_source_id, vec![action])
             }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
-                mut ongoing_request,
-            )) => {
+            IdleInner::GrandpaWarpSync(mut grandpa) => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
-                let inner_source_id = ongoing_request.add_source(GrandpaWarpSyncSourceExtra {
+                let source_extra = GrandpaWarpSyncSourceExtra {
                     user_data,
                     outer_source_id,
                     best_block_number,
                     best_block_hash,
-                });
+                };
+
+                let inner_source_id = match &mut grandpa {
+                    grandpa_warp_sync::GrandpaWarpSync::Finished(_) => unreachable!(),
+                    grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(_) => unreachable!(),
+                    grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(sync) => {
+                        sync.add_source(source_extra)
+                    }
+                    grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(sync) => {
+                        sync.add_source(source_extra)
+                    }
+                    grandpa_warp_sync::GrandpaWarpSync::Verifier(sync) => {
+                        sync.add_source(source_extra)
+                    }
+                    grandpa_warp_sync::GrandpaWarpSync::StorageGet(sync) => {
+                        sync.add_source(source_extra)
+                    }
+                    grandpa_warp_sync::GrandpaWarpSync::NextKey(sync) => {
+                        sync.add_source(source_extra)
+                    }
+                };
 
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
 
-                self.inner = IdleInner::GrandpaWarpSync(ongoing_request.into());
+                self.inner = IdleInner::GrandpaWarpSync(grandpa);
                 (outer_source_id, Vec::new())
             }
             IdleInner::Optimistic(mut optimistic) => {
@@ -444,6 +462,24 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
                     sync,
                 )),
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => &mut sync.source_user_data_mut(*source_id).user_data,
+            (
+                IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::NextKey(sync)),
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => &mut sync.source_user_data_mut(*source_id).user_data,
+            (
+                IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(sync)),
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => &mut sync.source_user_data_mut(*source_id).user_data,
+            (
+                IdleInner::GrandpaWarpSync(
+                    grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(sync),
+                ),
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => &mut sync.source_user_data_mut(*source_id).user_data,
+            (
+                IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Verifier(sync)),
                 SourceMapping::GrandpaWarpSync(source_id),
             ) => &mut sync.source_user_data_mut(*source_id).user_data,
             (IdleInner::Poisoned, _) => unreachable!(),
@@ -738,7 +774,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                                 next_actions: vec![action],
                             };
                         }
-                        grandpa_warp_sync::GrandpaWarpSync::NextKey(next_key) => {
+                        grandpa_warp_sync::GrandpaWarpSync::NextKey(_next_key) => {
                             todo!()
                         }
                         grandpa_warp_sync::GrandpaWarpSync::Verifier(verifier) => {
@@ -795,7 +831,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         }
     }
 
-    /*/// Inject a response to a previously-emitted storage proof request.
+    /// Inject a response to a previously-emitted storage proof request.
     ///
     /// # Panic
     ///
@@ -815,7 +851,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             _ => panic!(),
         }
-    }*/
+    }
 }
 
 /// Start or cancel a request.
@@ -973,6 +1009,17 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
 /// Outcome of calling [`Idle::grandpa_warp_sync_response`].
 pub enum GrandpaWarpSyncResponseOutcome<TRq, TSrc, TBl> {
     /// GrandPa warp sync response has been processed and might be used later.
+    Queued {
+        sync: Idle<TRq, TSrc, TBl>,
+
+        /// Next requests that must be started.
+        next_actions: Vec<Action>,
+    },
+}
+
+/// Outcome of calling [`Idle::storage_get_response`].
+pub enum StorageGetResponseOutcome<TRq, TSrc, TBl> {
+    /// Storage proof response has been processed and might be used later.
     Queued {
         sync: Idle<TRq, TSrc, TBl>,
 
