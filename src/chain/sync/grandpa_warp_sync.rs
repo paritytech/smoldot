@@ -154,7 +154,11 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         },
                     },
                     runtime,
-                    sources: state.sources.drain().map(|source| source.user_data).collect(),
+                    sources: state
+                        .sources
+                        .drain()
+                        .map(|source| source.user_data)
+                        .collect(),
                 }))
             }
             (babe_fetch_epoch::Query::Finished(Ok((current_epoch, runtime))), None) => {
