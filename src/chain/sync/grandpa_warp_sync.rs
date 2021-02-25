@@ -511,6 +511,11 @@ pub struct VirtualMachineParamsGet<TSrc> {
 }
 
 impl<TSrc> VirtualMachineParamsGet<TSrc> {
+    /// Returns the source that we received the warp sync data from.
+    pub fn warp_sync_source(&self) -> &TSrc {
+        &self.state.warp_sync_source
+    }
+
     /// Returns the header that we're warp syncing up to.
     pub fn warp_sync_header(&self) -> HeaderRef {
         (&self.state.header).into()
