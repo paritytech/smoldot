@@ -34,8 +34,12 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use smoldot::{chain, chain::sync::all, informant::HashDisplay, libp2p, network};
-use std::{collections::HashMap, convert::TryFrom as _, num::NonZeroU32, pin::Pin, sync::Arc};
+use smoldot::{
+    chain, chain::sync::all, informant::HashDisplay, libp2p, network, trie::proof_verify,
+};
+use std::{
+    collections::HashMap, convert::TryFrom as _, iter, num::NonZeroU32, pin::Pin, sync::Arc,
+};
 
 mod lossy_channel;
 
@@ -319,13 +323,32 @@ async fn start_sync(
                                 peer_id.clone(),
                                 network::protocol::StorageProofRequestConfig {
                                     block_hash,
-                                    keys: keys.into_iter(),
+                                    keys: keys.clone().into_iter(),
                                 },
                             );
 
-                            /*let storage_request = async move {
-                                let outcome = storage_request.await;
-                            };*/
+                            let storage_request = async move {
+                                if let Ok(outcome) = storage_request.await {
+                                    // TODO: lots of copying around
+                                    // TODO: log what happens
+                                    keys.into_iter()
+                                        .map(|key| {
+                                            proof_verify::verify_proof(proof_verify::Config {
+                                                proof: outcome.iter().map(|nv| &nv[..]),
+                                                requested_key: key.as_ref(),
+                                                trie_root_hash: &state_trie_root,
+                                            })
+                                            .map_err(|_err| {
+                                                panic!("{:?}", _err); // TODO: remove panic, it's just for debugging
+                                                ()
+                                            })
+                                            .map(|v| v.map(|v| v.to_vec()))
+                                        })
+                                        .collect::<Result<Vec<_>, ()>>()
+                                } else {
+                                    Err(())
+                                }
+                            };
 
                             let (storage_request, abort) = future::abortable(storage_request);
                             pending_requests.insert(request_id, abort);
@@ -593,11 +616,11 @@ async fn start_sync(
                         // Inject the result of the request into the sync state machine.
                         let outcome = sync_idle.storage_get_response(
                             request_id,
-                            result.ok(),
+                            result.map(|list| list.into_iter()),
                         );
 
                         match outcome {
-                            all::GrandpaWarpSyncResponseOutcome::Queued {
+                            all::StorageGetResponseOutcome::Queued {
                                 sync: sync_idle, next_actions
                             } => {
                                 sync = sync_idle.into();

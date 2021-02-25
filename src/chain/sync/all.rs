@@ -24,12 +24,14 @@ use crate::{
         chain_information,
         sync::{all_forks, grandpa_warp_sync, optimistic},
     },
-    executor::host::HostVmPrototype,
+    executor::vm::ExecHint,
     header, verify,
 };
 
+use alloc::{vec, vec::Vec};
+
 use core::{
-    mem,
+    iter, mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
@@ -740,94 +742,22 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         let request = self.shared.requests.remove(request_id.0);
         assert!(matches!(request, RequestMapping::GrandpaWarpSync));
 
-        match self.inner {
+        let from_grandpa_outcome = match self.inner {
             IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
                 grandpa,
             )) => {
-                let mut grandpa_warp_sync = grandpa.handle_response(response);
-                loop {
-                    match grandpa_warp_sync {
-                        grandpa_warp_sync::GrandpaWarpSync::Finished(Ok(_)) => todo!(),
-                        grandpa_warp_sync::GrandpaWarpSync::Finished(Err(_)) => {
-                            todo!()
-                        }
-                        grandpa_warp_sync::GrandpaWarpSync::StorageGet(get) => {
-                            let request_id = RequestId(
-                                self.shared.requests.insert(RequestMapping::GrandpaWarpSync),
-                            );
-                            let outer_source_id = get.warp_sync_source().outer_source_id;
-                            let action = Action::Start {
-                                request_id,
-                                source_id: outer_source_id,
-                                detail: RequestDetail::StorageGet {
-                                    block_hash: get.warp_sync_header().hash(),
-                                    state_trie_root: *get.warp_sync_header().state_root,
-                                    keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                                },
-                            };
-
-                            return GrandpaWarpSyncResponseOutcome::Queued {
-                                sync: Idle {
-                                    inner: IdleInner::GrandpaWarpSync(get.into()),
-                                    ..self
-                                },
-                                next_actions: vec![action],
-                            };
-                        }
-                        grandpa_warp_sync::GrandpaWarpSync::NextKey(_next_key) => {
-                            todo!()
-                        }
-                        grandpa_warp_sync::GrandpaWarpSync::Verifier(verifier) => {
-                            grandpa_warp_sync = verifier.next();
-                        }
-                        grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(rq) => {
-                            let action = self.shared.grandpa_warp_sync_request_to_request(&rq);
-                            return GrandpaWarpSyncResponseOutcome::Queued {
-                                sync: Idle {
-                                    inner: IdleInner::GrandpaWarpSync(rq.into()),
-                                    ..self
-                                },
-                                next_actions: vec![action],
-                            };
-                        }
-                        grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(rq) => {
-                            let request_id = RequestId(
-                                self.shared.requests.insert(RequestMapping::GrandpaWarpSync),
-                            );
-                            let outer_source_id = rq.warp_sync_source().outer_source_id;
-                            let action = Action::Start {
-                                request_id,
-                                source_id: outer_source_id,
-                                detail: RequestDetail::StorageGet {
-                                    block_hash: rq.warp_sync_header().hash(),
-                                    state_trie_root: *rq.warp_sync_header().state_root,
-                                    keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                                },
-                            };
-
-                            return GrandpaWarpSyncResponseOutcome::Queued {
-                                sync: Idle {
-                                    inner: IdleInner::GrandpaWarpSync(rq.into()),
-                                    ..self
-                                },
-                                next_actions: vec![action],
-                            };
-                        }
-                        gp @ grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(_) => {
-                            return GrandpaWarpSyncResponseOutcome::Queued {
-                                sync: Idle {
-                                    inner: IdleInner::GrandpaWarpSync(gp),
-                                    ..self
-                                },
-                                next_actions: Vec::new(),
-                            };
-                        }
-                    }
-                }
+                let grandpa_warp_sync = grandpa.handle_response(response);
+                Self::from_grandpa(grandpa_warp_sync, self.shared)
             }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             _ => unreachable!(),
+        };
+
+        match from_grandpa_outcome {
+            FromGrandpaOutcome::Queued { sync, next_actions } => {
+                GrandpaWarpSyncResponseOutcome::Queued { sync, next_actions }
+            }
         }
     }
 
@@ -838,18 +768,146 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
+    /// Panics if the number of items in the response doesn't match the number of keys that have
+    /// been requested.
+    ///
     pub fn storage_get_response(
-        self,
+        mut self,
         request_id: RequestId,
-        response: Result<Option<impl Iterator<Item = impl AsRef<[u8]>>>, ()>,
+        response: Result<impl Iterator<Item = Option<impl AsRef<[u8]>>>, ()>,
     ) -> StorageGetResponseOutcome<TRq, TSrc, TBl> {
-        // TODO: check request_id?!
-        match self.inner {
-            /*IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(grandpa)) => {
-                AllSync::from_grandpa_inner(grandpa.inject_value(response));
-            }*/
+        debug_assert!(self.shared.requests.contains(request_id.0));
+        let request = self.shared.requests.remove(request_id.0);
+        assert!(matches!(request, RequestMapping::GrandpaWarpSync));
+
+        let mut response = response.unwrap(); // TODO: handle this properly; requires changes in the grandpa warp sync machine
+
+        let from_grandpa_outcome = match self.inner {
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(sync),
+            ) => {
+                // In this state, we expect the response to be one value for `:code` and one for
+                // `:heappages`. As documented, we panic if the number of items isn't 2.
+                let code = response.next().unwrap();
+                let heap_pages = response.next().unwrap();
+                assert!(response.next().is_none());
+
+                // TODO: we use `Oneshot` because the VM is thrown away afterwards; ideally it wouldn't be be thrown away
+                Self::from_grandpa(
+                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot),
+                    self.shared,
+                )
+            }
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(sync)) => {
+                // In this state, we expect the response to be one value. As documented, we panic
+                // if the number of items isn't 1.
+                let value = response.next().unwrap();
+                assert!(response.next().is_none());
+
+                Self::from_grandpa(sync.inject_value(value.map(iter::once)), self.shared)
+            }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             _ => panic!(),
+        };
+
+        match from_grandpa_outcome {
+            FromGrandpaOutcome::Queued { sync, next_actions } => {
+                StorageGetResponseOutcome::Queued { sync, next_actions }
+            }
+        }
+    }
+
+    fn from_grandpa(
+        mut grandpa_warp_sync: grandpa_warp_sync::GrandpaWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>,
+        mut shared: Shared,
+    ) -> FromGrandpaOutcome<TRq, TSrc, TBl> {
+        loop {
+            match grandpa_warp_sync {
+                grandpa_warp_sync::GrandpaWarpSync::Finished(Ok(success)) => {
+                    let (all_forks, next_actions) =
+                        shared.transition_grandpa_warp_sync_all_forks(success);
+                    // TODO: wrong enum being used variant
+                    return FromGrandpaOutcome::Queued {
+                        sync: Idle {
+                            inner: IdleInner::AllForks(all_forks),
+                            shared,
+                        },
+                        next_actions,
+                    };
+                }
+                grandpa_warp_sync::GrandpaWarpSync::Finished(Err(_)) => {
+                    todo!()
+                }
+                grandpa_warp_sync::GrandpaWarpSync::StorageGet(get) => {
+                    let request_id =
+                        RequestId(shared.requests.insert(RequestMapping::GrandpaWarpSync));
+                    let outer_source_id = get.warp_sync_source().outer_source_id;
+                    let action = Action::Start {
+                        request_id,
+                        source_id: outer_source_id,
+                        detail: RequestDetail::StorageGet {
+                            block_hash: get.warp_sync_header().hash(),
+                            state_trie_root: *get.warp_sync_header().state_root,
+                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                        },
+                    };
+
+                    return FromGrandpaOutcome::Queued {
+                        sync: Idle {
+                            inner: IdleInner::GrandpaWarpSync(get.into()),
+                            shared,
+                        },
+                        next_actions: vec![action],
+                    };
+                }
+                grandpa_warp_sync::GrandpaWarpSync::NextKey(_next_key) => {
+                    todo!()
+                }
+                grandpa_warp_sync::GrandpaWarpSync::Verifier(verifier) => {
+                    grandpa_warp_sync = verifier.next();
+                }
+                grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(rq) => {
+                    let action = shared.grandpa_warp_sync_request_to_request(&rq);
+                    return FromGrandpaOutcome::Queued {
+                        sync: Idle {
+                            inner: IdleInner::GrandpaWarpSync(rq.into()),
+                            shared,
+                        },
+                        next_actions: vec![action],
+                    };
+                }
+                grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(rq) => {
+                    let request_id =
+                        RequestId(shared.requests.insert(RequestMapping::GrandpaWarpSync));
+                    let outer_source_id = rq.warp_sync_source().outer_source_id;
+                    let action = Action::Start {
+                        request_id,
+                        source_id: outer_source_id,
+                        detail: RequestDetail::StorageGet {
+                            block_hash: rq.warp_sync_header().hash(),
+                            state_trie_root: *rq.warp_sync_header().state_root,
+                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                        },
+                    };
+
+                    return FromGrandpaOutcome::Queued {
+                        sync: Idle {
+                            inner: IdleInner::GrandpaWarpSync(rq.into()),
+                            shared,
+                        },
+                        next_actions: vec![action],
+                    };
+                }
+                gp @ grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(_) => {
+                    return FromGrandpaOutcome::Queued {
+                        sync: Idle {
+                            inner: IdleInner::GrandpaWarpSync(gp),
+                            shared,
+                        },
+                        next_actions: Vec::new(),
+                    }
+                }
+            }
         }
     }
 }
@@ -1019,6 +1077,18 @@ pub enum GrandpaWarpSyncResponseOutcome<TRq, TSrc, TBl> {
 
 /// Outcome of calling [`Idle::storage_get_response`].
 pub enum StorageGetResponseOutcome<TRq, TSrc, TBl> {
+    /// Storage proof response has been processed and might be used later.
+    Queued {
+        sync: Idle<TRq, TSrc, TBl>,
+
+        /// Next requests that must be started.
+        next_actions: Vec<Action>,
+    },
+}
+
+/// Outcome of calling [`Idle::from_grandpa`].
+// TODO: this hasn't received any brainstorming and is just laid out in a way to match the other two similar enums
+enum FromGrandpaOutcome<TRq, TSrc, TBl> {
     /// Storage proof response has been processed and might be used later.
     Queued {
         sync: Idle<TRq, TSrc, TBl>,
@@ -1415,8 +1485,7 @@ impl Shared {
     /// strategy.
     fn transition_grandpa_warp_sync_all_forks<TRq, TSrc, TBl>(
         &mut self,
-        grandpa: (chain_information::ChainInformation, HostVmPrototype),
-        grandpa_sources: Vec<GrandpaWarpSyncSourceExtra<TSrc>>,
+        grandpa: grandpa_warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
     ) -> (
         all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>,
         Vec<Action>,
@@ -1429,7 +1498,7 @@ impl Shared {
 
         // TODO: arbitrary config
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
-            chain_information: grandpa.0,
+            chain_information: grandpa.chain_information,
             sources_capacity: 1024,
             blocks_capacity: 1024,
             max_disjoint_headers: 1024,
@@ -1437,9 +1506,9 @@ impl Shared {
             full: false,
         });
 
-        let mut all_forks_demands = Vec::with_capacity(grandpa_sources.len());
+        let mut all_forks_demands = Vec::with_capacity(grandpa.sources.len());
 
-        for source in grandpa_sources {
+        for source in grandpa.sources {
             let (updated_source_id, request) = all_forks.add_source(
                 AllForksSourceExtra {
                     user_data: source.user_data,
