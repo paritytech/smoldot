@@ -206,7 +206,10 @@ impl<TSrc> StorageGet<TSrc> {
 
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
-        debug_assert!(self.state.sources.contains(self.state.warp_sync_source_id.0));
+        debug_assert!(self
+            .state
+            .sources
+            .contains(self.state.warp_sync_source_id.0));
         &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
@@ -275,7 +278,10 @@ impl<TSrc> NextKey<TSrc> {
 
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
-        debug_assert!(self.state.sources.contains(self.state.warp_sync_source_id.0));
+        debug_assert!(self
+            .state
+            .sources
+            .contains(self.state.warp_sync_source_id.0));
         &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
@@ -595,7 +601,10 @@ pub struct VirtualMachineParamsGet<TSrc> {
 impl<TSrc> VirtualMachineParamsGet<TSrc> {
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
-        debug_assert!(self.state.sources.contains(self.state.warp_sync_source_id.0));
+        debug_assert!(self
+            .state
+            .sources
+            .contains(self.state.warp_sync_source_id.0));
         &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
