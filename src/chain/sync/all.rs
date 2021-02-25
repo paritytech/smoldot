@@ -839,6 +839,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     todo!()
                 }
                 grandpa_warp_sync::GrandpaWarpSync::StorageGet(get) => {
+                    debug_assert!(shared.requests.is_empty());
                     let request_id =
                         RequestId(shared.requests.insert(RequestMapping::GrandpaWarpSync));
                     let outer_source_id = get.warp_sync_source().outer_source_id;
@@ -877,6 +878,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     };
                 }
                 grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(rq) => {
+                    debug_assert!(shared.requests.is_empty());
                     let request_id =
                         RequestId(shared.requests.insert(RequestMapping::GrandpaWarpSync));
                     let outer_source_id = rq.warp_sync_source().outer_source_id;
@@ -1396,6 +1398,7 @@ impl Shared {
         &mut self,
         grandpa_warp_sync: &grandpa_warp_sync::WarpSyncRequest<GrandpaWarpSyncSourceExtra<TSrc>>,
     ) -> Action {
+        debug_assert!(self.requests.is_empty());
         let request_id = RequestId(self.requests.insert(RequestMapping::GrandpaWarpSync));
         let outer_source_id = grandpa_warp_sync.current_source().1.outer_source_id;
         Action::Start {
