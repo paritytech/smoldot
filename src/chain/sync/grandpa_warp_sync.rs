@@ -206,6 +206,7 @@ impl<TSrc> StorageGet<TSrc> {
 
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
+        debug_assert!(self.state.sources.contains(self.state.warp_sync_source_id.0));
         &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
@@ -274,6 +275,7 @@ impl<TSrc> NextKey<TSrc> {
 
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
+        debug_assert!(self.state.sources.contains(self.state.warp_sync_source_id.0));
         &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
@@ -415,6 +417,7 @@ pub struct WarpSyncRequest<TSrc> {
 impl<TSrc> WarpSyncRequest<TSrc> {
     /// The source to make a GrandPa warp sync request to.
     pub fn current_source(&self) -> (SourceId, &TSrc) {
+        debug_assert!(self.sources.contains(self.source_id.0));
         (self.source_id, &self.sources[self.source_id.0].user_data)
     }
 
@@ -468,6 +471,7 @@ impl<TSrc> WarpSyncRequest<TSrc> {
                 .find(|(_, s)| !s.already_tried)
                 .map(|(id, _)| SourceId(id));
 
+            debug_assert!(self.sources.contains(to_remove.0));
             let removed = self.sources.remove(to_remove.0).user_data;
 
             let next_state = if let Some(next_id) = next_id {
@@ -487,6 +491,7 @@ impl<TSrc> WarpSyncRequest<TSrc> {
 
             (removed, next_state)
         } else {
+            debug_assert!(self.sources.contains(to_remove.0));
             let removed = self.sources.remove(to_remove.0).user_data;
             (removed, GrandpaWarpSync::WarpSyncRequest(self))
         }
@@ -497,6 +502,7 @@ impl<TSrc> WarpSyncRequest<TSrc> {
         mut self,
         response: Option<GrandpaWarpSyncResponse>,
     ) -> GrandpaWarpSync<TSrc> {
+        debug_assert!(self.sources.contains(self.source_id.0));
         self.sources[self.source_id.0].already_tried = true;
 
         // If the response is empty, then we've warp synced to the head of the
@@ -589,6 +595,7 @@ pub struct VirtualMachineParamsGet<TSrc> {
 impl<TSrc> VirtualMachineParamsGet<TSrc> {
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
+        debug_assert!(self.state.sources.contains(self.state.warp_sync_source_id.0));
         &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
