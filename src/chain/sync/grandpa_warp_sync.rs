@@ -195,6 +195,45 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
 }
 
 impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
+    /// Returns the chain information that is considered verified.
+    pub fn as_chain_information(&self) -> ChainInformationRef {
+        match self {
+            Self::StorageGet(storage_get) => storage_get.as_chain_information(),
+            Self::NextKey(next_key) => next_key.as_chain_information(),
+            Self::Verifier(verifier) => verifier.as_chain_information(),
+            Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.as_chain_information(),
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                virtual_machine_params_get.as_chain_information()
+            }
+            Self::WaitingForSources(waiting_for_sources) => {
+                waiting_for_sources.as_chain_information()
+            }
+        }
+    }
+
+    // Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        match self {
+            Self::StorageGet(storage_get) => storage_get.source_user_data_mut(source_id),
+            Self::NextKey(next_key) => next_key.source_user_data_mut(source_id),
+            Self::Verifier(verifier) => verifier.source_user_data_mut(source_id),
+            Self::WarpSyncRequest(warp_sync_request) => {
+                warp_sync_request.source_user_data_mut(source_id)
+            }
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                virtual_machine_params_get.source_user_data_mut(source_id)
+            }
+            Self::WaitingForSources(waiting_for_sources) => {
+                waiting_for_sources.source_user_data_mut(source_id)
+            }
+        }
+    }
+
     fn warp_sync_request_from_next_source(
         sources: slab::Slab<Source<TSrc>>,
         state: PreVerificationState,
