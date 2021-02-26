@@ -55,7 +55,9 @@ pub fn prefix_scan(config: Config<'_>) -> PrefixScan {
 /// Scan of a prefix in progress.
 pub struct PrefixScan {
     trie_root_hash: [u8; 32],
+    // TODO: we have lots of Vecs here; maybe find a way to optimize
     next_queries: Vec<Vec<nibble::Nibble>>,
+    // TODO: we have lots of Vecs here; maybe find a way to optimize
     final_result: Vec<Vec<u8>>,
 }
 
