@@ -538,7 +538,7 @@ impl NetworkService {
                     let mut result = Vec::with_capacity(outcome.len());
                     for key in requested_keys.clone() {
                         result.push(
-                            proof_verify::verify_proof(proof_verify::Config {
+                            proof_verify::verify_proof(proof_verify::VerifyProofConfig {
                                 proof: outcome.iter().map(|nv| &nv[..]),
                                 requested_key: key.as_ref(),
                                 trie_root_hash: &storage_trie_root,

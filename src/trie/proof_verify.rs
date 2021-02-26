@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 use core::{convert::TryFrom as _, iter};
 
 /// Configuration to pass to [`verify_proof`].
-pub struct Config<'a, I> {
+pub struct VerifyProofConfig<'a, I> {
     /// Key whose storage value needs to be found.
     pub requested_key: &'a [u8],
 
@@ -78,9 +78,30 @@ pub struct Config<'a, I> {
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
 pub fn verify_proof<'a>(
-    config: Config<'a, impl Iterator<Item = &'a [u8]> + Clone>,
+    config: VerifyProofConfig<'a, impl Iterator<Item = &'a [u8]> + Clone>,
 ) -> Result<Option<&'a [u8]>, Error> {
-    Ok(trie_node_info(config)?.node_value)
+    Ok(trie_node_info(TrieNodeInfoConfig {
+        requested_key: nibble::bytes_to_nibbles(config.requested_key.iter().cloned()),
+        trie_root_hash: config.trie_root_hash,
+        proof: config.proof,
+    })?
+    .node_value)
+}
+
+/// Configuration to pass to [`trie_node_info`].
+pub struct TrieNodeInfoConfig<'a, K, I> {
+    /// Key whose storage value needs to be found.
+    pub requested_key: K,
+
+    /// Merkle value (or node value) of the root node of the trie.
+    ///
+    /// > **Note**: The Merkle value and node value are always the same for the root node.
+    pub trie_root_hash: &'a [u8; 32],
+
+    /// List of node values of nodes found in the trie. No specific order is required. All the
+    /// values between the root node and the node closest to the requested key have to be included
+    /// in the list in order for the verification to be able to succeed.
+    pub proof: I,
 }
 
 /// Find information about the node whose key is requested by [`Config::requested_key`].
@@ -93,9 +114,12 @@ pub fn verify_proof<'a>(
 /// > **Note**: This does not fully verify the correctness of the node values provided by `proof`.
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
-// TODO: allow passing a list of Nibbles for the requested key
 pub fn trie_node_info<'a>(
-    config: Config<'a, impl Iterator<Item = &'a [u8]> + Clone>,
+    config: TrieNodeInfoConfig<
+        'a,
+        impl Iterator<Item = nibble::Nibble>,
+        impl Iterator<Item = &'a [u8]> + Clone,
+    >,
 ) -> Result<TrieNodeInfo<'a>, Error> {
     // The proof contains node values, while Merkle values will be needed. Create a list of
     // Merkle values, one per entry in `config.proof`.
@@ -127,7 +151,7 @@ pub fn trie_node_info<'a>(
     };
 
     // The verification consists in iterating using `expected_nibbles_iter` and `node_value`.
-    let mut expected_nibbles_iter = nibble::bytes_to_nibbles(config.requested_key.iter().copied());
+    let mut expected_nibbles_iter = config.requested_key;
     loop {
         if node_value.is_empty() {
             return Err(Error::InvalidNodeValue);
@@ -367,7 +391,7 @@ mod tests {
             <[u8; 32]>::try_from(&bytes[..]).unwrap()
         };
 
-        let obtained = super::verify_proof(super::Config {
+        let obtained = super::verify_proof(super::VerifyProofConfig {
             requested_key: &requested_key[..],
             trie_root_hash: &trie_root,
             proof: proof.iter().map(|p| &p[..]),
@@ -429,7 +453,7 @@ mod tests {
             215, 134, 15, 252, 135, 67, 129, 21, 16, 20, 211, 97, 217,
         ];
 
-        let obtained = super::verify_proof(super::Config {
+        let obtained = super::verify_proof(super::VerifyProofConfig {
             requested_key: &requested_key[..],
             trie_root_hash: &trie_root,
             proof: proof.iter().map(|p| &p[..]),
