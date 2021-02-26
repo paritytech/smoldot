@@ -39,8 +39,6 @@ pub enum Error {
     #[display(fmt = "{}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
     #[display(fmt = "{}", _0)]
-    Verifier(warp_sync::Error),
-    #[display(fmt = "{}", _0)]
     BabeFetchEpoch(babe_fetch_epoch::Error),
     #[display(fmt = "{}", _0)]
     NewRuntime(NewErr),
