@@ -53,6 +53,11 @@ pub enum NibbleFromU8Error {
     TooLarge,
 }
 
+/// Returns an iterator of all possible nibble values.
+pub fn all_nibbles() -> impl ExactSizeIterator<Item = Nibble> {
+    (0..16).map(Nibble)
+}
+
 /// Turns an iterator of bytes into an iterator of nibbles corresponding to these bytes.
 ///
 /// For each byte, the iterator yields a nibble containing the 4 most significant bits then a
