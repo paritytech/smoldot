@@ -173,7 +173,7 @@ impl core::str::FromStr for NodeKey {
         let mut out = [0; 32];
         out.copy_from_slice(&bytes);
 
-        ed25519_dalek::SecretKey::from_bytes(&out).map_err(|_| NodeKeyParseError::BadKey)?;
+        ed25519_zebra::SecretKey::from_bytes(&out).map_err(|_| NodeKeyParseError::BadKey)?;
 
         Ok(NodeKey(out))
     }
