@@ -98,7 +98,7 @@ pub struct Idle<TRq, TSrc, TBl> {
 enum IdleInner<TRq, TSrc, TBl> {
     Optimistic(optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>),
     /// > **Note**: Must never contain [`grandpa_warp_sync::GrandpaWarpSync::Finished`].
-    GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>),
+    GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>),
     AllForks(all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>),
     Poisoned,
 }
@@ -169,27 +169,24 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.as_chain_information(),
             IdleInner::AllForks(sync) => sync.as_chain_information(),
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
-                unreachable!()
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(sync)) => {
-                sync.as_chain_information()
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::NextKey(sync)) => {
-                sync.as_chain_information()
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Verifier(sync)) => {
-                sync.as_chain_information()
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(sync),
+            ) => sync.as_chain_information(),
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync::NextKey(
+                sync,
+            )) => sync.as_chain_information(),
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync::Verifier(
                 sync,
             )) => sync.as_chain_information(),
             IdleInner::GrandpaWarpSync(
-                grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(sync),
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(sync),
             ) => sync.as_chain_information(),
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
-                sync,
-            )) => sync.as_chain_information(),
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(sync),
+            ) => sync.as_chain_information(),
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WaitingForSources(sync),
+            ) => sync.as_chain_information(),
             IdleInner::Poisoned => unreachable!(),
         }
     }
@@ -199,27 +196,24 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.finalized_block_header(),
             IdleInner::AllForks(sync) => sync.finalized_block_header(),
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
-                unreachable!()
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(sync)) => {
-                sync.as_chain_information().finalized_block_header
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::NextKey(sync)) => {
-                sync.as_chain_information().finalized_block_header
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Verifier(sync)) => {
-                sync.as_chain_information().finalized_block_header
-            }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(sync),
+            ) => sync.as_chain_information().finalized_block_header,
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync::NextKey(
+                sync,
+            )) => sync.as_chain_information().finalized_block_header,
+            IdleInner::GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync::Verifier(
                 sync,
             )) => sync.as_chain_information().finalized_block_header,
             IdleInner::GrandpaWarpSync(
-                grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(sync),
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(sync),
             ) => sync.as_chain_information().finalized_block_header,
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
-                sync,
-            )) => sync.as_chain_information().finalized_block_header,
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(sync),
+            ) => sync.as_chain_information().finalized_block_header,
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WaitingForSources(sync),
+            ) => sync.as_chain_information().finalized_block_header,
             IdleInner::Poisoned => unreachable!(),
         }
     }
@@ -245,9 +239,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_number(),
             IdleInner::AllForks(sync) => sync.best_block_number(),
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
-                unreachable!()
-            }
             IdleInner::GrandpaWarpSync(_) => self.best_block_header().number,
             IdleInner::Poisoned => unreachable!(),
         }
@@ -261,9 +252,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         match &self.inner {
             IdleInner::Optimistic(sync) => sync.best_block_hash(),
             IdleInner::AllForks(sync) => sync.best_block_hash(),
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)) => {
-                unreachable!()
-            }
             IdleInner::GrandpaWarpSync(_) => self.best_block_header().hash(),
             IdleInner::Poisoned => unreachable!(),
         }
@@ -300,9 +288,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         // `inner` is temporarily replaced with `Poisoned`. A new value must be put back before
         // returning.
         match mem::replace(&mut self.inner, IdleInner::Poisoned) {
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
-                waiting,
-            )) => {
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WaitingForSources(waiting),
+            ) => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
@@ -322,9 +310,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 self.inner = IdleInner::GrandpaWarpSync(warp_sync_request.into());
                 (outer_source_id, vec![action])
             }
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
-                mut ongoing_request,
-            )) => {
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(mut ongoing_request),
+            ) => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
@@ -425,19 +413,16 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             (IdleInner::AllForks(sync), SourceMapping::AllForks(src)) => {
                 &mut sync.source_mut(*src).unwrap().into_user_data().user_data
             }
-            (IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::Finished(_)), _) => {
-                unreachable!()
-            }
             (
-                IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
-                    sync,
-                )),
+                IdleInner::GrandpaWarpSync(
+                    grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(sync),
+                ),
                 SourceMapping::GrandpaWarpSync(source_id),
             ) => &mut sync.source_user_data_mut(*source_id).user_data,
             (
-                IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(
-                    sync,
-                )),
+                IdleInner::GrandpaWarpSync(
+                    grandpa_warp_sync::InProgressGrandpaWarpSync::WaitingForSources(sync),
+                ),
                 SourceMapping::GrandpaWarpSync(source_id),
             ) => &mut sync.source_user_data_mut(*source_id).user_data,
             (IdleInner::Poisoned, _) => unreachable!(),
@@ -699,33 +684,32 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         assert!(matches!(request, RequestMapping::GrandpaWarpSync));
 
         match self.inner {
-            IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(
-                grandpa,
-            )) => {
+            IdleInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(grandpa),
+            ) => {
                 let mut grandpa_warp_sync = grandpa.handle_response(response);
                 loop {
                     match grandpa_warp_sync {
-                        grandpa_warp_sync::GrandpaWarpSync::Finished(Ok(_)) => todo!(),
-                        grandpa_warp_sync::GrandpaWarpSync::Finished(Err(_)) => {
+                        grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(get) => {
                             todo!()
                         }
-                        grandpa_warp_sync::GrandpaWarpSync::StorageGet(get) => {
+                        grandpa_warp_sync::InProgressGrandpaWarpSync::NextKey(next_key) => {
                             todo!()
                         }
-                        grandpa_warp_sync::GrandpaWarpSync::NextKey(next_key) => {
-                            todo!()
+                        grandpa_warp_sync::InProgressGrandpaWarpSync::Verifier(verifier) => {
+                            let (next_grandpa_warp_sync, _error) = verifier.next();
+                            grandpa_warp_sync = next_grandpa_warp_sync;
                         }
-                        grandpa_warp_sync::GrandpaWarpSync::Verifier(verifier) => {
-                            grandpa_warp_sync = verifier.next();
-                        }
-                        grandpa_warp_sync::GrandpaWarpSync::WarpSyncRequest(rq) => {
+                        grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(rq) => {
                             let action = self.shared.grandpa_warp_sync_request_to_request(&rq);
                             todo!()
                         }
-                        grandpa_warp_sync::GrandpaWarpSync::VirtualMachineParamsGet(rq) => {
+                        grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(
+                            rq,
+                        ) => {
                             todo!()
                         }
-                        gp @ grandpa_warp_sync::GrandpaWarpSync::WaitingForSources(_) => {
+                        gp @ grandpa_warp_sync::InProgressGrandpaWarpSync::WaitingForSources(_) => {
                             return AllSync::Idle(Idle {
                                 inner: IdleInner::GrandpaWarpSync(gp),
                                 ..self
@@ -754,7 +738,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     ) -> StorageGetResponseOutcome<TRq, TSrc, TBl> {
         // TODO: check request_id?!
         match self.inner {
-            /*IdleInner::GrandpaWarpSync(grandpa_warp_sync::GrandpaWarpSync::StorageGet(grandpa)) => {
+            /*IdleInner::GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(grandpa)) => {
                 AllSync::from_grandpa_inner(grandpa.inject_value(response));
             }*/
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
