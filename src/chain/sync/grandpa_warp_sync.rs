@@ -198,17 +198,20 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
     /// Returns the chain information that is considered verified.
     pub fn as_chain_information(&self) -> ChainInformationRef {
         match self {
-            Self::StorageGet(storage_get) => storage_get.as_chain_information(),
-            Self::NextKey(next_key) => next_key.as_chain_information(),
-            Self::Verifier(verifier) => verifier.as_chain_information(),
-            Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.as_chain_information(),
+            Self::StorageGet(storage_get) => &storage_get.state.start_chain_information,
+            Self::NextKey(next_key) => &next_key.state.start_chain_information,
+            Self::Verifier(verifier) => &verifier.state.start_chain_information,
+            Self::WarpSyncRequest(warp_sync_request) => {
+                &warp_sync_request.state.start_chain_information
+            }
             Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
-                virtual_machine_params_get.as_chain_information()
+                &virtual_machine_params_get.state.start_chain_information
             }
             Self::WaitingForSources(waiting_for_sources) => {
-                waiting_for_sources.as_chain_information()
+                &waiting_for_sources.state.start_chain_information
             }
         }
+        .into()
     }
 
     // Returns the user data (`TSrc`) corresponding to the given source.
@@ -218,20 +221,19 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
     /// Panics if the [`SourceId`] is invalid.
     ///
     pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        match self {
-            Self::StorageGet(storage_get) => storage_get.source_user_data_mut(source_id),
-            Self::NextKey(next_key) => next_key.source_user_data_mut(source_id),
-            Self::Verifier(verifier) => verifier.source_user_data_mut(source_id),
-            Self::WarpSyncRequest(warp_sync_request) => {
-                warp_sync_request.source_user_data_mut(source_id)
-            }
+        let sources = match self {
+            Self::StorageGet(storage_get) => &mut storage_get.state.sources,
+            Self::NextKey(next_key) => &mut next_key.state.sources,
+            Self::Verifier(verifier) => &mut verifier.sources,
+            Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
             Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
-                virtual_machine_params_get.source_user_data_mut(source_id)
+                &mut virtual_machine_params_get.state.sources
             }
-            Self::WaitingForSources(waiting_for_sources) => {
-                waiting_for_sources.source_user_data_mut(source_id)
-            }
-        }
+            Self::WaitingForSources(waiting_for_sources) => &mut waiting_for_sources.sources,
+        };
+
+        debug_assert!(sources.contains(source_id.0));
+        &mut sources[source_id.0].user_data
     }
 
     fn warp_sync_request_from_next_source(
@@ -289,17 +291,6 @@ impl<TSrc> StorageGet<TSrc> {
         (&self.state.header).into()
     }
 
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.state.sources.contains(source_id.0));
-        &mut self.state.sources[source_id.0].user_data
-    }
-
     /// Add a source to the list of sources.
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         SourceId(self.state.sources.insert(Source {
@@ -313,11 +304,6 @@ impl<TSrc> StorageGet<TSrc> {
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
     pub fn key_as_vec(&self) -> Vec<u8> {
         self.inner.key_as_vec()
-    }
-
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
     }
 
     /// Injects the corresponding storage value.
@@ -361,28 +347,12 @@ impl<TSrc> NextKey<TSrc> {
         (&self.state.header).into()
     }
 
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.state.sources.contains(source_id.0));
-        &mut self.state.sources[source_id.0].user_data
-    }
-
     /// Add a source to the list of sources.
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         SourceId(self.state.sources.insert(Source {
             user_data,
             already_tried: false,
         }))
-    }
-
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
     }
 
     /// Injects the key.
@@ -411,22 +381,6 @@ pub struct Verifier<TSrc> {
 }
 
 impl<TSrc> Verifier<TSrc> {
-    /// Returns the chain information that is considered verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.sources.contains(source_id.0));
-        &mut self.sources[source_id.0].user_data
-    }
-
     /// Add a source to the list of sources.
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         SourceId(self.sources.insert(Source {
@@ -528,22 +482,6 @@ impl<TSrc> WarpSyncRequest<TSrc> {
                 .finalized_block_header
                 .hash(),
         }
-    }
-
-    /// Returns the chain information that is considered verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.sources.contains(source_id.0));
-        &mut self.sources[source_id.0].user_data
     }
 
     /// Add a source to the list of sources.
@@ -683,22 +621,6 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         }))
     }
 
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.state.sources.contains(source_id.0));
-        &mut self.state.sources[source_id.0].user_data
-    }
-
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
-    }
-
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn set_virtual_machine_params(
@@ -759,22 +681,6 @@ impl<TSrc> WaitingForSources<TSrc> {
             state: self.state,
             previous_verifier_values: self.previous_verifier_values,
         }
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.sources.contains(source_id.0));
-        &mut self.sources[source_id.0].user_data
-    }
-
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
     }
 }
 
