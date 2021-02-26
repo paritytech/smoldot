@@ -77,9 +77,9 @@ pub struct VerifyProofConfig<'a, I> {
 /// > **Note**: This does not fully verify the correctness of the node values provided by `proof`.
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
-pub fn verify_proof<'a>(
-    config: VerifyProofConfig<'a, impl Iterator<Item = &'a [u8]> + Clone>,
-) -> Result<Option<&'a [u8]>, Error> {
+pub fn verify_proof<'a, 'b>(
+    config: VerifyProofConfig<'a, impl Iterator<Item = &'b [u8]> + Clone>,
+) -> Result<Option<&'b [u8]>, Error> {
     Ok(trie_node_info(TrieNodeInfoConfig {
         requested_key: nibble::bytes_to_nibbles(config.requested_key.iter().cloned()),
         trie_root_hash: config.trie_root_hash,
@@ -114,13 +114,13 @@ pub struct TrieNodeInfoConfig<'a, K, I> {
 /// > **Note**: This does not fully verify the correctness of the node values provided by `proof`.
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
-pub fn trie_node_info<'a>(
+pub fn trie_node_info<'a, 'b>(
     config: TrieNodeInfoConfig<
         'a,
         impl Iterator<Item = nibble::Nibble>,
-        impl Iterator<Item = &'a [u8]> + Clone,
+        impl Iterator<Item = &'b [u8]> + Clone,
     >,
-) -> Result<TrieNodeInfo<'a>, Error> {
+) -> Result<TrieNodeInfo<'b>, Error> {
     // The proof contains node values, while Merkle values will be needed. Create a list of
     // Merkle values, one per entry in `config.proof`.
     let merkle_values = config

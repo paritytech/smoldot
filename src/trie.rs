@@ -91,6 +91,7 @@ mod nibble;
 
 pub mod calculate_root;
 pub mod node_value;
+pub mod prefix_proof;
 pub mod proof_verify;
 pub mod trie_structure;
 
