@@ -28,7 +28,7 @@ use crate::{
     },
     finality::grandpa::warp_sync,
     header::{Header, HeaderRef},
-    network::protocol::GrandpaWarpSyncResponseFragment,
+    network::protocol::GrandpaWarpSyncResponse,
 };
 
 /// Problem encountered during a call to [`grandpa_warp_sync`].
@@ -38,8 +38,6 @@ pub enum Error {
     MissingCode,
     #[display(fmt = "{}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
-    #[display(fmt = "{}", _0)]
-    Verifier(warp_sync::Error),
     #[display(fmt = "{}", _0)]
     BabeFetchEpoch(babe_fetch_epoch::Error),
     #[display(fmt = "{}", _0)]
@@ -55,8 +53,8 @@ pub struct Config {
 }
 
 /// Starts syncing via GrandPa warp sync.
-pub fn grandpa_warp_sync<TSrc>(config: Config) -> GrandpaWarpSync<TSrc> {
-    GrandpaWarpSync::WaitingForSources(WaitingForSources {
+pub fn grandpa_warp_sync<TSrc>(config: Config) -> InProgressGrandpaWarpSync<TSrc> {
+    InProgressGrandpaWarpSync::WaitingForSources(WaitingForSources {
         state: PreVerificationState {
             start_chain_information: config.start_chain_information,
         },
@@ -71,11 +69,27 @@ pub fn grandpa_warp_sync<TSrc>(config: Config) -> GrandpaWarpSync<TSrc> {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(usize);
 
+/// The result of a successful warp sync.
+pub struct Success<TSrc> {
+    /// The synced chain information.
+    pub chain_information: ChainInformation,
+    /// The runtime constructed in `VirtualMachineParamsGet`.
+    pub runtime: HostVmPrototype,
+    /// The list of sources that were added to the state machine.
+    pub sources: Vec<TSrc>,
+}
+
 /// The GrandPa warp sync state machine.
 #[derive(derive_more::From)]
 pub enum GrandpaWarpSync<TSrc> {
     /// Warp syncing is over.
-    Finished(Result<(ChainInformation, HostVmPrototype), Error>),
+    Finished(Result<Success<TSrc>, Error>),
+    /// Warp syncing is in progress,
+    InProgress(InProgressGrandpaWarpSync<TSrc>),
+}
+
+#[derive(derive_more::From)]
+pub enum InProgressGrandpaWarpSync<TSrc> {
     /// Loading a storage value is required in order to continue.
     #[from]
     StorageGet(StorageGet<TSrc>),
@@ -100,7 +114,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
     fn from_babe_fetch_epoch_query(
         query: babe_fetch_epoch::Query,
         fetched_current_epoch: Option<PartialBabeEpochInformation>,
-        state: PostVerificationState<TSrc>,
+        mut state: PostVerificationState<TSrc>,
     ) -> Self {
         match (query, fetched_current_epoch) {
             (babe_fetch_epoch::Query::Finished(Ok((next_epoch, runtime))), Some(current_epoch)) => {
@@ -119,8 +133,8 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         _ => unreachable!(),
                     };
 
-                Self::Finished(Ok((
-                    ChainInformation {
+                Self::Finished(Ok(Success {
+                    chain_information: ChainInformation {
                         finalized_block_header: state.header,
                         finality: state.chain_information_finality,
                         consensus: ChainInformationConsensus::Babe {
@@ -144,7 +158,12 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         },
                     },
                     runtime,
-                )))
+                    sources: state
+                        .sources
+                        .drain()
+                        .map(|source| source.user_data)
+                        .collect(),
+                }))
             }
             (babe_fetch_epoch::Query::Finished(Ok((current_epoch, runtime))), None) => {
                 let babe_next_epoch_query =
@@ -158,19 +177,88 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                 Self::Finished(Err(Error::BabeFetchEpoch(error)))
             }
             (babe_fetch_epoch::Query::StorageGet(storage_get), fetched_current_epoch) => {
-                Self::StorageGet(StorageGet {
+                Self::InProgress(InProgressGrandpaWarpSync::StorageGet(StorageGet {
                     inner: storage_get,
                     fetched_current_epoch,
                     state,
-                })
+                }))
             }
             (babe_fetch_epoch::Query::NextKey(next_key), fetched_current_epoch) => {
-                Self::NextKey(NextKey {
+                Self::InProgress(InProgressGrandpaWarpSync::NextKey(NextKey {
                     inner: next_key,
                     fetched_current_epoch,
                     state,
-                })
+                }))
             }
+        }
+    }
+}
+
+impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
+    /// Returns the chain information that is considered verified.
+    pub fn as_chain_information(&self) -> ChainInformationRef {
+        match self {
+            Self::StorageGet(storage_get) => &storage_get.state.start_chain_information,
+            Self::NextKey(next_key) => &next_key.state.start_chain_information,
+            Self::Verifier(verifier) => &verifier.state.start_chain_information,
+            Self::WarpSyncRequest(warp_sync_request) => {
+                &warp_sync_request.state.start_chain_information
+            }
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                &virtual_machine_params_get.state.start_chain_information
+            }
+            Self::WaitingForSources(waiting_for_sources) => {
+                &waiting_for_sources.state.start_chain_information
+            }
+        }
+        .into()
+    }
+
+    // Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        let sources = match self {
+            Self::StorageGet(storage_get) => &mut storage_get.state.sources,
+            Self::NextKey(next_key) => &mut next_key.state.sources,
+            Self::Verifier(verifier) => &mut verifier.sources,
+            Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                &mut virtual_machine_params_get.state.sources
+            }
+            Self::WaitingForSources(waiting_for_sources) => &mut waiting_for_sources.sources,
+        };
+
+        debug_assert!(sources.contains(source_id.0));
+        &mut sources[source_id.0].user_data
+    }
+
+    fn warp_sync_request_from_next_source(
+        sources: slab::Slab<Source<TSrc>>,
+        state: PreVerificationState,
+        previous_verifier_values: Option<(Header, ChainInformationFinality)>,
+    ) -> Self {
+        let next_id = sources
+            .iter()
+            .find(|(_, s)| !s.already_tried)
+            .map(|(id, _)| SourceId(id));
+
+        if let Some(next_id) = next_id {
+            Self::WarpSyncRequest(WarpSyncRequest {
+                source_id: next_id,
+                sources,
+                state: state,
+                previous_verifier_values,
+            })
+        } else {
+            Self::WaitingForSources(WaitingForSources {
+                sources,
+                state,
+                previous_verifier_values,
+            })
         }
     }
 }
@@ -191,7 +279,11 @@ impl<TSrc> StorageGet<TSrc> {
 
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
-        &self.state.warp_sync_source
+        debug_assert!(self
+            .state
+            .sources
+            .contains(self.state.warp_sync_source_id.0));
+        &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
     /// Returns the header that we're warp syncing up to.
@@ -199,16 +291,19 @@ impl<TSrc> StorageGet<TSrc> {
         (&self.state.header).into()
     }
 
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.state.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
+    }
+
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     ///
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
     pub fn key_as_vec(&self) -> Vec<u8> {
         self.inner.key_as_vec()
-    }
-
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
     }
 
     /// Injects the corresponding storage value.
@@ -240,7 +335,11 @@ impl<TSrc> NextKey<TSrc> {
 
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> &TSrc {
-        &self.state.warp_sync_source
+        debug_assert!(self
+            .state
+            .sources
+            .contains(self.state.warp_sync_source_id.0));
+        &self.state.sources[self.state.warp_sync_source_id.0].user_data
     }
 
     /// Returns the header that we're warp syncing up to.
@@ -248,9 +347,12 @@ impl<TSrc> NextKey<TSrc> {
         (&self.state.header).into()
     }
 
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.state.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
     }
 
     /// Injects the key.
@@ -275,49 +377,70 @@ pub struct Verifier<TSrc> {
     warp_sync_source_id: SourceId,
     sources: slab::Slab<Source<TSrc>>,
     final_set_of_fragments: bool,
+    previous_verifier_values: Option<(Header, ChainInformationFinality)>,
 }
 
 impl<TSrc> Verifier<TSrc> {
-    /// Returns the chain information that is considered verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
     }
 
-    pub fn next(mut self) -> GrandpaWarpSync<TSrc> {
+    pub fn next(self) -> (InProgressGrandpaWarpSync<TSrc>, Option<warp_sync::Error>) {
         match self.verifier.next() {
-            Ok(warp_sync::Next::NotFinished(next_verifier)) => GrandpaWarpSync::Verifier(Self {
-                verifier: next_verifier,
-                state: self.state,
-                sources: self.sources,
-                warp_sync_source_id: self.warp_sync_source_id,
-                final_set_of_fragments: self.final_set_of_fragments,
-            }),
+            Ok(warp_sync::Next::NotFinished(next_verifier)) => (
+                InProgressGrandpaWarpSync::Verifier(Self {
+                    verifier: next_verifier,
+                    state: self.state,
+                    sources: self.sources,
+                    warp_sync_source_id: self.warp_sync_source_id,
+                    final_set_of_fragments: self.final_set_of_fragments,
+                    previous_verifier_values: self.previous_verifier_values,
+                }),
+                None,
+            ),
             Ok(warp_sync::Next::Success {
                 header,
                 chain_information_finality,
             }) => {
                 if self.final_set_of_fragments {
-                    GrandpaWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
-                        state: PostVerificationState {
-                            header,
-                            chain_information_finality,
-                            start_chain_information: self.state.start_chain_information,
-                            warp_sync_source: self
-                                .sources
-                                .remove(self.warp_sync_source_id.0)
-                                .user_data,
-                        },
-                    })
+                    (
+                        InProgressGrandpaWarpSync::VirtualMachineParamsGet(
+                            VirtualMachineParamsGet {
+                                state: PostVerificationState {
+                                    header,
+                                    chain_information_finality,
+                                    start_chain_information: self.state.start_chain_information,
+                                    sources: self.sources,
+                                    warp_sync_source_id: self.warp_sync_source_id,
+                                },
+                            },
+                        ),
+                        None,
+                    )
                 } else {
-                    GrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
-                        source_id: self.warp_sync_source_id,
-                        sources: self.sources,
-                        state: self.state,
-                        previous_verifier_values: Some((header, chain_information_finality)),
-                    })
+                    (
+                        InProgressGrandpaWarpSync::WarpSyncRequest(WarpSyncRequest {
+                            source_id: self.warp_sync_source_id,
+                            sources: self.sources,
+                            state: self.state,
+                            previous_verifier_values: Some((header, chain_information_finality)),
+                        }),
+                        None,
+                    )
                 }
             }
-            Err(error) => GrandpaWarpSync::Finished(Err(Error::Verifier(error))),
+            Err(error) => (
+                InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                    self.sources,
+                    self.state,
+                    self.previous_verifier_values,
+                ),
+                Some(error),
+            ),
         }
     }
 }
@@ -330,7 +453,8 @@ struct PostVerificationState<TSrc> {
     header: Header,
     chain_information_finality: ChainInformationFinality,
     start_chain_information: ChainInformation,
-    warp_sync_source: TSrc,
+    sources: slab::Slab<Source<TSrc>>,
+    warp_sync_source_id: SourceId,
 }
 
 /// Requesting GrandPa warp sync data from a source is required to continue.
@@ -344,6 +468,7 @@ pub struct WarpSyncRequest<TSrc> {
 impl<TSrc> WarpSyncRequest<TSrc> {
     /// The source to make a GrandPa warp sync request to.
     pub fn current_source(&self) -> (SourceId, &TSrc) {
+        debug_assert!(self.sources.contains(self.source_id.0));
         (self.source_id, &self.sources[self.source_id.0].user_data)
     }
 
@@ -357,22 +482,6 @@ impl<TSrc> WarpSyncRequest<TSrc> {
                 .finalized_block_header
                 .hash(),
         }
-    }
-
-    /// Returns the chain information that is considered verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.sources.contains(source_id.0));
-        &mut self.sources[source_id.0].user_data
     }
 
     /// Add a source to the list of sources.
@@ -389,50 +498,40 @@ impl<TSrc> WarpSyncRequest<TSrc> {
     ///
     /// Panics if the source wasn't added to the list earlier.
     ///
-    pub fn remove_source(mut self, to_remove: SourceId) -> (TSrc, GrandpaWarpSync<TSrc>) {
+    pub fn remove_source(mut self, to_remove: SourceId) -> (TSrc, InProgressGrandpaWarpSync<TSrc>) {
         if to_remove == self.source_id {
-            let next_id = self
-                .sources
-                .iter()
-                .find(|(_, s)| !s.already_tried)
-                .map(|(id, _)| SourceId(id));
+            debug_assert!(self.sources.contains(to_remove.0));
 
             let removed = self.sources.remove(to_remove.0).user_data;
 
-            let next_state = if let Some(next_id) = next_id {
-                GrandpaWarpSync::WarpSyncRequest(Self {
-                    source_id: next_id,
-                    sources: self.sources,
-                    state: self.state,
-                    previous_verifier_values: self.previous_verifier_values,
-                })
-            } else {
-                GrandpaWarpSync::WaitingForSources(WaitingForSources {
-                    sources: self.sources,
-                    state: self.state,
-                    previous_verifier_values: self.previous_verifier_values,
-                })
-            };
+            let next_state = InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.sources,
+                self.state,
+                self.previous_verifier_values,
+            );
 
             (removed, next_state)
         } else {
+            debug_assert!(self.sources.contains(to_remove.0));
             let removed = self.sources.remove(to_remove.0).user_data;
-            (removed, GrandpaWarpSync::WarpSyncRequest(self))
+            (removed, InProgressGrandpaWarpSync::WarpSyncRequest(self))
         }
     }
 
     /// Submit a GrandPa warp sync response if the request succeeded or `None` if it did not.
     pub fn handle_response(
         mut self,
-        mut response: Option<Vec<GrandpaWarpSyncResponseFragment>>,
-    ) -> GrandpaWarpSync<TSrc> {
+        response: Option<GrandpaWarpSyncResponse>,
+    ) -> InProgressGrandpaWarpSync<TSrc> {
+        debug_assert!(self.sources.contains(self.source_id.0));
+
         self.sources[self.source_id.0].already_tried = true;
 
         // If the response is empty, then we've warp synced to the head of the
         // chain.
         if response
             .as_ref()
-            .map(|fragments| fragments.is_empty())
+            .map(|response| response.fragments.is_empty())
             .unwrap_or(false)
         {
             let (header, chain_information_finality) = match self.previous_verifier_values {
@@ -446,61 +545,50 @@ impl<TSrc> WarpSyncRequest<TSrc> {
                 ),
             };
 
-            return GrandpaWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+            return InProgressGrandpaWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
                 state: PostVerificationState {
                     header,
                     chain_information_finality,
                     start_chain_information: self.state.start_chain_information,
-                    warp_sync_source: self.sources.remove(self.source_id.0).user_data,
+                    sources: self.sources,
+                    warp_sync_source_id: self.source_id,
                 },
             });
         }
 
         match response {
-            Some(response_fragments) => {
-                let final_set_of_fragments = response_fragments.len() == 1;
+            Some(response) => {
+                // TODO: remove this `unwrap_or` when a polkadot version that
+                // serves `is_finished` is released.
+                let final_set_of_fragments = response
+                    .is_finished
+                    .unwrap_or(response.fragments.len() == 1);
 
-                let verifier = match self.previous_verifier_values {
+                let verifier = match &self.previous_verifier_values {
                     Some((_, chain_information_finality)) => warp_sync::Verifier::new(
-                        (&chain_information_finality).into(),
-                        response_fragments,
+                        chain_information_finality.into(),
+                        response.fragments,
                     ),
                     None => warp_sync::Verifier::new(
                         (&self.state.start_chain_information.finality).into(),
-                        response_fragments,
+                        response.fragments,
                     ),
                 };
 
-                GrandpaWarpSync::Verifier(Verifier {
+                InProgressGrandpaWarpSync::Verifier(Verifier {
                     final_set_of_fragments,
                     verifier,
                     state: self.state,
                     sources: self.sources,
                     warp_sync_source_id: self.source_id,
+                    previous_verifier_values: self.previous_verifier_values,
                 })
             }
-            None => {
-                let next_id = self
-                    .sources
-                    .iter()
-                    .find(|(_, s)| !s.already_tried)
-                    .map(|(id, _)| SourceId(id));
-
-                if let Some(next_id) = next_id {
-                    GrandpaWarpSync::WarpSyncRequest(Self {
-                        source_id: next_id,
-                        sources: self.sources,
-                        state: self.state,
-                        previous_verifier_values: self.previous_verifier_values,
-                    })
-                } else {
-                    GrandpaWarpSync::WaitingForSources(WaitingForSources {
-                        sources: self.sources,
-                        state: self.state,
-                        previous_verifier_values: self.previous_verifier_values,
-                    })
-                }
-            }
+            None => InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.sources,
+                self.state,
+                self.previous_verifier_values,
+            ),
         }
     }
 }
@@ -511,14 +599,26 @@ pub struct VirtualMachineParamsGet<TSrc> {
 }
 
 impl<TSrc> VirtualMachineParamsGet<TSrc> {
+    /// Returns the source that we received the warp sync data from.
+    pub fn warp_sync_source(&self) -> &TSrc {
+        debug_assert!(self
+            .state
+            .sources
+            .contains(self.state.warp_sync_source_id.0));
+        &self.state.sources[self.state.warp_sync_source_id.0].user_data
+    }
+
     /// Returns the header that we're warp syncing up to.
     pub fn warp_sync_header(&self) -> HeaderRef {
         (&self.state.header).into()
     }
 
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
+    /// Add a source to the list of sources.
+    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
+        SourceId(self.state.sources.insert(Source {
+            user_data,
+            already_tried: false,
+        }))
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
@@ -581,22 +681,6 @@ impl<TSrc> WaitingForSources<TSrc> {
             state: self.state,
             previous_verifier_values: self.previous_verifier_values,
         }
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.sources.contains(source_id.0));
-        &mut self.sources[source_id.0].user_data
-    }
-
-    /// Returns the chain information that is considered fully verified.
-    pub fn as_chain_information(&self) -> ChainInformationRef {
-        (&self.state.start_chain_information).into()
     }
 }
 
