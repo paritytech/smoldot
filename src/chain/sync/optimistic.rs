@@ -849,8 +849,12 @@ impl<TRq, TSrc, TBl> ProcessOne<TRq, TSrc, TBl> {
                             Some(parent_runtime)
                         };
                     } else {
-                        debug_assert!(shared.inner.best_runtime.is_none());
                         shared.inner.finalized_runtime = Some(parent_runtime);
+
+                        debug_assert!(shared.inner.best_runtime.is_none());
+                        if let Some(new_runtime) = new_runtime {
+                            shared.inner.best_runtime = Some(new_runtime);
+                        }
                     }
 
                     shared.inner.top_trie_root_calculation_cache =
