@@ -184,8 +184,7 @@
 //! - TODO: telemetry
 //!
 
-// TODO: for `no_std`, fix all the compilation errors caused by the copy-pasted code
-//#![cfg_attr(not(any(test, feature = "std")), no_std)]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 

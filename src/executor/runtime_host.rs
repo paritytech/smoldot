@@ -42,7 +42,10 @@ use crate::{
     trie::calculate_root,
 };
 
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString as _},
+    vec::Vec,
+};
 use core::{fmt, iter, slice};
 use hashbrown::{HashMap, HashSet};
 
