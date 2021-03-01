@@ -29,7 +29,7 @@
 
 use super::{nibble, proof_verify};
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::{fmt, iter};
 
 /// Configuration to pass to [`prefix_scan`].
