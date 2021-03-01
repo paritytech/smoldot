@@ -66,7 +66,8 @@ pub struct VerifyProofConfig<'a, I> {
     pub proof: I,
 }
 
-/// Find the storage value of the requested key (as designated by [`Config::requested_key`]).
+/// Find the storage value of the requested key (as designated by
+/// [`VerifyProofConfig::requested_key`]).
 ///
 /// Returns an error if the proof couldn't be verified.
 /// If the proof could be verified and the key has an associated storage value, `Ok(Some(_))` is
