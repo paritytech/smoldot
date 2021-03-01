@@ -342,6 +342,12 @@ impl Clone for HostVmPrototype {
     }
 }
 
+impl fmt::Debug for HostVmPrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("HostVmPrototype").finish()
+    }
+}
+
 /// Running virtual machine.
 #[must_use]
 #[derive(derive_more::From)]
@@ -908,12 +914,12 @@ impl ReadyToRun {
 
                     // TODO: copy overhead?
                     let success = if let Ok(public_key) =
-                        ed25519_dalek::PublicKey::from_bytes(&pubkey)
+                        ed25519_zebra::VerificationKey::try_from(&pubkey[..])
                     {
                         // TODO: copy overhead?
                         let signature =
-                            ed25519_dalek::Signature::new(<[u8; 64]>::try_from(&sig[..]).unwrap());
-                        public_key.verify_strict(&message, &signature).is_ok()
+                            ed25519_zebra::Signature::from(<[u8; 64]>::try_from(&sig[..]).unwrap());
+                        public_key.verify(&signature, &message).is_ok()
                     } else {
                         false
                     };
