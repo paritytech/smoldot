@@ -184,14 +184,13 @@
 //! - TODO: telemetry
 //!
 
-// TODO: for `no_std`, fix all the compilation errors caused by the copy-pasted code
-//#![cfg_attr(not(any(test, feature = "std")), no_std)]
+// The library part of `smoldot` should as pure as possible and shouldn't rely on any environment
+// such as a file system, environment variables, time, randomness, etc.
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
 extern crate alloc;
-
-use alloc::vec::Vec;
 
 pub mod author;
 pub mod chain;
@@ -238,11 +237,9 @@ pub fn calculate_genesis_block_header<'a>(
                         keys.inject(genesis_storage.clone().map(|(k, _)| k.iter().cloned()));
                 }
                 trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                    // TODO: don't allocate
-                    let key = val.key().collect::<Vec<_>>();
                     let value = genesis_storage
                         .clone()
-                        .find(|(k, _)| *k == &key[..])
+                        .find(|(k, _)| itertools::equal(k.iter().copied(), val.key()))
                         .map(|(_, v)| v);
                     calculation = val.inject(value);
                 }

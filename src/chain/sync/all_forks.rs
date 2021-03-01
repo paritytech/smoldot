@@ -87,7 +87,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::collections::VecDeque;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -960,6 +960,7 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
                 .unwrap()
                 .remove_verify_success();
             // TODO: properly cancel the requests found in `outcome`
+            assert!(outcome.cancelled_requests.is_empty()); // not implemented
             self.verifiable_blocks.extend(outcome.verify_next);
         } else {
             self.parent
