@@ -104,7 +104,8 @@ pub struct TrieNodeInfoConfig<'a, K, I> {
     pub proof: I,
 }
 
-/// Find information about the node whose key is requested by [`Config::requested_key`].
+/// Find information about the node whose key is requested by
+/// [`TrieNodeInfoConfig::requested_key`].
 ///
 /// The node in question doesn't necessarily have to exist. Nodes that don't exist still return
 /// `Ok` but have no storage value and no children.
