@@ -352,21 +352,21 @@ pub async fn start_client(
 
                     // The runtime service follows the runtime of the best block of the chain,
                     // and allows performing runtime calls.
-                    let runtime_service = Arc::new(runtime_service::RuntimeService::new(runtime_service::Config {
+                    let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
                         tasks_executor: Box::new({
                             let new_task_tx = new_task_tx.clone();
                             move |fut| new_task_tx.unbounded_send(fut).unwrap()
                         }),
                         network_service: (network_service.clone(), chain_index),
                         sync_service: sync_service.clone(),
-                        chain_spec,
+                        chain_spec: &chain_spec,
                         genesis_block_hash: genesis_chain_information
                             .finalized_block_header
                             .hash(),
                         genesis_block_state_root: genesis_chain_information
                             .finalized_block_header
                             .state_root,
-                    }).await);
+                    }).await;
 
                     // Spawn the JSON-RPC service. It is responsible for answer incoming JSON-RPC
                     // requests and sending back responses.
