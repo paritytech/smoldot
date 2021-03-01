@@ -27,6 +27,8 @@
 
 // TODO: usage example
 
+// TODO: this code is entirely untested; no idea if it works
+
 use super::{nibble, proof_verify};
 
 use alloc::{vec, vec::Vec};
