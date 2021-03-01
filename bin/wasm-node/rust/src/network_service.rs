@@ -21,7 +21,7 @@
 //! Importantly, its design is oriented towards the particular use case of the light client.
 //!
 //! The [`NetworkService`] spawns one background task (using the [`Config::tasks_executor`]) for
-//! each active WebSocket.
+//! each active connection.
 //!
 //! The objective of the [`NetworkService`] in general is to try stay connected as much as
 //! possible to the nodes of the peer-to-peer network of the chain, and maintain open substreams
@@ -54,7 +54,7 @@ use smoldot::{
         peer_id::PeerId,
     },
     network::{protocol, service},
-    trie::proof_verify,
+    trie::{self, prefix_proof, proof_verify},
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -141,7 +141,16 @@ impl NetworkService {
                     .collect(),
                 in_slots: 25,
                 out_slots: 25,
-                has_grandpa_protocol: chain.has_grandpa_protocol,
+                grandpa_protocol_config: if chain.has_grandpa_protocol {
+                    // TODO: dummy values
+                    Some(service::GrandpaState {
+                        commit_finalized_height: 0,
+                        round_number: 1,
+                        set_id: 0,
+                    })
+                } else {
+                    None
+                },
                 protocol_id: chain.protocol_id.clone(),
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
@@ -317,33 +326,9 @@ impl NetworkService {
 
                         // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
                         // into a `Future<dyn Output = Result<TcpStream, ...>>`.
-                        let socket = match multiaddr_to_url(&start_connect.multiaddr) {
-                            Ok(url) => {
-                                log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, url);
-                                ffi::WebSocket::connect(&url)
-                            }
-                            Err(()) => {
-                                if is_important_peer {
-                                    log::warn!(
-                                        target: "connections",
-                                        "Unsupported multiaddr ({}) when trying to connect to {}",
-                                        start_connect.multiaddr,
-                                        start_connect.expected_peer_id
-                                    );
-                                } else {
-                                    log::debug!(
-                                        target: "connections",
-                                        "Unsupported multiaddr: {}",
-                                        start_connect.multiaddr
-                                    );
-                                }
-
-                                network_service
-                                    .network
-                                    .pending_outcome_err(start_connect.id)
-                                    .await;
-                                continue;
-                            }
+                        let socket = {
+                            log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
+                            ffi::Connection::connect(&start_connect.multiaddr.to_string())
                         };
 
                         // TODO: handle dialing timeout here
@@ -491,8 +476,7 @@ impl NetworkService {
         target: PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
-    ) -> Result<Vec<protocol::GrandpaWarpSyncResponseFragment>, service::GrandpaWarpSyncRequestError>
-    {
+    ) -> Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError> {
         log::debug!(target: "network", "Connection({}) <= GrandpaWarpSyncRequest({:?})", target, begin_hash);
 
         let result = self
@@ -504,7 +488,7 @@ impl NetworkService {
             target: "network",
             "Connection({}) => GrandpaWarpSyncRequest({:?})",
             target,
-            result.as_ref().map(|fragments| fragments.len()),
+            result.as_ref().map(|response| response.fragments.len()),
         );
 
         result
@@ -554,7 +538,7 @@ impl NetworkService {
                     let mut result = Vec::with_capacity(outcome.len());
                     for key in requested_keys.clone() {
                         result.push(
-                            proof_verify::verify_proof(proof_verify::Config {
+                            proof_verify::verify_proof(proof_verify::VerifyProofConfig {
                                 proof: outcome.iter().map(|nv| &nv[..]),
                                 requested_key: key.as_ref(),
                                 trie_root_hash: &storage_trie_root,
@@ -579,6 +563,68 @@ impl NetworkService {
         Err(StorageQueryError {
             errors: outcome_errors,
         })
+    }
+
+    pub async fn storage_prefix_keys_query(
+        self: Arc<Self>,
+        chain_index: usize,
+        block_hash: &[u8; 32],
+        prefix: &[u8],
+        storage_trie_root: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>, StorageQueryError> {
+        let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
+            prefix,
+            trie_root_hash: *storage_trie_root,
+        });
+
+        'main_scan: loop {
+            const NUM_ATTEMPTS: usize = 3;
+
+            let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
+
+            // TODO: better peers selection ; don't just take the first 3
+            // TODO: must only ask the peers that know about this block
+            for target in self.peers_list().await.take(NUM_ATTEMPTS) {
+                let result = self
+                    .clone()
+                    .storage_proof_request(
+                        chain_index,
+                        target,
+                        protocol::StorageProofRequestConfig {
+                            block_hash: *block_hash,
+                            keys: prefix_scan.requested_keys().map(|nibbles| {
+                                trie::nibbles_to_bytes_extend(nibbles).collect::<Vec<_>>()
+                            }),
+                        },
+                    )
+                    .await
+                    .map_err(StorageQueryErrorDetail::Network);
+
+                match result {
+                    Ok(proof) => {
+                        match prefix_scan.resume(proof.iter().map(|v| &v[..])) {
+                            Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                // Continue next step of the proof.
+                                prefix_scan = scan;
+                                continue 'main_scan;
+                            }
+                            Ok(prefix_proof::ResumeOutcome::Success { keys }) => {
+                                return Ok(keys);
+                            }
+                            Err(err) => todo!("{:?}", err),
+                        }
+                    }
+                    Err(err) => {
+                        outcome_errors.push(err);
+                    }
+                }
+            }
+
+            debug_assert_eq!(outcome_errors.len(), outcome_errors.capacity());
+            return Err(StorageQueryError {
+                errors: outcome_errors,
+            });
+        }
     }
 
     /// Sends a storage proof request to the given peer.
@@ -812,11 +858,11 @@ impl fmt::Display for CallProofQueryError {
     }
 }
 
-/// Asynchronous task managing a specific WebSocket connection.
+/// Asynchronous task managing a specific connection.
 ///
 /// `is_important_peer` controls the log level used for problems that happen on this connection.
 async fn connection_task(
-    websocket: impl Future<Output = Result<Pin<Box<ffi::WebSocket>>, ()>>,
+    websocket: impl Future<Output = Result<Pin<Box<ffi::Connection>>, ()>>,
     network_service: Arc<NetworkService>,
     pending_id: service::PendingId,
     expected_peer_id: PeerId,

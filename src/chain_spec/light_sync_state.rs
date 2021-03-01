@@ -17,7 +17,7 @@
 
 use crate::header::BabeNextConfig;
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use parity_scale_codec::{Decode, DecodeAll as _, Encode};
 use serde::{Deserialize, Serialize};
 
@@ -33,17 +33,16 @@ pub(super) struct LightSyncState {
 
 impl LightSyncState {
     pub(super) fn decode(&self) -> DecodedLightSyncState {
-        let mut grandpa_authority_set_slice = &self.grandpa_authority_set.0[..];
-        let mut babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
+        let grandpa_authority_set_slice = &self.grandpa_authority_set.0[..];
+        let babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
 
         let decoded = DecodedLightSyncState {
             babe_finalized_block_weight: self.babe_finalized_block_weight,
             finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
                 .unwrap()
                 .into(),
-            grandpa_authority_set: AuthoritySet::decode_all(&mut grandpa_authority_set_slice)
-                .unwrap(),
-            babe_epoch_changes: EpochChanges::decode_all(&mut babe_epoch_changes_slice).unwrap(),
+            grandpa_authority_set: AuthoritySet::decode_all(&grandpa_authority_set_slice).unwrap(),
+            babe_epoch_changes: EpochChanges::decode_all(&babe_epoch_changes_slice).unwrap(),
         };
 
         decoded

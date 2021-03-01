@@ -40,9 +40,13 @@
 use crate::{
     executor::{self, host, vm},
     trie::calculate_root,
+    util,
 };
 
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString as _},
+    vec::Vec,
+};
 use core::{fmt, iter, slice};
 use hashbrown::{HashMap, HashSet};
 
@@ -112,7 +116,7 @@ pub struct SuccessVirtualMachine(host::Finished);
 
 impl SuccessVirtualMachine {
     /// Returns the value the called function has returned.
-    pub fn value<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+    pub fn value(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.0.value()
     }
 
@@ -164,7 +168,7 @@ pub struct StorageGet {
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
         match &self.inner.vm {
             host::HostVm::ExternalStorageGet(req) => either::Left(iter::once(either::Left(
                 either::Left(either::Left(req.key())),
@@ -271,7 +275,7 @@ pub struct PrefixKeys {
 
 impl PrefixKeys {
     /// Returns the prefix whose keys to load.
-    pub fn prefix<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
         match &self.inner.vm {
             host::HostVm::ExternalStorageClearPrefix(req) => either::Left(req.prefix()),
             host::HostVm::ExternalStorageRoot { .. } => either::Right(&[]),
@@ -365,7 +369,7 @@ pub struct NextKey {
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
-    pub fn key<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
         if let Some(key_overwrite) = &self.key_overwrite {
             return either::Left(key_overwrite);
         }
@@ -671,40 +675,35 @@ impl Inner {
 
 /// Performs the action described by [`host::HostVm::ExternalStorageAppend`] on an
 /// encoded storage value.
-// TODO: remove usage of parity_scale_codec
 fn append_to_storage_value(value: &mut Vec<u8>, to_add: &[u8]) {
-    let curr_len = match <parity_scale_codec::Compact<u64> as parity_scale_codec::Decode>::decode(
-        &mut &value[..],
-    ) {
-        Ok(l) => l,
-        Err(_) => {
-            value.clear();
-            parity_scale_codec::Encode::encode_to(&parity_scale_codec::Compact(1u64), value);
-            value.extend_from_slice(to_add);
-            return;
-        }
-    };
+    let (curr_len, curr_len_encoded_size) =
+        match util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&value) {
+            Ok((rest, l)) => (l, value.len() - rest.len()),
+            Err(_) => {
+                value.clear();
+                value.reserve(to_add.len() + 1);
+                value.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
+                value.extend_from_slice(to_add);
+                return;
+            }
+        };
 
     // Note: we use `checked_add`, as it is possible that the storage entry erroneously starts
     // with `u64::max_value()`.
-    let new_len = match curr_len.0.checked_add(1) {
-        Some(l) => parity_scale_codec::Compact(l),
+    let new_len = match curr_len.checked_add(1) {
+        Some(l) => l,
         None => {
             value.clear();
-            parity_scale_codec::Encode::encode_to(&parity_scale_codec::Compact(1u64), value);
+            value.reserve(to_add.len() + 1);
+            value.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
             value.extend_from_slice(to_add);
             return;
         }
     };
 
-    let curr_len_encoded_size =
-        <parity_scale_codec::Compact<u64> as parity_scale_codec::CompactLen<u64>>::compact_len(
-            &curr_len.0,
-        );
-    let new_len_encoded_size =
-        <parity_scale_codec::Compact<u64> as parity_scale_codec::CompactLen<u64>>::compact_len(
-            &new_len.0,
-        );
+    let new_len_encoded = util::encode_scale_compact_usize(new_len);
+
+    let new_len_encoded_size = new_len_encoded.as_ref().len();
     debug_assert!(
         new_len_encoded_size == curr_len_encoded_size
             || new_len_encoded_size == curr_len_encoded_size + 1
@@ -714,6 +713,6 @@ fn append_to_storage_value(value: &mut Vec<u8>, to_add: &[u8]) {
         value.insert(0, 0);
     }
 
-    parity_scale_codec::Encode::encode_to(&new_len, &mut (&mut value[..new_len_encoded_size]));
+    value[..new_len_encoded_size].copy_from_slice(new_len_encoded.as_ref());
     value.extend_from_slice(to_add);
 }
