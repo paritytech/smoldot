@@ -49,6 +49,7 @@ use super::super::{blocks_tree, chain_information};
 use crate::{executor::host, header, trie::calculate_root, verify};
 
 use alloc::{
+    borrow::ToOwned as _,
     collections::{BTreeMap, VecDeque},
     vec::Vec,
 };
