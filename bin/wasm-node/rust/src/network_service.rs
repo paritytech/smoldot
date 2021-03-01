@@ -611,7 +611,7 @@ impl NetworkService {
                             Ok(prefix_proof::ResumeOutcome::Success { keys }) => {
                                 return Ok(keys);
                             }
-                            Err(err) => todo!(),
+                            Err(err) => todo!("{:?}", err),
                         }
                     }
                     Err(err) => {
