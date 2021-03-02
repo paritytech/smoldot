@@ -486,15 +486,26 @@ impl RuntimeService {
                         return Err(RuntimeCallError::CallError(error.detail));
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                        // TODO: must put back the virtual machine in `latest_known_runtime` in case of error
                         let requested_key = get.key_as_vec(); // TODO: optimization: don't use as_vec
-                        let storage_value =
-                            proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                        let storage_value = match proof_verify::verify_proof(
+                            proof_verify::VerifyProofConfig {
                                 requested_key: &requested_key,
                                 trie_root_hash: &runtime_block_state_root,
                                 proof: call_proof.iter().map(|v| &v[..]),
-                            })
-                            .map_err(RuntimeCallError::StorageRetrieval)?; // TODO: shouldn't return if error but do a storage_proof instead
+                            },
+                        ) {
+                            Ok(v) => v,
+                            Err(err) => {
+                                // TODO: shouldn't return if error but do a storage_proof instead
+                                runtime.virtual_machine = Some(
+                                    executor::read_only_runtime_host::RuntimeHostVm::StorageGet(
+                                        get,
+                                    )
+                                    .into_prototype(),
+                                );
+                                return Err(RuntimeCallError::StorageRetrieval(err));
+                            }
+                        };
                         runtime_call = get.inject_value(storage_value.as_ref().map(iter::once));
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
