@@ -38,7 +38,7 @@
 
 use core::{convert::TryFrom as _, iter};
 
-/// Produces the input to pass to the [`ParachainHost_persisted_validation_data`] runtime call.
+/// Produces the input to pass to the `ParachainHost_persisted_validation_data` runtime call.
 pub fn persisted_validation_data_parameters(
     para_id: u32,
     assumption: OccupiedCoreAssumption,
