@@ -137,6 +137,7 @@ impl RuntimeService {
                 runtime_block_hash: config.genesis_block_hash,
                 runtime_block_state_root: config.genesis_block_state_root,
                 runtime_version_subscriptions: Vec::new(),
+                best_blocks_subscriptions: Vec::new(),
             }
         };
 
@@ -261,6 +262,17 @@ impl RuntimeService {
                     latest_known_runtime.runtime_block_state_root =
                         *new_best_block_decoded.state_root;
 
+                    // Notify the best block subscriptions.
+                    latest_known_runtime
+                        .best_blocks_subscriptions
+                        .retain(|c| !c.is_closed());
+                    latest_known_runtime
+                        .best_blocks_subscriptions
+                        .shrink_to_fit();
+                    for subscription in &mut latest_known_runtime.best_blocks_subscriptions {
+                        let _ = subscription.send(new_best_block.clone()).await;
+                    }
+
                     // `continue` if there wasn't any change in `:code` and `:heappages`.
                     if new_code == latest_known_runtime.runtime_code
                         && new_heap_pages == latest_known_runtime.heap_pages
@@ -331,25 +343,22 @@ impl RuntimeService {
     }
 
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
-    /// produces one item every time the best block are changed.
+    /// produces one item every time the best block is changed.
     ///
     /// This function is similar to [`sync_service::SyncService::subscribe_best`], except that
-    /// it is called less often.
+    /// it is called less often. Additionally, it is guaranteed that when a notification is sent
+    /// out, calling [`RuntimeService::recent_best_block_runtime_call`] will operate on this
+    /// block or more recent. In other words, if you call
+    /// [`RuntimeService::recent_best_block_runtime_call`] and the stream of notifications is
+    /// empty, you are guaranteed that the call has been performed on the best block.
     pub async fn subscribe_best(
         self: &Arc<RuntimeService>,
-    ) -> (
-        Vec<u8>,
-        impl Stream<Item = Result<executor::CoreVersion, ()>>,
-    ) {
+    ) -> (Vec<u8>, impl Stream<Item = Vec<u8>>) {
         let (tx, rx) = mpsc::channel(8);
         let mut latest_known_runtime = self.latest_known_runtime.lock().await;
-        latest_known_runtime.runtime_version_subscriptions.push(tx);
-        let current_version = latest_known_runtime
-            .runtime
-            .as_ref()
-            .map(|r| r.runtime_spec.clone())
-            .map_err(|&()| ());
-        (current_version, rx)
+        latest_known_runtime.best_blocks_subscriptions.push(tx);
+        let (current, _) = self.sync_service.subscribe_best().await;
+        (current, rx)
     }
 
     /// Performs a runtime call using the best block, or a recent best block.
@@ -586,8 +595,14 @@ struct LatestKnownRuntime {
     /// List of senders that get notified when the runtime specs of the best block changes.
     /// Whenever [`LatestKnownRuntime::runtime`] is updated, one should emit an item on each
     /// sender.
+    /// See [`RuntimeService::subscribe_runtime_version`].
     // TODO: should be a lossy_channel
     runtime_version_subscriptions: Vec<mpsc::Sender<Result<executor::CoreVersion, ()>>>,
+
+    /// List of senders that get notified when the best block is updated.
+    /// See [`RuntimeService::subscribe_best`].
+    // TODO: should be a lossy_channel
+    best_blocks_subscriptions: Vec<mpsc::Sender<Vec<u8>>>,
 }
 
 struct SuccessfulRuntime {
