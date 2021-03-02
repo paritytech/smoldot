@@ -359,7 +359,7 @@ pub async fn start_client(
                             .state_root,
                     }).await;
 
-                    per_chain.insert(chain_spec.name().to_owned(), (chain_index, runtime_service.clone()));
+                    per_chain.insert(chain_spec.id().to_owned(), (chain_index, runtime_service.clone()));
 
                     // TODO: At the moment the JSON-RPC and database save tasks would conflict
                     // with each other if run multiple times. For now, we only run them for

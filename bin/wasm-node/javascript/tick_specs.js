@@ -30,7 +30,7 @@ export default function westend_specs() {
       "tokenDecimals": 12,
       "tokenSymbol": "ROC"
     },
-    "relay_chain": "rococo",
+    "relay_chain": "rococo_v1_1",
     "para_id": 100,
     "consensusEngine": null,
     "lightSyncState": null,

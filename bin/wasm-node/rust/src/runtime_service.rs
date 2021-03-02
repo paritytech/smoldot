@@ -222,18 +222,38 @@ impl RuntimeService {
                     let new_best_block_decoded = header::decode(&new_best_block).unwrap();
                     let new_best_block_hash =
                         header::hash_from_scale_encoded_header(&new_best_block);
+                    let code_query_result = runtime_service
+                        .network_service
+                        .clone()
+                        .storage_query(
+                            runtime_service.network_chain_index,
+                            &new_best_block_hash,
+                            new_best_block_decoded.state_root,
+                            iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                        )
+                        .await;
+
+                    // Only lock `latest_known_runtime` now that everything is synchronous.
+                    let mut latest_known_runtime =
+                        runtime_service.latest_known_runtime.lock().await;
+                    let latest_known_runtime = &mut *latest_known_runtime;
+
+                    // Whatever the result of `code_query_result` is, notify the best block
+                    // subscriptions. After this, we shouldn't unlock `latest_known_runtime` ever
+                    // again to avoid giving the possibility to inspect the runtime in response
+                    // to the notifications.
+                    latest_known_runtime
+                        .best_blocks_subscriptions
+                        .retain(|c| !c.is_closed());
+                    latest_known_runtime
+                        .best_blocks_subscriptions
+                        .shrink_to_fit();
+                    for subscription in &mut latest_known_runtime.best_blocks_subscriptions {
+                        let _ = subscription.send(new_best_block.clone()).await;
+                    }
+
                     let (new_code, new_heap_pages) = {
-                        let mut results = match runtime_service
-                            .network_service
-                            .clone()
-                            .storage_query(
-                                runtime_service.network_chain_index,
-                                &new_best_block_hash,
-                                new_best_block_decoded.state_root,
-                                iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-                            )
-                            .await
-                        {
+                        let mut results = match code_query_result {
                             Ok(c) => c,
                             Err(error) => {
                                 log::log!(
@@ -251,27 +271,11 @@ impl RuntimeService {
                         (new_code, new_heap_pages)
                     };
 
-                    // Only lock `latest_known_runtime` now that everything is synchronous.
-                    let mut latest_known_runtime =
-                        runtime_service.latest_known_runtime.lock().await;
-                    let latest_known_runtime = &mut *latest_known_runtime;
-
                     // `runtime_block_hash` is always updated in order to have the most recent
                     // block possible.
                     latest_known_runtime.runtime_block_hash = new_best_block_hash;
                     latest_known_runtime.runtime_block_state_root =
                         *new_best_block_decoded.state_root;
-
-                    // Notify the best block subscriptions.
-                    latest_known_runtime
-                        .best_blocks_subscriptions
-                        .retain(|c| !c.is_closed());
-                    latest_known_runtime
-                        .best_blocks_subscriptions
-                        .shrink_to_fit();
-                    for subscription in &mut latest_known_runtime.best_blocks_subscriptions {
-                        let _ = subscription.send(new_best_block.clone()).await;
-                    }
 
                     // `continue` if there wasn't any change in `:code` and `:heappages`.
                     if new_code == latest_known_runtime.runtime_code
@@ -359,6 +363,11 @@ impl RuntimeService {
         latest_known_runtime.best_blocks_subscriptions.push(tx);
         let (current, _) = self.sync_service.subscribe_best().await;
         (current, rx)
+    }
+
+    /// See [`SyncService::is_near_head_of_chain_heuristic`].
+    pub async fn is_near_head_of_chain_heuristic(&self) -> bool {
+        self.sync_service.is_near_head_of_chain_heuristic().await
     }
 
     /// Performs a runtime call using the best block, or a recent best block.
@@ -471,6 +480,7 @@ impl RuntimeService {
                         return Err(RuntimeCallError::CallError(error));
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                        // TODO: must put back the virtual machine in `latest_known_runtime` in case of error
                         let requested_key = get.key_as_vec(); // TODO: optimization: don't use as_vec
                         let storage_value =
                             proof_verify::verify_proof(proof_verify::VerifyProofConfig {
@@ -478,7 +488,7 @@ impl RuntimeService {
                                 trie_root_hash: &runtime_block_state_root,
                                 proof: call_proof.iter().map(|v| &v[..]),
                             })
-                            .unwrap(); // TODO: shouldn't unwrap but do storage_proof instead
+                            .map_err(RuntimeCallError::StorageRetrieval)?; // TODO: shouldn't return if error but do a storage_proof instead
                         runtime_call = get.inject_value(storage_value.as_ref().map(iter::once));
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
@@ -555,8 +565,9 @@ pub enum RuntimeCallError {
     #[display(fmt = "Runtime of the best block isn't valid")]
     InvalidRuntime,
     /// Error while retrieving the storage item from other nodes.
+    // TODO: change error type?
     #[display(fmt = "{}", _0)]
-    StorageRetrieval(network_service::CallProofQueryError),
+    StorageRetrieval(proof_verify::Error),
 }
 
 /// Error that can happen when calling [`RuntimeService::metadata`].

@@ -29,11 +29,7 @@
 
 use crate::{ffi, network_service, runtime_service};
 
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-};
+use futures::{channel::{mpsc, oneshot}, lock::Mutex, pin_mut, prelude::*};
 use smoldot::{
     chain,
     informant::HashDisplay,
@@ -696,8 +692,12 @@ async fn start_parachain(
 ) {
     // TODO: handle finality as well
 
-    let (relay_best_block_header, mut relay_best_blocks_subscription) =
-        parachain_config.relay_chain_sync.subscribe_best().await;
+    let relay_best_blocks = {
+        let (relay_best_block_header, relay_best_blocks_subscription) =
+            parachain_config.relay_chain_sync.subscribe_best().await;
+        stream::once(future::ready(relay_best_block_header)).chain(relay_best_blocks_subscription)
+    };
+    futures::pin_mut!(relay_best_blocks);
 
     loop {
         futures::select! {
@@ -708,16 +708,19 @@ async fn start_parachain(
                     None => return,
                 };
 
+                // TODO: spawn background tasks?
                 match message {
                     ToBackground::Serialize { send_back } => core::mem::forget(send_back), // TODO:
                     ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                        core::mem::forget(send_back); // TODO:
+                        let response = parachain_config.relay_chain_sync.is_near_head_of_chain_heuristic().await;
+                        let _ = send_back.send(response);
                     },
                     ToBackground::SubscribeFinalized { send_back } => core::mem::forget(send_back), // TODO:
                     ToBackground::SubscribeBest { send_back } => core::mem::forget(send_back), // TODO:
                 }
             },
-            relay_best_block = relay_best_blocks_subscription.next().fuse() => {
+            relay_best_block = relay_best_blocks.next().fuse() => {
+                println!("test {:?}", relay_best_block);
                 let outcome = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
                     "ParachainHost_persisted_validation_data",
                     para::persisted_validation_data_parameters(
@@ -725,10 +728,14 @@ async fn start_parachain(
                         // TODO: we use TimedOut because that's what cumulus does, but it's unclear if that's correct
                         para::OccupiedCoreAssumption::TimedOut
                     )
-                ).await.unwrap(); // TODO: don't unwrap?
+                ).await;
 
-                let pvd = para::decode_persisted_validation_data(&outcome).unwrap(); // TODO: don't unwrap?
-                println!("{:?}", pvd.parent_head);
+                if let Ok(outcome) = outcome {
+                    let pvd = para::decode_persisted_validation_data(&outcome).unwrap(); // TODO: don't unwrap?
+                    println!("{:?}", pvd.parent_head);
+                } else {
+                    println!("error: {:?}", outcome);
+                }
             }
         }
     }
