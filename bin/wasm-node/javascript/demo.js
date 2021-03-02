@@ -21,7 +21,8 @@ import * as smoldot from './index.js';
 import { default as websocket } from 'websocket';
 import * as http from 'http';
 // Adjust these chain specs for the chain you want to connect to.
-import { default as chain_specs } from './westend_specs.js';
+import { default as chain_specs } from './tick_specs.js';
+import { default as relay_chain_specs } from './rococo_specs.js';
 import * as fs from 'fs';
 
 let client = null;
@@ -32,10 +33,11 @@ const database_path = 'smoldot-demo-db.json';
 var database_content = null;
 try {
     database_content = fs.readFileSync(database_path, 'utf8');
-} catch(error) {}
+} catch (error) { }
 
 smoldot.start({
-    chain_spec: JSON.stringify(chain_specs()),
+    chain_spec: JSON.stringify(relay_chain_specs()),
+    relay_chain_spec: null,//JSON.stringify(relay_chain_specs()),
     database_content: database_content,
     max_log_level: 3,  // Can be increased for more verbosity
     json_rpc_callback: (resp) => {
