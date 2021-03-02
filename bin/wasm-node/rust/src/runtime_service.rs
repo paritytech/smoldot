@@ -340,7 +340,9 @@ impl RuntimeService {
         method: &str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
     ) -> Result<Vec<u8>, RuntimeCallError> {
-        self.recent_best_block_runtime_call_inner(method, parameter_vectored).await.map(|(ret, _)| ret)
+        self.recent_best_block_runtime_call_inner(method, parameter_vectored)
+            .await
+            .map(|(ret, _)| ret)
     }
 
     /// See [`RuntimeService::recent_best_block_runtime_call`].
@@ -355,7 +357,8 @@ impl RuntimeService {
         self: &'a Arc<RuntimeService>,
         method: &str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-    ) -> Result<(Vec<u8>, futures::lock::MutexGuard<'a, LatestKnownRuntime>), RuntimeCallError> {
+    ) -> Result<(Vec<u8>, futures::lock::MutexGuard<'a, LatestKnownRuntime>), RuntimeCallError>
+    {
         // `latest_known_runtime` should be kept locked as little as possible.
         // In order to handle the possibility a runtime upgrade happening during the operation,
         // every time `latest_known_runtime` is locked, we compare the runtime version stored in
@@ -463,15 +466,12 @@ impl RuntimeService {
         // First, try the cache.
         {
             let latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-            if let Ok(runtime) = latest_known_runtime_lock
-                .runtime
-                .as_ref()
-            {
+            if let Ok(runtime) = latest_known_runtime_lock.runtime.as_ref() {
                 if let Some(metadata) = runtime.metadata.as_ref() {
                     return Ok(metadata.clone());
                 }
             } else {
-                return Err(MetadataError::InvalidRuntime)
+                return Err(MetadataError::InvalidRuntime);
             }
         }
 
