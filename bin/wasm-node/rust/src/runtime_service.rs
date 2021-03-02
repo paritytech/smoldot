@@ -330,6 +330,28 @@ impl RuntimeService {
         (current_version, rx)
     }
 
+    /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
+    /// produces one item every time the best block are changed.
+    ///
+    /// This function is similar to [`sync_service::SyncService::subscribe_best`], except that
+    /// it is called less often.
+    pub async fn subscribe_best(
+        self: &Arc<RuntimeService>,
+    ) -> (
+        Vec<u8>,
+        impl Stream<Item = Result<executor::CoreVersion, ()>>,
+    ) {
+        let (tx, rx) = mpsc::channel(8);
+        let mut latest_known_runtime = self.latest_known_runtime.lock().await;
+        latest_known_runtime.runtime_version_subscriptions.push(tx);
+        let current_version = latest_known_runtime
+            .runtime
+            .as_ref()
+            .map(|r| r.runtime_spec.clone())
+            .map_err(|&()| ());
+        (current_version, rx)
+    }
+
     /// Performs a runtime call using the best block, or a recent best block.
     ///
     /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,

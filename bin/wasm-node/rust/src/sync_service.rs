@@ -27,7 +27,7 @@
 //! Use [`SyncService::subscribe_best`] and [`SyncService::subscribe_finalized`] to get notified
 //! about updates of the best and finalized blocks.
 
-use crate::{ffi, network_service};
+use crate::{ffi, network_service, runtime_service};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -69,8 +69,8 @@ pub struct Config {
 
 /// See [`Config::parachain`].
 pub struct ConfigParachain {
-    /// Sync service that synchronizes the relay chain of this parachain.
-    pub relay_chain_sync: Arc<SyncService>,
+    /// Runtime service that synchronizes the relay chain of this parachain.
+    pub relay_chain_sync: Arc<runtime_service::RuntimeService>,
 
     /// Index in the network service of [`Config::network_service`] of the relay chain of this
     /// parachain.
