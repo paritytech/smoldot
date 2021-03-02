@@ -34,7 +34,13 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use smoldot::{chain, informant::HashDisplay, libp2p, network, sync::all, trie::proof_verify};
+use smoldot::{
+    chain,
+    informant::HashDisplay,
+    libp2p, network,
+    sync::{all, para},
+    trie::proof_verify,
+};
 use std::{
     collections::HashMap, convert::TryFrom as _, iter, num::NonZeroU32, pin::Pin, sync::Arc,
 };
@@ -688,8 +694,8 @@ async fn start_parachain(
     mut from_network_service: mpsc::Receiver<network_service::Event>,
     parachain_config: ConfigParachain,
 ) {
-    let (_relay_finalized_block_header, mut relay_finalized_blocks_subscription) =
-        parachain_config.relay_chain_sync.subscribe_best().await;
+    // TODO: handle finality as well
+
     let (relay_best_block_header, mut relay_best_blocks_subscription) =
         parachain_config.relay_chain_sync.subscribe_best().await;
 
@@ -703,19 +709,26 @@ async fn start_parachain(
                 };
 
                 match message {
-                    ToBackground::Serialize { send_back } => todo!(),
+                    ToBackground::Serialize { send_back } => core::mem::forget(send_back), // TODO:
                     ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                        todo!()
+                        core::mem::forget(send_back); // TODO:
                     },
-                    ToBackground::SubscribeFinalized { send_back } => todo!(),
-                    ToBackground::SubscribeBest { send_back } => todo!(),
+                    ToBackground::SubscribeFinalized { send_back } => core::mem::forget(send_back), // TODO:
+                    ToBackground::SubscribeBest { send_back } => core::mem::forget(send_back), // TODO:
                 }
             },
-            relay_finalized_block = relay_finalized_blocks_subscription.next().fuse() => {
-
-            },
             relay_best_block = relay_best_blocks_subscription.next().fuse() => {
+                let outcome = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
+                    "ParachainHost_persisted_validation_data",
+                    para::persisted_validation_data_parameters(
+                        parachain_config.parachain_id,
+                        // TODO: we use TimedOut because that's what cumulus does, but it's unclear if that's correct
+                        para::OccupiedCoreAssumption::TimedOut
+                    )
+                ).await.unwrap(); // TODO: don't unwrap?
 
+                let pvd = para::decode_persisted_validation_data(&outcome).unwrap(); // TODO: don't unwrap?
+                println!("{:?}", pvd.parent_head);
             }
         }
     }

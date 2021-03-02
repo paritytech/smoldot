@@ -71,7 +71,6 @@ impl OccupiedCoreAssumption {
 }
 
 /// Attempt to decode the given SCALE-encoded persisted validation data.
-// TODO: shouldn't this method be specific to Grandpa?
 pub fn decode_persisted_validation_data(
     scale_encoded: &[u8],
 ) -> Result<PersistedValidationDataRef, Error> {

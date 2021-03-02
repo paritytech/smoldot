@@ -27,7 +27,7 @@ use smoldot::{
     chain, chain_spec,
     libp2p::{multiaddr, peer_id::PeerId},
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub mod ffi;
 
@@ -303,12 +303,15 @@ pub async fn start_client(
 
                 // The network service is the only one in common between all chains. Other
                 // services run once per chain.
+                let mut per_chain = HashMap::<String, (usize, Arc<runtime_service::RuntimeService>)>::new();
+
                 for (chain_index, ((chain_information, chain_spec), genesis_chain_information)) in
                     chain_information
                         .iter()
                         .zip(chain_specs.into_iter())
                         .zip(genesis_chain_information.iter())
                         .enumerate()
+                        .rev()
                 {
                     // The sync service is leveraging the network service, downloads block headers,
                     // and verifies them, to determine what are the best and finalized blocks of the
@@ -322,10 +325,13 @@ pub async fn start_client(
                             }),
                             network_service: (network_service.clone(), chain_index),
                             network_events_receiver: network_event_receivers.pop().unwrap(),
-                            parachain: if let Some((relay_chain_name, parachain_id))  = chain_spec.relay_chain() {
+                            parachain: if let Some((relay_chain_name, parachain_id)) = chain_spec.relay_chain() {
+                                let chain = per_chain.get(relay_chain_name)
+                                    .expect("couldn't find relay chain spec");
+
                                 Some(sync_service::ConfigParachain {
-                                    relay_chain_sync: ,
-                                    relay_network_chain_index: ,
+                                    relay_chain_sync: chain.1.clone(),
+                                    relay_network_chain_index: chain.0,
                                     parachain_id,
                                 })
                             } else {
@@ -334,6 +340,26 @@ pub async fn start_client(
                         })
                         .await,
                     );
+
+                    // The runtime service follows the runtime of the best block of the chain,
+                    // and allows performing runtime calls.
+                    let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+                        tasks_executor: Box::new({
+                            let new_task_tx = new_task_tx.clone();
+                            move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                        }),
+                        network_service: (network_service.clone(), chain_index),
+                        sync_service: sync_service.clone(),
+                        chain_spec: &chain_spec,
+                        genesis_block_hash: genesis_chain_information
+                            .finalized_block_header
+                            .hash(),
+                        genesis_block_state_root: genesis_chain_information
+                            .finalized_block_header
+                            .state_root,
+                    }).await;
+
+                    per_chain.insert(chain_spec.name().to_owned(), (chain_index, runtime_service.clone()));
 
                     // TODO: At the moment the JSON-RPC and database save tasks would conflict
                     // with each other if run multiple times. For now, we only run them for
@@ -358,24 +384,6 @@ pub async fn start_client(
                         )
                         .await,
                     );
-
-                    // The runtime service follows the runtime of the best block of the chain,
-                    // and allows performing runtime calls.
-                    let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
-                        tasks_executor: Box::new({
-                            let new_task_tx = new_task_tx.clone();
-                            move |fut| new_task_tx.unbounded_send(fut).unwrap()
-                        }),
-                        network_service: (network_service.clone(), chain_index),
-                        sync_service: sync_service.clone(),
-                        chain_spec: &chain_spec,
-                        genesis_block_hash: genesis_chain_information
-                            .finalized_block_header
-                            .hash(),
-                        genesis_block_state_root: genesis_chain_information
-                            .finalized_block_header
-                            .state_root,
-                    }).await;
 
                     // Spawn the JSON-RPC service. It is responsible for answer incoming JSON-RPC
                     // requests and sending back responses.
