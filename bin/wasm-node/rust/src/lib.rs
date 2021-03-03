@@ -33,6 +33,7 @@ pub mod ffi;
 
 mod json_rpc_service;
 mod network_service;
+mod lossy_channel;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
