@@ -27,7 +27,7 @@
 //! Use [`SyncService::subscribe_best`] and [`SyncService::subscribe_finalized`] to get notified
 //! about updates of the best and finalized blocks.
 
-use crate::{ffi, network_service, lossy_channel};
+use crate::{ffi, lossy_channel, network_service};
 
 use futures::{
     channel::{mpsc, oneshot},
