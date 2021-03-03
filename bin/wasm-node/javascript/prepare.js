@@ -19,7 +19,7 @@ import * as child_process from 'child_process';
 import * as fs from 'fs';
 
 // Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`.
-const build_profile = 'release';
+const build_profile = 'debug';
 
 // The important step in this script is running `cargo build --target wasm32-wasi` on the Rust
 // code. This generates a `wasm` file in `target/wasm32-wasi`.

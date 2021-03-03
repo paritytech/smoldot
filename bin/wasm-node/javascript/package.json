@@ -19,7 +19,7 @@
     "prepublishOnly": "node prepare.js",
     "prestart": "node prepare.js",
     "build": "node prepare.js",
-    "start": "node demo.js",
+    "start": "node --inspect demo.js",
     "test": "node prepare.js && dtslint && node test.js"
   },
   "browser": {
