@@ -318,6 +318,18 @@ impl Inner {
                     self.vm = req.resume();
                 }
 
+                host::HostVm::ExternalStorageSet(_) => panic!("ExternalStorageSet"),
+                host::HostVm::ExternalStorageAppend(_) => panic!("ExternalStorageAppend"),
+                host::HostVm::ExternalStorageClearPrefix(_) => panic!("ExternalStorageClearPrefix"),
+                host::HostVm::ExternalStorageRoot(resume) => {
+                    // TODO: dummy
+                    self.vm = resume.resume(&[0; 32]);
+                }
+                host::HostVm::ExternalStorageChangesRoot(_) => panic!("ExternalStorageChangesRoot"),
+                host::HostVm::ExternalOffchainStorageSet(_) => panic!("ExternalOffchainStorageSet"),
+                host::HostVm::StartStorageTransaction(_) => panic!("StartStorageTransaction"),
+                host::HostVm::EndStorageTransaction { .. } => panic!("EndStorageTransaction"),
+
                 other => {
                     return RuntimeHostVm::Finished(Err(Error {
                         detail: ErrorDetail::ForbiddenHostCall,

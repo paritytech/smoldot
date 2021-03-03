@@ -747,6 +747,7 @@ async fn start_parachain(
                 ).await;
 
                 if let Ok(outcome) = outcome {
+                    println!("outcome = {:?}", outcome);
                     let pvd = para::decode_persisted_validation_data(&outcome).unwrap(); // TODO: don't unwrap?
                     println!("{:?}", pvd.parent_head);
                 } else {

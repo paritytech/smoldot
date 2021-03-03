@@ -218,6 +218,8 @@ impl RuntimeService {
                         };
                     }
 
+                    println!("relay best block");
+
                     // Download the runtime code of this new best block.
                     let new_best_block_decoded = header::decode(&new_best_block).unwrap();
                     let new_best_block_hash =
@@ -234,8 +236,10 @@ impl RuntimeService {
                         .await;
 
                     // Only lock `latest_known_runtime` now that everything is synchronous.
+                    println!("new relay block before lock");
                     let mut latest_known_runtime =
                         runtime_service.latest_known_runtime.lock().await;
+                    println!("new relay block after lock");
                     let latest_known_runtime = &mut *latest_known_runtime;
 
                     // Whatever the result of `code_query_result` is, notify the best block
@@ -249,7 +253,7 @@ impl RuntimeService {
                         .best_blocks_subscriptions
                         .shrink_to_fit();
                     for subscription in &mut latest_known_runtime.best_blocks_subscriptions {
-                        let _ = subscription.send(new_best_block.clone()).await;
+                        let _ = subscription.try_send(new_best_block.clone());
                     }
 
                     let (new_code, new_heap_pages) = {
@@ -316,7 +320,7 @@ impl RuntimeService {
                             .as_ref()
                             .map(|r| r.runtime_spec.clone())
                             .map_err(|&()| ());
-                        let _ = subscription.send(to_send).await;
+                        let _ = subscription.try_send(to_send);
                     }
                 }
             })
@@ -361,7 +365,8 @@ impl RuntimeService {
         let (tx, rx) = mpsc::channel(8);
         let mut latest_known_runtime = self.latest_known_runtime.lock().await;
         latest_known_runtime.best_blocks_subscriptions.push(tx);
-        let (current, _) = self.sync_service.subscribe_best().await;
+        drop(latest_known_runtime);
+        let (current, _) = self.sync_service.subscribe_best().await; // TODO: not correct; should load from latest_known_runtime
         (current, rx)
     }
 
@@ -406,10 +411,12 @@ impl RuntimeService {
         // it with the value previously found. If there is a mismatch, the entire runtime call
         // is restarted from scratch.
         loop {
+            println!("call loop");
             // Get `runtime_block_hash` and `runtime_block_state_root`, the hash and state trie
             // root of a recent best block that uses this runtime.
             let (spec_version, runtime_block_hash, runtime_block_state_root) = {
                 let lock = self.latest_known_runtime.lock().await;
+                println!("after lock");
                 (
                     lock.runtime
                         .as_ref()
@@ -439,6 +446,8 @@ impl RuntimeService {
                 )
                 .await
                 .unwrap_or(Vec::new());
+
+            println!("after call proof");
 
             // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
             // in-between.
@@ -487,25 +496,24 @@ impl RuntimeService {
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
                         let requested_key = get.key_as_vec(); // TODO: optimization: don't use as_vec
-                        let storage_value = match proof_verify::verify_proof(
-                            proof_verify::VerifyProofConfig {
+                        let storage_value =
+                            match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
                                 requested_key: &requested_key,
                                 trie_root_hash: &runtime_block_state_root,
                                 proof: call_proof.iter().map(|v| &v[..]),
-                            },
-                        ) {
-                            Ok(v) => v,
-                            Err(err) => {
-                                // TODO: shouldn't return if error but do a storage_proof instead
-                                runtime.virtual_machine = Some(
+                            }) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    // TODO: shouldn't return if error but do a storage_proof instead
+                                    runtime.virtual_machine = Some(
                                     executor::read_only_runtime_host::RuntimeHostVm::StorageGet(
                                         get,
                                     )
                                     .into_prototype(),
                                 );
-                                return Err(RuntimeCallError::StorageRetrieval(err));
-                            }
-                        };
+                                    return Err(RuntimeCallError::StorageRetrieval(err));
+                                }
+                            };
                         runtime_call = get.inject_value(storage_value.as_ref().map(iter::once));
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::NextKey(_) => {

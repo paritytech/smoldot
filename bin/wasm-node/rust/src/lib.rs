@@ -410,7 +410,8 @@ pub async fn start_client(
                         )
                         .unwrap();
 
-                    // Spawn a task responsible for serializing the chain from the sync service at
+                    // TODO: restore
+                    /*// Spawn a task responsible for serializing the chain from the sync service at
                     // a periodic interval.
                     new_task_tx
                         .unbounded_send(
@@ -424,7 +425,7 @@ pub async fn start_client(
                             }
                             .boxed(),
                         )
-                        .unwrap();
+                        .unwrap();*/
 
                     log::info!("Initialization complete");
                 }
