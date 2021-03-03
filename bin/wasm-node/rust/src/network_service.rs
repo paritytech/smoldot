@@ -522,6 +522,7 @@ impl NetworkService {
         // TODO: better peers selection ; don't just take the first 3
         // TODO: must only ask the peers that know about this block
         for target in self.peers_list().await.take(NUM_ATTEMPTS) {
+            println!("attempt");
             let result = self
                 .clone()
                 .storage_proof_request(

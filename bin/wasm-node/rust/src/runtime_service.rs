@@ -610,6 +610,8 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     )
                     .await;
 
+                println!("after code download");
+
                 // Only lock `latest_known_runtime` now that everything is synchronous.
                 let mut latest_known_runtime = runtime_service.latest_known_runtime.lock().await;
                 let latest_known_runtime = &mut *latest_known_runtime;
@@ -648,8 +650,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 // `runtime_block_hash` is always updated in order to have the most recent
                 // block possible.
                 latest_known_runtime.runtime_block_hash = new_best_block_hash;
-                latest_known_runtime.runtime_block_state_root =
-                    *new_best_block_decoded.state_root;
+                latest_known_runtime.runtime_block_state_root = *new_best_block_decoded.state_root;
 
                 // `continue` if there wasn't any change in `:code` and `:heappages`.
                 if new_code == latest_known_runtime.runtime_code
