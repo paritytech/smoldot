@@ -23,13 +23,15 @@
 
 // TODO: doc
 
-use crate::{ffi, network_service, sync_service};
+use crate::{ffi, lossy_channel, network_service, sync_service};
 
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use futures::{lock::Mutex, prelude::*};
 use smoldot::{chain_spec, executor, header, metadata, network::protocol, trie::proof_verify};
 use std::{iter, pin::Pin, sync::Arc, time::Duration};
 
-/// Configuration for a JSON-RPC service.
+pub use crate::lossy_channel::Receiver as NotificationsReceiver;
+
+/// Configuration for a runtime service.
 pub struct Config<'a> {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
@@ -169,9 +171,9 @@ impl RuntimeService {
         self: &Arc<RuntimeService>,
     ) -> (
         Result<executor::CoreVersion, ()>,
-        impl Stream<Item = Result<executor::CoreVersion, ()>>,
+        NotificationsReceiver<Result<executor::CoreVersion, ()>>,
     ) {
-        let (tx, rx) = mpsc::channel(8);
+        let (tx, rx) = lossy_channel::channel();
         let mut latest_known_runtime = self.latest_known_runtime.lock().await;
         latest_known_runtime.runtime_version_subscriptions.push(tx);
         let current_version = latest_known_runtime
@@ -193,8 +195,8 @@ impl RuntimeService {
     /// empty, you are guaranteed that the call has been performed on the best block.
     pub async fn subscribe_best(
         self: &Arc<RuntimeService>,
-    ) -> (Vec<u8>, impl Stream<Item = Vec<u8>>) {
-        let (tx, rx) = mpsc::channel(8);
+    ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
+        let (tx, rx) = lossy_channel::channel();
         let mut latest_known_runtime = self.latest_known_runtime.lock().await;
         latest_known_runtime.best_blocks_subscriptions.push(tx);
         drop(latest_known_runtime);
@@ -312,7 +314,7 @@ impl RuntimeService {
                     executor::read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                         if !success.logs.is_empty() {
                             log::debug!(
-                                target: "json-rpc",
+                                target: "runtime",
                                 "Runtime logs: {}",
                                 success.logs
                             );
@@ -350,6 +352,9 @@ impl RuntimeService {
                     }
                     executor::read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
                         todo!() // TODO:
+                    }
+                    executor::read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                        runtime_call = storage_root.resume(&runtime_block_state_root);
                     }
                 }
             }
@@ -389,7 +394,7 @@ impl RuntimeService {
                     }
                     Err(error) => {
                         log::warn!(
-                            target: "json-rpc",
+                            target: "runtime",
                             "Failed to call Metadata_metadata on runtime: {}",
                             error
                         );
@@ -399,7 +404,7 @@ impl RuntimeService {
             }
             Err(error) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: "runtime",
                     "Failed to call Metadata_metadata on runtime: {}",
                     error
                 );
@@ -464,19 +469,17 @@ struct LatestKnownRuntime {
     /// Whenever [`LatestKnownRuntime::runtime`] is updated, one should emit an item on each
     /// sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
-    // TODO: should be a lossy_channel
-    runtime_version_subscriptions: Vec<mpsc::Sender<Result<executor::CoreVersion, ()>>>,
+    runtime_version_subscriptions: Vec<lossy_channel::Sender<Result<executor::CoreVersion, ()>>>,
 
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
-    // TODO: should be a lossy_channel
-    best_blocks_subscriptions: Vec<mpsc::Sender<Vec<u8>>>,
+    best_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
 }
 
 struct SuccessfulRuntime {
     /// Cache of the metadata extracted from the runtime. `None` if unknown.
     ///
-    /// This cache is filled lazily whenever the JSON-RPC client requests it.
+    /// This cache is filled lazily whenever it is requested through the public API.
     ///
     /// Note that building the metadata might require access to the storage, just like obtaining
     /// the runtime code. if the runtime code gets an update, we can reasonably assume that the
@@ -511,7 +514,7 @@ impl SuccessfulRuntime {
         ) {
             Ok(vm) => vm,
             Err(error) => {
-                log::warn!(target: "json-rpc", "Failed to compile best block runtime: {}", error);
+                log::warn!(target: "runtime", "Failed to compile best block runtime: {}", error);
                 return Err(());
             }
         };
@@ -520,7 +523,7 @@ impl SuccessfulRuntime {
             Ok(v) => v,
             Err(_error) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: "runtime",
                     "Failed to call Core_version on new runtime",  // TODO: print error message as well ; at the moment the type of the error is `()`
                 );
                 return Err(());
@@ -560,7 +563,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 // To avoid using too much bandwidth, we force another delay between two runtime
                 // code downloads.
                 // This delay is done at the beginning of the loop because the runtime is built
-                // as part of the initialization of the `JsonRpcService`, and in order to make it
+                // as part of the initialization of the `RuntimeService`, and in order to make it
                 // possible to use `continue` without accidentally skipping this delay.
                 ffi::Delay::new(Duration::from_secs(3)).await;
 
@@ -595,8 +598,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
 
                 // Download the runtime code of this new best block.
                 let new_best_block_decoded = header::decode(&new_best_block).unwrap();
-                let new_best_block_hash =
-                    header::hash_from_scale_encoded_header(&new_best_block);
+                let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
                 let code_query_result = runtime_service
                     .network_service
                     .clone()
@@ -609,10 +611,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     .await;
 
                 // Only lock `latest_known_runtime` now that everything is synchronous.
-                println!("new relay block before lock");
-                let mut latest_known_runtime =
-                    runtime_service.latest_known_runtime.lock().await;
-                println!("new relay block after lock");
+                let mut latest_known_runtime = runtime_service.latest_known_runtime.lock().await;
                 let latest_known_runtime = &mut *latest_known_runtime;
 
                 // Whatever the result of `code_query_result` is, notify the best block
@@ -621,12 +620,10 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 // to the notifications.
                 latest_known_runtime
                     .best_blocks_subscriptions
-                    .retain(|c| !c.is_closed());
-                latest_known_runtime
-                    .best_blocks_subscriptions
                     .shrink_to_fit();
                 for subscription in &mut latest_known_runtime.best_blocks_subscriptions {
-                    let _ = subscription.try_send(new_best_block.clone());
+                    // TODO: remove channel if it's closed (i.e. error returned)
+                    let _ = subscription.send(new_best_block.clone());
                 }
 
                 let (new_code, new_heap_pages) = {
@@ -634,7 +631,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                         Ok(c) => c,
                         Err(error) => {
                             log::log!(
-                                target: "json-rpc",
+                                target: "runtime",
                                 if error.is_network_problem() { log::Level::Debug } else { log::Level::Warn },
                                 "Failed to download :code and :heappages of new best block: {}",
                                 error
@@ -666,7 +663,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 // the best block in the first place.
                 if runtime_matches_best_block {
                     log::info!(
-                        target: "json-rpc",
+                        target: "runtime",
                         "New runtime code detected around block #{} (block number might be wrong)",
                         new_best_block_decoded.number
                     );
@@ -682,9 +679,6 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
 
                 latest_known_runtime
                     .runtime_version_subscriptions
-                    .retain(|c| !c.is_closed());
-                latest_known_runtime
-                    .runtime_version_subscriptions
                     .shrink_to_fit();
 
                 for subscription in &mut latest_known_runtime.runtime_version_subscriptions {
@@ -693,7 +687,8 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                         .as_ref()
                         .map(|r| r.runtime_spec.clone())
                         .map_err(|&()| ());
-                    let _ = subscription.try_send(to_send);
+                    // TODO: remove channel if it's closed (i.e. error returned)
+                    let _ = subscription.send(to_send);
                 }
             }
         })
