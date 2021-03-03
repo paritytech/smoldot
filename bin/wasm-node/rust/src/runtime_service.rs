@@ -62,6 +62,7 @@ pub struct Config<'a> {
     pub genesis_block_state_root: [u8; 32],
 }
 
+/// See [the module-level documentation](..).
 pub struct RuntimeService {
     /// See [`Config::tasks_executor`].
     tasks_executor: Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
@@ -73,11 +74,6 @@ pub struct RuntimeService {
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
 
-    /// Hash of the genesis block.
-    /// Keeping the genesis block is important, as the genesis block hash is included in
-    /// transaction signatures, and must therefore be queried by upper-level UIs.
-    genesis_block: [u8; 32],
-
     /// Initially contains the runtime code of the genesis block. Whenever a best block is
     /// received, updated with the runtime of this new best block.
     /// If, after a new best block, it isn't possible to determine whether the runtime has changed,
@@ -87,7 +83,12 @@ pub struct RuntimeService {
 }
 
 impl RuntimeService {
+    /// Initializes a new runtime service.
+    ///
+    /// The future returned by this function is expected to finish relatively quickly and is
+    /// necessary only for locking purposes.
     pub async fn new(config: Config<'_>) -> Arc<Self> {
+        // Build the runtime of the genesis block.
         let latest_known_runtime = {
             let code = config
                 .chain_spec
@@ -100,8 +101,8 @@ impl RuntimeService {
                 .find(|(k, _)| k == b":heappages")
                 .map(|(_, v)| v.to_vec());
 
-            // Note that in the absolute we don't need to panic in case of a problem, and could simply
-            // store an `Err` and continue running.
+            // Note that in the absolute we don't need to panic in case of a problem, and could
+            // simply store an `Err` and continue running.
             // However, in practice, it seems more sane to detect problems in the genesis block.
             let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages)
                 .expect("invalid runtime at genesis block");
@@ -140,19 +141,11 @@ impl RuntimeService {
             }
         };
 
-        let (_finalized_block_header, finalized_blocks_subscription) =
-            config.sync_service.subscribe_best().await;
-        let (best_block_header, best_blocks_subscription) =
-            config.sync_service.subscribe_best().await;
-        debug_assert_eq!(_finalized_block_header, best_block_header);
-        let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
-
         let runtime_service = Arc::new(RuntimeService {
             tasks_executor: Mutex::new(config.tasks_executor),
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
             sync_service: config.sync_service,
-            genesis_block: config.genesis_block_hash,
             latest_known_runtime: Mutex::new(latest_known_runtime),
         });
 
