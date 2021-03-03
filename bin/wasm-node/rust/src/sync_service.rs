@@ -29,7 +29,12 @@
 
 use crate::{ffi, network_service, runtime_service};
 
-use futures::{channel::{mpsc, oneshot}, lock::Mutex, pin_mut, prelude::*};
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+    pin_mut,
+    prelude::*,
+};
 use smoldot::{
     chain,
     informant::HashDisplay,
@@ -48,7 +53,6 @@ pub use lossy_channel::Receiver as NotificationsReceiver;
 /// Configuration for a [`SyncService`].
 pub struct Config {
     /// State of the finalized chain.
-    // TODO: not needed for parachains
     pub chain_information: chain::chain_information::ChainInformation,
 
     /// Closure that spawns background tasks.
@@ -101,6 +105,7 @@ impl SyncService {
 
         if let Some(config_parachain) = config.parachain {
             (config.tasks_executor)(Box::pin(start_parachain(
+                config.chain_information,
                 from_foreground,
                 config.network_service.0,
                 config.network_service.1,
@@ -684,6 +689,7 @@ async fn start_relay_chain(
 }
 
 async fn start_parachain(
+    chain_information: chain::chain_information::ChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService>,
     network_chain_index: usize,
@@ -699,6 +705,9 @@ async fn start_parachain(
     };
     futures::pin_mut!(relay_best_blocks);
 
+    let mut current_finalized_block = chain_information.finalized_block_header;
+    let mut current_best_block = current_finalized_block.clone();
+
     loop {
         futures::select! {
             message = from_foreground.next().fuse() => {
@@ -710,17 +719,24 @@ async fn start_parachain(
 
                 // TODO: spawn background tasks?
                 match message {
-                    ToBackground::Serialize { send_back } => core::mem::forget(send_back), // TODO:
+                    ToBackground::Serialize { send_back } => todo!(),
                     ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                        let response = parachain_config.relay_chain_sync.is_near_head_of_chain_heuristic().await;
-                        let _ = send_back.send(response);
+                        todo!()
                     },
-                    ToBackground::SubscribeFinalized { send_back } => core::mem::forget(send_back), // TODO:
-                    ToBackground::SubscribeBest { send_back } => core::mem::forget(send_back), // TODO:
+                    ToBackground::SubscribeFinalized { send_back } => {
+                        let (tx, rx) = lossy_channel::channel();
+                        core::mem::forget(tx); // TODO:
+                        let _ = send_back.send((current_finalized_block.scale_encoding_vec(), rx));
+                    }
+                    ToBackground::SubscribeBest { send_back } => {
+                        let (tx, rx) = lossy_channel::channel();
+                        core::mem::forget(tx); // TODO:
+                        let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
+                    }
                 }
             },
             relay_best_block = relay_best_blocks.next().fuse() => {
-                println!("test {:?}", relay_best_block);
+                println!("new relay block {:?}", smoldot::header::decode(&relay_best_block.unwrap()).unwrap());
                 let outcome = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
                     "ParachainHost_persisted_validation_data",
                     para::persisted_validation_data_parameters(
