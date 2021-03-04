@@ -688,7 +688,7 @@ async fn start_parachain(
     mut from_foreground: mpsc::Receiver<ToBackground>,
     parachain_config: ConfigParachain,
 ) {
-    // TODO: handle finality as well
+    // TODO: handle finality as well; this is semi-complicated because the runtime service needs to provide a way to call a function on the finalized block's runtime
 
     let relay_best_blocks = {
         let (relay_best_block_header, relay_best_blocks_subscription) =
