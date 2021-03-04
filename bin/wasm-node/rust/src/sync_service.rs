@@ -42,9 +42,7 @@ use smoldot::{
     sync::{all, para},
     trie::proof_verify,
 };
-use std::{
-    collections::HashMap, convert::TryFrom as _, num::NonZeroU32, pin::Pin, sync::Arc,
-};
+use std::{collections::HashMap, convert::TryFrom as _, num::NonZeroU32, pin::Pin, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
