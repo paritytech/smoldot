@@ -204,11 +204,6 @@ impl RuntimeService {
         (current, rx)
     }
 
-    /// See [`SyncService::is_near_head_of_chain_heuristic`].
-    pub async fn is_near_head_of_chain_heuristic(&self) -> bool {
-        self.sync_service.is_near_head_of_chain_heuristic().await
-    }
-
     /// Performs a runtime call using the best block, or a recent best block.
     ///
     /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,

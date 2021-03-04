@@ -725,11 +725,11 @@ async fn start_parachain(
                     None => return,
                 };
 
-                // TODO: spawn background tasks?
                 match message {
                     ToBackground::Serialize { send_back } => todo!(),
                     ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                        todo!()
+                        // TODO: that doesn't seem totally correct
+                        let _ = send_back.send(previous_best_head_data_hash.is_some());
                     },
                     ToBackground::SubscribeFinalized { send_back } => {
                         let (tx, rx) = lossy_channel::channel();
@@ -743,8 +743,8 @@ async fn start_parachain(
                     }
                 }
             },
+
             _relay_best_block = relay_best_blocks.next().fuse() => {
-                println!("new relay block");
                 // For each relay chain block, call `ParachainHost_persisted_validation_data` in
                 // order to know where the parachains are.
                 let pvd_result = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
