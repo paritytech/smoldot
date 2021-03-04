@@ -245,12 +245,10 @@ impl RuntimeService {
         // it with the value previously found. If there is a mismatch, the entire runtime call
         // is restarted from scratch.
         loop {
-            println!("call loop");
             // Get `runtime_block_hash` and `runtime_block_state_root`, the hash and state trie
             // root of a recent best block that uses this runtime.
             let (spec_version, runtime_block_hash, runtime_block_state_root) = {
                 let lock = self.latest_known_runtime.lock().await;
-                println!("after lock");
                 (
                     lock.runtime
                         .as_ref()
@@ -280,8 +278,6 @@ impl RuntimeService {
                 )
                 .await
                 .unwrap_or(Vec::new());
-
-            println!("after call proof");
 
             // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
             // in-between.
@@ -594,8 +590,6 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     };
                 }
 
-                println!("relay best block");
-
                 // Download the runtime code of this new best block.
                 let new_best_block_decoded = header::decode(&new_best_block).unwrap();
                 let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
@@ -609,8 +603,6 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                         iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
                     )
                     .await;
-
-                println!("after code download");
 
                 // Only lock `latest_known_runtime` now that everything is synchronous.
                 let mut latest_known_runtime = runtime_service.latest_known_runtime.lock().await;

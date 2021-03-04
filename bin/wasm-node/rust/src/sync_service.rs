@@ -736,7 +736,7 @@ async fn start_parachain(
                 }
             },
             relay_best_block = relay_best_blocks.next().fuse() => {
-                println!("new relay block {:?}", smoldot::header::decode(&relay_best_block.unwrap()).unwrap());
+                println!("new relay block");
                 let outcome = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
                     "ParachainHost_persisted_validation_data",
                     para::persisted_validation_data_parameters(
@@ -747,9 +747,9 @@ async fn start_parachain(
                 ).await;
 
                 if let Ok(outcome) = outcome {
-                    println!("outcome = {:?}", outcome);
                     let pvd = para::decode_persisted_validation_data_return_value(&outcome).unwrap(); // TODO: don't unwrap?
-                    println!("{:?}", pvd.unwrap().parent_head);
+                    let header = smoldot::header::decode(&pvd.unwrap().parent_head);
+                    println!("{:?}", header);
                 } else {
                     println!("error: {:?}", outcome);
                 }
