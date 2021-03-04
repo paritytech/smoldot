@@ -33,7 +33,6 @@ use blake2_rfc::blake2b::blake2b;
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
-    pin_mut,
     prelude::*,
 };
 use smoldot::{
@@ -44,7 +43,7 @@ use smoldot::{
     trie::proof_verify,
 };
 use std::{
-    collections::HashMap, convert::TryFrom as _, iter, num::NonZeroU32, pin::Pin, sync::Arc,
+    collections::HashMap, convert::TryFrom as _, num::NonZeroU32, pin::Pin, sync::Arc,
 };
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
@@ -106,9 +105,6 @@ impl SyncService {
             (config.tasks_executor)(Box::pin(start_parachain(
                 config.chain_information,
                 from_foreground,
-                config.network_service.0,
-                config.network_service.1,
-                config.network_events_receiver,
                 config_parachain,
             )));
         } else {
@@ -690,13 +686,8 @@ async fn start_relay_chain(
 async fn start_parachain(
     chain_information: chain::chain_information::ChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
-    network_service: Arc<network_service::NetworkService>,
-    network_chain_index: usize,
-    mut from_network_service: mpsc::Receiver<network_service::Event>,
     parachain_config: ConfigParachain,
 ) {
-    drop(from_network_service);
-
     // TODO: handle finality as well
 
     let relay_best_blocks = {
@@ -725,8 +716,13 @@ async fn start_parachain(
                     None => return,
                 };
 
+                // Note that the rest of this `select!` statement can block for a long time,
+                // which means that there might be a big delay for processing the messages here.
+                // At the time of writing, the nature of the messages makes this a non-issue,
+                // but care should be taken about this.
+
                 match message {
-                    ToBackground::Serialize { send_back } => todo!(),
+                    ToBackground::Serialize { .. } => todo!(),  // TODO: it doesn't make sense to serialize a parachain
                     ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
                         // TODO: that doesn't seem totally correct
                         let _ = send_back.send(previous_best_head_data_hash.is_some());
