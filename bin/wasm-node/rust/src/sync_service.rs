@@ -694,6 +694,8 @@ async fn start_parachain(
     mut from_network_service: mpsc::Receiver<network_service::Event>,
     parachain_config: ConfigParachain,
 ) {
+    drop(from_network_service);
+
     // TODO: handle finality as well
 
     let relay_best_blocks = {

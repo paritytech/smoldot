@@ -39,7 +39,7 @@ smoldot.start({
     chain_spec: JSON.stringify(chain_specs()),
     relay_chain_spec: JSON.stringify(relay_chain_specs()),
     database_content: null, // TODO: database_content,
-    max_log_level: 5,  // Can be increased for more verbosity
+    max_log_level: 3,  // Can be increased for more verbosity
     json_rpc_callback: (resp) => {
         if (ws_connection) {
             ws_connection.sendUTF(resp);

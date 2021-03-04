@@ -175,7 +175,7 @@ impl NetworkService {
                 known_nodes,
                 listen_addresses: Vec::new(), // TODO:
                 noise_key: connection::NoiseKey::new(&rand::random()),
-                pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
+                pending_api_events_buffer_size: NonZeroUsize::new(2048).unwrap(),
                 randomness_seed: rand::random(),
             }),
             important_nodes,
@@ -522,7 +522,6 @@ impl NetworkService {
         // TODO: better peers selection ; don't just take the first 3
         // TODO: must only ask the peers that know about this block
         for target in self.peers_list().await.take(NUM_ATTEMPTS) {
-            println!("attempt");
             let result = self
                 .clone()
                 .storage_proof_request(
@@ -536,7 +535,7 @@ impl NetworkService {
                 .await
                 .map_err(StorageQueryErrorDetail::Network)
                 .and_then(|outcome| {
-                    let mut result = Vec::with_capacity(outcome.len());
+                    let mut result = Vec::with_capacity(requested_keys.clone().count());
                     for key in requested_keys.clone() {
                         result.push(
                             proof_verify::verify_proof(proof_verify::VerifyProofConfig {
