@@ -29,6 +29,7 @@
 
 use crate::{ffi, lossy_channel, network_service, runtime_service};
 
+use blake2_rfc::blake2b::blake2b;
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -36,7 +37,7 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain,
+    chain, header,
     informant::HashDisplay,
     libp2p, network,
     sync::{all, para},
@@ -708,6 +709,13 @@ async fn start_parachain(
     let mut current_finalized_block = chain_information.finalized_block_header;
     let mut current_best_block = current_finalized_block.clone();
 
+    // List of senders that get notified when the best block is modified.
+    let mut best_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
+
+    // Hash of the head data of the best block of the parachain. `None` if no head data obtained
+    // yet. Used to avoid sending out notifications if the head data hasn't changed.
+    let mut previous_best_head_data_hash = None::<[u8; 32]>;
+
     loop {
         futures::select! {
             message = from_foreground.next().fuse() => {
@@ -730,14 +738,16 @@ async fn start_parachain(
                     }
                     ToBackground::SubscribeBest { send_back } => {
                         let (tx, rx) = lossy_channel::channel();
-                        core::mem::forget(tx); // TODO:
+                        best_subscriptions.push(tx);
                         let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
                     }
                 }
             },
-            relay_best_block = relay_best_blocks.next().fuse() => {
+            _relay_best_block = relay_best_blocks.next().fuse() => {
                 println!("new relay block");
-                let outcome = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
+                // For each relay chain block, call `ParachainHost_persisted_validation_data` in
+                // order to know where the parachains are.
+                let pvd_result = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
                     "ParachainHost_persisted_validation_data",
                     para::persisted_validation_data_parameters(
                         parachain_config.parachain_id,
@@ -746,12 +756,69 @@ async fn start_parachain(
                     )
                 ).await;
 
-                if let Ok(outcome) = outcome {
-                    let pvd = para::decode_persisted_validation_data_return_value(&outcome).unwrap(); // TODO: don't unwrap?
-                    let header = smoldot::header::decode(&pvd.unwrap().parent_head);
-                    println!("{:?}", header);
-                } else {
-                    println!("error: {:?}", outcome);
+                // Even if there isn't any bug, the runtime call can likely fail because the relay
+                // chain block has already been pruned from the network. This isn't a severe
+                // error.
+                let encoded_pvd = match pvd_result {
+                    Ok(encoded_pvd) => encoded_pvd,
+                    Err(err) => {
+                        previous_best_head_data_hash = None;
+                        if err.is_network_problem() {
+                            log::debug!(target: "sync-verify", "Failed to get chain heads: {}", err);
+                        } else {
+                            log::warn!(target: "sync-verify", "Failed to get chain heads: {}", err);
+                        }
+                        continue;
+                    }
+                };
+
+                // Try decode the result of the runtime call.
+                // If this fails, it indicates an incompatibility between smoldot and the relay
+                // chain.
+                let head_data =
+                    match para::decode_persisted_validation_data_return_value(&encoded_pvd) {
+                        Ok(Some(pvd)) => pvd.parent_head,
+                        Ok(None) => {
+                            log::warn!(
+                                target: "sync-verify",
+                                "Couldn't find the parachain head from relay chain. \
+                                The parachain likely doesn't occupy a core."
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            log::error!(
+                                target: "sync-verify",
+                                "Failed to fetch the parachain head from relay chain: {}",
+                                error
+                            );
+                            continue;
+                        }
+                    };
+
+                // Don't do anything more if the head data matches
+                // `previous_best_head_data_hash`.
+                match (&mut previous_best_head_data_hash, blake2b(32, &[], &head_data)) {
+                    (&mut Some(ref mut h1), h2) if *h1 == h2.as_bytes() => continue,
+                    (h1 @ _, h2) => *h1 = Some(<[u8; 32]>::try_from(h2.as_bytes()).unwrap()),
+                };
+
+                // The meaning of `head_data` depends on the parachain. It can represent
+                // anything. In practice, however, it is most of the time a block header.
+                match header::decode(&head_data) {
+                    Ok(header) => {
+                        current_best_block = header.into();
+                        for sender in &mut best_subscriptions {
+                            // TODO: remove senders if they're closed
+                            let _ = sender.send(head_data.to_vec());
+                        }
+                    }
+                    Err(_) => {
+                        log::warn!(
+                            target: "sync-verify",
+                            "Head data is not a block header. This isn't supported by smoldot."
+                        );
+                    }
                 }
             }
         }
