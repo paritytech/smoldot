@@ -270,39 +270,49 @@ impl HostVmPrototype {
     }
 
     /// Starts the VM, calling the function passed as parameter.
-    pub fn run(self, function_to_call: &str, data: &[u8]) -> Result<ReadyToRun, StartErr> {
+    pub fn run(self, function_to_call: &str, data: &[u8]) -> Result<ReadyToRun, (StartErr, Self)> {
         self.run_vectored(function_to_call, iter::once(data))
     }
 
     /// Same as [`HostVmPrototype::run`], except that the function desn't need any parameter.
-    pub fn run_no_param(self, function_to_call: &str) -> Result<ReadyToRun, StartErr> {
+    pub fn run_no_param(self, function_to_call: &str) -> Result<ReadyToRun, (StartErr, Self)> {
         self.run_vectored(function_to_call, iter::empty::<Vec<u8>>())
     }
 
     /// Same as [`HostVmPrototype::run`], except that the function parameter can be passed as
     /// a list of buffers. All the buffers will be concatenated in memory.
     pub fn run_vectored(
-        self,
+        mut self,
         function_to_call: &str,
         data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-    ) -> Result<ReadyToRun, StartErr> {
+    ) -> Result<ReadyToRun, (StartErr, Self)> {
         let mut data_len_u32: u32 = 0;
         for data in data.clone() {
-            let len = u32::try_from(data.as_ref().len()).map_err(|_| StartErr::DataSizeOverflow)?;
-            data_len_u32 = data_len_u32
-                .checked_add(len)
-                .ok_or(StartErr::DataSizeOverflow)?;
+            let len = match u32::try_from(data.as_ref().len()) {
+                Ok(v) => v,
+                Err(_) => return Err((StartErr::DataSizeOverflow, self)),
+            };
+            data_len_u32 = match data_len_u32.checked_add(len) {
+                Some(v) => v,
+                None => return Err((StartErr::DataSizeOverflow, self)),
+            };
         }
 
         // Now create the actual virtual machine. We pass as parameter `heap_base` as the location
         // of the input data.
-        let mut vm = self.vm_proto.start(
+        let mut vm = match self.vm_proto.start(
             function_to_call,
             &[
                 vm::WasmValue::I32(i32::from_ne_bytes(self.heap_base.to_ne_bytes())),
                 vm::WasmValue::I32(i32::from_ne_bytes(data_len_u32.to_ne_bytes())),
             ],
-        )?;
+        ) {
+            Ok(vm) => vm,
+            Err((error, vm_proto)) => {
+                self.vm_proto = vm_proto;
+                return Err((error.into(), self));
+            }
+        };
 
         // Now writing the input data into the VM.
         let mut after_input_data = self.heap_base;
@@ -339,6 +349,12 @@ impl Clone for HostVmPrototype {
         // Since we have successfully called `from_module` with that same `module` earlier, it
         // is assumed that errors cannot happen.
         Self::from_module(self.module.clone(), self.heap_pages).unwrap()
+    }
+}
+
+impl fmt::Debug for HostVmPrototype {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("HostVmPrototype").finish()
     }
 }
 
@@ -411,6 +427,29 @@ pub enum HostVm {
     /// Runtime has emitted a log entry.
     #[from]
     LogEmit(LogEmit),
+}
+
+impl HostVm {
+    /// Cancels execution of the virtual machine and returns back the prototype.
+    pub fn into_prototype(self) -> HostVmPrototype {
+        match self {
+            HostVm::ReadyToRun(inner) => inner.inner.into_prototype(),
+            HostVm::Finished(inner) => inner.inner.into_prototype(),
+            HostVm::Error { prototype, .. } => prototype,
+            HostVm::ExternalStorageGet(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalStorageSet(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalStorageAppend(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalStorageClearPrefix(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalStorageChangesRoot(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
+            HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
+            HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
+            HostVm::StartStorageTransaction(inner) => inner.inner.into_prototype(),
+            HostVm::EndStorageTransaction { resume, .. } => resume.inner.into_prototype(),
+            HostVm::LogEmit(inner) => inner.inner.into_prototype(),
+        }
+    }
 }
 
 /// Virtual machine is ready to run.
@@ -908,12 +947,12 @@ impl ReadyToRun {
 
                     // TODO: copy overhead?
                     let success = if let Ok(public_key) =
-                        ed25519_dalek::PublicKey::from_bytes(&pubkey)
+                        ed25519_zebra::VerificationKey::try_from(&pubkey[..])
                     {
                         // TODO: copy overhead?
                         let signature =
-                            ed25519_dalek::Signature::new(<[u8; 64]>::try_from(&sig[..]).unwrap());
-                        public_key.verify_strict(&message, &signature).is_ok()
+                            ed25519_zebra::Signature::from(<[u8; 64]>::try_from(&sig[..]).unwrap());
+                        public_key.verify(&signature, &message).is_ok()
                     } else {
                         false
                     };
@@ -1501,15 +1540,15 @@ impl ExternalStorageGet {
     pub fn resume_full_value(self, value: Option<&[u8]>) -> HostVm {
         if let Some(value) = value {
             if usize::try_from(self.offset).unwrap() < value.len() {
-                let value = &value[usize::try_from(self.offset).unwrap()..];
-                if usize::try_from(self.max_size).unwrap() < value.len() {
-                    let value = &value[..usize::try_from(self.max_size).unwrap()];
-                    self.resume(Some(value))
+                let value_slice = &value[usize::try_from(self.offset).unwrap()..];
+                if usize::try_from(self.max_size).unwrap() < value_slice.len() {
+                    let value_slice = &value_slice[..usize::try_from(self.max_size).unwrap()];
+                    self.resume(Some((value_slice, value.len())))
                 } else {
-                    self.resume(Some(value))
+                    self.resume(Some((value_slice, value.len())))
                 }
             } else {
-                self.resume(Some(&[]))
+                self.resume(Some((&[], value.len())))
             }
         } else {
             self.resume(None)
@@ -1523,18 +1562,28 @@ impl ExternalStorageGet {
     /// [`ExternalStorageGet::offset`]. If the offset is out of range, an empty slice must be
     /// passed.
     ///
+    /// If `Some`, the total size of the value, without taking [`ExternalStorageGet::offset`] or
+    /// [`ExternalStorageGet::max_size`] into account, must additionally be provided.
+    ///
     /// The value must not be longer than what [`ExternalStorageGet::max_size`] returns.
     ///
     /// # Panic
     ///
     /// Panics if the value is longer than what [`ExternalStorageGet::max_size`] returns.
     ///
-    pub fn resume(self, value: Option<&[u8]>) -> HostVm {
-        self.resume_vectored(value.as_ref().map(iter::once))
+    pub fn resume(self, value: Option<(&[u8], usize)>) -> HostVm {
+        self.resume_vectored(
+            value
+                .as_ref()
+                .map(|(value, size)| (iter::once(&value[..]), *size)),
+        )
     }
 
     /// Similar to [`ExternalStorageGet::resume`], but allows passing the value as a list of
     /// buffers whose concatenation forms the actual value.
+    ///
+    /// If `Some`, the total size of the value, without taking [`ExternalStorageGet::offset`] or
+    /// [`ExternalStorageGet::max_size`] into account, must additionally be provided.
     ///
     /// # Panic
     ///
@@ -1542,15 +1591,18 @@ impl ExternalStorageGet {
     ///
     pub fn resume_vectored(
         mut self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
+        value: Option<(impl Iterator<Item = impl AsRef<[u8]>> + Clone, usize)>,
     ) -> HostVm {
         let host_fn = self.inner.registered_functions[self.calling];
         match host_fn {
             HostFunction::ext_storage_get_version_1 => {
-                if let Some(value) = value {
+                if let Some((value, value_total_len)) = value {
                     // Writing `Some(value)`.
-                    let value_len = value.clone().fold(0, |a, b| a + b.as_ref().len());
-                    let value_len_enc = util::encode_scale_compact_usize(value_len);
+                    debug_assert_eq!(
+                        value.clone().fold(0, |a, b| a + b.as_ref().len()),
+                        value_total_len
+                    );
+                    let value_len_enc = util::encode_scale_compact_usize(value_total_len);
                     self.inner.alloc_write_and_return_pointer_size(
                         host_fn.name(),
                         iter::once(&[1][..])
@@ -1565,21 +1617,20 @@ impl ExternalStorageGet {
                 }
             }
             HostFunction::ext_storage_read_version_1 => {
-                let outcome = if let Some(value) = value {
-                    let written =
-                        u32::try_from(value.clone().fold(0, |a, b| a + b.as_ref().len())).unwrap();
-                    assert!(written <= self.max_size);
-                    // TODO: don't unwrap!
+                let outcome = if let Some((value, value_total_len)) = value {
+                    let mut remaining_max_allowed = usize::try_from(self.max_size).unwrap();
                     let mut offset = self.value_out_ptr.unwrap();
                     for value in value {
                         let value = value.as_ref();
+                        assert!(value.len() <= remaining_max_allowed);
+                        remaining_max_allowed -= value.len();
                         self.inner.vm.write_memory(offset, value).unwrap();
                         offset += u32::try_from(value.len()).unwrap();
                     }
-                    // TODO: while the specs mention that `written` should be returned,
-                    // substrate instead returns the total length of the read value;
-                    // see https://github.com/paritytech/substrate/pull/7084
-                    Some(written)
+
+                    // Note: the https://github.com/paritytech/substrate/pull/7084 PR has changed
+                    // the meaning of this return value.
+                    Some(u32::try_from(value_total_len).unwrap() - self.offset)
                 } else {
                     None
                 };

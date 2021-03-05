@@ -20,12 +20,11 @@
 // TODO: this module needs considerable clean-up
 
 use crate::{
-    chain::{
-        chain_information,
-        sync::{all_forks, grandpa_warp_sync, optimistic},
-    },
-    executor::vm::ExecHint,
-    header, verify,
+    chain::chain_information,
+    executor::{host, vm::ExecHint},
+    header,
+    sync::{all_forks, grandpa_warp_sync, optimistic},
+    verify,
 };
 
 use alloc::{vec, vec::Vec};
@@ -76,8 +75,16 @@ pub struct Config {
     /// situations where determinism/reproducibility is desired.
     pub source_selection_randomness_seed: u64,
 
-    /// If true, the block bodies and storage are also synchronized.
-    pub full: bool,
+    /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
+    /// configuration.
+    pub full: Option<ConfigFull>,
+}
+
+/// See [`Config::full`].
+#[derive(Debug)]
+pub struct ConfigFull {
+    /// Compiled runtime code of the finalized block.
+    pub finalized_runtime: host::HostVmPrototype,
 }
 
 #[derive(derive_more::From)]
@@ -141,7 +148,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
         Idle {
-            inner: if true || config.full {
+            inner: if true || config.full.is_some() {
                 // TODO: remove the `true ||` once GP warp sync is ready
                 IdleInner::Optimistic(optimistic::OptimisticSync::new(optimistic::Config {
                     chain_information: config.chain_information,
@@ -150,7 +157,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     blocks_request_granularity: config.blocks_request_granularity,
                     download_ahead_blocks: config.download_ahead_blocks,
                     source_selection_randomness_seed: config.source_selection_randomness_seed,
-                    full: config.full,
+                    full: config.full.map(|cfg| optimistic::ConfigFull {
+                        finalized_runtime: cfg.finalized_runtime,
+                    }),
                 }))
             } else {
                 IdleInner::GrandpaWarpSync(grandpa_warp_sync::grandpa_warp_sync(
@@ -494,8 +503,18 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     }
                 }
             }
-            (IdleInner::GrandpaWarpSync(sync), &SourceMapping::GrandpaWarpSync(_)) => {
-                // TODO: block announces are simply ignored at the moment; update the user data
+            (IdleInner::GrandpaWarpSync(mut sync), &SourceMapping::GrandpaWarpSync(source_id)) => {
+                // If GrandPa warp syncing is in progress, the best block of the source is stored
+                // in the user data. It will be useful later when transitioning to another
+                // syncing strategy.
+                if is_best {
+                    let mut user_data = sync.source_user_data_mut(source_id);
+                    // TODO: this can't panic right now, but it should be made explicit in the API that the header must be valid
+                    let header = header::decode(&announced_scale_encoded_header).unwrap();
+                    user_data.best_block_number = header.number;
+                    user_data.best_block_hash = header.hash();
+                }
+
                 self.inner = IdleInner::GrandpaWarpSync(sync);
                 BlockAnnounceOutcome::Disjoint {
                     sync: self,
@@ -1133,14 +1152,40 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         is_new_best,
                         mut sync,
                         next_request,
+                        requests_replace,
                     } => {
-                        let next_actions = if let Some(request) = next_request {
-                            vec![self
+                        let mut next_actions = Vec::with_capacity(
+                            requests_replace.len() + if next_request.is_some() { 1 } else { 0 },
+                        );
+
+                        for (source, new_request) in requests_replace {
+                            // TODO: O(n)
+                            let outer_request_id = self
                                 .shared
-                                .all_forks_request_to_request(&mut sync, source_id, request)]
-                        } else {
-                            Vec::new()
-                        };
+                                .requests
+                                .iter()
+                                .find(|(_, s)| **s == RequestMapping::AllForks(source))
+                                .map(|(id, _)| RequestId(id))
+                                .unwrap();
+                            self.shared.requests.remove(outer_request_id.0);
+                            next_actions.push(Action::Cancel(outer_request_id));
+
+                            if let Some(new_request) = new_request {
+                                next_actions.push(self.shared.all_forks_request_to_request(
+                                    &mut sync,
+                                    source,
+                                    new_request,
+                                ));
+                            }
+                        }
+
+                        if let Some(request) = next_request {
+                            next_actions.push(
+                                self.shared
+                                    .all_forks_request_to_request(&mut sync, source_id, request),
+                            );
+                        }
+
                         HeaderVerifyOutcome::Success {
                             is_new_best,
                             sync: Idle {
@@ -1154,28 +1199,75 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     all_forks::HeaderVerifyOutcome::SuccessContinue {
                         is_new_best,
                         next_block,
-                    } => HeaderVerifyOutcome::Success {
-                        is_new_best,
-                        sync: HeaderVerify {
-                            inner: HeaderVerifyInner::AllForks(next_block),
-                            shared: self.shared,
+                        requests_replace,
+                    } => {
+                        let mut next_actions = Vec::with_capacity(requests_replace.len());
+                        for (source, new_request) in requests_replace {
+                            // TODO: O(n)
+                            let outer_request_id = self
+                                .shared
+                                .requests
+                                .iter()
+                                .find(|(_, s)| **s == RequestMapping::AllForks(source))
+                                .map(|(id, _)| RequestId(id))
+                                .unwrap();
+                            self.shared.requests.remove(outer_request_id.0);
+                            next_actions.push(Action::Cancel(outer_request_id));
+
+                            if let Some(_new_request) = new_request {
+                                todo!() // Need to call `all_forks_request_to_request`
+                            }
                         }
-                        .into(),
-                        next_actions: Vec::new(),
-                    },
+
+                        HeaderVerifyOutcome::Success {
+                            is_new_best,
+                            sync: HeaderVerify {
+                                inner: HeaderVerifyInner::AllForks(next_block),
+                                shared: self.shared,
+                            }
+                            .into(),
+                            next_actions,
+                        }
+                    }
                     all_forks::HeaderVerifyOutcome::Error {
                         mut sync,
                         error,
                         user_data,
                         next_request,
+                        requests_replace,
                     } => {
-                        let next_actions = if let Some(request) = next_request {
-                            vec![self
+                        let mut next_actions = Vec::with_capacity(
+                            requests_replace.len() + if next_request.is_some() { 1 } else { 0 },
+                        );
+
+                        for (source, new_request) in requests_replace {
+                            // TODO: O(n)
+                            let outer_request_id = self
                                 .shared
-                                .all_forks_request_to_request(&mut sync, source_id, request)]
-                        } else {
-                            Vec::new()
-                        };
+                                .requests
+                                .iter()
+                                .find(|(_, s)| **s == RequestMapping::AllForks(source))
+                                .map(|(id, _)| RequestId(id))
+                                .unwrap();
+                            self.shared.requests.remove(outer_request_id.0);
+                            next_actions.push(Action::Cancel(outer_request_id));
+
+                            if let Some(new_request) = new_request {
+                                next_actions.push(self.shared.all_forks_request_to_request(
+                                    &mut sync,
+                                    source,
+                                    new_request,
+                                ));
+                            }
+                        }
+
+                        if let Some(request) = next_request {
+                            next_actions.push(
+                                self.shared
+                                    .all_forks_request_to_request(&mut sync, source_id, request),
+                            );
+                        }
+
                         HeaderVerifyOutcome::Error {
                             sync: Idle {
                                 inner: IdleInner::AllForks(sync),
@@ -1191,16 +1283,37 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         next_block,
                         error,
                         user_data,
-                    } => HeaderVerifyOutcome::Error {
-                        sync: HeaderVerify {
-                            inner: HeaderVerifyInner::AllForks(next_block),
-                            shared: self.shared,
+                        requests_replace,
+                    } => {
+                        let mut next_actions = Vec::with_capacity(requests_replace.len());
+                        for (source, new_request) in requests_replace {
+                            // TODO: O(n)
+                            let outer_request_id = self
+                                .shared
+                                .requests
+                                .iter()
+                                .find(|(_, s)| **s == RequestMapping::AllForks(source))
+                                .map(|(id, _)| RequestId(id))
+                                .unwrap();
+                            self.shared.requests.remove(outer_request_id.0);
+                            next_actions.push(Action::Cancel(outer_request_id));
+
+                            if let Some(_new_request) = new_request {
+                                todo!() // Need to call `all_forks_request_to_request`
+                            }
                         }
-                        .into(),
-                        next_actions: Vec::new(),
-                        error,
-                        user_data,
-                    },
+
+                        HeaderVerifyOutcome::Error {
+                            sync: HeaderVerify {
+                                inner: HeaderVerifyInner::AllForks(next_block),
+                                shared: self.shared,
+                            }
+                            .into(),
+                            next_actions,
+                            error,
+                            user_data,
+                        }
+                    }
                 }
             }
         }

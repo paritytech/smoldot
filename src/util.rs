@@ -22,27 +22,26 @@ use core::convert::TryFrom as _;
 
 pub(crate) mod leb128;
 
-/// Decodes a SCALE-encoded `Option`.
+/// Returns a parser that decodes a SCALE-encoded `Option`.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
 /// >           the type of `E`. Use `nom::Err<nom::error::Error>`.
 pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
-    bytes: &'a [u8],
     inner_decode: impl Fn(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
-) -> nom::IResult<&'a [u8], Option<O>, E> {
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Option<O>, E> {
     nom::branch::alt((
         nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| None),
         nom::combinator::map(
             nom::sequence::preceded(nom::bytes::complete::tag(&[1]), inner_decode),
             Some,
         ),
-    ))(bytes)
+    ))
 }
 
 /// Decodes a SCALE-compact-encoded usize.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
-/// >           the type of `E`. Use `nom::Err<nom::error::Error>`.
+/// >           the type of `E`. Use `nom::error::Error`.
 pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], usize, E> {

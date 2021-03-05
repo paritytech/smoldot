@@ -54,7 +54,7 @@ use smoldot::{
         peer_id::PeerId,
     },
     network::{protocol, service},
-    trie::proof_verify,
+    trie::{self, prefix_proof, proof_verify},
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -175,7 +175,9 @@ impl NetworkService {
                 known_nodes,
                 listen_addresses: Vec::new(), // TODO:
                 noise_key: connection::NoiseKey::new(&rand::random()),
-                pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
+                // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
+                // once the issue is solved, this should be restored to a smaller value, such as 16
+                pending_api_events_buffer_size: NonZeroUsize::new(2048).unwrap(),
                 randomness_seed: rand::random(),
             }),
             important_nodes,
@@ -535,10 +537,10 @@ impl NetworkService {
                 .await
                 .map_err(StorageQueryErrorDetail::Network)
                 .and_then(|outcome| {
-                    let mut result = Vec::with_capacity(outcome.len());
+                    let mut result = Vec::with_capacity(requested_keys.clone().count());
                     for key in requested_keys.clone() {
                         result.push(
-                            proof_verify::verify_proof(proof_verify::Config {
+                            proof_verify::verify_proof(proof_verify::VerifyProofConfig {
                                 proof: outcome.iter().map(|nv| &nv[..]),
                                 requested_key: key.as_ref(),
                                 trie_root_hash: &storage_trie_root,
@@ -559,10 +561,74 @@ impl NetworkService {
             }
         }
 
-        debug_assert_eq!(outcome_errors.len(), outcome_errors.capacity());
         Err(StorageQueryError {
             errors: outcome_errors,
         })
+    }
+
+    pub async fn storage_prefix_keys_query(
+        self: Arc<Self>,
+        chain_index: usize,
+        block_hash: &[u8; 32],
+        prefix: &[u8],
+        storage_trie_root: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>, StorageQueryError> {
+        let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
+            prefix,
+            trie_root_hash: *storage_trie_root,
+        });
+
+        'main_scan: loop {
+            const NUM_ATTEMPTS: usize = 3;
+
+            let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
+
+            // TODO: better peers selection ; don't just take the first 3
+            // TODO: must only ask the peers that know about this block
+            for target in self.peers_list().await.take(NUM_ATTEMPTS) {
+                let result = self
+                    .clone()
+                    .storage_proof_request(
+                        chain_index,
+                        target,
+                        protocol::StorageProofRequestConfig {
+                            block_hash: *block_hash,
+                            keys: prefix_scan.requested_keys().map(|nibbles| {
+                                trie::nibbles_to_bytes_extend(nibbles).collect::<Vec<_>>()
+                            }),
+                        },
+                    )
+                    .await
+                    .map_err(StorageQueryErrorDetail::Network);
+
+                match result {
+                    Ok(proof) => {
+                        match prefix_scan.resume(proof.iter().map(|v| &v[..])) {
+                            Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                // Continue next step of the proof.
+                                prefix_scan = scan;
+                                continue 'main_scan;
+                            }
+                            Ok(prefix_proof::ResumeOutcome::Success { keys }) => {
+                                return Ok(keys);
+                            }
+                            Err((scan, err)) => {
+                                prefix_scan = scan;
+                                outcome_errors
+                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        outcome_errors.push(err);
+                    }
+                }
+            }
+
+            return Err(StorageQueryError {
+                errors: outcome_errors,
+            });
+        }
     }
 
     /// Sends a storage proof request to the given peer.
@@ -627,7 +693,6 @@ impl NetworkService {
             }
         }
 
-        debug_assert_eq!(outcome_errors.len(), outcome_errors.capacity());
         Err(CallProofQueryError {
             errors: outcome_errors,
         })

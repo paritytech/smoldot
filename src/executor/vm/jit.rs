@@ -253,19 +253,20 @@ impl JitPrototype {
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
-    pub fn start(self, function_name: &str, params: &[WasmValue]) -> Result<Jit, StartErr> {
+    pub fn start(self, function_name: &str, params: &[WasmValue]) -> Result<Jit, (StartErr, Self)> {
         // Try to start executing `_start`.
-        let start_function = self
-            .instance
-            .get_export(function_name)
-            .ok_or(StartErr::FunctionNotFound)?
-            .into_func()
-            .ok_or(StartErr::NotAFunction)?;
+        let start_function = match self.instance.get_export(function_name) {
+            Some(export) => match export.into_func() {
+                Some(f) => f,
+                None => return Err((StartErr::NotAFunction, self)),
+            },
+            None => return Err((StartErr::FunctionNotFound, self)),
+        };
 
         // Try to convert the signature of the function to call, in order to make sure
         // that the type of parameters and return value are supported.
         if Signature::try_from(&start_function.ty()).is_err() {
-            return Err(StartErr::SignatureNotSupported);
+            return Err((StartErr::SignatureNotSupported, self));
         }
 
         // Now running the `start` function of the Wasm code.

@@ -57,7 +57,7 @@
 
 use crate::executor::{host, read_only_runtime_host};
 
-use alloc::vec::Vec;
+use alloc::{borrow::ToOwned as _, vec::Vec};
 
 /// Retrieves the SCALE-encoded metadata from the given virtual machine prototype.
 ///
@@ -72,7 +72,7 @@ pub fn query_metadata(virtual_machine: host::HostVmPrototype) -> Query {
 
     match vm {
         Ok(vm) => Query::from_inner(vm),
-        Err(err) => Query::Finished(Err(Error::VmStart(err))),
+        Err((err, proto)) => Query::Finished(Err(Error::VmStart(err, proto))),
     }
 }
 
@@ -106,6 +106,9 @@ impl Query {
             read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
                 Query::Finished(Err(Error::HostFunctionNotAllowed))
             }
+            read_only_runtime_host::RuntimeHostVm::StorageRoot(_) => {
+                Query::Finished(Err(Error::HostFunctionNotAllowed))
+            }
         }
     }
 }
@@ -116,7 +119,8 @@ pub enum Error {
     /// Error when initializing the virtual machine.
     VmInitialization(host::NewErr),
     /// Error when starting the virtual machine.
-    VmStart(host::StartErr),
+    #[display(fmt = "{}", _0)]
+    VmStart(host::StartErr, host::HostVmPrototype),
     /// Error while running the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
     WasmRun(read_only_runtime_host::Error),

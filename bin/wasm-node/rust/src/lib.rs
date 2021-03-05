@@ -32,7 +32,9 @@ use std::{sync::Arc, time::Duration};
 pub mod ffi;
 
 mod json_rpc_service;
+mod lossy_channel;
 mod network_service;
+mod runtime_service;
 mod sync_service;
 mod transactions_service;
 
@@ -321,6 +323,7 @@ pub async fn start_client(
                             }),
                             network_service: (network_service.clone(), chain_index),
                             network_events_receiver: network_event_receivers.pop().unwrap(),
+                            parachain: None,
                         })
                         .await,
                     );
@@ -349,6 +352,24 @@ pub async fn start_client(
                         .await,
                     );
 
+                    // The runtime service follows the runtime of the best block of the chain,
+                    // and allows performing runtime calls.
+                    let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+                        tasks_executor: Box::new({
+                            let new_task_tx = new_task_tx.clone();
+                            move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                        }),
+                        network_service: (network_service.clone(), chain_index),
+                        sync_service: sync_service.clone(),
+                        chain_spec: &chain_spec,
+                        genesis_block_hash: genesis_chain_information
+                            .finalized_block_header
+                            .hash(),
+                        genesis_block_state_root: genesis_chain_information
+                            .finalized_block_header
+                            .state_root,
+                    }).await;
+
                     // Spawn the JSON-RPC service. It is responsible for answer incoming JSON-RPC
                     // requests and sending back responses.
                     new_task_tx
@@ -361,6 +382,7 @@ pub async fn start_client(
                                 network_service: (network_service.clone(), chain_index),
                                 sync_service: sync_service.clone(),
                                 transactions_service,
+                                runtime_service,
                                 chain_spec,
                                 genesis_block_hash: genesis_chain_information
                                     .finalized_block_header
