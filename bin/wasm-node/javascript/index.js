@@ -64,7 +64,11 @@ export async function start(config) {
   let has_thrown = false;
 
   // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
-  let wasi_config = {};
+  let wasi_config = {
+    // This should ideally also clean up all resources (such as connections and active
+    // timers), but it is assumed that this function isn't going to be called anyway.
+    has_thrown: () => has_thrown = true,
+  };
 
   // Start the Wasm virtual machine.
   // The Rust code defines a list of imports that must be fulfilled by the environment. The second

@@ -104,9 +104,8 @@ export default (config) => {
 
         // Used by Rust in catastrophic situations, such as a double panic.
         proc_exit: (ret_code) => {
-            // This should ideally also clean up all resources (such as connections and active
-            // timers), but it is assumed that this function isn't going to be called anyway.
-            has_thrown = true;
+            if (config.has_thrown)
+                config.has_thrown();
             throw new SmoldotError(`proc_exit called: ${ret_code}`);
         },
 
