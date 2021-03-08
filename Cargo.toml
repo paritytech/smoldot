@@ -23,6 +23,7 @@ database-sled = [
     "sled",
     "std"   # A database stored on the filesystem can't reasonably work without a filesystem.
 ]
+javascript-wasm-vm = []
 std = [
     "async-std",
     "futures/thread-pool",

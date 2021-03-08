@@ -79,7 +79,7 @@ impl JitPrototype {
     pub fn new(
         module: &Module,
         heap_pages: HeapPages,
-        mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+        mut symbols: impl FnMut(&str, &str) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let store = wasmtime::Store::new_async(&module.inner.engine());
 
@@ -98,9 +98,10 @@ impl JitPrototype {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
                         // TODO: don't panic below
-                        let function_index = match import.name().and_then(|name| {
-                            symbols(import.module(), name, &TryFrom::try_from(&f).unwrap()).ok()
-                        }) {
+                        let function_index = match import
+                            .name()
+                            .and_then(|name| symbols(import.module(), name).ok())
+                        {
                             Some(idx) => idx,
                             None => {
                                 return Err(NewErr::ModuleError(ModuleError(format!(

@@ -76,10 +76,10 @@ impl InterpreterPrototype {
     pub fn new(
         module: &Module,
         heap_pages: HeapPages,
-        mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+        mut symbols: impl FnMut(&str, &str) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         struct ImportResolve<'a> {
-            functions: RefCell<&'a mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>>,
+            functions: RefCell<&'a mut dyn FnMut(&str, &str) -> Result<usize, ()>>,
             import_memory: RefCell<&'a mut Option<wasmi::MemoryRef>>,
             heap_pages: usize,
         }
@@ -92,16 +92,7 @@ impl InterpreterPrototype {
                 signature: &wasmi::Signature,
             ) -> Result<wasmi::FuncRef, wasmi::Error> {
                 let closure = &mut **self.functions.borrow_mut();
-                let conv_signature = match TryFrom::try_from(signature) {
-                    Ok(i) => i,
-                    Err(_) => {
-                        return Err(wasmi::Error::Instantiation(format!(
-                            "Function with unsupported signature `{}`:`{}`",
-                            module_name, field_name
-                        )))
-                    }
-                };
-                let index = match closure(module_name, field_name, &conv_signature) {
+                let index = match closure(module_name, field_name) {
                     Ok(i) => i,
                     Err(_) => {
                         return Err(wasmi::Error::Instantiation(format!(

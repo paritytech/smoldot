@@ -89,7 +89,10 @@
 //! The first variant used to be the default model when compiling to WebAssembly, but the second
 //! variant (importing memory objects) is preferred nowadays.
 
+#[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
 mod interpreter;
+#[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+mod javascript;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod jit;
 
@@ -110,7 +113,10 @@ pub struct Module {
 enum ModuleInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::Module),
+    #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
     Interpreter(interpreter::Module),
+    #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+    JsVm(javascript::Module),
 }
 
 impl Module {
@@ -132,7 +138,11 @@ impl Module {
                 let out = unreachable!();
                 out
             } else {
-                ModuleInner::Interpreter(interpreter::Module::new(module)?)
+                #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
+                let out = ModuleInner::Interpreter(interpreter::Module::new(module)?);
+                #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+                let out = ModuleInner::JsVm(javascript::Module::new(module)?);
+                out
             },
         })
     }
@@ -145,7 +155,10 @@ pub struct VirtualMachinePrototype {
 enum VirtualMachinePrototypeInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::JitPrototype),
+    #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
     Interpreter(interpreter::InterpreterPrototype),
+    #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+    JsVm(javascript::JsVmPrototype),
 }
 
 impl VirtualMachinePrototype {
@@ -161,16 +174,21 @@ impl VirtualMachinePrototype {
     pub fn new(
         module: &Module,
         heap_pages: HeapPages,
-        symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
+        symbols: impl FnMut(&str, &str) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         Ok(VirtualMachinePrototype {
             inner: match &module.inner {
+                #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
                 ModuleInner::Interpreter(module) => VirtualMachinePrototypeInner::Interpreter(
                     interpreter::InterpreterPrototype::new(module, heap_pages, symbols)?,
                 ),
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 ModuleInner::Jit(module) => VirtualMachinePrototypeInner::Jit(
                     jit::JitPrototype::new(module, heap_pages, symbols)?,
+                ),
+                #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+                ModuleInner::JsVm(module) => VirtualMachinePrototypeInner::JsVm(
+                    javascript::JsVmPrototype::new(module, heap_pages, symbols)?,
                 ),
             },
         })
@@ -183,7 +201,10 @@ impl VirtualMachinePrototype {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachinePrototypeInner::Jit(inner) => inner.global_value(name),
+            #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
             VirtualMachinePrototypeInner::Interpreter(inner) => inner.global_value(name),
+            #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+            VirtualMachinePrototypeInner::JsVm(inner) => inner.global_value(name),
         }
     }
 
@@ -206,11 +227,22 @@ impl VirtualMachinePrototype {
                         }
                     }
                 }
+                #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
                 VirtualMachinePrototypeInner::Interpreter(inner) => {
                     match inner.start(function_name, params) {
                         Ok(vm) => VirtualMachineInner::Interpreter(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Interpreter(proto);
+                            return Err((err, self));
+                        }
+                    }
+                }
+                #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+                VirtualMachinePrototypeInner::JsVm(inner) => {
+                    match inner.start(function_name, params) {
+                        Ok(vm) => VirtualMachineInner::JsVm(vm),
+                        Err((err, proto)) => {
+                            self.inner = VirtualMachinePrototypeInner::JsVm(proto);
                             return Err((err, self));
                         }
                     }
@@ -225,7 +257,10 @@ impl fmt::Debug for VirtualMachinePrototype {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachinePrototypeInner::Jit(inner) => fmt::Debug::fmt(inner, f),
+            #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
             VirtualMachinePrototypeInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
+            #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+            VirtualMachinePrototypeInner::JsVm(inner) => fmt::Debug::fmt(inner, f),
         }
     }
 }
@@ -237,7 +272,10 @@ pub struct VirtualMachine {
 enum VirtualMachineInner {
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     Jit(jit::Jit),
+    #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
     Interpreter(interpreter::Interpreter),
+    #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+    JsVm(javascript::JsVm),
 }
 
 impl VirtualMachine {
@@ -252,7 +290,10 @@ impl VirtualMachine {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.run(value),
+            #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
             VirtualMachineInner::Interpreter(inner) => inner.run(value),
+            #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+            VirtualMachineInner::JsVm(inner) => inner.run(value),
         }
     }
 
@@ -263,7 +304,10 @@ impl VirtualMachine {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.memory_size(),
+            #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
             VirtualMachineInner::Interpreter(inner) => inner.memory_size(),
+            #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+            VirtualMachineInner::JsVm(inner) => inner.memory_size(),
         }
     }
 
@@ -282,8 +326,13 @@ impl VirtualMachine {
             VirtualMachineInner::Interpreter(inner) => {
                 either::Right(inner.read_memory(offset, size)?)
             }
-            #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+            #[cfg(all(
+                not(all(target_arch = "x86_64", feature = "std")),
+                not(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))
+            ))]
             VirtualMachineInner::Interpreter(inner) => inner.read_memory(offset, size)?,
+            #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+            VirtualMachineInner::JsVm(inner) => inner.read_memory(offset, size)?,
         })
     }
 
@@ -294,7 +343,10 @@ impl VirtualMachine {
         match &mut self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.write_memory(offset, value),
+            #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
             VirtualMachineInner::Interpreter(inner) => inner.write_memory(offset, value),
+            #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+            VirtualMachineInner::JsVm(inner) => inner.write_memory(offset, value),
         }
     }
 
@@ -306,8 +358,13 @@ impl VirtualMachine {
                 VirtualMachineInner::Jit(inner) => {
                     VirtualMachinePrototypeInner::Jit(inner.into_prototype())
                 }
+                #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
                 VirtualMachineInner::Interpreter(inner) => {
                     VirtualMachinePrototypeInner::Interpreter(inner.into_prototype())
+                }
+                #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+                VirtualMachineInner::JsVm(inner) => {
+                    VirtualMachinePrototypeInner::JsVm(inner.into_prototype())
                 }
             },
         }
@@ -319,7 +376,10 @@ impl fmt::Debug for VirtualMachine {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => fmt::Debug::fmt(inner, f),
+            #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
             VirtualMachineInner::Interpreter(inner) => fmt::Debug::fmt(inner, f),
+            #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
+            VirtualMachineInner::JsVm(inner) => fmt::Debug::fmt(inner, f),
         }
     }
 }
