@@ -54,8 +54,8 @@ export default (config) => {
 
             let mem = Buffer.from(config.instance.exports.memory.buffer);
 
-            // `fd_write` passes a buffer containing itself a list of pointers and lengths to the actual
-            // buffers. See writev(2).
+            // `fd_write` passes a buffer containing itself a list of pointers and lengths to the
+            // actual buffers. See writev(2).
             let to_write = new String("");
             let total_length = 0;
             for (let i = 0; i < num; i++) {
@@ -66,15 +66,15 @@ export default (config) => {
             }
 
             let flush_buffer = (string) => {
-                // As documented in the documentation of `println!`, lines are always split by a single
-                // `\n` in Rust.
+                // As documented in the documentation of `println!`, lines are always split by a
+                // single `\n` in Rust.
                 let index = string.indexOf('\n');
                 if (index != -1) {
-                    // Note that it is questionnable to use `console.log` from within a library. However
-                    // this simply reflects the usage of `println!` in the Rust code. In other words, it
-                    // is `println!` that shouldn't be used in the first place. The harm of not showing
-                    // text printed with `println!` at all is greater than the harm possibly caused by
-                    // accidentally leaving a `println!` in the code.
+                    // Note that it is questionnable to use `console.log` from within a library.
+                    // However this simply reflects the usage of `println!` in the Rust code. In
+                    // other words, it is `println!` that shouldn't be used in the first place.
+                    // The harm of not showing text printed with `println!` at all is greater than
+                    // the harm possibly caused by accidentally leaving a `println!` in the code.
                     console.log(string.substring(0, index));
                     return string.substring(index + 1);
                 } else {
@@ -82,8 +82,8 @@ export default (config) => {
                 }
             };
 
-            // Append the newly-written data to either `stdout_buffer` or `stderr_buffer`, and print
-            // their content if necessary.
+            // Append the newly-written data to either `stdout_buffer` or `stderr_buffer`, and
+            // print their content if necessary.
             if (fd == 1) {
                 stdout_buffer += to_write;
                 stdout_buffer = flush_buffer(stdout_buffer);
@@ -104,14 +104,14 @@ export default (config) => {
 
         // Used by Rust in catastrophic situations, such as a double panic.
         proc_exit: (ret_code) => {
-            // This should ideally also clean up all resources (such as connections and active timers),
-            // but it is assumed that this function isn't going to be called anyway.
+            // This should ideally also clean up all resources (such as connections and active
+            // timers), but it is assumed that this function isn't going to be called anyway.
             has_thrown = true;
             throw new SmoldotError(`proc_exit called: ${ret_code}`);
         },
 
-        // Return the number of environment variables and the total size of all environment variables.
-        // This is called in order to initialize buffers before `environ_get`.
+        // Return the number of environment variables and the total size of all environment
+        // variables. This is called in order to initialize buffers before `environ_get`.
         environ_sizes_get: (argc_out, argv_buf_size_out) => {
             let total_len = 0;
             env_vars.forEach(e => total_len += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
@@ -124,8 +124,8 @@ export default (config) => {
 
         // Write the environment variables to the given pointers.
         // `argv` is a pointer to a buffer that must be overwritten with a list of pointers to
-        // environment variables, and `argv_buf` is a pointer to a buffer where to actually store the
-        // environment variables.
+        // environment variables, and `argv_buf` is a pointer to a buffer where to actually store
+        // the environment variables.
         // The sizes of the buffers were determined by calling `environ_sizes_get`.
         environ_get: (argv, argv_buf) => {
             let mem = Buffer.from(config.instance.exports.memory.buffer);
