@@ -19,7 +19,7 @@ import { Buffer } from 'buffer';
 import { default as now } from 'performance-now';
 import Websocket from 'websocket';
 import { default as net } from './tcp-nodejs.js';
-import { default as wasi_builder } from './wasi.js';
+import { default as wasi_builder } from './bindings-wasi.js';
 
 import { default as wasm_base64 } from './autogen/wasm.js';
 
@@ -63,7 +63,7 @@ export async function start(config) {
   // further function of the Wasm virtual machine. This flag is used to enforce this.
   let has_thrown = false;
 
-  // Used to bind with the Wasi bindings. See the `wasi.js` file.
+  // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
   let wasi_config = {};
 
   // Start the Wasm virtual machine.
