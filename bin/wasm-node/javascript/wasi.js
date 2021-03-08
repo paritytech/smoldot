@@ -23,6 +23,7 @@
 //! In order to use this code, call the function passing an object, then fill the `instance` field
 //! of that object with the Wasm instance.
 
+import { Buffer } from 'buffer';
 import { default as randombytes } from 'randombytes';
 
 export default (config) => {
