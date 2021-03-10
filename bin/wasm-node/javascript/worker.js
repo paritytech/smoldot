@@ -22,7 +22,14 @@ import { default as wasi_builder } from './bindings-wasi.js';
 
 import { default as wasm_base64 } from './autogen/wasm.js';
 
-let instance = null;
+// This variable represents the state of the worker, and serves three different purposes:
+//
+// - At initialization, it is set to `null`.
+// - Once the first message has been received with the parameters, it is an array filled with
+//   JSON-RPC requests that are received while the Wasm VM is initializing.
+// - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
+//
+let state = null;
 
 // Set to `true` once `throw` has been called.
 // As documented, after the `throw` function has been called, it is forbidden to call any
@@ -71,9 +78,6 @@ const startInstance = async (config) => {
     "wasi_snapshot_preview1": wasi_builder(wasi_config),
   });
 
-  console.log();
-
-  instance = result.instance;
   smoldot_js_config.instance = result.instance;
   wasi_config.instance = result.instance;
 
@@ -103,6 +107,16 @@ const startInstance = async (config) => {
       relay_chain_spec_ptr, relay_chain_spec_len,
       max_log_level
     );
+
+    state.forEach((json_rpc_request) => {
+      let len = Buffer.byteLength(json_rpc_request, 'utf8');
+      let ptr = result.instance.exports.alloc(len);
+      Buffer.from(result.instance.exports.memory.buffer).write(json_rpc_request, ptr);
+      result.instance.exports.json_rpc_send(ptr, len);
+    });
+
+    state = result.instance;
+
   } catch (error) {
     has_thrown = true;
     terminate();
@@ -111,12 +125,12 @@ const startInstance = async (config) => {
 };
 
 compat.setOnMessage((message) => {
-  if (instance == null) {
-    instance = [];
+  if (state == null) {
+    state = [];
     startInstance(message);
 
-  } else if (typeof instance == 'Array') {
-    instance.push(message);
+  } else if (Array.isArray(state)) {
+    state.push(message);
 
   } else {
     if (has_thrown) {
@@ -124,8 +138,8 @@ compat.setOnMessage((message) => {
     }
 
     let len = Buffer.byteLength(message, 'utf8');
-    let ptr = instance.exports.alloc(len);
-    Buffer.from(instance.exports.memory.buffer).write(message, ptr);
-    instance.exports.json_rpc_send(ptr, len);
+    let ptr = state.exports.alloc(len);
+    Buffer.from(state.exports.memory.buffer).write(message, ptr);
+    state.exports.json_rpc_send(ptr, len);
   }
 });
