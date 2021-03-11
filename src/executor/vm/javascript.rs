@@ -93,7 +93,7 @@ extern "C" {
     ///
     /// No actual execution should take place until [`instance_resume`] is called.
     ///
-    /// If the instance was executing another function, the execution should be interrupted.
+    /// If the instance was executing another function, the execution must be interrupted.
     fn instance_init(
         instance_id: i32,
         function_name_ptr: *const u8,
