@@ -25,8 +25,9 @@ import { default as wasm_base64 } from './autogen/wasm.js';
 // This variable represents the state of the worker, and serves three different purposes:
 //
 // - At initialization, it is set to `null`.
-// - Once the first message has been received with the parameters, it is an array filled with
-//   JSON-RPC requests that are received while the Wasm VM is initializing.
+// - Once the first message, containing the configuration, has been received from the parent, it
+//   becomes an array filled with JSON-RPC requests that are received while the Wasm VM is still
+//   initializing.
 // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
 //
 let state = null;
@@ -51,9 +52,11 @@ const startInstance = async (config) => {
   let smoldot_js_config = {
     onTerminated: () => has_thrown = true,
     json_rpc_callback: (data) => {
+      // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'jsonrpc', data });
     },
     database_save_callback: (data) => {
+      // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'database', data });
     }
   };
@@ -124,12 +127,16 @@ const startInstance = async (config) => {
   }
 };
 
+// `compat.setOnMessage` is the same as `onmessage = ...`, but works across environments.
 compat.setOnMessage((message) => {
+  // See the documentation of the `state` variable for information.
   if (state == null) {
     state = [];
     startInstance(message);
 
   } else if (Array.isArray(state)) {
+    // A JSON-RPC request has been received while the Wasm VM is still initializing. Queue it
+    // for when initialization is over.
     state.push(message);
 
   } else {

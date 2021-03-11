@@ -28,6 +28,11 @@ export async function start(config) {
     throw new SmoldotError('config must include a string chain_spec');
 
   // The actual execution of Smoldot is performed in a worker thread.
+  //
+  // The line of code below (`new Worker(...)`) is designed to hopefully work across all
+  // platforms. It should work in NodeJS, browsers, webpack
+  // (https://webpack.js.org/guides/web-workers/), and parcel
+  // (https://github.com/parcel-bundler/parcel/pull/5846)
   const worker = new Worker(new URL('./worker.js', import.meta.url));
 
   // The worker can send us either a database save message, or a JSON-RPC answer.
