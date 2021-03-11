@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
+    chain::chain_information::BabeEpochInformation,
     executor::{host, read_only_runtime_host},
     header,
 };
@@ -74,19 +75,11 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
     }
 }
 
-/// Partial information about a Babe epoch.
-pub struct PartialBabeEpochInformation {
-    pub epoch_index: u64,
-    pub start_slot_number: Option<u64>,
-    pub authorities: Vec<header::BabeAuthority>,
-    pub randomness: [u8; 32],
-}
-
 /// Current state of the operation.
 #[must_use]
 pub enum Query {
     /// Fetching the Babe epoch is over.
-    Finished(Result<(PartialBabeEpochInformation, host::HostVmPrototype), Error>),
+    Finished(Result<(BabeEpochInformation, host::HostVmPrototype), Error>),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
     /// Fetching the key that follows a given one is required in order to continue.
@@ -105,7 +98,7 @@ impl Query {
 
                 match decoded {
                     Ok(epoch) => Query::Finished(Ok((
-                        PartialBabeEpochInformation {
+                        BabeEpochInformation {
                             epoch_index: epoch.epoch_index,
                             start_slot_number: Some(epoch.start_slot_number),
                             authorities: epoch
@@ -117,6 +110,8 @@ impl Query {
                                 })
                                 .collect(),
                             randomness: epoch.randomness,
+                            c: epoch.c,
+                            allowed_slots: epoch.allowed_slots,
                         },
                         success.virtual_machine.into_prototype(),
                     ))),
@@ -199,6 +194,8 @@ struct DecodableBabeEpochInformation {
     duration: u64,
     authorities: Vec<DecodableBabeAuthority>,
     randomness: [u8; 32],
+    c: (u64, u64),
+    allowed_slots: header::BabeAllowedSlots,
 }
 
 #[derive(Decode, Encode)]
