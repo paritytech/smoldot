@@ -17,6 +17,8 @@
 
 // Contains a worker spawned by `bindings-smoldot`.
 
+import * as compat from './compat-nodejs.js';
+
 let instance = null;
 let sharedArrayBuffer = null;
 let int32Array = null;
@@ -108,10 +110,10 @@ startInstance = (incomingMessage) => {
   instance = new WebAssembly.Instance(incomingMessage.module, constructedImports);
 };
 
-onmessage = (incomingMessage) => {
+compat.setOnMessage((incomingMessage) => {
   if (!instance) {
     // The first message that is expected to come is of the form
-    // `{ module: <some Wasm module> , requestedImports: [..] }`. We instantiate this module.
+    // `{ module: <some Wasm module>, requestedImports: [..] }`. We instantiate this module.
     startInstance(incomingMessage);
   } else {
     // The second message that is expected to come is of the form
@@ -136,4 +138,4 @@ onmessage = (incomingMessage) => {
     int32Array[0] = 0;
     Atomics.notify(int32Array, 0);
   }
-};
+});

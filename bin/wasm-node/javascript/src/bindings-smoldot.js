@@ -170,24 +170,23 @@ export default (config) => {
             // uses `Atomics.notify` to wake up the other side.
             const sharedArrayBuffer = new SharedArrayBuffer(512);
 
+            workerOnMessage(worker, (messageFromWorker) => {
+
+            });
+
+            worker.postMessage({
+                module: wasmModules[moduleId],
+                requestedImports,
+                sharedArrayBuffer,
+            });
+
             const id = nextIdAlloc;
             nextIdAlloc += 1;
             wasmInstances[id] = {
                 sharedArrayBuffer,
                 int32Array: new Int32Array(sharedArrayBuffer),
-                worker: worker
+                worker
             };
-
-            worker.onmessage = (messageFromWorker) => {
-
-            };
-
-            worker.postMessage({
-                module: WebAssembly.Module.imports(wasmModules[moduleId]),
-                requestedImports: requestedImports,
-                sharedArrayBuffer: sharedArrayBuffer,
-            });
-
             return id;
         },
         instance_init: (instanceId, functionNamePtr, functionNameSize, paramsPtr, paramsSize) => {
