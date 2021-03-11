@@ -128,7 +128,7 @@ onmessage = (incomingMessage) => {
     } else if (typeof returnValue === "number") {
       sharedArrayBuffer.writeUInt8(1, 6); // `Some` variant
       sharedArrayBuffer.writeUInt8(0, 7); // `I32` variant
-      sharedArrayBuffer.writeUInt64LE(returnValue, 8);
+      sharedArrayBuffer.writeUInt32LE(returnValue, 8);
     } else {
       sharedArrayBuffer.writeUInt8(0, 6); // `None` variant
     }
