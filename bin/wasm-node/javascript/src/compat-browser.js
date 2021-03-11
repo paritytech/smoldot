@@ -14,30 +14,11 @@
 
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
-declare class SmoldotError extends Error {
-  constructor(message: string);
-}
 
-export interface SmoldotClient {
-  send_json_rpc(rpc: string): void;
-}
+// Overrides `compat-nodejs.js` when in a browser.
 
-export type SmoldotJsonRpcCallback = (response: string) => void;
-export type SmoldotDatabaseSaveCallback = (response: string) => void;
-
-export interface SmoldotOptions {
-  max_log_level?: number;
-  chain_spec: string;
-  json_rpc_callback: SmoldotJsonRpcCallback;
-  database_save_callback: SmoldotDatabaseSaveCallback;
-  database_content?: string;
-  relay_chain_spec?: string;
-}
-
-export interface Smoldot {
-  start(options: SmoldotOptions): Promise<SmoldotClient>;
-}
-
-export const smoldot: Smoldot;
-
-export default smoldot;
+export const net = null;
+export const Worker = typeof window != 'undefined' ? window.Worker : null;
+export const workerOnMessage = (worker, callback) => { worker.onmessage = (event) => callback(event.data) };
+export const postMessage = (msg) => self.postMessage(msg);
+export const setOnMessage = (callback) => { self.onmessage = (event) => callback(event.data) };

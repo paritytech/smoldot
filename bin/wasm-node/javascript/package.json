@@ -13,17 +13,17 @@
     "url": "https://github.com/paritytech/smoldot/issues"
   },
   "type": "module",
-  "types": "index.d.ts",
-  "main": "index.js",
+  "types": "src/index.d.ts",
+  "main": "src/index.js",
   "scripts": {
     "prepublishOnly": "node prepare.js",
     "prestart": "node prepare.js",
     "build": "node prepare.js",
-    "start": "node demo.js",
-    "test": "node prepare.js && dtslint && node test.js"
+    "start": "node test/demo.js",
+    "test": "node prepare.js && dtslint src/ && node test/test.js"
   },
   "browser": {
-    "./tcp-nodejs.js": "./tcp-browser.js"
+    "./compat-nodejs.js": "./compat-browser.js"
   },
   "dependencies": {
     "buffer": "^6.0.1",
