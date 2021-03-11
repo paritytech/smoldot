@@ -18,6 +18,7 @@
 import { Buffer } from 'buffer';
 import * as compat from './compat-nodejs.js';
 import { default as smoldot_js_builder } from './bindings-smoldot-js.js';
+import { default as smoldot_builder } from './bindings-smoldot.js';
 import { default as wasi_builder } from './bindings-wasi.js';
 
 import { default as wasm_base64 } from './autogen/wasm.js';
@@ -63,6 +64,13 @@ const startInstance = async (config) => {
 
   let { bindings: smoldot_js_bindings, terminate } = smoldot_js_builder(smoldot_js_config);
 
+  // Used to bind with the smoldot bindings. See the `bindings-smoldot.js` file.
+  let smoldot_config = {
+    onTerminated: () => has_thrown = true,
+  };
+
+  let smoldot_bindings = smoldot_builder(smoldot_config);
+
   // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
   let wasi_config = {
     onTerminated: () => {
@@ -77,11 +85,14 @@ const startInstance = async (config) => {
   let result = await WebAssembly.instantiate(wasm_bytecode, {
     // The functions with the "smoldot" prefix are specific to smoldot.
     "smoldot": smoldot_js_bindings,
+    // The functions with the "javascript_wasm_vm" prefix are specific to smoldot.
+    "javascript_wasm_vm": smoldot_bindings,
     // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
     "wasi_snapshot_preview1": wasi_builder(wasi_config),
   });
 
   smoldot_js_config.instance = result.instance;
+  smoldot_config.instance = result.instance;
   wasi_config.instance = result.instance;
 
   let chain_spec_len = Buffer.byteLength(chain_spec, 'utf8');

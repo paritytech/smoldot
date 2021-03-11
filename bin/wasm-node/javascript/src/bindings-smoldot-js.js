@@ -27,123 +27,277 @@ import { default as now } from 'performance-now';
 import { net } from './compat-nodejs.js';
 
 export default (config) => {
-    // 
-    let wasmModules = {};
-    let wasmInstances = {};
-  
-    let nextIdAlloc = 0;
+    // Used below to store the list of all connections.
+    // The indices within this array are chosen by the Rust code.
+    let connections = {};
+
+    // Set to `true` once `throw` has been called.
+    // As documented, after the `throw` function has been called, it is forbidden to call any
+    // further function of the Wasm virtual machine. This flag is used to enforce this.
+    let terminated = false;
+
+    const terminate = () => {
+        terminated = true;
+        Object.values(connections).forEach(connection => {
+            if (connection.close) {
+                // WebSocket
+                connection.onopen = null;
+                connection.onclose = null;
+                connection.onmessage = null;
+                connection.onerror = null;
+                connection.close();
+            } else {
+                // TCP
+                connection.destroy();
+            }
+        });
+    };
 
     const bindings = {
-        "javascript_wasm_vm": {
-            new_module: (module_ptr, module_size, numImportsOutPtr) => {
-                const moduleBytes = Buffer.from(module.exports.memory.buffer)
-                    .subarray(module_ptr, module_ptr + module_size);
-                // TODO: consider making this async
-                // TODO: must handle errors
-                const compiledModule = new WebAssembly.Module(moduleBytes);
-                const numImports = WebAssembly.Module.imports(compiledModule).length;
-                Buffer.from(module.exports.memory.buffer).writeUInt32LE(numImports, numImportsOutPtr);
-                const id = nextIdAlloc;
-                nextIdAlloc += 1;
-                wasmModules[id] = compiledModule;
-                return id;
-            },
-            module_import_is_fn: (moduleId, importNum) => {
-                const kind = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].kind;
-                if (kind == 'function') {
-                    return 1;
-                } else if (kind == 'memory') {
-                    return 0;
-                } else {
-                    throw "Unknown kind: " + kind;
-                }
-            },
-            module_import_module_len: (moduleId, importNum) => {
-                const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].module;
-                return Buffer.byteLength(str, 'utf8');
-            },
-            module_import_module: (moduleId, importNum, outPtr) => {
-                const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].module;
-                Buffer.from(module.exports.memory.buffer).write(str, outPtr);
-            },
-            module_import_name_len: (moduleId, importNum) => {
-                const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].name;
-                return Buffer.byteLength(str, 'utf8');
-            },
-            module_import_name: (moduleId, importNum, outPtr) => {
-                const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].name;
-                Buffer.from(module.exports.memory.buffer).write(str, outPtr);
-            },
-            destroy_module: (id) => {
-                wasmModules[id] = undefined;
-            },
-            new_instance: (moduleId, importsPtr) => {
-                const requestedImports = WebAssembly.Module.imports(wasmModules[moduleId])
-                    .map((_, i) => Buffer.from(module.exports.memory.buffer)
-                        .readUInt32LE(importsPtr + 4 * i));
+        // Must throw an error. A human-readable message can be found in the WebAssembly memory in
+        // the given buffer.
+        throw: (ptr, len) => {
+            terminate();
+            if (config.onTerminated)
+                config.onTerminated();
+            let message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            throw new Error(message);
+        },
 
-                const worker = new Worker('./child-wasm-worker.js');
-                const returnValueSharedArrayBuffer = new SharedArrayBuffer(16);
-
-                const id = nextIdAlloc;
-                nextIdAlloc += 1;
-                wasmInstances[id] = {
-                    returnValueSharedArrayBuffer: new Int32Array(returnValueSharedArrayBuffer),
-                    valuesStack: [],
-                    worker: worker
-                };
-
-                worker.onmessage = (messageFromWorker) => {
-
-                };
-
-                worker.postMessage({
-                    module: WebAssembly.Module.imports(wasmModules[moduleId]),
-                    requestedImports: requestedImports,
-                    returnValueSharedArrayBuffer: returnValueSharedArrayBuffer,
-                });
-
-                return id;
-            },
-            instance_push_i32: (instanceId, value) => {
-                wasmInstances[instanceId].valuesStack.push(value);
-            },
-            instance_push_i64: (instanceId, value) => {
-                console.log(value);
-                wasmInstances[instanceId].valuesStack.push(value);
-            },
-            instance_start: (instanceId, functionNamePtr, functionNameSize) => {
-                const functionName = Buffer.from(module.exports.memory.buffer)
-                    .toString('utf8', functionNamePtr, functionNamePtr + functionNameSize);
-                wasmInstances[instanceId].worker.postMessage({
-                    functionName: functionName,
-                    params: wasmInstances[instanceId].valuesStack
-                });
-                wasmInstances[instanceId].valuesStack = [];
-            },
-            instance_resume: (instanceId) => {
-                Atomics.store(wasmInstances[instanceId].returnValueSharedArrayBuffer, 0, 1);
-                Atomics.notify(wasmInstances[instanceId].returnValueSharedArrayBuffer, 0);
-            },
-            destroy_instance: (instanceId) => {
-                wasmInstances[instanceId].worker.terminate();
-                wasmInstances[instanceId] = undefined;
-            },
-            global_value: (instanceId, name_ptr, name_size, out) => {
-                const name = Buffer.from(module.exports.memory.buffer)
-                    .toString('utf8', name_ptr, name_ptr + name_size);
-                // TODO: wasmInstances[instanceId].exports[name]
-            },
-            memory_size: (instanceId) => {
-                // TODO:
-            },
-            read_memory: (instanceId, offset, size, outPtr) => {
-                // TODO:
-            },
-            write_memory: (instanceId, offset, size, dataPtr) => {
-                // TODO:
+        // Used by the Rust side to emit a JSON-RPC response or subscription notification.
+        json_rpc_respond: (ptr, len) => {
+            let message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            if (config.json_rpc_callback) {
+                config.json_rpc_callback(message);
             }
         },
+
+        // Used by the Rust side to emit a log entry.
+        // See also the `max_log_level` parameter in the configuration.
+        log: (level, target_ptr, target_len, message_ptr, message_len) => {
+            let target = Buffer.from(config.instance.exports.memory.buffer)
+                .toString('utf8', target_ptr, target_ptr + target_len);
+            let message = Buffer.from(config.instance.exports.memory.buffer)
+                .toString('utf8', message_ptr, message_ptr + message_len);
+
+            if (level <= 1) {
+                console.error("[" + target + "]", message);
+            } else if (level == 2) {
+                console.warn("[" + target + "]", message);
+            } else if (level == 3) {
+                console.info("[" + target + "]", message);
+            } else if (level == 4) {
+                console.debug("[" + target + "]", message);
+            } else {
+                console.trace("[" + target + "]", message);
+            }
+        },
+
+        // Must return the UNIX time in milliseconds.
+        unix_time_ms: () => Date.now(),
+
+        // Must return the value of a monotonic clock in milliseconds.
+        monotonic_clock_ms: () => now(),
+
+        // Must call `timer_finished` after the given number of milliseconds has elapsed.
+        start_timer: (id, ms) => {
+            // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS
+            // requires a minimum of 1 millisecond (if `0` is passed, it is automatically replaced
+            // with `1`) and wants you to use `setImmediate` instead.
+            if (ms == 0 && typeof setImmediate === "function") {
+                setImmediate(() => {
+                    if (!terminated) {
+                        try {
+                            config.instance.exports.timer_finished(id);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    }
+                })
+            } else {
+                setTimeout(() => {
+                    if (!terminated) {
+                        try {
+                            config.instance.exports.timer_finished(id);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    }
+                }, ms)
+            }
+        },
+
+        // Must set the content of the database to the given string.
+        database_save: (ptr, len) => {
+            if (config.database_save_callback) {
+                let content = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+                config.database_save_callback(content);
+            }
+        },
+
+        // Must create a new connection object. This implementation stores the created object in
+        // `connections`.
+        connection_new: (id, addr_ptr, addr_len) => {
+            try {
+                if (!!connections[id]) {
+                    throw new Error("internal error: connection already allocated");
+                }
+
+                let addr = Buffer.from(config.instance.exports.memory.buffer)
+                    .toString('utf8', addr_ptr, addr_ptr + addr_len);
+
+                let connection;
+
+                // Attempt to parse the multiaddress.
+                // Note: peers can decide of the content of `addr`, meaning that it shouldn't be
+                // trusted.
+                let ws_parsed = addr.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss)$/);
+                let tcp_parsed = addr.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
+
+                if (ws_parsed != null) {
+                    let proto = 'wss';
+                    if (ws_parsed[4] == 'ws') {
+                        proto = 'ws';
+                    }
+                    if (ws_parsed[1] == 'ip6') {
+                        connection = new Websocket.w3cwebsocket(proto + "://[" + ws_parsed[2] + "]:" + ws_parsed[3]);
+                    } else {
+                        connection = new Websocket.w3cwebsocket(proto + "://" + ws_parsed[2] + ":" + ws_parsed[3]);
+                    }
+
+                    connection.binaryType = 'arraybuffer';
+
+                    connection.onopen = () => {
+                        try {
+                            config.instance.exports.connection_open(id);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    };
+                    connection.onclose = () => {
+                        try {
+                            config.instance.exports.connection_closed(id);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    };
+                    connection.onmessage = (msg) => {
+                        try {
+                            let message = Buffer.from(msg.data);
+                            let ptr = config.instance.exports.alloc(message.length);
+                            message.copy(Buffer.from(config.instance.exports.memory.buffer), ptr);
+                            config.instance.exports.connection_message(id, ptr, message.length);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    };
+
+                } else if (tcp_parsed != null) {
+                    if (!net) {
+                        // `net` module not available, most likely because we're not in NodeJS.
+                        return 1;
+                    }
+
+                    connection = net.createConnection({
+                        host: tcp_parsed[2],
+                        port: parseInt(tcp_parsed[3], 10),
+                    });
+                    connection.setNoDelay();
+
+                    connection.on('connect', () => {
+                        try {
+                            if (connection.destroyed) return;
+                            config.instance.exports.connection_open(id);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    });
+                    connection.on('close', () => {
+                        try {
+                            if (connection.destroyed) return;
+                            config.instance.exports.connection_closed(id);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    });
+                    connection.on('error', () => { });
+                    connection.on('data', (message) => {
+                        try {
+                            if (connection.destroyed) return;
+                            let ptr = config.instance.exports.alloc(message.length);
+                            message.copy(Buffer.from(config.instance.exports.memory.buffer), ptr);
+                            config.instance.exports.connection_message(id, ptr, message.length);
+                        } catch (error) {
+                            terminate();
+                            if (config.onTerminated)
+                                config.onTerminated();
+                            throw error;
+                        }
+                    });
+
+                } else {
+                    return 1;
+                }
+
+                connections[id] = connection;
+                return 0;
+
+            } catch (error) {
+                return 1;
+            }
+        },
+
+        // Must close and destroy the connection object.
+        connection_close: (id) => {
+            let connection = connections[id];
+            if (connection.close) {
+                // WebSocket
+                connection.onopen = null;
+                connection.onclose = null;
+                connection.onmessage = null;
+                connection.onerror = null;
+                connection.close();
+            } else {
+                // TCP
+                connection.destroy();
+            }
+            connections[id] = undefined;
+        },
+
+        // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
+        // that this function is called only when the connection is in an open state.
+        connection_send: (id, ptr, len) => {
+            let data = Buffer.from(config.instance.exports.memory.buffer).slice(ptr, ptr + len);
+            let connection = connections[id];
+            if (connection.send) {
+                // WebSocket
+                connection.send(data);
+            } else {
+                // TCP
+                connection.write(data);
+            }
+        }
     };
 
     return {
