@@ -19,10 +19,31 @@
 
 let instance = null;
 
+// Decodes a SCALE-encoded `WasmValue`.
+//
+// Returns an object of the form `{ offsetAfter: ..., value: ... }`.
+const decodeWasmValue = (memory, offset) => {
+  const buffer = Buffer.from(memory);
+  const ty = buffer.readUInt8(offset);
+  if (ty == 0) {
+    const value = buffer.readInt32LE(offset + 1);
+    return {
+      offsetAfter: offset + 5,
+      value
+    };
+  } else {
+    const value = buffer.readInt64LE(offset + 1);
+    return {
+      offsetAfter: offset + 9,
+      value
+    };
+  }
+};
+
 startInstance = (incomingMessage) => {
   const moduleImports = WebAssembly.Module.imports(incomingMessage.module);
   let constructedImports = {};
-  const sharedArrayBuffer = new Int32Array(incomingMessage.sharedArrayBuffer);
+  const int32Array = new Int32Array(incomingMessage.sharedArrayBuffer);
 
   moduleImports.forEach((moduleImport, i) => {
     if (!constructedImports[moduleImport.module])
@@ -30,11 +51,10 @@ startInstance = (incomingMessage) => {
 
     if (moduleImport.kind == 'function') {
       constructedImports[moduleImport.module][moduleImport.name] = () => {
-        postMessage({ functionId: requestedImports[i] });
-        Atomics.wait(sharedArrayBuffer, 0, 0);
-        sharedArrayBuffer[0] = 0;
-        var returnValue = sharedArrayBuffer[1];
-        throw requestedImports[i];
+        Atomics.wait(int32Array, 0, 0);
+        int32Array[0] = 0;
+        const returnValue = decodeWasmValue(sharedArrayBuffer, 4);
+        return returnValue;
       };
 
     } else if (moduleImport.kind == 'memory') {

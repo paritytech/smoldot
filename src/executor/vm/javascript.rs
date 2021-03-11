@@ -81,8 +81,8 @@ extern "C" {
 
     /// The given instance must be configured to start executing the given function.
     ///
-    /// The content of the buffer designated by `params_ptr` contains the SCALE encoding of a
-    /// `Vec<WasmValue>`, where `WasmValue` is defined like this:
+    /// The content of the buffer designated by `params_ptr` and `params_size` contains the SCALE
+    /// encoding of a `Vec<WasmValue>`, where `WasmValue` is defined like this:
     ///
     /// ```no_run
     /// enum WasmValue {
@@ -99,18 +99,21 @@ extern "C" {
         function_name_ptr: *const u8,
         function_name_size: usize,
         params_ptr: *const u8,
+        params_size: usize,
     );
 
     /// Must execute the given instance until something happens (a host function is called, or the
     /// function being called finishes executing), then return.
     ///
     /// This function is always called after [`instance_init`]. If this is the first time
-    /// [`instance_resume`] is called after [`instance_init`], then the `return_value_ptr`
-    /// parameter should be ignored. If the instance has been interrupted by a host function call,
-    /// it designates a buffer that contains the return value of the host function.
+    /// [`instance_resume`] is called after [`instance_init`], then the `return_value_ptr` and
+    /// `return_value_size` parameters should be ignored. If the instance has been interrupted by
+    /// a host function call, they designate a buffer that contains the return value of the host
+    /// function.
     ///
-    /// The content of the buffer designated by `return_value_ptr` contains the SCALE encoding of
-    /// an `Option<WasmValue>`. See [`instance_init`] for a definition of `WasmValue`.
+    /// The content of the buffer designated by `return_value_ptr` and `return_value_size`
+    /// contains the SCALE encoding of an `Option<WasmValue>`. See [`instance_init`] for a
+    /// definition of `WasmValue`.
     ///
     /// Must write in the buffer designated by `out_ptr` and `out_size` the SCALE encoding of the
     /// `Ret` enum defined as such:
@@ -129,6 +132,7 @@ extern "C" {
     fn instance_resume(
         instance_id: i32,
         return_value_ptr: *const u8,
+        return_value_size: usize,
         out_ptr: *mut u8,
         out_size: usize,
     );
@@ -329,6 +333,7 @@ impl JsVmPrototype {
                 function_name.as_bytes().as_ptr(),
                 function_name.as_bytes().len(),
                 params_buffer.as_ptr(),
+                params_buffer.len(),
             );
         }
 
@@ -380,6 +385,7 @@ impl JsVm {
             instance_resume(
                 self.external_identifier.0,
                 ret_val_buffer.as_ptr(),
+                ret_val_buffer.len(),
                 self.instance_resume_buffer.as_mut_ptr(),
                 self.instance_resume_buffer.len(),
             );
