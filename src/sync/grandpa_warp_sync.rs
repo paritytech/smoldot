@@ -138,8 +138,6 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                             _ => unreachable!(),
                         };
 
-                    log::info!("Got next epoch: {:?}", next_epoch);
-
                     return Self::Finished(Ok(Success {
                         chain_information: ChainInformation {
                             finalized_block_header: state.header,
