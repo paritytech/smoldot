@@ -20,12 +20,18 @@
 //!
 //! In order to use this code, call the function passing an object, then fill the `instance` field
 //! of that object with the Wasm instance.
+//!
+//! Because it makes use of `Atomics.wait`, the code in this module must itself be run within a
+//! worker.
 
 import { Buffer } from 'buffer';
 import { Worker, workerOnMessage } from './compat-nodejs.js';
 import Websocket from 'websocket';
 import { default as now } from 'performance-now';
-import { net } from './compat-nodejs.js';
+
+const parseParams = (memory, offset) => {
+
+};
 
 export default (config) => {
     // 
@@ -90,13 +96,20 @@ export default (config) => {
             // (https://webpack.js.org/guides/web-workers/), and parcel
             // (https://github.com/parcel-bundler/parcel/pull/5846)
             const worker = new Worker(new URL('./bindings-smoldot-worker.js', import.meta.url));
-            const returnValueSharedArrayBuffer = new SharedArrayBuffer(512);
+
+            // A `SharedArrayBuffer` is shared between this module and the worker, used to
+            // communicate between the two.
+            //
+            // The first four bytes are used to determine who has ownership of the content of the
+            // buffer. If 0, then it's this module. If 1, then it's the worker. Each side reads
+            // the content of the buffer, then writes it, then switches the first four bytes and
+            // uses `Atomics.notify` to wake up the other side.
+            const sharedArrayBuffer = new SharedArrayBuffer(512);
 
             const id = nextIdAlloc;
             nextIdAlloc += 1;
             wasmInstances[id] = {
-                returnValueSharedArrayBuffer: new Int32Array(returnValueSharedArrayBuffer),
-                valuesStack: [],
+                sharedArrayBuffer: new Int32Array(sharedArrayBuffer),
                 worker: worker
             };
 
@@ -107,21 +120,15 @@ export default (config) => {
             worker.postMessage({
                 module: WebAssembly.Module.imports(wasmModules[moduleId]),
                 requestedImports: requestedImports,
-                returnValueSharedArrayBuffer: returnValueSharedArrayBuffer,
+                sharedArrayBuffer: sharedArrayBuffer,
             });
 
             return id;
         },
-        instance_push_i32: (instanceId, value) => {
-            wasmInstances[instanceId].valuesStack.push(value);
-        },
-        instance_push_i64: (instanceId, value) => {
-            console.log(value);
-            wasmInstances[instanceId].valuesStack.push(value);
-        },
-        instance_start: (instanceId, functionNamePtr, functionNameSize) => {
+        instance_init: (instanceId, functionNamePtr, functionNameSize, paramsPtr) => {
             const functionName = Buffer.from(config.instance.exports.memory.buffer)
                 .toString('utf8', functionNamePtr, functionNamePtr + functionNameSize);
+            const params = paramsPtr;
             wasmInstances[instanceId].worker.postMessage({
                 functionName: functionName,
                 params: wasmInstances[instanceId].valuesStack
@@ -129,8 +136,8 @@ export default (config) => {
             wasmInstances[instanceId].valuesStack = [];
         },
         instance_resume: (instanceId) => {
-            Atomics.store(wasmInstances[instanceId].returnValueSharedArrayBuffer, 0, 1);
-            Atomics.notify(wasmInstances[instanceId].returnValueSharedArrayBuffer, 0);
+            Atomics.store(wasmInstances[instanceId].sharedArrayBuffer, 0, 1);
+            Atomics.notify(wasmInstances[instanceId].sharedArrayBuffer, 0);
         },
         destroy_instance: (instanceId) => {
             wasmInstances[instanceId].worker.terminate();

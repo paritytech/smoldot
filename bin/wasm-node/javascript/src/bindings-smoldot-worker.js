@@ -22,7 +22,7 @@ let instance = null;
 startInstance = (incomingMessage) => {
   const moduleImports = WebAssembly.Module.imports(incomingMessage.module);
   let constructedImports = {};
-  const returnValueSharedArrayBuffer = new Int32Array(incomingMessage.returnValueSharedArrayBuffer);
+  const sharedArrayBuffer = new Int32Array(incomingMessage.sharedArrayBuffer);
 
   moduleImports.forEach((moduleImport, i) => {
     if (!constructedImports[moduleImport.module])
@@ -31,9 +31,9 @@ startInstance = (incomingMessage) => {
     if (moduleImport.kind == 'function') {
       constructedImports[moduleImport.module][moduleImport.name] = () => {
         postMessage({ functionId: requestedImports[i] });
-        Atomics.wait(returnValueSharedArrayBuffer, 0, 0);
-        returnValueSharedArrayBuffer[0] = 0;
-        var returnValue = returnValueSharedArrayBuffer[1];
+        Atomics.wait(sharedArrayBuffer, 0, 0);
+        sharedArrayBuffer[0] = 0;
+        var returnValue = sharedArrayBuffer[1];
         throw requestedImports[i];
       };
 

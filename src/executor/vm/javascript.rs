@@ -28,12 +28,13 @@ use alloc::{
     format,
     string::{String, ToString as _},
     sync::Arc,
+    vec,
     vec::Vec,
 };
 use core::{
     cell::RefCell,
     convert::{TryFrom, TryInto as _},
-    fmt,
+    fmt, str,
 };
 
 /// This module uses external functions that the environment (i.e. browser or NodeJS) must
@@ -78,14 +79,62 @@ extern "C" {
 
     fn new_instance(module_id: i32, imports_ptr: *const u32) -> i32;
 
-    fn instance_push_i32(instance_id: i32, value: i32);
+    /// The given instance must be configured to start executing the given function.
+    ///
+    /// The content of the buffer designated by `params_ptr` contains the SCALE encoding of a
+    /// `Vec<WasmValue>`, where `WasmValue` is defined like this:
+    ///
+    /// ```no_run
+    /// enum WasmValue {
+    ///     I32(i32),
+    ///     I64(i64),
+    /// }
+    /// ```
+    ///
+    /// No actual execution should take place until [`instance_resume`] is called.
+    ///
+    /// If the instance was executing another function, the execution should be interrupted.
+    fn instance_init(
+        instance_id: i32,
+        function_name_ptr: *const u8,
+        function_name_size: usize,
+        params_ptr: *const u8,
+    );
 
-    fn instance_push_i64(instance_id: i32, value: i64);
+    /// Must execute the given instance until something happens (a host function is called, or the
+    /// function being called finishes executing), then return.
+    ///
+    /// This function is always called after [`instance_init`]. If this is the first time
+    /// [`instance_resume`] is called after [`instance_init`], then the `return_value_ptr`
+    /// parameter should be ignored. If the instance has been interrupted by a host function call,
+    /// it designates a buffer that contains the return value of the host function.
+    ///
+    /// The content of the buffer designated by `return_value_ptr` contains the SCALE encoding of
+    /// an `Option<WasmValue>`. See [`instance_init`] for a definition of `WasmValue`.
+    ///
+    /// Must write in the buffer designated by `out_ptr` and `out_size` the SCALE encoding of the
+    /// `Ret` enum defined as such:
+    ///
+    /// ```no_run
+    /// enum Ret {
+    ///     Finished {
+    ///         return_value: Result<Option<WasmValue>, String>,
+    ///     },
+    ///     Interrupted {
+    ///         id: u32,
+    ///         params: Vec<WasmValue>,
+    ///     },
+    /// }
+    /// ```
+    fn instance_resume(
+        instance_id: i32,
+        return_value_ptr: *const u8,
+        out_ptr: *mut u8,
+        out_size: usize,
+    );
 
-    fn instance_start(instance_id: i32, function_name_ptr: *const u8, function_name_size: usize);
-
-    fn instance_resume(instance_id: i32);
-
+    /// Permits freeing the memory associated with the given instance. The passed `instance_id` is
+    /// no longer considered valid.
     fn destroy_instance(instance_id: i32);
 
     /// Fetch from the given instance the value of the export whose name is passed as parameter.
@@ -105,10 +154,16 @@ extern "C" {
 
     /// Must read `size` bytes from the memory of the instance starting at `offset` and write
     /// them to `out`.
+    ///
+    /// > **Note**: This can be called while an instance has been interrupted by a host
+    /// >           function call.
     fn read_memory(instance_id: i32, offset: u32, size: u32, out: *mut u8);
 
     /// Must write `size` bytes into the memory of the instance starting at `offset`. The data
     /// can be found in `data`.
+    ///
+    /// > **Note**: This can be called while an instance has been interrupted by a host
+    /// >           function call.
     fn write_memory(instance_id: i32, offset: u32, size: u32, data: *const u8);
 }
 
@@ -251,23 +306,37 @@ impl JsVmPrototype {
         params: &[WasmValue],
     ) -> Result<JsVm, (StartErr, Self)> {
         unsafe {
+            let mut params_buffer = Vec::with_capacity(params.len() * 9 + 2);
+            params_buffer
+                .extend_from_slice(crate::util::encode_scale_compact_usize(params.len()).as_ref());
+
             for param in params {
                 match *param {
-                    WasmValue::I32(value) => instance_push_i32(self.external_identifier.0, value),
-                    WasmValue::I64(value) => instance_push_i64(self.external_identifier.0, value),
+                    WasmValue::I32(value) => {
+                        params_buffer.push(0);
+                        params_buffer.extend_from_slice(&value.to_le_bytes());
+                    }
+                    WasmValue::I64(value) => {
+                        params_buffer.push(1);
+                        params_buffer.extend_from_slice(&value.to_le_bytes());
+                    }
                 }
             }
 
             // TODO: error handling
-            instance_start(
+            instance_init(
                 self.external_identifier.0,
                 function_name.as_bytes().as_ptr(),
                 function_name.as_bytes().len(),
+                params_buffer.as_ptr(),
             );
         }
 
         Ok(JsVm {
             external_identifier: self.external_identifier,
+            // TODO: don't zero
+            // TODO: put in JsVmPrototype too
+            instance_resume_buffer: vec![0; 1024],
         })
     }
 }
@@ -280,23 +349,119 @@ impl fmt::Debug for JsVmPrototype {
 
 /// See [`super::VirtualMachine`].
 pub struct JsVm {
-    // The value returned by the environment when creating the instance.
+    /// The value returned by the environment when creating the instance.
     external_identifier: InstanceRaii,
+    /// Buffer written by [`instance_resume`]. In this struct in order to be re-used across
+    /// invocations.
+    instance_resume_buffer: Vec<u8>,
 }
 
 impl JsVm {
     /// See [`super::VirtualMachine::run`].
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
         unsafe {
+            let mut ret_val_buffer = Vec::with_capacity(10);
             match value {
-                Some(WasmValue::I32(value)) => instance_push_i32(self.external_identifier.0, value),
-                Some(WasmValue::I64(value)) => instance_push_i64(self.external_identifier.0, value),
-                None => {}
+                None => {
+                    ret_val_buffer.push(0);
+                }
+                Some(WasmValue::I32(value)) => {
+                    ret_val_buffer.push(1);
+                    ret_val_buffer.push(0);
+                    ret_val_buffer.extend_from_slice(&value.to_le_bytes());
+                }
+                Some(WasmValue::I64(value)) => {
+                    ret_val_buffer.push(1);
+                    ret_val_buffer.push(1);
+                    ret_val_buffer.extend_from_slice(&value.to_le_bytes());
+                }
             }
 
-            instance_resume(self.external_identifier.0);
+            instance_resume(
+                self.external_identifier.0,
+                ret_val_buffer.as_ptr(),
+                self.instance_resume_buffer.as_mut_ptr(),
+                self.instance_resume_buffer.len(),
+            );
 
-            todo!()
+            // Decode the value written by the outside.
+            let mut parser = nom::branch::alt((
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::complete::tag(&[0]),
+                        crate::util::nom_result_decode(
+                            crate::util::nom_option_decode(nom::branch::alt((
+                                nom::combinator::map(
+                                    nom::sequence::preceded(
+                                        nom::bytes::complete::tag(&[0]),
+                                        nom::number::complete::le_i32,
+                                    ),
+                                    WasmValue::I32,
+                                ),
+                                nom::combinator::map(
+                                    nom::sequence::preceded(
+                                        nom::bytes::complete::tag(&[1]),
+                                        nom::number::complete::le_i64,
+                                    ),
+                                    WasmValue::I64,
+                                ),
+                            ))),
+                            nom::combinator::map(
+                                nom::combinator::map_res(
+                                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                                    str::from_utf8,
+                                ),
+                                |msg| Trap(msg.to_owned()),
+                            ),
+                        ),
+                    ),
+                    |return_value| ExecOutcome::Finished { return_value },
+                ),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::complete::tag(&[1]),
+                        nom::sequence::tuple((
+                            nom::number::complete::le_u32,
+                            nom::combinator::flat_map(
+                                crate::util::nom_scale_compact_usize,
+                                |num_elems| {
+                                    nom::multi::many_m_n(
+                                        num_elems,
+                                        num_elems,
+                                        nom::branch::alt((
+                                            nom::combinator::map(
+                                                nom::sequence::preceded(
+                                                    nom::bytes::complete::tag(&[0]),
+                                                    nom::number::complete::le_i32,
+                                                ),
+                                                WasmValue::I32,
+                                            ),
+                                            nom::combinator::map(
+                                                nom::sequence::preceded(
+                                                    nom::bytes::complete::tag(&[1]),
+                                                    nom::number::complete::le_i64,
+                                                ),
+                                                WasmValue::I64,
+                                            ),
+                                        )),
+                                    )
+                                },
+                            ),
+                        )),
+                    ),
+                    |(id, params)| ExecOutcome::Interrupted {
+                        id: usize::try_from(id).unwrap(),
+                        params,
+                    },
+                ),
+            ));
+
+            let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
+                parser(&self.instance_resume_buffer);
+            match result {
+                Ok((_, out)) => Ok(out),
+                Err(_) => panic!(),
+            }
         }
     }
 
@@ -346,7 +511,6 @@ impl JsVm {
 
     /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> JsVmPrototype {
-        // TODO: interrupt the current execution?
         // TODO: zero the memory
 
         JsVmPrototype {
