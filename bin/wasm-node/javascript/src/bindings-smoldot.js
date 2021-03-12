@@ -165,6 +165,10 @@ export default (config) => {
             // the content of the buffer, then writes it, then switches the first four bytes and
             // uses `Atomics.notify` to wake up the other side.
             const communicationsSab = new SharedArrayBuffer(512);
+            const communicationsSabBuffer = Buffer.from(communicationsSab);
+            const int32Array = new Int32Array(communicationsSab);
+            int32Array[0] = 1;
+            int32Array[1] = 0xdeadbeef; // Garbage data to make sure everything is correctly overwritten.
 
             const id = nextIdAlloc;
             nextIdAlloc += 1;
@@ -182,41 +186,44 @@ export default (config) => {
                 }
             });
 
-            wasmInstances[id] = {
-                communicationsSab: Buffer.from(communicationsSab),
-                int32Array: new Int32Array(communicationsSab)
-            };
+            Atomics.wait(int32Array, 0, 1);
+            if (communicationsSabBuffer.readUInt8(4) != 0)
+                throw 'State mismatch: expected InitializationResult';
+            const retCode = communicationsSabBuffer.readUInt8(5);
 
-            Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(id, idOut);
-            return 0;
+            if (retCode == 0) {
+                Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(id, idOut);
+                wasmInstances[id] = {
+                    communicationsSab: communicationsSabBuffer,
+                    int32Array,
+                };
+            }
+
+            return retCode;
         },
-        instance_init: (instanceId, functionNamePtr, functionNameSize, paramsPtr, paramsSize) => {
-            const functionName = Buffer.from(config.instance.exports.memory.buffer)
-                .toString('utf8', functionNamePtr, functionNamePtr + functionNameSize);
-            const params = decodeVecWasmValue(config.instance.exports.memory.buffer, paramsPtr);
-
+        instance_init: (instanceId, infoPtr, infoSize) => {
             const instance = wasmInstances[instanceId];
-            // TODO: don't assume postMessage
-            postMessage({
-                kind: 'send-vm-worker',
-                data: {
-                    id: instanceId,
-                    message: { functionName, params }
-                }
-            });
+            instance.communicationsSab.writeUInt8(1, 4);  // `StartFunction`
+            // The buffer in `infoPtr`/`infoSize` matches (intentionally) the body of the
+            // `StartFunction` message.
+            Buffer.from(config.instance.exports.memory.buffer)
+                .copy(instance.communicationsSab, 5, infoPtr, infoPtr + infoSize);
 
             instance.int32Array[0] = 1;
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
-            return instance.communicationsSab.readUInt8(4);
+            if (instance.communicationsSab.readUInt8(4) != 2)
+                throw 'State mismatch: expected StartResult';
+            return instance.communicationsSab.readUInt8(5);
         },
         instance_resume: (instanceId, returnValuePtr, returnValueSize, outPtr, outSize) => {
             const instance = wasmInstances[instanceId];
             const selfMemory = Buffer.from(config.instance.exports.memory.buffer);
 
             // Write the return value to the shared array.
-            selfMemory.copy(instance.communicationsSab, 4, returnValuePtr, returnValuePtr + returnValueSize);
+            instance.communicationsSab.writeUInt8(5, 4);  // `Resume`
+            selfMemory.copy(instance.communicationsSab, 5, returnValuePtr, returnValuePtr + returnValueSize);
             instance.int32Array[0] = 1;
 
             // Wait for the child Wasm to execute.

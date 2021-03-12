@@ -109,8 +109,8 @@ extern "C" {
 
     /// The given instance must be configured to start executing the given function.
     ///
-    /// The content of the buffer designated by `params_ptr` and `params_size` contains the SCALE
-    /// encoding of a `Vec<WasmValue>`, where `WasmValue` is defined like this:
+    /// The content of the buffer designated by `info_ptr` and `info_size` contains the SCALE
+    /// encoding of a `(String, Vec<WasmValue>)`, where `WasmValue` is defined like this:
     ///
     /// ```no_run
     /// enum WasmValue {
@@ -118,6 +118,9 @@ extern "C" {
     ///     I64(i64),
     /// }
     /// ```
+    ///
+    /// The `String` corresponds to the name of the function to execute, and the `Vec` to the
+    /// parameters to pass.
     ///
     /// No actual execution should take place until [`instance_resume`] is called.
     ///
@@ -130,13 +133,7 @@ extern "C" {
     /// - 2 if the requested function isn't actually a function.
     /// - 3 if the signature of the function doesn't match the parameters.
     ///
-    fn instance_init(
-        instance_id: i32,
-        function_name_ptr: *const u8,
-        function_name_size: usize,
-        params_ptr: *const u8,
-        params_size: usize,
-    ) -> i32;
+    fn instance_init(instance_id: i32, info_ptr: *const u8, info_size: usize) -> i32;
 
     /// Must execute the given instance until something happens (a host function is called, or the
     /// function being called finishes executing), then return.
@@ -365,29 +362,32 @@ impl JsVmPrototype {
         params: &[WasmValue],
     ) -> Result<JsVm, (StartErr, Self)> {
         unsafe {
-            let mut params_buffer = Vec::with_capacity(params.len() * 9 + 2);
-            params_buffer
+            let mut infos_buffer =
+                Vec::with_capacity(function_name.as_bytes().len() + 2 + params.len() * 9 + 2);
+            infos_buffer.extend_from_slice(
+                crate::util::encode_scale_compact_usize(function_name.as_bytes().len()).as_ref(),
+            );
+            infos_buffer.extend_from_slice(function_name.as_bytes());
+            infos_buffer
                 .extend_from_slice(crate::util::encode_scale_compact_usize(params.len()).as_ref());
 
             for param in params {
                 match *param {
                     WasmValue::I32(value) => {
-                        params_buffer.push(0);
-                        params_buffer.extend_from_slice(&value.to_le_bytes());
+                        infos_buffer.push(0);
+                        infos_buffer.extend_from_slice(&value.to_le_bytes());
                     }
                     WasmValue::I64(value) => {
-                        params_buffer.push(1);
-                        params_buffer.extend_from_slice(&value.to_le_bytes());
+                        infos_buffer.push(1);
+                        infos_buffer.extend_from_slice(&value.to_le_bytes());
                     }
                 }
             }
 
             let ret_code = instance_init(
                 self.external_identifier.0,
-                function_name.as_bytes().as_ptr(),
-                function_name.as_bytes().len(),
-                params_buffer.as_ptr(),
-                params_buffer.len(),
+                infos_buffer.as_ptr(),
+                infos_buffer.len(),
             );
 
             match ret_code {

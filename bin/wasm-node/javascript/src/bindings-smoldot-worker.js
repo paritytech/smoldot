@@ -127,8 +127,8 @@
 // }
 // ```
 //
-// The `communicationsSab` is initially owner by this worker and must be answered with an
-// "Initialization result" message. If initialization has failed, the worker shuts down.
+// The `communicationsSab` is initially owned by this worker and must be answered with an
+// "InitializationResult" message. If initialization has failed, the worker shuts down.
 //
 
 import * as compat from './compat-nodejs.js';
@@ -213,6 +213,9 @@ const sendStartFeedbackIfNeeded = () => {
   sendMessageWaitReply();
 
   state.startedFeedback = true;
+
+  // TODO: !!!
+  const receivedMessage = processMessages();
 };
 
 // Function that builds a host function.
@@ -301,17 +304,17 @@ const processMessages = () => {
   }
 };
 
-compat.setOnMessage((incomingMessage) => {
-  state.communicationsSab = Buffer.from(incomingMessage.communicationsSab);
-  state.int32Array = new Int32Array(incomingMessage.communicationsSab);
+compat.setOnMessage((initializationMessage) => {
+  state.communicationsSab = Buffer.from(initializationMessage.communicationsSab);
+  state.int32Array = new Int32Array(initializationMessage.communicationsSab);
   if (state.int32Array[0] != 1)
     throw "Invalid communicationsSab state";
 
   // Try instantiate the VM and send back the `InitializationResult`.
   state.communicationsSab.writeUInt8(0, 4); // `InitializationResult` variant
   try {
-    const { constructedImports, memory } = buildImports(incomingMessage.module, incomingMessage.requestedImports);
-    state.instance = new WebAssembly.Instance(incomingMessage.module, constructedImports);
+    const { constructedImports, memory } = buildImports(initializationMessage.module, initializationMessage.requestedImports);
+    state.instance = new WebAssembly.Instance(initializationMessage.module, constructedImports);
     state.memory = memory;
     if (!state.memory) {
       state.memory = state.instance.exports.memory;
@@ -319,45 +322,48 @@ compat.setOnMessage((incomingMessage) => {
     state.communicationsSab.writeUInt8(0, 5); // Sucess
   } catch (error) {
     state.communicationsSab.writeUInt8(1, 5); // Error
+    return;
   }
 
   // Send the message and wait for further instruction.
   sendMessageWaitReply();
 
+  // Main execution loop. Despite being JavaScript, this is entirely synchronous.
   while (true) {
-    processMessages();
-  }
-});
+    const receivedMessage = processMessages();
+    if (receivedMessage.kind != 'StartFunction')
+      throw "Invalid state: received Resume when not calling anything";
 
-/*compat.setOnMessage((incomingMessage) => {
-  if (!state.instance) {
-    // The first message that is expected to come is of the form
-    // `{ module: <some Wasm module>, requestedImports: [..] }`. We instantiate this module.
-    startInstance(incomingMessage);
-  } else {
-    // The second message that is expected to come is of the form
-    // `{ functionName: "foo", params: [..] }`.
+    // Start executing the requested function.
     startedFeedback = false;
-    const toStart = state.instance.exports[incomingMessage.functionName];
+    const toStart = state.instance.exports[initializationMessage.functionName];
 
     if (!toStart) {
-      communicationsSab.writeUInt8(1, 4);
-      int32Array[0] = 0;
-      Atomics.notify(int32Array, 0);
-      return;
+      communicationsSab.writeUInt8(2, 4); // `StartResult`
+      communicationsSab.writeUInt8(1, 5);
+      sendMessageWaitReply();
+      continue;
     }
+
+    // TODO: check if toStart is indeed a function
 
     let returnValue;
     try {
-      returnValue = toStart(incomingMessage.params);
+      returnValue = toStart(initializationMessage.params);
     } catch (error) {
-      // TODO:
-      throw error;
+      // TODO: can also be interrupted by host function
+      communicationsSab.writeUInt8(2, 4); // `StartResult`
+      communicationsSab.writeUInt8(3, 5);
+      sendMessageWaitReply();
+      continue;
     }
 
+    // Function has successfully ended.
+
+    // Send back a `StartResult` if necessary.
     sendStartFeedbackIfNeeded();
 
-    communicationsSab.writeUInt8(0, 4); // `Finished` variant
+    communicationsSab.writeUInt8(3, 4); // `Finished`
     communicationsSab.writeUInt8(0, 5); // `Ok` variant
     if (typeof returnValue === "bigint") {
       communicationsSab.writeUInt8(1, 6); // `Some` variant
@@ -371,7 +377,6 @@ compat.setOnMessage((incomingMessage) => {
       communicationsSab.writeUInt8(0, 6); // `None` variant
     }
 
-    int32Array[0] = 0;
-    Atomics.notify(int32Array, 0);
+    sendMessageWaitReply();
   }
-});*/
+});
