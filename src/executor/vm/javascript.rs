@@ -94,13 +94,21 @@ extern "C" {
     /// No actual execution should take place until [`instance_resume`] is called.
     ///
     /// If the instance was executing another function, the execution must be interrupted.
+    ///
+    /// The returned value should be:
+    ///
+    /// - 0 on success.
+    /// - 1 if the function doesn't exist.
+    /// - 2 if the requested function isn't actually a function.
+    /// - 3 if the signature of the function doesn't match the parameters.
+    ///
     fn instance_init(
         instance_id: i32,
         function_name_ptr: *const u8,
         function_name_size: usize,
         params_ptr: *const u8,
         params_size: usize,
-    );
+    ) -> i32;
 
     /// Must execute the given instance until something happens (a host function is called, or the
     /// function being called finishes executing), then return.
@@ -327,22 +335,27 @@ impl JsVmPrototype {
                 }
             }
 
-            // TODO: error handling
-            instance_init(
+            let ret_code = instance_init(
                 self.external_identifier.0,
                 function_name.as_bytes().as_ptr(),
                 function_name.as_bytes().len(),
                 params_buffer.as_ptr(),
                 params_buffer.len(),
             );
-        }
 
-        Ok(JsVm {
-            external_identifier: self.external_identifier,
-            // TODO: don't zero
-            // TODO: put in JsVmPrototype too
-            instance_resume_buffer: vec![0; 1024],
-        })
+            match ret_code {
+                0 => Ok(JsVm {
+                    external_identifier: self.external_identifier,
+                    // TODO: don't zero
+                    // TODO: put in JsVmPrototype too
+                    instance_resume_buffer: vec![0; 1024],
+                }),
+                1 => return Err((StartErr::FunctionNotFound, self)),
+                2 => return Err((StartErr::NotAFunction, self)),
+                3 => return Err((StartErr::SignatureNotSupported, self)),
+                _ => panic!(),
+            }
+        }
     }
 }
 

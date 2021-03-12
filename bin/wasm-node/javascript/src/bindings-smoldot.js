@@ -196,6 +196,12 @@ export default (config) => {
                     message: { functionName, params }
                 }
             });
+
+            const instance = wasmInstances[instanceId];
+            instance.int32Array[0] = 1;
+            Atomics.wait(instance.int32Array, 0, 1);
+
+            return instance.communicationsSab.readUInt8(4);
         },
         instance_resume: (instanceId, returnValuePtr, returnValueSize, outPtr, outSize) => {
             const instance = wasmInstances[instanceId];

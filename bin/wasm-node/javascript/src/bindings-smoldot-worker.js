@@ -122,8 +122,21 @@ compat.setOnMessage((incomingMessage) => {
     // The second message that is expected to come is of the form
     // `{ functionName: "foo", params: [..] }`.
     const toStart = instance.exports[incomingMessage.functionName];
-    // TODO: error handling
-    const returnValue = toStart(incomingMessage.params);
+
+    if (!toStart) {
+      communicationsSab.writeUInt8(1, 4);
+      int32Array[0] = 0;
+      Atomics.notify(int32Array, 0);
+      return;
+    }
+  
+    let returnValue;
+    try {
+      returnValue = toStart(incomingMessage.params);
+    } catch(error) {
+      // TODO:
+      throw error;
+    }
 
     communicationsSab.writeUInt8(0, 4); // `Finished` variant
     communicationsSab.writeUInt8(0, 5); // `Ok` variant
