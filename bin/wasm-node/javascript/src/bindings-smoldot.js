@@ -158,9 +158,9 @@ export default (config) => {
             // Write the return value to the shared array.
             instance.communicationsSab.writeUInt8(5, 4);  // `Resume`
             selfMemory.copy(instance.communicationsSab, 5, returnValuePtr, returnValuePtr + returnValueSize);
-            instance.int32Array[0] = 1;
 
             // Wait for the child Wasm to execute.
+            instance.int32Array[0] = 1;
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
@@ -178,13 +178,43 @@ export default (config) => {
             });
             wasmInstances[instanceId] = undefined;
         },
-        global_value: (instanceId, name_ptr, name_size, out) => {
-            const name = Buffer.from(config.instance.exports.memory.buffer)
-                .toString('utf8', name_ptr, name_ptr + name_size);
-            // TODO: wasmInstances[instanceId].exports[name]
+        global_value: (instanceId, namePtr, nameSize, outPtr) => {
+            const instance = wasmInstances[instanceId];
+            const selfMemory = Buffer.from(config.instance.exports.memory.buffer);
+
+            // Write the message destined to the worker.
+            instance.communicationsSab.writeUInt8(12, 4);  // `GetGlobal`
+            // TODO: must write SCALE-encoded size
+            selfMemory.copy(instance.communicationsSab, 5, namePtr, namePtr + nameSize);
+
+            // Wait for the child Wasm to execute.
+            instance.int32Array[0] = 1;
+            Atomics.notify(instance.int32Array, 0);
+            Atomics.wait(instance.int32Array, 0, 1);
+
+            const retMessageTy = instance.communicationsSab.readUInt8(4);
+            if (retMessageTy == 13) {
+                const globalValue = instance.communicationsSab.readUInt32LE(5);
+                selfMemory.writeUint32LE(globalValue, outPtr);
+                return 0;
+            } else if (retMessageTy == 14) {
+                return instance.communicationsSab.readUInt8(5);
+            } else {
+                throw 'Expected GetGlobalOk or GetGlobalErr';
+            }
         },
         memory_size: (instanceId) => {
-            // TODO:
+            const instance = wasmInstances[instanceId];
+            instance.communicationsSab.writeUInt8(10, 4);  // `MemorySize`
+
+            // Wait for the child Wasm to execute.
+            instance.int32Array[0] = 1;
+            Atomics.notify(instance.int32Array, 0);
+            Atomics.wait(instance.int32Array, 0, 1);
+
+            if (instance.communicationsSab.readUInt8(4) != 11)
+                throw 'Expected MemorySizeResult';
+            return instance.communicationsSab.readUInt32LE(5);
         },
         read_memory: (instanceId, offset, size, outPtr) => {
             // TODO:

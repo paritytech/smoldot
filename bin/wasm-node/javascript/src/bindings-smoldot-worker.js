@@ -118,7 +118,9 @@
 //
 //     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
 //     // `ReadMemory`, or `Resume`.
-//     GetGlobalErr,
+//     // Contains 1 if the export wasn't found. Contains 2 if the export isn't a global value
+//     // of type `i32`.
+//     GetGlobalErr(u8),
 // }
 //
 // enum WasmValue {
@@ -352,18 +354,27 @@ const processMessages = () => {
 
     if (messageTy == 10) { // `MemorySize`.
       state.communicationsSab.writeUInt8(11, 5); // `MemorySizeResult`.
-      state.communicationsSab.writeUInt32(state.memory ? state.memory.byteLength : 0, 6);
+      state.communicationsSab.writeUInt32LE(state.memory ? state.memory.byteLength : 0, 6);
       sendMessageWaitReply();
       continue;
     }
 
-    // TODO:
-    /*if (messageTy == 12) { // `GetGlobal`.
-      state.communicationsSab.writeUInt8(11, 5); // `MemorySizeResult`.
-      state.communicationsSab.writeUInt32(state.memory ? state.memory.byteLength : 0, 6);
+    if (messageTy == 12) { // `GetGlobal`.
+      const { value: globalName } = decodeString(state.communicationsSab, 5);
+      const globalVal = state.instance.exports[globalName];
+      if (globalVal === undefined) {
+        state.communicationsSab.writeUInt8(14, 5); // `GetGlobalErr`.
+        state.communicationsSab.writeUInt8(1, 6);
+      } else if (typeof globalVal != 'number') {
+        state.communicationsSab.writeUInt8(14, 5); // `GetGlobalErr`.
+        state.communicationsSab.writeUInt8(2, 6);
+      } else {
+        state.communicationsSab.writeUInt8(13, 5); // `GetGlobalOk`.
+        state.communicationsSab.writeUInt32LE(globalVal, 6);
+      }
       sendMessageWaitReply();
       continue;
-    }*/
+    }
 
     throw "Unknown message type: " + messageTy;
   }
