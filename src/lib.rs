@@ -186,7 +186,7 @@
 
 // The library part of `smoldot` should as pure as possible and shouldn't rely on any environment
 // such as a file system, environment variables, time, randomness, etc.
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
+//#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 

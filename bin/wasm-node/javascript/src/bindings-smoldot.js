@@ -26,6 +26,37 @@
 
 import { Buffer } from 'buffer';
 
+// Encodes a number in its SCALE-compact encoding.
+//
+// Returns an object of the form `{ offsetAfter: ... }`.
+const encodeScaleCompactUsize = (value, bufferOut, bufferOutOffset) => {
+    if (value < 64) {
+        bufferOut.writeUInt8(value << 2, bufferOutOffset);
+        return { offsetAfter: bufferOutOffset + 1 };
+
+    } else if (value < (1 << 14)) {
+        bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b01, bufferOutOffset);
+        bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 2);
+        return { offsetAfter: bufferOutOffset + 1 };
+
+    } else if (value < (1 << 30)) {
+        bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b10, bufferOutOffset);
+        bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 1);
+        bufferOut.writeUInt8((value >> 14) & 0xff, bufferOutOffset + 2);
+        bufferOut.writeUInt8((value >> 22) & 0xff, bufferOutOffset + 3);
+        return { offsetAfter: bufferOutOffset + 4 };
+
+    } else {
+        let off = 1;
+        while (value != 0) {
+            bufferOut.writeUInt8(value & 0xff, bufferOutOffset + off);
+            off += 1;
+            value >>= 8;
+        }
+        bufferOut.writeUInt8(((off - 1 - 4) << 2) | 0b11, bufferOutOffset);
+    }
+};
+
 export default (config) => {
     // 
     let wasmModules = {};
@@ -267,15 +298,15 @@ export default (config) => {
 
             // Because the size of `communicationsSab` might be too small to fit the entire
             // data, we need to cap the write to a certain limit.
-            const sizeLimit = instance.communicationsSab.byteLength - 9;
+            const sizeLimit = instance.communicationsSab.byteLength - 11;
 
             while (size > 0) {
                 const sizeIter = size > sizeLimit ? sizeLimit : size;
 
                 instance.communicationsSab.writeUInt8(6, 4);  // `WriteMemory`
                 instance.communicationsSab.writeUInt32LE(offset, 5);
-                // TODO: must write SCALE-encoded size
-                selfMemory.copy(instance.communicationsSab, 6, dataPtr, dataPtr + sizeIter);
+                const { offsetAfter } = encodeScaleCompactUsize(sizeIter, instance.communicationsSab, 9);
+                selfMemory.copy(instance.communicationsSab, offsetAfter, dataPtr, dataPtr + sizeIter);
 
                 // Wait for the child Wasm to execute.
                 instance.int32Array[0] = 1;

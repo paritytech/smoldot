@@ -79,7 +79,10 @@ impl BabeGenesisConfiguration {
                         Err(err) => return Err(FromVmPrototypeError::OutputDecode(err)),
                     };
                 }
-                host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { error, .. } => {
+                    panic!("{:?}", error);
+                    return Err(FromVmPrototypeError::Trapped)
+                },
 
                 host::HostVm::ExternalStorageGet(req) => {
                     let value = genesis_storage_access(req.key().as_ref());

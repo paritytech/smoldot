@@ -278,11 +278,29 @@ const processMessages = () => {
 
     if (messageTy == 5) { // `Resume`.
       const optValue = state.communicationsSab.readUInt8(5);
-      const value = optValue != 0 ? decodeWasmValue(state.communicationsSab, 6) : null;
+      const value = optValue != 0 ? decodeWasmValue(state.communicationsSab, 6).value : null;
       return {
         kind: 'Resume',
         value
       };
+    }
+
+    if (messageTy == 6) { // `WriteMemory`.
+      const writeOffset = state.communicationsSab.readUint32LE(5);
+      const { value: writeSize, offsetAfter: dataOffset } = decodeScaleCompactInt(state.communicationsSab, 9);
+      state.communicationsSab.copy(state.memory, writeOffset, dataOffset, dataOffset + writeSize);
+      state.communicationsSab.writeUInt8(7, 4); // `WriteMemoryOk`.
+      sendMessageWaitReply();
+      continue;
+    }
+
+    if (messageTy == 8) { // `ReadMemory`.
+      const readOffset = state.communicationsSab.readUint32LE(5);
+      const readSize = state.communicationsSab.readUint32LE(9);
+      state.communicationsSab.writeUInt8(9, 4); // `ReadMemoryResult`.
+      state.memory.copy(state.communicationsSab, 5, readOffset, readSize);
+      sendMessageWaitReply();
+      continue;
     }
 
     if (messageTy == 10) { // `MemorySize`.
@@ -323,15 +341,13 @@ const buildHostFunction = (id) => {
     let { offsetAfter } = encodeScaleCompactUsize(args.length, state.communicationsSab, 9);
     args.forEach((value) => {
       if (typeof value === "bigint") {
-        state.communicationsSab.writeUInt8(1, offsetAfter); // `Some` variant
-        state.communicationsSab.writeUInt8(1, offsetAfter + 1); // `I64` variant
-        state.communicationsSab.writeBigUInt64BE(value, offsetAfter + 2);
-        offsetAfter += 10;
+        state.communicationsSab.writeUInt8(1, offsetAfter); // `I64` variant
+        state.communicationsSab.writeBigInt64LE(value, offsetAfter + 1);
+        offsetAfter += 9;
       } else if (typeof value === "number") {
-        state.communicationsSab.writeUInt8(1, offsetAfter); // `Some` variant
-        state.communicationsSab.writeUInt8(0, offsetAfter + 1); // `I32` variant
-        state.communicationsSab.writeUInt32LE(value, offsetAfter + 2);
-        offsetAfter += 6;
+        state.communicationsSab.writeUInt8(0, offsetAfter); // `I32` variant
+        state.communicationsSab.writeUInt32LE(value, offsetAfter + 1);
+        offsetAfter += 5;
       } else {
         throw 'Expected i32 or i64 host function argument';
       }
@@ -393,9 +409,9 @@ compat.setOnMessage((initializationMessage) => {
   try {
     const { constructedImports, memory } = buildImports(initializationMessage.module, initializationMessage.requestedImports);
     state.instance = new WebAssembly.Instance(initializationMessage.module, constructedImports);
-    state.memory = memory;
+    state.memory = Buffer.from(memory.buffer);
     if (!state.memory) {
-      state.memory = state.instance.exports.memory;
+      state.memory = Buffer.from(state.instance.exports.memory.buffer);
     }
     state.communicationsSab.writeUInt8(0, 5); // Sucess
   } catch (error) {
@@ -450,7 +466,7 @@ compat.setOnMessage((initializationMessage) => {
       if (typeof returnValue === "bigint") {
         state.communicationsSab.writeUInt8(1, 6); // `Some` variant
         state.communicationsSab.writeUInt8(1, 7); // `I64` variant
-        state.communicationsSab.writeBigUInt64BE(returnValue, 8);
+        state.communicationsSab.writeBigInt64LE(returnValue, 8);
       } else if (typeof returnValue === "number") {
         state.communicationsSab.writeUInt8(1, 6); // `Some` variant
         state.communicationsSab.writeUInt8(0, 7); // `I32` variant
