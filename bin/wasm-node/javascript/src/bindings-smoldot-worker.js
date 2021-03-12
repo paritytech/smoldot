@@ -414,7 +414,6 @@ compat.setOnMessage((initializationMessage) => {
     state.instance = new WebAssembly.Instance(initializationMessage.module, constructedImports);
     state.memory = Buffer.from(memory.buffer);
     if (!state.memory) {
-      state.instance.exports.memory.grow(1024);
       state.memory = Buffer.from(state.instance.exports.memory.buffer);
     }
     state.communicationsSab.writeUInt8(0, 5); // Sucess
