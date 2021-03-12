@@ -83,8 +83,9 @@
 //     // Must be answered with `Interrupted` or `Finished`.
 //     Resume(Option<WasmValue>),
 //
-//     // Must write data at given memory offset. Must be answered with `WriteMemoryOk`.
-//     WriteMemory(u32, Vec<u8>),
+//     // Must write data at given memory offset. Parameters are offset and size.
+//     // Must be answered with `WriteMemoryOk`.
+//     WriteMemory(u32, u32, Vec<u8> /* NO LENGTH PREFIX */),
 //
 //     // Confirmation that `WriteMemory` has been done.
 //     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
@@ -288,8 +289,8 @@ const processMessages = () => {
 
     if (messageTy == 6) { // `WriteMemory`.
       const writeOffset = state.communicationsSab.readUint32LE(5);
-      const { value: writeSize, offsetAfter: dataOffset } = decodeScaleCompactInt(state.communicationsSab, 9);
-      state.communicationsSab.copy(state.memory, writeOffset, dataOffset, dataOffset + writeSize);
+      const writeSize = state.communicationsSab.readUint32LE(9);
+      state.communicationsSab.copy(state.memory, writeOffset, 13, 13 + writeSize);
       state.communicationsSab.writeUInt8(7, 4); // `WriteMemoryOk`.
       sendMessageWaitReply();
       continue;
@@ -385,6 +386,7 @@ const buildImports = (wasmModule, requestedImports) => {
     } else if (moduleImport.kind == 'memory') {
       if (memory)
         throw "Can't have multiple memory objects";
+      // TODO: heap_pages is actually "additional" memory?
       memory = new WebAssembly.Memory({
         initial: requestedImports[i],
         maximum: requestedImports[i]
@@ -412,6 +414,7 @@ compat.setOnMessage((initializationMessage) => {
     state.instance = new WebAssembly.Instance(initializationMessage.module, constructedImports);
     state.memory = Buffer.from(memory.buffer);
     if (!state.memory) {
+      state.instance.exports.memory.grow(1024);
       state.memory = Buffer.from(state.instance.exports.memory.buffer);
     }
     state.communicationsSab.writeUInt8(0, 5); // Sucess

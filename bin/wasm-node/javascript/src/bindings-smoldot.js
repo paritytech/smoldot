@@ -26,38 +26,6 @@
 
 import { Buffer } from 'buffer';
 
-// Encodes a number in its SCALE-compact encoding.
-//
-// Returns an object of the form `{ offsetAfter: ... }`.
-const encodeScaleCompactUsize = (value, bufferOut, bufferOutOffset) => {
-    if (value < 64) {
-        bufferOut.writeUInt8(value << 2, bufferOutOffset);
-        return { offsetAfter: bufferOutOffset + 1 };
-
-    } else if (value < (1 << 14)) {
-        bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b01, bufferOutOffset);
-        bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 1);
-        return { offsetAfter: bufferOutOffset + 2 };
-
-    } else if (value < (1 << 30)) {
-        bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b10, bufferOutOffset);
-        bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 1);
-        bufferOut.writeUInt8((value >> 14) & 0xff, bufferOutOffset + 2);
-        bufferOut.writeUInt8((value >> 22) & 0xff, bufferOutOffset + 3);
-        return { offsetAfter: bufferOutOffset + 4 };
-
-    } else {
-        let off = 1;
-        while (value != 0) {
-            bufferOut.writeUInt8(value & 0xff, bufferOutOffset + off);
-            off += 1;
-            value >>= 8;
-        }
-        bufferOut.writeUInt8(((off - 1 - 4) << 2) | 0b11, bufferOutOffset);
-        return { offsetAfter: bufferOutOffset + off };
-    }
-};
-
 export default (config) => {
     // 
     let wasmModules = {};
@@ -127,7 +95,7 @@ export default (config) => {
             // The size of the buffer is arbitrary. Notably, memory transfers (reading and
             // writing memory) are notably done through this buffer, and if it is too small, these
             // transfers require multiple iterations.
-            const communicationsSab = new SharedArrayBuffer(1024);
+            const communicationsSab = new SharedArrayBuffer(2048);
             const communicationsSabBuffer = Buffer.from(communicationsSab);
             const int32Array = new Int32Array(communicationsSab);
             int32Array[0] = 1;
@@ -306,8 +274,8 @@ export default (config) => {
 
                 instance.communicationsSab.writeUInt8(6, 4);  // `WriteMemory`
                 instance.communicationsSab.writeUInt32LE(offset, 5);
-                const { offsetAfter } = encodeScaleCompactUsize(sizeIter, instance.communicationsSab, 9);
-                selfMemory.copy(instance.communicationsSab, offsetAfter, dataPtr, dataPtr + sizeIter);
+                instance.communicationsSab.writeUInt32LE(offset, 9);
+                selfMemory.copy(instance.communicationsSab, 13, dataPtr, dataPtr + sizeIter);
 
                 // Wait for the child Wasm to execute.
                 instance.int32Array[0] = 1;
