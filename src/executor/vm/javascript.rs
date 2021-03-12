@@ -340,8 +340,7 @@ impl JsVmPrototype {
     /// See [`super::VirtualMachinePrototype::global_value`].
     pub fn global_value(&self, name: &str) -> Result<u32, GlobalValueErr> {
         unsafe {
-            let mut name_buffer =
-                Vec::with_capacity(name.as_bytes().len() + 2);
+            let mut name_buffer = Vec::with_capacity(name.as_bytes().len() + 2);
             name_buffer.extend_from_slice(
                 crate::util::encode_scale_compact_usize(name.as_bytes().len()).as_ref(),
             );

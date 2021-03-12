@@ -140,7 +140,6 @@ let state = {
   instance: null,
   communicationsSab: null,
   int32Array: null,
-  startedFeedback: false,
   memory: null,
 };
 
@@ -227,68 +226,128 @@ const sendMessageWaitReply = () => {
   Atomics.wait(state.int32Array, 0, 0);
 };
 
-/*
-/// Returns a buffer containing the SCALE-compact encoding of the parameter.
-pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> + Clone {
-    // TODO: use usize::BITS after https://github.com/rust-lang/rust/issues/76904 is stable
-    let mut array = arrayvec::ArrayVec::<[u8; 1 + 64 / 8]>::new();
+// Encodes a number in its SCALE-compact encoding.
+//
+// Returns an object of the form `{ offsetAfter: ... }`.
+const encodeScaleCompactUsize = (value, bufferOut, bufferOutOffset) => {
+  if (value < 64) {
+    bufferOut.writeUInt8(value << 2, bufferOutOffset);
+    return { offsetAfter: bufferOutOffset + 1 };
 
-    if value < 64 {
-        array.push(u8::try_from(value).unwrap() << 2);
-    } else if value < (1 << 14) {
-        array.push((u8::try_from(value & 0b111111).unwrap() << 2) | 0b01);
-        array.push(u8::try_from((value >> 6) & 0xff).unwrap());
-    } else if value < (1 << 30) {
-        array.push((u8::try_from(value & 0b111111).unwrap() << 2) | 0b10);
-        array.push(u8::try_from((value >> 6) & 0xff).unwrap());
-        array.push(u8::try_from((value >> 14) & 0xff).unwrap());
-        array.push(u8::try_from((value >> 22) & 0xff).unwrap());
-    } else {
-        array.push(0);
-        while value != 0 {
-            array.push(u8::try_from(value & 0xff).unwrap());
-            value >>= 8;
-        }
-        array[0] = (u8::try_from(array.len() - 1 - 4).unwrap() << 2) | 0b11;
+  } else if (value < (1 << 14)) {
+    bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b01, bufferOutOffset);
+    bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 2);
+    return { offsetAfter: bufferOutOffset + 1 };
+
+  } else if (value < (1 << 30)) {
+    bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b10, bufferOutOffset);
+    bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 1);
+    bufferOut.writeUInt8((value >> 14) & 0xff, bufferOutOffset + 2);
+    bufferOut.writeUInt8((value >> 22) & 0xff, bufferOutOffset + 3);
+    return { offsetAfter: bufferOutOffset + 4 };
+
+  } else {
+    let off = 1;
+    while (value != 0) {
+      bufferOut.writeUInt8(value & 0xff, bufferOutOffset + off);
+      off += 1;
+      value >>= 8;
+    }
+    bufferOut.writeUInt8(((off - 1 - 4) << 2) | 0b11, bufferOutOffset);
+  }
+};
+
+// Reads the message in the `communicationsSab`, answering them if possible.
+//
+// Doesn't return until the message is either `StartFunction` or `Resume`.
+// If the message is `StartFunction`, returns `{kind:'StartFunction', name:'...', params:[...]}`.
+// If the message is `Resume`, returns `{kind:'Resume', value:...}`.
+const processMessages = () => {
+  while (true) {
+    const messageTy = state.communicationsSab.readUInt8(4);
+
+    if (messageTy == 1) { // `StartFunction`.
+      const { offsetAfter, value: name } = decodeString(state.communicationsSab, 5);
+      const { value: params } = decodeVecWasmValue(state.communicationsSab, offsetAfter);
+      return {
+        kind: 'StartFunction',
+        name,
+        params,
+      };
     }
 
-    array
-}
-*/
+    if (messageTy == 5) { // `Resume`.
+      const optValue = state.communicationsSab.readUInt8(5);
+      const value = optValue != 0 ? decodeWasmValue(state.communicationsSab, 6) : null;
+      return {
+        kind: 'Resume',
+        value
+      };
+    }
 
-/*const encodeScaleCompactUsize = (value, bufferOut) => {
-  if 
-};*/
+    if (messageTy == 10) { // `MemorySize`.
+      state.communicationsSab.writeUInt8(11, 4); // `MemorySizeResult`.
+      state.communicationsSab.writeUInt32LE(state.memory ? state.memory.byteLength : 0, 5);
+      sendMessageWaitReply();
+      continue;
+    }
 
-const sendStartFeedbackIfNeeded = () => {
-  if (state.startedFeedback)
-    return;
+    if (messageTy == 12) { // `GetGlobal`.
+      const { value: globalName } = decodeString(state.communicationsSab, 5);
+      const globalVal = state.instance.exports[globalName];
+      if (globalVal === undefined) {
+        state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
+        state.communicationsSab.writeUInt8(1, 5);
+      } else if (typeof globalVal.value != 'number') {
+        state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
+        state.communicationsSab.writeUInt8(2, 5);
+      } else {
+        state.communicationsSab.writeUInt8(13, 4); // `GetGlobalOk`.
+        state.communicationsSab.writeUInt32LE(globalVal.value, 5);
+      }
+      sendMessageWaitReply();
+      continue;
+    }
 
-  state.communicationsSab.writeUInt8(2, 4); // `StartResult`
-  state.communicationsSab.writeUInt8(0, 5); // Success
-  sendMessageWaitReply();
-
-  state.startedFeedback = true;
-
-  // TODO: !!!
-  const receivedMessage = processMessages();
+    throw "Unknown message type: " + messageTy;
+  }
 };
 
 // Function that builds a host function.
 const buildHostFunction = (id) => {
   // The function returned here is what is called by the Wasm VM for all its host functions.
-  // Must send an `Interrupted` message and wait for the `Resume`.
-  return () => {
-    sendStartFeedbackIfNeeded();
+  return (...args) => {
+    // Must send an `Interrupted` message and wait for the `Resume`.
+    state.communicationsSab.writeUInt8(4, 4); // `Interrupted`
+    state.communicationsSab.writeUInt32LE(id, 5);
+    let { offsetAfter } = encodeScaleCompactUsize(args.length, state.communicationsSab, 9);
+    args.forEach((value) => {
+      if (typeof value === "bigint") {
+        state.communicationsSab.writeUInt8(1, offsetAfter); // `Some` variant
+        state.communicationsSab.writeUInt8(1, offsetAfter + 1); // `I64` variant
+        state.communicationsSab.writeBigUInt64BE(value, offsetAfter + 2);
+        offsetAfter += 10;
+      } else if (typeof value === "number") {
+        state.communicationsSab.writeUInt8(1, offsetAfter); // `Some` variant
+        state.communicationsSab.writeUInt8(0, offsetAfter + 1); // `I32` variant
+        state.communicationsSab.writeUInt32LE(value, offsetAfter + 2);
+        offsetAfter += 6;
+      } else {
+        throw 'Expected i32 or i64 host function argument';
+      }
+    });
+    sendMessageWaitReply();
 
-    // TODO: write params
+    // Now processing the reply from the outside.
+    const receivedMessage = processMessages();
+    if (receivedMessage.kind == 'Resume') {
+      return receivedMessage.value;
 
-    int32Array[0] = 0;
-    Atomics.notify(int32Array, 0);
-
-    Atomics.wait(int32Array, 0, 0);
-    const returnValue = decodeWasmValue(state.communicationsSab, 4);
-    return returnValue;
+    } else {
+      // `StartFunction` interrupting the execution.
+      // TODO:
+      throw 'not implemented yet!';
+    }
   };
 };
 
@@ -323,62 +382,6 @@ const buildImports = (wasmModule, requestedImports) => {
   return { constructedImports, memory };
 };
 
-// Reads the message in the `communicationsSab`, answering them if possible.
-//
-// Doesn't return until the message is either `StartFunction` or `Resume`.
-// If the message is `StartFunction`, returns `{kind:'StartFunction', name:'...', params:[...]}`.
-// If the message is `Resume`, returns `{kind:'Resume', value:...}`.
-const processMessages = () => {
-  while (true) {
-    const messageTy = state.communicationsSab.readUInt8(4);
-
-    if (messageTy == 1) { // `StartFunction`.
-      const { offsetAfter, value: name } = decodeString(state.communicationsSab, 5);
-      const { value: params } = decodeVecWasmValue(state.communicationsSab, offsetAfter);
-      return {
-        kind: 'StartFunction',
-        name,
-        params,
-      };
-    }
-
-    if (messageTy == 5) { // `Resume`.
-      const optValue = state.communicationsSab.readUInt8(5);
-      const value = optValue != 0 ? decodeWasmValue(state.communicationsSab, 6) : null;
-      return {
-        kind: 'Resume',
-        value
-      };
-    }
-
-    if (messageTy == 10) { // `MemorySize`.
-      state.communicationsSab.writeUInt8(11, 5); // `MemorySizeResult`.
-      state.communicationsSab.writeUInt32LE(state.memory ? state.memory.byteLength : 0, 6);
-      sendMessageWaitReply();
-      continue;
-    }
-
-    if (messageTy == 12) { // `GetGlobal`.
-      const { value: globalName } = decodeString(state.communicationsSab, 5);
-      const globalVal = state.instance.exports[globalName];
-      if (globalVal === undefined) {
-        state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
-        state.communicationsSab.writeUInt8(1, 5);
-      } else if (typeof globalVal.value != 'number') {
-        state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
-        state.communicationsSab.writeUInt8(2, 5);
-      } else {
-        state.communicationsSab.writeUInt8(13, 4); // `GetGlobalOk`.
-        state.communicationsSab.writeUInt32LE(globalVal.value, 5);
-      }
-      sendMessageWaitReply();
-      continue;
-    }
-
-    throw "Unknown message type: " + messageTy;
-  }
-};
-
 compat.setOnMessage((initializationMessage) => {
   state.communicationsSab = Buffer.from(initializationMessage.communicationsSab);
   state.int32Array = new Int32Array(initializationMessage.communicationsSab);
@@ -404,54 +407,59 @@ compat.setOnMessage((initializationMessage) => {
   sendMessageWaitReply();
 
   // Main execution loop. Despite being JavaScript, this is entirely synchronous.
+  const toStart = { function: null, params: null };
   while (true) {
     const receivedMessage = processMessages();
-    if (receivedMessage.kind != 'StartFunction')
-      throw "Invalid state: received Resume when not calling anything";
 
-    // Start executing the requested function.
-    state.startedFeedback = false;
-    const toStart = state.instance.exports[receivedMessage.name];
+    if (receivedMessage.kind == 'StartFunction') {
+      // Start executing the requested function.
+      toStart.function = state.instance.exports[receivedMessage.name];
+      toStart.params = receivedMessage.params;
 
-    if (!toStart) {
+      if (!toStart.function) {
+        state.communicationsSab.writeUInt8(2, 4); // `StartResult`
+        state.communicationsSab.writeUInt8(1, 5);
+        sendMessageWaitReply();
+        continue;
+      }
+
+      // TODO: check if toStart.function is indeed a function
+
+      // Send back start success.
       state.communicationsSab.writeUInt8(2, 4); // `StartResult`
-      state.communicationsSab.writeUInt8(1, 5);
+      state.communicationsSab.writeUInt8(0, 5); // Success
       sendMessageWaitReply();
-      continue;
-    }
 
-    // TODO: check if toStart is indeed a function
+    } else { // Resume
+      let returnValue;
+      try {
+        returnValue = toStart.function(toStart.params);
+      } catch (error) {
+        // TODO: can also be interruption from Host
+        // TODO: finish here
+        state.communicationsSab.writeUInt8(3, 4); // `Finished`
+        state.communicationsSab.writeUInt8(1, 5); // `Err`
+        throw 'unfinished' + error;
+        sendMessageWaitReply();
+        continue;
+      }
 
-    let returnValue;
-    try {
-      returnValue = toStart(receivedMessage.params);
-    } catch (error) {
-      // TODO: can also be interrupted by host function
-      state.communicationsSab.writeUInt8(2, 4); // `StartResult`
-      state.communicationsSab.writeUInt8(3, 5);
+      // Function has successfully ended.
+      state.communicationsSab.writeUInt8(3, 4); // `Finished`
+      state.communicationsSab.writeUInt8(0, 5); // `Ok` variant
+      if (typeof returnValue === "bigint") {
+        state.communicationsSab.writeUInt8(1, 6); // `Some` variant
+        state.communicationsSab.writeUInt8(1, 7); // `I64` variant
+        state.communicationsSab.writeBigUInt64BE(returnValue, 8);
+      } else if (typeof returnValue === "number") {
+        state.communicationsSab.writeUInt8(1, 6); // `Some` variant
+        state.communicationsSab.writeUInt8(0, 7); // `I32` variant
+        state.communicationsSab.writeUInt32LE(returnValue, 8);
+      } else {
+        state.communicationsSab.writeUInt8(0, 6); // `None` variant
+      }
+
       sendMessageWaitReply();
-      continue;
     }
-
-    // Function has successfully ended.
-
-    // Send back a `StartResult` if necessary.
-    sendStartFeedbackIfNeeded();
-
-    state.communicationsSab.writeUInt8(3, 4); // `Finished`
-    state.communicationsSab.writeUInt8(0, 5); // `Ok` variant
-    if (typeof returnValue === "bigint") {
-      state.communicationsSab.writeUInt8(1, 6); // `Some` variant
-      state.communicationsSab.writeUInt8(1, 7); // `I64` variant
-      state.communicationsSab.writeUInt64LE(returnValue, 8);
-    } else if (typeof returnValue === "number") {
-      state.communicationsSab.writeUInt8(1, 6); // `Some` variant
-      state.communicationsSab.writeUInt8(0, 7); // `I32` variant
-      state.communicationsSab.writeUInt32LE(returnValue, 8);
-    } else {
-      state.communicationsSab.writeUInt8(0, 6); // `None` variant
-    }
-
-    sendMessageWaitReply();
   }
 });
