@@ -153,31 +153,34 @@ export default (config) => {
                 .map((_, i) => Buffer.from(config.instance.exports.memory.buffer)
                     .readUInt32LE(importsPtr + 4 * i));
 
-            // A `int32Array` is shared between this module and the worker, used to
+            // A `SharedArrayBuffer` is shared between this module and the worker, used to
             // communicate between the two.
             //
             // The first four bytes are used to determine who has ownership of the content of the
             // buffer. If 0, then it's this module. If 1, then it's the worker. Each side reads
             // the content of the buffer, then writes it, then switches the first four bytes and
             // uses `Atomics.notify` to wake up the other side.
-            const sharedArrayBuffer = new SharedArrayBuffer(512);
+            const communicationsSab = new SharedArrayBuffer(512);
 
             const id = nextIdAlloc;
             nextIdAlloc += 1;
 
+            // TODO: don't assume postMessage
             postMessage({
-                kind: 'startvm',
+                kind: 'spawn-vm-worker',
                 data: {
                     id,
-                    module: wasmModules[moduleId],
-                    requestedImports,
-                    sharedArrayBuffer,
+                    workerMessage: {
+                        module: wasmModules[moduleId],
+                        requestedImports,
+                        communicationsSab,
+                    }
                 }
             });
 
             wasmInstances[id] = {
-                sharedArrayBuffer,
-                int32Array: new Int32Array(sharedArrayBuffer)
+                communicationsSab: Buffer.from(communicationsSab),
+                int32Array: new Int32Array(communicationsSab)
             };
             return id;
         },
@@ -185,15 +188,21 @@ export default (config) => {
             const functionName = Buffer.from(config.instance.exports.memory.buffer)
                 .toString('utf8', functionNamePtr, functionNamePtr + functionNameSize);
             const params = decodeVecWasmValue(config.instance.exports.memory.buffer, paramsPtr);
-            wasmInstances[instanceId].worker.postMessage({ functionName, params });
+            // TODO: don't assume postMessage
+            postMessage({
+                kind: 'send-vm-worker',
+                data: {
+                    id: instanceId,
+                    message: { functionName, params }
+                }
+            });
         },
         instance_resume: (instanceId, returnValuePtr, returnValueSize, outPtr, outSize) => {
             const instance = wasmInstances[instanceId];
             const selfMemory = Buffer.from(config.instance.exports.memory.buffer);
-            const childMemory = Buffer.from(instance.sharedArrayBuffer);
 
             // Write the return value to the shared array.
-            selfMemory.copy(childMemory, 4, returnValuePtr, returnValuePtr + returnValueSize);
+            selfMemory.copy(instance.communicationsSab, 4, returnValuePtr, returnValuePtr + returnValueSize);
             instance.int32Array[0] = 1;
 
             // Wait for the child Wasm to execute.
@@ -202,9 +211,9 @@ export default (config) => {
 
             // As a response, the child worker answers with the SCALE-encoded output to copy back
             // to `outPtr`/`outSize`.
-            const outCopySize = (instance.sharedArrayBuffer.length - 4) > outSize ?
-                outSize : (instance.sharedArrayBuffer.length - 4);
-            instance.sharedArrayBuffer.copy(selfMemory, outPtr, 4, 4 + outCopySize);
+            const outCopySize = (instance.communicationsSab.length - 4) > outSize ?
+                outSize : (instance.communicationsSab.length - 4);
+            instance.communicationsSab.copy(selfMemory, outPtr, 4, 4 + outCopySize);
         },
         destroy_instance: (instanceId) => {
             wasmInstances[instanceId].worker.terminate();

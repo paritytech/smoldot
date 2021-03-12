@@ -17,12 +17,10 @@
 
 // Contains a worker spawned by `bindings-smoldot`.
 
-throw 'test';
-
 import * as compat from './compat-nodejs.js';
 
 let instance = null;
-let sharedArrayBuffer = null;
+let communicationsSab = null;
 let int32Array = null;
 
 // Decodes a SCALE-encoded `WasmValue`.
@@ -78,11 +76,11 @@ pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> +
   if 
 };*/
 
-startInstance = (incomingMessage) => {
+const startInstance = (incomingMessage) => {
   const moduleImports = WebAssembly.Module.imports(incomingMessage.module);
   let constructedImports = {};
-  sharedArrayBuffer = Buffer.from(incomingMessage.sharedArrayBuffer);
-  int32Array = new Int32Array(incomingMessage.sharedArrayBuffer);
+  communicationsSab = Buffer.from(incomingMessage.communicationsSab);
+  int32Array = new Int32Array(incomingMessage.communicationsSab);
 
   moduleImports.forEach((moduleImport, i) => {
     if (!constructedImports[moduleImport.module])
@@ -95,13 +93,16 @@ startInstance = (incomingMessage) => {
         Atomics.notify(int32Array, 0);
 
         Atomics.wait(int32Array, 0, 0);
-        const returnValue = decodeWasmValue(sharedArrayBuffer, 4);
+        const returnValue = decodeWasmValue(communicationsSab, 4);
         return returnValue;
       };
 
     } else if (moduleImport.kind == 'memory') {
       constructedImports[moduleImport.module][moduleImport.name] =
-        new WebAssembly.Memory({ initial: requestedImports[i], maximum: requestedImports[i], shared: true });
+        new WebAssembly.Memory({
+          initial: incomingMessage.requestedImports[i],
+          maximum: incomingMessage.requestedImports[i]
+        });
 
     } else {
       throw "Unknown kind: " + kind;
@@ -121,20 +122,21 @@ compat.setOnMessage((incomingMessage) => {
     // The second message that is expected to come is of the form
     // `{ functionName: "foo", params: [..] }`.
     const toStart = instance.exports[incomingMessage.functionName];
+    // TODO: error handling
     const returnValue = toStart(incomingMessage.params);
 
-    sharedArrayBuffer.writeUInt8(0, 4); // `Finished` variant
-    sharedArrayBuffer.writeUInt8(0, 5); // `Ok` variant
+    communicationsSab.writeUInt8(0, 4); // `Finished` variant
+    communicationsSab.writeUInt8(0, 5); // `Ok` variant
     if (typeof returnValue === "bigint") {
-      sharedArrayBuffer.writeUInt8(1, 6); // `Some` variant
-      sharedArrayBuffer.writeUInt8(1, 7); // `I64` variant
-      sharedArrayBuffer.writeUInt64LE(returnValue, 8);
+      communicationsSab.writeUInt8(1, 6); // `Some` variant
+      communicationsSab.writeUInt8(1, 7); // `I64` variant
+      communicationsSab.writeUInt64LE(returnValue, 8);
     } else if (typeof returnValue === "number") {
-      sharedArrayBuffer.writeUInt8(1, 6); // `Some` variant
-      sharedArrayBuffer.writeUInt8(0, 7); // `I32` variant
-      sharedArrayBuffer.writeUInt32LE(returnValue, 8);
+      communicationsSab.writeUInt8(1, 6); // `Some` variant
+      communicationsSab.writeUInt8(0, 7); // `I32` variant
+      communicationsSab.writeUInt32LE(returnValue, 8);
     } else {
-      sharedArrayBuffer.writeUInt8(0, 6); // `None` variant
+      communicationsSab.writeUInt8(0, 6); // `None` variant
     }
 
     int32Array[0] = 0;
