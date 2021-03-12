@@ -204,8 +204,8 @@ export default (config) => {
 
             // Make sure to not go beyond `outSize`.
             // TODO: we're copying too much data here
-            const outCopySize = (instance.communicationsSab.length - 5) > outSize ?
-                outSize : (instance.communicationsSab.length - 5);
+            const outCopySize = (instance.communicationsSab.byteLength - 5) > outSize ?
+                outSize : (instance.communicationsSab.byteLength - 5);
             const retMessageTy = instance.communicationsSab.readUInt8(4);
             if (retMessageTy == 3) { // Finished
                 selfMemory.writeUInt8(0, outPtr);
