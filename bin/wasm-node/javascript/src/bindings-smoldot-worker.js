@@ -45,23 +45,32 @@
 // ```
 // enum Message {
 //     // 0 if initialization was successful, non-0 otherwise.
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     InitializationResult(u8),
 //
-//     // Must start executing the function with the given name, with the given parameters.
-//     // Must answer with a `StartResult`.
+//     // Must start executing the function with the given name, with the given parameters,
+//     // interrupting the current execution if any is in progress.
+//     // Must be answered with a `StartResult`.
 //     StartFunction(String, Vec<WasmValue>),
 //
 //     // If 0, the start has succeeded. If 1, the function doesn't exist. If 2, the requested
 //     // function isn't actually a function. If 3, the signature of the function doesn't match
 //     // the parameters.
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
+//     // Most likely, to start execution, use `Resume(None)`.
 //     StartResult(u8),
 //
 //     // Execution has finished, either successully or with an error. If error, contains a
 //     // human-readable message. If success, contains the return value.
+//     // Must be answered with a `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     Finished(Result<Option<WasmValue>, String>),
 //
-//     // Send when Wasm VM has been interrupted by host function call. Must be answered with
-//     // a `Resume`.
+//     // Send when Wasm VM has been interrupted by host function call.
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     Interrupted {
 //         // Value initially passed through the `requestedImports`.
 //         function_id: u32,
@@ -69,29 +78,46 @@
 //     },
 //
 //     // Contains the return value of the host function.
+//     // If this is the first time `Resume` is called after a `StartFunction`, must contain
+//     // `None`.
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     Resume(Option<WasmValue>),
 //
-//     // Must write data at given memory offset.
+//     // Must write data at given memory offset. Must be answered with `WriteMemoryOk`.
 //     WriteMemory(u32, Vec<u8>),
+//
+//     // Confirmation that `WriteMemory` has been done.
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
+//     WriteMemoryOk,
 //
 //     // Must read data from memory. Offset is first `u32`. Size is second `u32`. Must answer
 //     // with `ReadMemoryResult`.
 //     ReadMemory(u32, u32),
 //
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     ReadMemoryResult(Vec<u8>),
 //
 //     // Must respond with a `MemorySizeResult`.
 //     MemorySize,
 //
 //     // Contains number of bytes of memory of the child Wasm VM.
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     MemorySizeResult(u32),
 //
 //     // Must read the value of the global whose name is in parameter. Must respond with either
 //     // `GetGlobalOk` or `GetGlobalErr`.
 //     GetGlobal(String),
 //
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     GetGlobalOk(u32),
 //
+//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
+//     // `ReadMemory`, or `Resume`.
 //     GetGlobalErr,
 // }
 //
@@ -136,6 +162,14 @@ const decodeWasmValue = (memory, offset) => {
   }
 };
 
+// Gives back hand to the outside and waits for a response to be written on the
+// `communicationsSab`.
+const sendMessageWaitReply = () => {
+  state.int32Array[0] = 0;
+  Atomics.notify(state.int32Array, 0);
+  Atomics.wait(state.int32Array, 0, 0);
+};
+
 /*
 /// Returns a buffer containing the SCALE-compact encoding of the parameter.
 pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> + Clone {
@@ -170,16 +204,32 @@ pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> +
 };*/
 
 const sendStartFeedbackIfNeeded = () => {
-  if (startedFeedback)
+  if (state.startedFeedback)
     return;
 
-  communicationsSab.writeUInt8(0, 4);
-  int32Array[0] = 0;
-  Atomics.notify(int32Array, 0);
+  state.communicationsSab.writeUInt8(2, 4); // `StartResult`
+  state.communicationsSab.writeUInt8(0, 5); // Success
+  sendMessageWaitReply();
 
-  Atomics.wait(int32Array, 0, 0);
+  state.startedFeedback = true;
+};
 
-  startedFeedback = true;
+// Function that builds a host function.
+const buildHostFunction = (id) => {
+  // The function returned here is what is called by the Wasm VM for all its host functions.
+  // Must send an `Interrupted` message and wait for the `Resume`.
+  return () => {
+    sendStartFeedbackIfNeeded();
+
+    // TODO: write params
+
+    int32Array[0] = 0;
+    Atomics.notify(int32Array, 0);
+
+    Atomics.wait(int32Array, 0, 0);
+    const returnValue = decodeWasmValue(state.communicationsSab, 4);
+    return returnValue;
+  };
 };
 
 compat.setOnMessage((incomingMessage) => {
@@ -194,18 +244,8 @@ compat.setOnMessage((incomingMessage) => {
       constructedImports[moduleImport.module] = {};
 
     if (moduleImport.kind == 'function') {
-      constructedImports[moduleImport.module][moduleImport.name] = () => {
-        sendStartFeedbackIfNeeded();
-
-        // TODO: write params
-
-        int32Array[0] = 0;
-        Atomics.notify(int32Array, 0);
-
-        Atomics.wait(int32Array, 0, 0);
-        const returnValue = decodeWasmValue(state.communicationsSab, 4);
-        return returnValue;
-      };
+      constructedImports[moduleImport.module][moduleImport.name] =
+        buildHostFunction(incomingMessage.requestedImports[i]);
 
     } else if (moduleImport.kind == 'memory') {
       constructedImports[moduleImport.module][moduleImport.name] =
@@ -228,9 +268,7 @@ compat.setOnMessage((incomingMessage) => {
   }
 
   // Send the message and wait for further instruction.
-  int32Array[0] = 0;
-  Atomics.notify(int32Array, 0);
-  Atomics.wait(int32Array, 0, 0);
+  sendMessageWaitReply();
 });
 
 /*compat.setOnMessage((incomingMessage) => {
