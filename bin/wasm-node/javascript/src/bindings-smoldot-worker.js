@@ -17,6 +17,8 @@
 
 // Contains a worker spawned by `bindings-smoldot`.
 
+throw 'test';
+
 import * as compat from './compat-nodejs.js';
 
 let instance = null;

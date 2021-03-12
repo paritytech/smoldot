@@ -25,7 +25,7 @@
 //! worker.
 
 import { Buffer } from 'buffer';
-import { Worker, workerOnMessage } from './compat-nodejs.js';
+import { Worker, workerOnMessage, postMessage } from './compat-nodejs.js';
 import Websocket from 'websocket';
 import { default as now } from 'performance-now';
 
@@ -153,14 +153,6 @@ export default (config) => {
                 .map((_, i) => Buffer.from(config.instance.exports.memory.buffer)
                     .readUInt32LE(importsPtr + 4 * i));
 
-            // The actual execution of Smoldot is performed in a worker thread.
-            //
-            // The line of code below (`new Worker(...)`) is designed to hopefully work across all
-            // platforms. It should work in NodeJS, browsers, webpack
-            // (https://webpack.js.org/guides/web-workers/), and parcel
-            // (https://github.com/parcel-bundler/parcel/pull/5846)
-            const worker = new Worker(new URL('./bindings-smoldot-worker.js', import.meta.url));
-
             // A `int32Array` is shared between this module and the worker, used to
             // communicate between the two.
             //
@@ -170,22 +162,22 @@ export default (config) => {
             // uses `Atomics.notify` to wake up the other side.
             const sharedArrayBuffer = new SharedArrayBuffer(512);
 
-            workerOnMessage(worker, (messageFromWorker) => {
-
-            });
-
-            worker.postMessage({
-                module: wasmModules[moduleId],
-                requestedImports,
-                sharedArrayBuffer,
-            });
-
             const id = nextIdAlloc;
             nextIdAlloc += 1;
+
+            postMessage({
+                kind: 'startvm',
+                data: {
+                    id,
+                    module: wasmModules[moduleId],
+                    requestedImports,
+                    sharedArrayBuffer,
+                }
+            });
+
             wasmInstances[id] = {
                 sharedArrayBuffer,
-                int32Array: new Int32Array(sharedArrayBuffer),
-                worker
+                int32Array: new Int32Array(sharedArrayBuffer)
             };
             return id;
         },

@@ -43,6 +43,8 @@ export async function start(config) {
     } else if (message.kind == 'database') {
       if (config.database_save_callback)
         config.database_save_callback(message.data);
+    } else if (message.kind == 'startvm') {
+      const worker = new Worker(new URL('./bindings-smoldot-worker.js', import.meta.url));
     } else {
       console.error('Unknown message type', message);
     }
