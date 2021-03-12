@@ -80,8 +80,7 @@
 //     // Contains the return value of the host function.
 //     // If this is the first time `Resume` is called after a `StartFunction`, must contain
 //     // `None`.
-//     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
-//     // `ReadMemory`, or `Resume`.
+//     // Must be answered with `Interrupted` or `Finished`.
 //     Resume(Option<WasmValue>),
 //
 //     // Must write data at given memory offset. Must be answered with `WriteMemoryOk`.

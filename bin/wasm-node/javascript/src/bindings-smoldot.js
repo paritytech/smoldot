@@ -170,11 +170,19 @@ export default (config) => {
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
-            // As a response, the child worker answers with the SCALE-encoded output to copy back
-            // to `outPtr`/`outSize`.
+            // Make sure to not go beyond `outSize`.
+            // TODO: we're copying too much data here
             const outCopySize = (instance.communicationsSab.length - 4) > outSize ?
                 outSize : (instance.communicationsSab.length - 4);
-            instance.communicationsSab.copy(selfMemory, outPtr, 4, 4 + outCopySize);
+            const retMessageTy = instance.communicationsSab.readUInt8(4);
+            if (retMessageTy == 3) { // Finished
+                selfMemory.writeUInt8(0, outPtr);
+            } else if (retMessageTy == 4) { // Interrupted
+                selfMemory.writeUInt8(1, outPtr);
+            } else {
+                throw 'Expected Interrupted or Finished';
+            }
+            instance.communicationsSab.copy(selfMemory, outPtr + 1, 5, 5 + outCopySize);
         },
 
         destroy_instance: (instanceId) => {
