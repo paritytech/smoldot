@@ -196,7 +196,7 @@ const decodeWasmValue = (buffer, offset) => {
       value
     };
   } else {
-    const value = buffer.readInt64LE(offset + 1);
+    const value = buffer.readBigInt64LE(offset + 1);
     return {
       offsetAfter: offset + 9,
       value
@@ -300,7 +300,7 @@ const processMessages = () => {
       const readOffset = state.communicationsSab.readUint32LE(5);
       const readSize = state.communicationsSab.readUint32LE(9);
       state.communicationsSab.writeUInt8(9, 4); // `ReadMemoryResult`.
-      state.memory.copy(state.communicationsSab, 5, readOffset, readSize);
+      state.memory.copy(state.communicationsSab, 5, readOffset, readOffset + readSize);
       sendMessageWaitReply();
       continue;
     }
