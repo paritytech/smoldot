@@ -36,8 +36,8 @@ const encodeScaleCompactUsize = (value, bufferOut, bufferOutOffset) => {
 
     } else if (value < (1 << 14)) {
         bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b01, bufferOutOffset);
-        bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 2);
-        return { offsetAfter: bufferOutOffset + 1 };
+        bufferOut.writeUInt8((value >> 6) & 0xff, bufferOutOffset + 1);
+        return { offsetAfter: bufferOutOffset + 2 };
 
     } else if (value < (1 << 30)) {
         bufferOut.writeUInt8(((value & 0b111111) << 2) | 0b10, bufferOutOffset);
@@ -54,6 +54,7 @@ const encodeScaleCompactUsize = (value, bufferOut, bufferOutOffset) => {
             value >>= 8;
         }
         bufferOut.writeUInt8(((off - 1 - 4) << 2) | 0b11, bufferOutOffset);
+        return { offsetAfter: bufferOutOffset + off };
     }
 };
 
@@ -203,8 +204,8 @@ export default (config) => {
 
             // Make sure to not go beyond `outSize`.
             // TODO: we're copying too much data here
-            const outCopySize = (instance.communicationsSab.length - 4) > outSize ?
-                outSize : (instance.communicationsSab.length - 4);
+            const outCopySize = (instance.communicationsSab.length - 5) > outSize ?
+                outSize : (instance.communicationsSab.length - 5);
             const retMessageTy = instance.communicationsSab.readUInt8(4);
             if (retMessageTy == 3) { // Finished
                 selfMemory.writeUInt8(0, outPtr);
