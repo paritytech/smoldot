@@ -98,7 +98,7 @@
 //
 //     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
 //     // `ReadMemory`, or `Resume`.
-//     ReadMemoryResult(Vec<u8>),
+//     ReadMemoryResult(Vec<u8> /* NO LENGTH PREFIX */),
 //
 //     // Must respond with a `MemorySizeResult`.
 //     MemorySize,

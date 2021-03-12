@@ -25,9 +25,6 @@
 //! worker.
 
 import { Buffer } from 'buffer';
-import { Worker, workerOnMessage, postMessage } from './compat-nodejs.js';
-import Websocket from 'websocket';
-import { default as now } from 'performance-now';
 
 export default (config) => {
     // 
@@ -55,6 +52,7 @@ export default (config) => {
             wasmModules[id] = compiledModule;
             return 0;
         },
+
         module_import_is_fn: (moduleId, importNum) => {
             const kind = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].kind;
             if (kind == 'function') {
@@ -65,55 +63,68 @@ export default (config) => {
                 throw "Unknown kind: " + kind;
             }
         },
+
         module_import_module_len: (moduleId, importNum) => {
             const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].module;
             return Buffer.byteLength(str, 'utf8');
         },
+
         module_import_module: (moduleId, importNum, outPtr) => {
             const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].module;
             Buffer.from(config.instance.exports.memory.buffer).write(str, outPtr);
         },
+
         module_import_name_len: (moduleId, importNum) => {
             const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].name;
             return Buffer.byteLength(str, 'utf8');
         },
+
         module_import_name: (moduleId, importNum, outPtr) => {
             const str = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].name;
             Buffer.from(config.instance.exports.memory.buffer).write(str, outPtr);
         },
+
         destroy_module: (id) => {
             wasmModules[id] = undefined;
         },
-        new_instance: (moduleId, importsPtr, idOut) => {
-            const requestedImports = WebAssembly.Module.imports(wasmModules[moduleId])
-                .map((_, i) => Buffer.from(config.instance.exports.memory.buffer)
-                    .readUInt32LE(importsPtr + 4 * i));
 
+        new_instance: (moduleId, importsPtr, idOut) => {
             // A `SharedArrayBuffer` is shared between this module and the worker, used to
             // communicate between the two.
             // See the documentation of the worker for more information.
-            const communicationsSab = new SharedArrayBuffer(512);
+            // The size of the buffer is arbitrary. Notably, memory transfers (reading and
+            // writing memory) are notably done through this buffer, and if it is too small, these
+            // transfers require multiple iterations.
+            const communicationsSab = new SharedArrayBuffer(1024);
             const communicationsSabBuffer = Buffer.from(communicationsSab);
             const int32Array = new Int32Array(communicationsSab);
             int32Array[0] = 1;
             int32Array[1] = 0xdeadbeef; // Garbage data to make sure everything is correctly overwritten.
 
+            // Assign the identifier for this instance.
+            // Note that this `id` might not end up being used if initialization fails below.
             const id = nextIdAlloc;
             nextIdAlloc += 1;
 
             // Ask the parent to spawn a worker with the given parameters.
             config.startVmWorker(id, {
                 module: wasmModules[moduleId],
-                requestedImports,
+                requestedImports: WebAssembly.Module.imports(wasmModules[moduleId])
+                    .map((_, i) => Buffer.from(config.instance.exports.memory.buffer)
+                        .readUInt32LE(importsPtr + 4 * i)),
                 communicationsSab,
             });
 
+            // Wait for the worker to have spawned and send us an `InitializationResult` message
+            // back.
             Atomics.wait(int32Array, 0, 1);
             if (communicationsSabBuffer.readUInt8(4) != 0)
                 throw 'State mismatch: expected InitializationResult';
-            const retCode = communicationsSabBuffer.readUInt8(5);
 
+            // Analyze this `InitializationResult` message.
+            const retCode = communicationsSabBuffer.readUInt8(5);
             if (retCode == 0) {
+                // Initialization successful.
                 Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(id, idOut);
                 wasmInstances[id] = {
                     communicationsSab: communicationsSabBuffer,
@@ -122,25 +133,30 @@ export default (config) => {
             } else {
                 config.terminateVmWorker(id);
             }
-
             return retCode;
         },
+
         instance_init: (instanceId, infoPtr, infoSize) => {
             const instance = wasmInstances[instanceId];
+
+            // Send a `StartFunction` message to the worker.
             instance.communicationsSab.writeUInt8(1, 4);  // `StartFunction`
             // The buffer in `infoPtr`/`infoSize` matches (intentionally) the body of the
             // `StartFunction` message.
             Buffer.from(config.instance.exports.memory.buffer)
                 .copy(instance.communicationsSab, 5, infoPtr, infoPtr + infoSize);
 
+            // Wait for the child Wasm to execute.
             instance.int32Array[0] = 1;
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
+            // The value in the `StartResult` matches what `instance_init` returns.
             if (instance.communicationsSab.readUInt8(4) != 2)
                 throw 'State mismatch: expected StartResult';
             return instance.communicationsSab.readUInt8(5);
         },
+
         instance_resume: (instanceId, returnValuePtr, returnValueSize, outPtr, outSize) => {
             const instance = wasmInstances[instanceId];
             const selfMemory = Buffer.from(config.instance.exports.memory.buffer);
@@ -160,10 +176,12 @@ export default (config) => {
                 outSize : (instance.communicationsSab.length - 4);
             instance.communicationsSab.copy(selfMemory, outPtr, 4, 4 + outCopySize);
         },
+
         destroy_instance: (instanceId) => {
             config.terminateVmWorker(id);
             wasmInstances[instanceId] = undefined;
         },
+
         global_value: (instanceId, namePtr, nameSize, outPtr) => {
             const instance = wasmInstances[instanceId];
             const selfMemory = Buffer.from(config.instance.exports.memory.buffer);
@@ -189,6 +207,7 @@ export default (config) => {
                 throw 'Expected GetGlobalOk or GetGlobalErr';
             }
         },
+
         memory_size: (instanceId) => {
             const instance = wasmInstances[instanceId];
             instance.communicationsSab.writeUInt8(10, 4);  // `MemorySize`
@@ -202,11 +221,66 @@ export default (config) => {
                 throw 'Expected MemorySizeResult';
             return instance.communicationsSab.readUInt32LE(5);
         },
+
         read_memory: (instanceId, offset, size, outPtr) => {
-            // TODO:
+            const instance = wasmInstances[instanceId];
+            const selfMemory = Buffer.from(config.instance.exports.memory.buffer);
+
+            // Because the size of `communicationsSab` might be too small to fit the entire
+            // data, we need to cap the write to a certain limit.
+            const sizeLimit = instance.communicationsSab.byteLength - 9;
+
+            while (size > 0) {
+                const sizeIter = size > sizeLimit ? sizeLimit : size;
+
+                instance.communicationsSab.writeUInt8(8, 4);  // `ReadMemory`
+                instance.communicationsSab.writeUInt32LE(offset, 5);
+                instance.communicationsSab.writeUInt32LE(sizeIter, 9);
+
+                // Wait for the child Wasm to execute.
+                instance.int32Array[0] = 1;
+                Atomics.notify(instance.int32Array, 0);
+                Atomics.wait(instance.int32Array, 0, 1);
+
+                if (instance.communicationsSab.readUInt8(4) != 9)
+                    throw 'Expected ReadMemoryResult';
+
+                instance.communicationsSab.copy(selfMemory, outPtr, 5, 5 + sizeIter);
+
+                size -= sizeIter;
+                outPtr += sizeIter;
+                offset += sizeIter;
+            }
         },
+
         write_memory: (instanceId, offset, size, dataPtr) => {
-            // TODO:
+            const instance = wasmInstances[instanceId];
+            const selfMemory = Buffer.from(config.instance.exports.memory.buffer);
+
+            // Because the size of `communicationsSab` might be too small to fit the entire
+            // data, we need to cap the write to a certain limit.
+            const sizeLimit = instance.communicationsSab.byteLength - 9;
+
+            while (size > 0) {
+                const sizeIter = size > sizeLimit ? sizeLimit : size;
+
+                instance.communicationsSab.writeUInt8(6, 4);  // `WriteMemory`
+                instance.communicationsSab.writeUInt32LE(offset, 5);
+                // TODO: must write SCALE-encoded size
+                selfMemory.copy(instance.communicationsSab, 6, dataPtr, dataPtr + sizeIter);
+
+                // Wait for the child Wasm to execute.
+                instance.int32Array[0] = 1;
+                Atomics.notify(instance.int32Array, 0);
+                Atomics.wait(instance.int32Array, 0, 1);
+
+                if (instance.communicationsSab.readUInt8(4) != 7)
+                    throw 'Expected WriteMemoryOk';
+
+                size -= sizeIter;
+                dataPtr += sizeIter;
+                offset += sizeIter;
+            }
         }
     };
 }
