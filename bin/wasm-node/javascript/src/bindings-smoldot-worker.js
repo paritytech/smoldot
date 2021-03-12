@@ -16,13 +16,105 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Contains a worker spawned by `bindings-smoldot`.
+//
+// # Interface
+//
+// After spawning, the worker expects one initial message (through `postMessage`) containing an
+// object with the following keys:
+//
+// - `module`: The `WebAssembly.Module` to instantiate.
+// - `requestedImports`: An array of values associated to the imports to pass when instantiating.
+// For each import, if it is a memory, then the corresponding element must be the number of pages
+// of memory to allocate (for both initial and maximum). If it is a function, then the
+// corresponding element must be an opaque identifier to pass back when the function is called.
+// - `communicationsSab`: A `SharedArrayBuffer` used for further communication between this
+// worker and the outside.
+//
+// After this initial message, all further communication is done through the `communicationsSab`.
+//
+// The `communicationsSab` has the following layout:
+//
+// - First four bytes are an integer used to determine who has ownership of the rest of the
+// content of the buffer. They are always accessed through an `Int32Array`. If 1 (the initial
+// value), then it's this worker. If 0, then it's the outside. Each side reads the content of
+// the buffer, then writes it, then switches the first four bytes and uses `Atomics.notify` to
+// wake up the other side.
+//
+// - Fifth byte and follow-up contain a SCALE-encoded enum defined below.
+//
+// ```
+// enum Message {
+//     // 0 if initialization was successful, non-0 otherwise.
+//     InitializationResult(u8),
+//
+//     // Must start executing the function with the given name, with the given parameters.
+//     // Must answer with a `StartResult`.
+//     StartFunction(String, Vec<WasmValue>),
+//
+//     // If 0, the start has succeeded. If 1, the function doesn't exist. If 2, the requested
+//     // function isn't actually a function. If 3, the signature of the function doesn't match
+//     // the parameters.
+//     StartResult(u8),
+//
+//     // Execution has finished, either successully or with an error. If error, contains a
+//     // human-readable message. If success, contains the return value.
+//     Finished(Result<Option<WasmValue>, String>),
+//
+//     // Send when Wasm VM has been interrupted by host function call. Must be answered with
+//     // a `Resume`.
+//     Interrupted {
+//         // Value initially passed through the `requestedImports`.
+//         function_id: u32,
+//         params: Vec<WasmValue>,
+//     },
+//
+//     // Contains the return value of the host function.
+//     Resume(Option<WasmValue>),
+//
+//     // Must write data at given memory offset.
+//     WriteMemory(u32, Vec<u8>),
+//
+//     // Must read data from memory. Offset is first `u32`. Size is second `u32`. Must answer
+//     // with `ReadMemoryResult`.
+//     ReadMemory(u32, u32),
+//
+//     ReadMemoryResult(Vec<u8>),
+//
+//     // Must respond with a `MemorySizeResult`.
+//     MemorySize,
+//
+//     // Contains number of bytes of memory of the child Wasm VM.
+//     MemorySizeResult(u32),
+//
+//     // Must read the value of the global whose name is in parameter. Must respond with either
+//     // `GetGlobalOk` or `GetGlobalErr`.
+//     GetGlobal(String),
+//
+//     GetGlobalOk(u32),
+//
+//     GetGlobalErr,
+// }
+//
+// enum WasmValue {
+//     I32(i32),
+//     I64(i64),
+// }
+// ```
+//
+// The `communicationsSab` is initially owner by this worker and must be answered with an
+// "Initialization result" message. If initialization has failed, the worker shuts down.
+//
 
 import * as compat from './compat-nodejs.js';
 
-let instance = null;
-let communicationsSab = null;
-let int32Array = null;
-let startedFeedback = false;
+// Filled with information about the state of the worker. All fields are initially null before
+// the first message is received.
+let state = {
+  instance: null,
+  communicationsSab: null,
+  int32Array: null,
+  startedFeedback: false
+};
 
 // Decodes a SCALE-encoded `WasmValue`.
 //
@@ -77,13 +169,27 @@ pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> +
   if 
 };*/
 
-const startInstance = (incomingMessage) => {
-  const moduleImports = WebAssembly.Module.imports(incomingMessage.module);
-  let constructedImports = {};
-  communicationsSab = Buffer.from(incomingMessage.communicationsSab);
-  int32Array = new Int32Array(incomingMessage.communicationsSab);
+const sendStartFeedbackIfNeeded = () => {
+  if (startedFeedback)
+    return;
 
-  moduleImports.forEach((moduleImport, i) => {
+  communicationsSab.writeUInt8(0, 4);
+  int32Array[0] = 0;
+  Atomics.notify(int32Array, 0);
+
+  Atomics.wait(int32Array, 0, 0);
+
+  startedFeedback = true;
+};
+
+compat.setOnMessage((incomingMessage) => {
+  state.communicationsSab = Buffer.from(incomingMessage.communicationsSab);
+  state.int32Array = new Int32Array(incomingMessage.communicationsSab);
+  if (state.int32Array[0] != 1)
+    throw "Invalid communicationsSab state";
+
+  let constructedImports = {};
+  WebAssembly.Module.imports(incomingMessage.module).forEach((moduleImport, i) => {
     if (!constructedImports[moduleImport.module])
       constructedImports[moduleImport.module] = {};
 
@@ -97,7 +203,7 @@ const startInstance = (incomingMessage) => {
         Atomics.notify(int32Array, 0);
 
         Atomics.wait(int32Array, 0, 0);
-        const returnValue = decodeWasmValue(communicationsSab, 4);
+        const returnValue = decodeWasmValue(state.communicationsSab, 4);
         return returnValue;
       };
 
@@ -113,25 +219,22 @@ const startInstance = (incomingMessage) => {
     }
   })
 
-  // TODO: must handle errors
-  instance = new WebAssembly.Instance(incomingMessage.module, constructedImports);
-};
+  state.communicationsSab.writeUInt8(0, 4); // `InitializationResult` variant
+  try {
+    state.instance = new WebAssembly.Instance(incomingMessage.module, constructedImports);
+    state.communicationsSab.writeUInt8(0, 5); // Sucess
+  } catch (error) {
+    state.communicationsSab.writeUInt8(1, 5); // Error
+  }
 
-const sendStartFeedbackIfNeeded = () => {
-  if (startedFeedback)
-    return;
-
-  communicationsSab.writeUInt8(0, 4);
+  // Send the message and wait for further instruction.
   int32Array[0] = 0;
   Atomics.notify(int32Array, 0);
-
   Atomics.wait(int32Array, 0, 0);
+});
 
-  startedFeedback = true;
-};
-
-compat.setOnMessage((incomingMessage) => {
-  if (!instance) {
+/*compat.setOnMessage((incomingMessage) => {
+  if (!state.instance) {
     // The first message that is expected to come is of the form
     // `{ module: <some Wasm module>, requestedImports: [..] }`. We instantiate this module.
     startInstance(incomingMessage);
@@ -139,7 +242,7 @@ compat.setOnMessage((incomingMessage) => {
     // The second message that is expected to come is of the form
     // `{ functionName: "foo", params: [..] }`.
     startedFeedback = false;
-    const toStart = instance.exports[incomingMessage.functionName];
+    const toStart = state.instance.exports[incomingMessage.functionName];
 
     if (!toStart) {
       communicationsSab.writeUInt8(1, 4);
@@ -147,11 +250,11 @@ compat.setOnMessage((incomingMessage) => {
       Atomics.notify(int32Array, 0);
       return;
     }
-  
+
     let returnValue;
     try {
       returnValue = toStart(incomingMessage.params);
-    } catch(error) {
+    } catch (error) {
       // TODO:
       throw error;
     }
@@ -175,4 +278,4 @@ compat.setOnMessage((incomingMessage) => {
     int32Array[0] = 0;
     Atomics.notify(int32Array, 0);
   }
-});
+});*/

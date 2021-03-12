@@ -94,8 +94,12 @@ extern "C" {
 
     /// Initializes a new instance from the given module.
     ///
-    /// The list of imports is found in a buffer represented by `imports_ptr`. The size of the
-    /// buffer is always `4 * num_imports`.
+    /// The list of imports is found in a buffer represented by `imports_ptr`. The elements in the
+    /// list match the elements requested by the module, and as such the size of the buffer is
+    /// always `4 * num_imports`. If a requested import is a memory, the element contains the
+    /// number of pages of memory to allocate (for both the initial and maximum). If the requested
+    /// import is a function, the element contains a `function_id` used to identify the function
+    /// when it gets called.
     ///
     /// On success, must return 0 and write in `id_out` an "instance id" (used in all the other
     /// instance-related functions of these bindings).
@@ -156,7 +160,7 @@ extern "C" {
     ///         return_value: Result<Option<WasmValue>, String>,
     ///     },
     ///     Interrupted {
-    ///         id: u32,
+    ///         function_id: u32,
     ///         params: Vec<WasmValue>,
     ///     },
     /// }
