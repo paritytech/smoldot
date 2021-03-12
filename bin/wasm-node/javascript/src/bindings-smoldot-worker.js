@@ -22,6 +22,7 @@ import * as compat from './compat-nodejs.js';
 let instance = null;
 let communicationsSab = null;
 let int32Array = null;
+let startedFeedback = false;
 
 // Decodes a SCALE-encoded `WasmValue`.
 //
@@ -88,6 +89,9 @@ const startInstance = (incomingMessage) => {
 
     if (moduleImport.kind == 'function') {
       constructedImports[moduleImport.module][moduleImport.name] = () => {
+        sendStartFeedbackIfNeeded();
+
+        // TODO: write params
 
         int32Array[0] = 0;
         Atomics.notify(int32Array, 0);
@@ -113,6 +117,19 @@ const startInstance = (incomingMessage) => {
   instance = new WebAssembly.Instance(incomingMessage.module, constructedImports);
 };
 
+const sendStartFeedbackIfNeeded = () => {
+  if (startedFeedback)
+    return;
+
+  communicationsSab.writeUInt8(0, 4);
+  int32Array[0] = 0;
+  Atomics.notify(int32Array, 0);
+
+  Atomics.wait(int32Array, 0, 0);
+
+  startedFeedback = true;
+};
+
 compat.setOnMessage((incomingMessage) => {
   if (!instance) {
     // The first message that is expected to come is of the form
@@ -121,6 +138,7 @@ compat.setOnMessage((incomingMessage) => {
   } else {
     // The second message that is expected to come is of the form
     // `{ functionName: "foo", params: [..] }`.
+    startedFeedback = false;
     const toStart = instance.exports[incomingMessage.functionName];
 
     if (!toStart) {
@@ -137,6 +155,8 @@ compat.setOnMessage((incomingMessage) => {
       // TODO:
       throw error;
     }
+
+    sendStartFeedbackIfNeeded();
 
     communicationsSab.writeUInt8(0, 4); // `Finished` variant
     communicationsSab.writeUInt8(0, 5); // `Ok` variant
