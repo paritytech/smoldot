@@ -274,7 +274,7 @@ export default (config) => {
 
                 instance.communicationsSab.writeUInt8(6, 4);  // `WriteMemory`
                 instance.communicationsSab.writeUInt32LE(offset, 5);
-                instance.communicationsSab.writeUInt32LE(offset, 9);
+                instance.communicationsSab.writeUInt32LE(sizeIter, 9);
                 selfMemory.copy(instance.communicationsSab, 13, dataPtr, dataPtr + sizeIter);
 
                 // Wait for the child Wasm to execute.
