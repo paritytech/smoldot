@@ -206,6 +206,7 @@ export default (config) => {
             });
 
             instance.int32Array[0] = 1;
+            Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
             return instance.communicationsSab.readUInt8(4);

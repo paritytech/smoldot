@@ -139,7 +139,8 @@ let state = {
   instance: null,
   communicationsSab: null,
   int32Array: null,
-  startedFeedback: false
+  startedFeedback: false,
+  memory: null,
 };
 
 // Decodes a SCALE-encoded `WasmValue`.
@@ -232,36 +233,89 @@ const buildHostFunction = (id) => {
   };
 };
 
-compat.setOnMessage((incomingMessage) => {
-  state.communicationsSab = Buffer.from(incomingMessage.communicationsSab);
-  state.int32Array = new Int32Array(incomingMessage.communicationsSab);
-  if (state.int32Array[0] != 1)
-    throw "Invalid communicationsSab state";
-
+// Builds the imports to pass when instantiating the Wasm module.
+// See documentation at the top of the file for the meaning of `requestedImports`.
+const buildImports = (wasmModule, requestedImports) => {
   let constructedImports = {};
-  WebAssembly.Module.imports(incomingMessage.module).forEach((moduleImport, i) => {
+  let memory = null;
+
+  WebAssembly.Module.imports(wasmModule).forEach((moduleImport, i) => {
     if (!constructedImports[moduleImport.module])
       constructedImports[moduleImport.module] = {};
 
     if (moduleImport.kind == 'function') {
       constructedImports[moduleImport.module][moduleImport.name] =
-        buildHostFunction(incomingMessage.requestedImports[i]);
+        buildHostFunction(requestedImports[i]);
 
     } else if (moduleImport.kind == 'memory') {
-      constructedImports[moduleImport.module][moduleImport.name] =
-        new WebAssembly.Memory({
-          initial: incomingMessage.requestedImports[i],
-          maximum: incomingMessage.requestedImports[i]
-        });
+      if (memory)
+        throw "Can't have multiple memory objects";
+      memory = new WebAssembly.Memory({
+        initial: requestedImports[i],
+        maximum: requestedImports[i]
+      });
+      constructedImports[moduleImport.module][moduleImport.name] = memory;
 
     } else {
       throw "Unknown kind: " + kind;
     }
   })
 
+  return { constructedImports, memory };
+};
+
+// Reads the message in the `communicationsSab`, answering them if possible.
+//
+// Doesn't return until the message is either `StartFunction` or `Resume`.
+// If the message is `StartFunction`, returns `{kind:'StartFunction', name:'...', params:[...]}`.
+// If the message is `Resume`, returns `{kind:'Resume', value:...}`.
+const processMessages = () => {
+  while (true) {
+    const messageTy = state.communicationsSab.readUInt8(4);
+
+    if (messageTy == 5) { // `Resume`.
+      const optValue = state.communicationsSab.readUInt8(5);
+      const value = optValue != 0 ? decodeWasmValue(state.communicationsSab, 6) : null;
+      return {
+        kind: 'Resume',
+        value
+      };
+    }
+
+    if (messageTy == 10) { // `MemorySize`.
+      state.communicationsSab.writeUInt8(11, 5); // `MemorySizeResult`.
+      state.communicationsSab.writeUInt32(state.memory ? state.memory.byteLength : 0, 6);
+      sendMessageWaitReply();
+      continue;
+    }
+
+    // TODO:
+    /*if (messageTy == 12) { // `GetGlobal`.
+      state.communicationsSab.writeUInt8(11, 5); // `MemorySizeResult`.
+      state.communicationsSab.writeUInt32(state.memory ? state.memory.byteLength : 0, 6);
+      sendMessageWaitReply();
+      continue;
+    }*/
+
+    throw "Unknown message type: " + messageTy;
+  }
+};
+
+compat.setOnMessage((incomingMessage) => {
+  state.communicationsSab = Buffer.from(incomingMessage.communicationsSab);
+  state.int32Array = new Int32Array(incomingMessage.communicationsSab);
+  if (state.int32Array[0] != 1)
+    throw "Invalid communicationsSab state";
+
+  // Try instantiate the VM and send back the `InitializationResult`.
   state.communicationsSab.writeUInt8(0, 4); // `InitializationResult` variant
   try {
+    const { constructedImports, memory } = buildImports(incomingMessage.module, incomingMessage.requestedImports);
     state.instance = new WebAssembly.Instance(incomingMessage.module, constructedImports);
+    state.memory = memory;
+    if (!state.memory) {
+      state.memory = state.instance.exports.memory;
+    }
     state.communicationsSab.writeUInt8(0, 5); // Sucess
   } catch (error) {
     state.communicationsSab.writeUInt8(1, 5); // Error
@@ -269,6 +323,10 @@ compat.setOnMessage((incomingMessage) => {
 
   // Send the message and wait for further instruction.
   sendMessageWaitReply();
+
+  while (true) {
+    processMessages();
+  }
 });
 
 /*compat.setOnMessage((incomingMessage) => {

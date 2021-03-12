@@ -55,8 +55,6 @@ export async function start(config) {
       const worker = new Worker(new URL('./bindings-smoldot-worker.js', import.meta.url));
       worker.postMessage(message.data.workerMessage);
       subWorkers[message.data.id] = worker;
-    } else if (message.kind == 'send-vm-worker') {
-      subWorkers[message.data.id].postMessage(message.data.message);
     } else if (message.kind == 'terminate-vm-worker') {
       subWorkers[message.data.id].terminate();
     } else {
