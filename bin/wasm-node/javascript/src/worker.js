@@ -67,6 +67,20 @@ const startInstance = async (config) => {
   // Used to bind with the smoldot bindings. See the `bindings-smoldot.js` file.
   let smoldot_config = {
     onTerminated: () => has_thrown = true,
+    startVmWorker: (id, initialMessage) => {
+      // `compat.postMessage` is the same as `postMessage`, but works across environments.
+      compat.postMessage({
+        kind: 'spawn-vm-worker',
+        data: { id, workerMessage: initialMessage }
+      });
+    },
+    terminateVmWorker: (id) => {
+      // `compat.postMessage` is the same as `postMessage`, but works across environments.
+      compat.postMessage({
+        kind: 'terminate-vm-worker',
+        data: { id }
+      });
+    },
   };
 
   let smoldot_bindings = smoldot_builder(smoldot_config);

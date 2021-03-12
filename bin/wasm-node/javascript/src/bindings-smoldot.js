@@ -101,17 +101,11 @@ export default (config) => {
             const id = nextIdAlloc;
             nextIdAlloc += 1;
 
-            // TODO: don't assume postMessage
-            postMessage({
-                kind: 'spawn-vm-worker',
-                data: {
-                    id,
-                    workerMessage: {
-                        module: wasmModules[moduleId],
-                        requestedImports,
-                        communicationsSab,
-                    }
-                }
+            // Ask the parent to spawn a worker with the given parameters.
+            config.startVmWorker(id, {
+                module: wasmModules[moduleId],
+                requestedImports,
+                communicationsSab,
             });
 
             Atomics.wait(int32Array, 0, 1);
@@ -126,11 +120,7 @@ export default (config) => {
                     int32Array,
                 };
             } else {
-                // TODO: don't assume postMessage
-                postMessage({
-                    kind: 'terminate-vm-worker',
-                    data: { id }
-                });
+                config.terminateVmWorker(id);
             }
 
             return retCode;
@@ -171,11 +161,7 @@ export default (config) => {
             instance.communicationsSab.copy(selfMemory, outPtr, 4, 4 + outCopySize);
         },
         destroy_instance: (instanceId) => {
-            // TODO: don't assume postMessage
-            postMessage({
-                kind: 'terminate-vm-worker',
-                data: { id: instanceId }
-            });
+            config.terminateVmWorker(id);
             wasmInstances[instanceId] = undefined;
         },
         global_value: (instanceId, namePtr, nameSize, outPtr) => {
