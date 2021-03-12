@@ -365,12 +365,12 @@ const processMessages = () => {
       if (globalVal === undefined) {
         state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
         state.communicationsSab.writeUInt8(1, 5);
-      } else if (typeof globalVal != 'number') {
+      } else if (typeof globalVal.value != 'number') {
         state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
         state.communicationsSab.writeUInt8(2, 5);
       } else {
         state.communicationsSab.writeUInt8(13, 4); // `GetGlobalOk`.
-        state.communicationsSab.writeUInt32LE(globalVal, 5);
+        state.communicationsSab.writeUInt32LE(globalVal.value, 5);
       }
       sendMessageWaitReply();
       continue;
