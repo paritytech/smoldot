@@ -117,7 +117,8 @@ export default (config) => {
             const numImports = WebAssembly.Module.imports(compiledModule).length;
             Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(numImports, numImportsOutPtr);
 
-            Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(idOut, nextIdAlloc);
+            const id = nextIdAlloc;
+            Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(id, idOut);
             nextIdAlloc += 1;
             wasmModules[id] = compiledModule;
             return 0;
@@ -151,7 +152,7 @@ export default (config) => {
         destroy_module: (id) => {
             wasmModules[id] = undefined;
         },
-        new_instance: (moduleId, importsPtr) => {
+        new_instance: (moduleId, importsPtr, idOut) => {
             const requestedImports = WebAssembly.Module.imports(wasmModules[moduleId])
                 .map((_, i) => Buffer.from(config.instance.exports.memory.buffer)
                     .readUInt32LE(importsPtr + 4 * i));
@@ -185,12 +186,16 @@ export default (config) => {
                 communicationsSab: Buffer.from(communicationsSab),
                 int32Array: new Int32Array(communicationsSab)
             };
-            return id;
+
+            Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(id, idOut);
+            return 0;
         },
         instance_init: (instanceId, functionNamePtr, functionNameSize, paramsPtr, paramsSize) => {
             const functionName = Buffer.from(config.instance.exports.memory.buffer)
                 .toString('utf8', functionNamePtr, functionNamePtr + functionNameSize);
             const params = decodeVecWasmValue(config.instance.exports.memory.buffer, paramsPtr);
+
+            const instance = wasmInstances[instanceId];
             // TODO: don't assume postMessage
             postMessage({
                 kind: 'send-vm-worker',
@@ -200,7 +205,6 @@ export default (config) => {
                 }
             });
 
-            const instance = wasmInstances[instanceId];
             instance.int32Array[0] = 1;
             Atomics.wait(instance.int32Array, 0, 1);
 
@@ -225,7 +229,11 @@ export default (config) => {
             instance.communicationsSab.copy(selfMemory, outPtr, 4, 4 + outCopySize);
         },
         destroy_instance: (instanceId) => {
-            wasmInstances[instanceId].worker.terminate();
+            // TODO: don't assume postMessage
+            postMessage({
+                kind: 'terminate-vm-worker',
+                data: { id: instanceId }
+            });
             wasmInstances[instanceId] = undefined;
         },
         global_value: (instanceId, name_ptr, name_size, out) => {

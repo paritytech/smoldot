@@ -92,7 +92,16 @@ extern "C" {
     /// >           is one or more instances using that module.
     fn destroy_module(module_id: i32);
 
-    fn new_instance(module_id: i32, imports_ptr: *const u32) -> i32;
+    /// Initializes a new instance from the given module.
+    ///
+    /// The list of imports is found in a buffer represented by `imports_ptr`. The size of the
+    /// buffer is always `4 * num_imports`.
+    ///
+    /// On success, must return 0 and write in `id_out` an "instance id" (used in all the other
+    /// instance-related functions of these bindings).
+    ///
+    /// On error, must return non-zero.
+    fn new_instance(module_id: i32, imports_ptr: *const u32, id_out: *mut i32) -> i32;
 
     /// The given instance must be configured to start executing the given function.
     ///
@@ -305,12 +314,21 @@ impl JsVmPrototype {
             }
         }
 
-        let external_identifier =
-            InstanceRaii(unsafe { new_instance(module.external_identifier, imports.as_ptr()) });
+        let mut external_identifier = 0;
+        let ret_code = unsafe {
+            new_instance(
+                module.external_identifier,
+                imports.as_ptr(),
+                &mut external_identifier,
+            )
+        };
 
-        Ok(JsVmPrototype {
-            external_identifier,
-        })
+        match ret_code {
+            0 => Ok(JsVmPrototype {
+                external_identifier: InstanceRaii(external_identifier),
+            }),
+            _ => Err(NewErr::ModuleError(ModuleError("<unknown>".to_string()))),
+        }
     }
 
     /// See [`super::VirtualMachinePrototype::global_value`].
