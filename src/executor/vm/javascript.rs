@@ -178,7 +178,12 @@ extern "C" {
     /// The export must be of type `i32`.
     ///
     /// The export name is a UTF-8 string found in the memory at offset `name_ptr` and with
-    /// length `name_size`.
+    /// length `name_size`. It starts with a SCALE-compact-encoded size. In other words,
+    /// `name_ptr` and `name_size` contain the SCALE encoding of a `String` representing the
+    /// name.
+    ///
+    /// > **Note**: The reason for including the prefix is ease of implementation. Including this
+    /// >           prefix avoids an intermediary conversion in the implementation.
     ///
     /// Must return 0 to indicate success. The value of the global must have been written at the
     /// address designated by `out`.
@@ -335,11 +340,18 @@ impl JsVmPrototype {
     /// See [`super::VirtualMachinePrototype::global_value`].
     pub fn global_value(&self, name: &str) -> Result<u32, GlobalValueErr> {
         unsafe {
+            let mut name_buffer =
+                Vec::with_capacity(name.as_bytes().len() + 2);
+            name_buffer.extend_from_slice(
+                crate::util::encode_scale_compact_usize(name.as_bytes().len()).as_ref(),
+            );
+            name_buffer.extend_from_slice(name.as_bytes());
+
             let mut out = 0u32;
             let ret = global_value(
                 self.external_identifier.0,
-                name.as_bytes().as_ptr(),
-                name.as_bytes().len(),
+                name_buffer.as_ptr(),
+                name_buffer.len(),
                 &mut out as *mut u32,
             );
 

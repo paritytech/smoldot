@@ -363,14 +363,14 @@ const processMessages = () => {
       const { value: globalName } = decodeString(state.communicationsSab, 5);
       const globalVal = state.instance.exports[globalName];
       if (globalVal === undefined) {
-        state.communicationsSab.writeUInt8(14, 5); // `GetGlobalErr`.
-        state.communicationsSab.writeUInt8(1, 6);
+        state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
+        state.communicationsSab.writeUInt8(1, 5);
       } else if (typeof globalVal != 'number') {
-        state.communicationsSab.writeUInt8(14, 5); // `GetGlobalErr`.
-        state.communicationsSab.writeUInt8(2, 6);
+        state.communicationsSab.writeUInt8(14, 4); // `GetGlobalErr`.
+        state.communicationsSab.writeUInt8(2, 5);
       } else {
-        state.communicationsSab.writeUInt8(13, 5); // `GetGlobalOk`.
-        state.communicationsSab.writeUInt32LE(globalVal, 6);
+        state.communicationsSab.writeUInt8(13, 4); // `GetGlobalOk`.
+        state.communicationsSab.writeUInt32LE(globalVal, 5);
       }
       sendMessageWaitReply();
       continue;

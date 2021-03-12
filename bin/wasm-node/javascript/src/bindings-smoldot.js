@@ -178,7 +178,7 @@ export default (config) => {
         },
 
         destroy_instance: (instanceId) => {
-            config.terminateVmWorker(id);
+            config.terminateVmWorker(instanceId);
             wasmInstances[instanceId] = undefined;
         },
 
@@ -188,7 +188,7 @@ export default (config) => {
 
             // Write the message destined to the worker.
             instance.communicationsSab.writeUInt8(12, 4);  // `GetGlobal`
-            // TODO: must write SCALE-encoded size
+            // Note that `namePtr`/`nameSize` already include the SCALE-compact length of the name.
             selfMemory.copy(instance.communicationsSab, 5, namePtr, namePtr + nameSize);
 
             // Wait for the child Wasm to execute.
