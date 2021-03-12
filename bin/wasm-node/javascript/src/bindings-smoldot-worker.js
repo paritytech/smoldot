@@ -143,24 +143,79 @@ let state = {
   memory: null,
 };
 
+// Decodes a SCALE-compact-encoded integer.
+//
+// Returns an object of the form `{ offsetAfter: ..., value: ... }`.
+const decodeScaleCompactInt = (buffer, offset) => {
+  const firstByte = buffer.readUInt8(offset);
+  if ((firstByte & 0b11) == 0b00) {
+    return {
+      offsetAfter: offset + 1,
+      value: (firstByte >> 2)
+    };
+  } else if ((firstByte & 0b11) == 0b01) {
+    const byte0 = (firstByte >> 2);
+    const byte1 = buffer.readUInt8(offset + 1);
+    return {
+      offsetAfter: offset + 2,
+      value: (byte1 << 6) | byte0
+    };
+  } else if ((firstByte & 0b11) == 0b10) {
+    const byte0 = (firstByte >> 2);
+    const byte1 = buffer.readUInt8(offset + 1);
+    const byte2 = buffer.readUInt8(offset + 2);
+    const byte3 = buffer.readUInt8(offset + 3);
+    return {
+      offsetAfter: offset + 4,
+      value: (byte3 << 22) | (byte2 << 14) | (byte1 << 6) | byte0
+    };
+  } else {
+    throw "unimplemented"; // TODO:
+  }
+}
+
+// Decodes a SCALE-encoded `String`.
+//
+// Returns an object of the form `{ offsetAfter: ..., value: ... }`.
+const decodeString = (buffer, offset) => {
+  const { offsetAfter, value: numBytes } = decodeScaleCompactInt(buffer, offset);
+  const string = buffer.toString('utf8', offsetAfter, offsetAfter + numBytes);
+  return { offsetAfter: offsetAfter + numBytes, value: string };
+};
+
 // Decodes a SCALE-encoded `WasmValue`.
 //
 // Returns an object of the form `{ offsetAfter: ..., value: ... }`.
-const decodeWasmValue = (memory, offset) => {
-  const ty = memory.readUInt8(offset);
+const decodeWasmValue = (buffer, offset) => {
+  const ty = buffer.readUInt8(offset);
   if (ty == 0) {
-    const value = memory.readInt32LE(offset + 1);
+    const value = buffer.readInt32LE(offset + 1);
     return {
       offsetAfter: offset + 5,
       value
     };
   } else {
-    const value = memory.readInt64LE(offset + 1);
+    const value = buffer.readInt64LE(offset + 1);
     return {
       offsetAfter: offset + 9,
       value
     };
   }
+};
+
+// Decodes a SCALE-encoded `Vec<WasmValue>`. Returns the decoded value.
+const decodeVecWasmValue = (buffer, offset) => {
+  const { offsetAfter, value: numElems } = decodeScaleCompactInt(buffer, offset);
+
+  let out = [];
+  let currentOffset = offsetAfter;
+  for (let i = 0; i < numElems; ++i) {
+    const { offsetAfter, value } = decodeWasmValue(buffer, currentOffset);
+    currentOffset = offsetAfter;
+    out.push(value);
+  }
+
+  return out;
 };
 
 // Gives back hand to the outside and waits for a response to be written on the
@@ -276,6 +331,16 @@ const processMessages = () => {
   while (true) {
     const messageTy = state.communicationsSab.readUInt8(4);
 
+    if (messageTy == 1) { // `StartFunction`.
+      const { offsetAfter, value: name } = decodeString(state.communicationsSab, 5);
+      const { value: params } = decodeVecWasmValue(state.communicationsSab, offsetAfter);
+      return {
+        kind: 'StartFunction',
+        name,
+        params,
+      };
+    }
+
     if (messageTy == 5) { // `Resume`.
       const optValue = state.communicationsSab.readUInt8(5);
       const value = optValue != 0 ? decodeWasmValue(state.communicationsSab, 6) : null;
@@ -335,12 +400,12 @@ compat.setOnMessage((initializationMessage) => {
       throw "Invalid state: received Resume when not calling anything";
 
     // Start executing the requested function.
-    startedFeedback = false;
-    const toStart = state.instance.exports[initializationMessage.functionName];
+    state.startedFeedback = false;
+    const toStart = state.instance.exports[receivedMessage.name];
 
     if (!toStart) {
-      communicationsSab.writeUInt8(2, 4); // `StartResult`
-      communicationsSab.writeUInt8(1, 5);
+      state.communicationsSab.writeUInt8(2, 4); // `StartResult`
+      state.communicationsSab.writeUInt8(1, 5);
       sendMessageWaitReply();
       continue;
     }
@@ -349,11 +414,11 @@ compat.setOnMessage((initializationMessage) => {
 
     let returnValue;
     try {
-      returnValue = toStart(initializationMessage.params);
+      returnValue = toStart(receivedMessage.params);
     } catch (error) {
       // TODO: can also be interrupted by host function
-      communicationsSab.writeUInt8(2, 4); // `StartResult`
-      communicationsSab.writeUInt8(3, 5);
+      state.communicationsSab.writeUInt8(2, 4); // `StartResult`
+      state.communicationsSab.writeUInt8(3, 5);
       sendMessageWaitReply();
       continue;
     }
@@ -363,18 +428,18 @@ compat.setOnMessage((initializationMessage) => {
     // Send back a `StartResult` if necessary.
     sendStartFeedbackIfNeeded();
 
-    communicationsSab.writeUInt8(3, 4); // `Finished`
-    communicationsSab.writeUInt8(0, 5); // `Ok` variant
+    state.communicationsSab.writeUInt8(3, 4); // `Finished`
+    state.communicationsSab.writeUInt8(0, 5); // `Ok` variant
     if (typeof returnValue === "bigint") {
-      communicationsSab.writeUInt8(1, 6); // `Some` variant
-      communicationsSab.writeUInt8(1, 7); // `I64` variant
-      communicationsSab.writeUInt64LE(returnValue, 8);
+      state.communicationsSab.writeUInt8(1, 6); // `Some` variant
+      state.communicationsSab.writeUInt8(1, 7); // `I64` variant
+      state.communicationsSab.writeUInt64LE(returnValue, 8);
     } else if (typeof returnValue === "number") {
-      communicationsSab.writeUInt8(1, 6); // `Some` variant
-      communicationsSab.writeUInt8(0, 7); // `I32` variant
-      communicationsSab.writeUInt32LE(returnValue, 8);
+      state.communicationsSab.writeUInt8(1, 6); // `Some` variant
+      state.communicationsSab.writeUInt8(0, 7); // `I32` variant
+      state.communicationsSab.writeUInt32LE(returnValue, 8);
     } else {
-      communicationsSab.writeUInt8(0, 6); // `None` variant
+      state.communicationsSab.writeUInt8(0, 6); // `None` variant
     }
 
     sendMessageWaitReply();

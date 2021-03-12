@@ -29,74 +29,6 @@ import { Worker, workerOnMessage, postMessage } from './compat-nodejs.js';
 import Websocket from 'websocket';
 import { default as now } from 'performance-now';
 
-// Decodes a SCALE-compact-encoded integer.
-//
-// Returns an object of the form `{ offsetAfter: ..., value: ... }`.
-const decodeScaleCompactInt = (memory, offset) => {
-    const buffer = Buffer.from(memory);
-    const firstByte = buffer.readUInt8(offset);
-    if ((firstByte & 0b11) == 0b00) {
-        return {
-            offsetAfter: offset + 1,
-            value: (firstByte >> 2)
-        };
-    } else if ((firstByte & 0b11) == 0b01) {
-        const byte0 = (firstByte >> 2);
-        const byte1 = buffer.readUInt8(offset + 1);
-        return {
-            offsetAfter: offset + 2,
-            value: (byte1 << 6) | byte0
-        };
-    } else if ((firstByte & 0b11) == 0b10) {
-        const byte0 = (firstByte >> 2);
-        const byte1 = buffer.readUInt8(offset + 1);
-        const byte2 = buffer.readUInt8(offset + 2);
-        const byte3 = buffer.readUInt8(offset + 3);
-        return {
-            offsetAfter: offset + 4,
-            value: (byte3 << 22) | (byte2 << 14) | (byte1 << 6) | byte0
-        };
-    } else {
-        throw "unimplemented"; // TODO:
-    }
-}
-
-// Decodes a SCALE-encoded `WasmValue`.
-//
-// Returns an object of the form `{ offsetAfter: ..., value: ... }`.
-const decodeWasmValue = (memory, offset) => {
-    const buffer = Buffer.from(memory);
-    const ty = buffer.readUInt8(offset);
-    if (ty == 0) {
-        const value = buffer.readInt32LE(offset + 1);
-        return {
-            offsetAfter: offset + 5,
-            value
-        };
-    } else {
-        const value = buffer.readInt64LE(offset + 1);
-        return {
-            offsetAfter: offset + 9,
-            value
-        };
-    }
-};
-
-// Decodes a SCALE-encoded `Vec<WasmValue>`. Returns the decoded value.
-const decodeVecWasmValue = (memory, offset) => {
-    const { offsetAfter, value: numElems } = decodeScaleCompactInt(memory, offset);
-
-    let out = [];
-    let currentOffset = offsetAfter;
-    for (let i = 0; i < numElems; ++i) {
-        const { offsetAfter, value } = decodeWasmValue(memory, currentOffset);
-        currentOffset = offsetAfter;
-        out.push(value);
-    }
-
-    return out;
-};
-
 export default (config) => {
     // 
     let wasmModules = {};
@@ -159,11 +91,7 @@ export default (config) => {
 
             // A `SharedArrayBuffer` is shared between this module and the worker, used to
             // communicate between the two.
-            //
-            // The first four bytes are used to determine who has ownership of the content of the
-            // buffer. If 0, then it's this module. If 1, then it's the worker. Each side reads
-            // the content of the buffer, then writes it, then switches the first four bytes and
-            // uses `Atomics.notify` to wake up the other side.
+            // See the documentation of the worker for more information.
             const communicationsSab = new SharedArrayBuffer(512);
             const communicationsSabBuffer = Buffer.from(communicationsSab);
             const int32Array = new Int32Array(communicationsSab);
@@ -197,6 +125,12 @@ export default (config) => {
                     communicationsSab: communicationsSabBuffer,
                     int32Array,
                 };
+            } else {
+                // TODO: don't assume postMessage
+                postMessage({
+                    kind: 'terminate-vm-worker',
+                    data: { id }
+                });
             }
 
             return retCode;
