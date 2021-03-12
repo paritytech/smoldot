@@ -105,19 +105,22 @@ export default (config) => {
     let nextIdAlloc = 0;
 
     return {
-        new_module: (module_ptr, module_size, numImportsOutPtr) => {
+        new_module: (module_ptr, module_size, idOut, numImportsOutPtr) => {
             const moduleBytes = Buffer.from(config.instance.exports.memory.buffer)
                 .subarray(module_ptr, module_ptr + module_size);
-            // TODO: consider making this async
-            // TODO: must handle errors
-            const compiledModule = new WebAssembly.Module(moduleBytes);
+            let compiledModule;
+            try {
+                compiledModule = new WebAssembly.Module(moduleBytes);
+            } catch (error) {
+                return 1;
+            }
             const numImports = WebAssembly.Module.imports(compiledModule).length;
             Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(numImports, numImportsOutPtr);
 
-            const id = nextIdAlloc;
+            Buffer.from(config.instance.exports.memory.buffer).writeUInt32LE(idOut, nextIdAlloc);
             nextIdAlloc += 1;
             wasmModules[id] = compiledModule;
-            return id;
+            return 0;
         },
         module_import_is_fn: (moduleId, importNum) => {
             const kind = WebAssembly.Module.imports(wasmModules[moduleId])[importNum].kind;

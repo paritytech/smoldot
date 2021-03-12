@@ -47,7 +47,22 @@ use core::{
 // TODO: properly document functions
 #[link(wasm_import_module = "javascript_wasm_vm")]
 extern "C" {
-    fn new_module(module_ptr: *const u8, module_size: usize, num_imports: *mut u32) -> i32;
+    /// Parses the Wasm byte code found in the buffer represented by `module_ptr` and
+    /// `module_size`.
+    ///
+    /// On success, must return 0 and write in `id_out` a "module id" (used in all the other
+    /// module-related functions of these bindings) and in `num_imports` the number of elements
+    /// that the Wasm module needs to import from the environment. These imports will later be
+    /// queried with [`module_import_is_fn`], [`module_import_module_len`],
+    /// [`module_import_module`], [`module_import_name_len`] and [`module_import_name`].
+    ///
+    /// On error, must return non-zero.
+    fn new_module(
+        module_ptr: *const u8,
+        module_size: usize,
+        id_out: *mut i32,
+        num_imports: *mut u32,
+    ) -> i32;
 
     /// Returns 1 if the `import_num`th import of the module identified by `module_id` is a
     /// function. Returns 0 if it is a memory.
@@ -193,14 +208,24 @@ impl Module {
     pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, NewErr> {
         let module_bytes = module_bytes.as_ref();
 
+        let mut external_identifier = 0i32;
         let mut num_imports = 0u32;
-        let external_identifier =
-            unsafe { new_module(module_bytes.as_ptr(), module_bytes.len(), &mut num_imports) };
+        let ret_code = unsafe {
+            new_module(
+                module_bytes.as_ptr(),
+                module_bytes.len(),
+                &mut external_identifier,
+                &mut num_imports,
+            )
+        };
 
-        Ok(Module {
-            external_identifier,
-            num_imports,
-        })
+        match ret_code {
+            0 => Ok(Module {
+                external_identifier,
+                num_imports,
+            }),
+            _ => Err(NewErr::ModuleError(ModuleError("<unknown>".to_string()))),
+        }
     }
 }
 
