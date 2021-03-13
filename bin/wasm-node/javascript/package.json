@@ -26,7 +26,7 @@
     "./src/compat-nodejs.js": "./src/compat-browser.js"
   },
   "dependencies": {
-    "buffer": "^6.0.1",
+    "buffer": "^6.0.3",
     "performance-now": "^2.1.0",
     "randombytes": "^2.1.0",
     "websocket": "^1.0.32"

@@ -134,6 +134,7 @@
 //
 
 import * as compat from './compat-nodejs.js';
+import { Buffer } from 'buffer';
 
 // Filled with information about the state of the worker. All fields are initially null before
 // the first message is received.
