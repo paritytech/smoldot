@@ -151,13 +151,13 @@ let state = {
 const writeBigInt64LE = (value, buffer, offset) => {
   const lo = Number(value & BigInt(0xffffffff));
   const hi = Number((value >> BigInt(32)) & BigInt(0xffffffff));
-  buffer.writeInt32LE(lo, offset);
+  buffer.writeUint32LE(lo, offset);
   buffer.writeInt32LE(hi, offset + 4);
 };
 const readBigInt64LE = (buffer, offset) => {
-  const lo = buffer.readInt32LE(offset);
+  const lo = buffer.readUint32LE(offset);
   const hi = buffer.readInt32LE(offset + 4);
-  return (BigInt(hi) << BigInt(32)) + BigInt(lo)
+  return (BigInt(hi) << BigInt(32)) | BigInt(lo)
 };
 
 // Decodes a SCALE-compact-encoded integer.
