@@ -471,7 +471,7 @@ compat.setOnMessage((initializationMessage) => {
     } else { // Resume
       let returnValue;
       try {
-        returnValue = toStart.function(toStart.params);
+        returnValue = toStart.function(...toStart.params);
       } catch (error) {
         // TODO: can also be interruption from host function because of a StartFunction
         const errorMsg = error.toString();
