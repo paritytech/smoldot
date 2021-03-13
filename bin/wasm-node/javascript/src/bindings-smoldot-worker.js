@@ -145,21 +145,6 @@ let state = {
   memory: null,
 };
 
-// For an unclear reason, in the browser the `Buffer` object doesn't have `writeBigInt64LE` and
-// `readBigInt64LE`. Might be a bundler bug. We redefine these operations locally as a work-around.
-// TODO: figure this out ^ or, in the future, remove these functions and try if it works if we use `Buffer.writeBigInt64LE` and `Buffer.readBigInt64LE`
-const writeBigInt64LE = (value, buffer, offset) => {
-  const lo = Number(value & BigInt(0xffffffff));
-  const hi = Number((value >> BigInt(32)) & BigInt(0xffffffff));
-  buffer.writeUint32LE(lo, offset);
-  buffer.writeInt32LE(hi, offset + 4);
-};
-const readBigInt64LE = (buffer, offset) => {
-  const lo = buffer.readUint32LE(offset);
-  const hi = buffer.readInt32LE(offset + 4);
-  return (BigInt(hi) << BigInt(32)) | BigInt(lo)
-};
-
 // Decodes a SCALE-compact-encoded integer.
 //
 // Returns an object of the form `{ offsetAfter: ..., value: ... }`.
@@ -212,7 +197,7 @@ const decodeWasmValue = (buffer, offset) => {
       value
     };
   } else {
-    const value = readBigInt64LE(buffer, offset + 1);
+    const value = buffer.readBigInt64LE(offset + 1);
     return {
       offsetAfter: offset + 9,
       value
@@ -363,7 +348,7 @@ const buildHostFunction = (id) => {
     args.forEach((value) => {
       if (typeof value === "bigint") {
         state.communicationsSab.writeUInt8(1, offsetAfter); // `I64` variant
-        writeBigInt64LE(value, state.communicationsSab, offsetAfter + 1);
+        state.communicationsSab.writeBigInt64LE(value, offsetAfter + 1);
         offsetAfter += 9;
       } else if (typeof value === "number") {
         state.communicationsSab.writeUInt8(0, offsetAfter); // `I32` variant
@@ -490,7 +475,7 @@ compat.setOnMessage((initializationMessage) => {
       if (typeof returnValue === "bigint") {
         state.communicationsSab.writeUInt8(1, 6); // `Some` variant
         state.communicationsSab.writeUInt8(1, 7); // `I64` variant
-        writeBigInt64LE(returnValue, state.communicationsSab, 8);
+        state.communicationsSab.writeBigInt64LE(returnValue, 8);
       } else if (typeof returnValue === "number") {
         state.communicationsSab.writeUInt8(1, 6); // `Some` variant
         state.communicationsSab.writeUInt8(0, 7); // `I32` variant
