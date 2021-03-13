@@ -232,7 +232,10 @@ const decodeVecWasmValue = (buffer, offset) => {
     out.push(value);
   }
 
-  return out;
+  return {
+    value: out,
+    offsetAfter: currentOffset
+  };
 };
 
 // Gives back hand to the outside and waits for a response to be written on the
