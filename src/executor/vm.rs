@@ -139,7 +139,7 @@ impl Module {
                 #[cfg(not(all(target_arch = "wasm32", feature = "javascript-wasm-vm")))]
                 let out = ModuleInner::Interpreter(interpreter::Module::new(module)?);
                 #[cfg(all(target_arch = "wasm32", feature = "javascript-wasm-vm"))]
-                let out = if javascript::is_browser_supported() {
+                let out = if javascript::is_javascript_supported() {
                     ModuleInner::JsVm(javascript::Module::new(module)?)
                 } else {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)

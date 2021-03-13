@@ -35,7 +35,8 @@ export default (config) => {
 
     return {
         is_supported: () => {
-            return typeof SharedArrayBuffer != 'undefined'
+            // TODO: at the moment, NodeJS must be started with `--experimental-wasm-bigint`. If this situation lasts, we should also detect that here
+            return typeof SharedArrayBuffer !== 'undefined'
         },
 
         new_module: (module_ptr, module_size, idOut, numImportsOutPtr) => {

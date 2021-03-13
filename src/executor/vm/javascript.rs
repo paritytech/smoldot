@@ -218,7 +218,7 @@ extern "C" {
 /// Returns `true` if the functions in this module are supported.
 ///
 /// If `false` is returned, all functions below might panic.
-pub fn is_browser_supported() -> bool {
+pub fn is_javascript_supported() -> bool {
     unsafe {
         is_supported() != 0
     }
