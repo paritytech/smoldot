@@ -241,7 +241,7 @@ export default (config) => {
 
             // Because the size of `communicationsSab` might be too small to fit the entire
             // data, we need to cap the write to a certain limit.
-            const sizeLimit = instance.communicationsSab.byteLength - 9;
+            const sizeLimit = instance.communicationsSab.byteLength - 5;
 
             while (size > 0) {
                 const sizeIter = size > sizeLimit ? sizeLimit : size;
@@ -272,7 +272,7 @@ export default (config) => {
 
             // Because the size of `communicationsSab` might be too small to fit the entire
             // data, we need to cap the write to a certain limit.
-            const sizeLimit = instance.communicationsSab.byteLength - 11;
+            const sizeLimit = instance.communicationsSab.byteLength - 13;
 
             while (size > 0) {
                 const sizeIter = size > sizeLimit ? sizeLimit : size;
