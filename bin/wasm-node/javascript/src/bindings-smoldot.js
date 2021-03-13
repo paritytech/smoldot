@@ -177,9 +177,8 @@ export default (config) => {
 
             // Make sure to not go beyond `outSize`.
             // TODO: we're copying too much data here
-            const outCopySize = (instance.communicationsSab.byteLength - 5) > outSize ?
-                outSize : (instance.communicationsSab.byteLength - 5);
             const retMessageTy = instance.communicationsSab.readUInt8(4);
+            const outCopySize = instance.communicationsSab.readUInt32LE(5);
             if (retMessageTy == 3) { // Finished
                 selfMemory.writeUInt8(0, outPtr);
             } else if (retMessageTy == 4) { // Interrupted
@@ -187,7 +186,7 @@ export default (config) => {
             } else {
                 throw 'Expected Interrupted or Finished';
             }
-            instance.communicationsSab.copy(selfMemory, outPtr + 1, 5, 5 + outCopySize);
+            instance.communicationsSab.copy(selfMemory, outPtr + 1, 9, 9 + outCopySize);
         },
 
         destroy_instance: (instanceId) => {
@@ -230,8 +229,9 @@ export default (config) => {
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
-            if (instance.communicationsSab.readUInt8(4) != 11)
-                throw 'Expected MemorySizeResult';
+            const messageTy = instance.communicationsSab.readUInt8(4);
+            if (messageTy != 11)
+                throw 'Expected MemorySizeResult, got ' + messageTy;
             return instance.communicationsSab.readUInt32LE(5);
         },
 
@@ -255,8 +255,9 @@ export default (config) => {
                 Atomics.notify(instance.int32Array, 0);
                 Atomics.wait(instance.int32Array, 0, 1);
 
-                if (instance.communicationsSab.readUInt8(4) != 9)
-                    throw 'Expected ReadMemoryResult';
+                const messageTy = instance.communicationsSab.readUInt8(4);
+                if (messageTy != 9)
+                    throw 'Expected ReadMemoryResult, got ' + messageTy;
 
                 instance.communicationsSab.copy(selfMemory, outPtr, 5, 5 + sizeIter);
 
@@ -287,8 +288,9 @@ export default (config) => {
                 Atomics.notify(instance.int32Array, 0);
                 Atomics.wait(instance.int32Array, 0, 1);
 
-                if (instance.communicationsSab.readUInt8(4) != 7)
-                    throw 'Expected WriteMemoryOk';
+                const messageTy = instance.communicationsSab.readUInt8(4);
+                if (messageTy != 7)
+                    throw 'Expected WriteMemoryOk, got ' + messageTy;
 
                 size -= sizeIter;
                 dataPtr += sizeIter;

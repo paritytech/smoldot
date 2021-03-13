@@ -66,12 +66,18 @@
 //     // human-readable message. If success, contains the return value.
 //     // Must be answered with a `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
 //     // `ReadMemory`, or `Resume`.
-//     Finished(Result<Option<WasmValue>, String>),
+//     Finished {
+//         // Size of the rest of this `Finished` message. Used for ease of implementation.
+//         size_of_self: u32,
+//         result: Result<Option<WasmValue>, String>,
+//     },
 //
 //     // Send when Wasm VM has been interrupted by host function call.
 //     // Must be answered with `StartFunction`, `GetGlobal`, `MemorySize`, `WriteMemory`,
 //     // `ReadMemory`, or `Resume`.
 //     Interrupted {
+//         // Size of the rest of this `Interrupted` message. Used for ease of implementation.
+//         size_of_self: u32,
 //         // Value initially passed through the `requestedImports`.
 //         function_id: u32,
 //         params: Vec<WasmValue>,
@@ -343,8 +349,8 @@ const buildHostFunction = (id) => {
   return (...args) => {
     // Must send an `Interrupted` message and wait for the `Resume`.
     state.communicationsSab.writeUInt8(4, 4); // `Interrupted`
-    state.communicationsSab.writeUInt32LE(id, 5);
-    let { offsetAfter } = encodeScaleCompactUsize(args.length, state.communicationsSab, 9);
+    state.communicationsSab.writeUInt32LE(id, 9);
+    let { offsetAfter } = encodeScaleCompactUsize(args.length, state.communicationsSab, 13);
     args.forEach((value) => {
       if (typeof value === "bigint") {
         state.communicationsSab.writeUInt8(1, offsetAfter); // `I64` variant
@@ -358,6 +364,7 @@ const buildHostFunction = (id) => {
         throw 'Expected i32 or i64 host function argument';
       }
     });
+    state.communicationsSab.writeUInt32LE(offsetAfter, 5);
     sendMessageWaitReply();
 
     // Now processing the reply from the outside.
@@ -462,26 +469,30 @@ compat.setOnMessage((initializationMessage) => {
         const errorMsg = error.toString();
         const errorMsgLen = Buffer.byteLength(errorMsg, 'utf8');
         state.communicationsSab.writeUInt8(3, 4); // `Finished`
-        state.communicationsSab.writeUInt8(1, 5); // `Err`
-        state.communicationsSab.writeUInt32LE(errorMsgLen, 6);
-        state.communicationsSab.write(errorMsg, 10);
+        state.communicationsSab.writeUInt32LE(errorMsgLen + 14, 5);
+        state.communicationsSab.writeUInt8(1, 9); // `Err`
+        state.communicationsSab.writeUInt32LE(errorMsgLen, 10);
+        state.communicationsSab.write(errorMsg, 14);
         sendMessageWaitReply();
         continue;
       }
 
       // Function has successfully ended.
       state.communicationsSab.writeUInt8(3, 4); // `Finished`
-      state.communicationsSab.writeUInt8(0, 5); // `Ok` variant
+      state.communicationsSab.writeUInt8(0, 9); // `Ok` variant
       if (typeof returnValue === "bigint") {
-        state.communicationsSab.writeUInt8(1, 6); // `Some` variant
-        state.communicationsSab.writeUInt8(1, 7); // `I64` variant
-        state.communicationsSab.writeBigInt64LE(returnValue, 8);
+        state.communicationsSab.writeUInt8(1, 10); // `Some` variant
+        state.communicationsSab.writeUInt8(1, 11); // `I64` variant
+        state.communicationsSab.writeBigInt64LE(returnValue, 12);
+        state.communicationsSab.writeUInt32LE(20, 5);
       } else if (typeof returnValue === "number") {
-        state.communicationsSab.writeUInt8(1, 6); // `Some` variant
-        state.communicationsSab.writeUInt8(0, 7); // `I32` variant
-        state.communicationsSab.writeUInt32LE(returnValue, 8);
+        state.communicationsSab.writeUInt8(1, 10); // `Some` variant
+        state.communicationsSab.writeUInt8(0, 11); // `I32` variant
+        state.communicationsSab.writeUInt32LE(returnValue, 12);
+        state.communicationsSab.writeUInt32LE(16, 5);
       } else {
-        state.communicationsSab.writeUInt8(0, 6); // `None` variant
+        state.communicationsSab.writeUInt8(0, 10); // `None` variant
+        state.communicationsSab.writeUInt32LE(1, 5);
       }
 
       sendMessageWaitReply();
