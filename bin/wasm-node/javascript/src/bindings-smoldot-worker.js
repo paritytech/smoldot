@@ -470,11 +470,13 @@ compat.setOnMessage((initializationMessage) => {
       try {
         returnValue = toStart.function(toStart.params);
       } catch (error) {
-        // TODO: can also be interruption from Host
-        // TODO: finish here
+        // TODO: can also be interruption from host function because of a StartFunction
+        const errorMsg = error.toString();
+        const errorMsgLen = Buffer.byteLength(errorMsg, 'utf8');
         state.communicationsSab.writeUInt8(3, 4); // `Finished`
         state.communicationsSab.writeUInt8(1, 5); // `Err`
-        throw 'unfinished' + error;
+        state.communicationsSab.writeUInt32LE(errorMsgLen, 6);
+        state.communicationsSab.write(errorMsg, 10);
         sendMessageWaitReply();
         continue;
       }

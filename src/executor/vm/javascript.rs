@@ -160,7 +160,7 @@ extern "C" {
     /// ```no_run
     /// enum Ret {
     ///     Finished {
-    ///         return_value: Result<Option<WasmValue>, String>,
+    ///         return_value: Result<Option<WasmValue>, ErrorStr>,
     ///     },
     ///     Interrupted {
     ///         function_id: u32,
@@ -168,6 +168,10 @@ extern "C" {
     ///     },
     /// }
     /// ```
+    ///
+    /// `ErrorStr` is a `u32` followed by the corresponding number of bytes that form a utf-8
+    /// string.
+    ///
     fn instance_resume(
         instance_id: i32,
         return_value_ptr: *const u8,
@@ -500,7 +504,7 @@ impl JsVm {
                             ))),
                             nom::combinator::map(
                                 nom::combinator::map_res(
-                                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                                    nom::multi::length_data(nom::number::complete::le_u32),
                                     str::from_utf8,
                                 ),
                                 |msg| Trap(msg.to_owned()),
