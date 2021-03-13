@@ -226,7 +226,7 @@ const decodeVecWasmValue = (buffer, offset) => {
 // Gives back hand to the outside and waits for a response to be written on the
 // `communicationsSab`.
 const sendMessageWaitReply = () => {
-  state.int32Array[0] = 0;
+  Atomics.store(state.int32Array, 0, 0);
   Atomics.notify(state.int32Array, 0);
   Atomics.wait(state.int32Array, 0, 0);
 };

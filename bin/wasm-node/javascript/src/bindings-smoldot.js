@@ -152,7 +152,7 @@ export default (config) => {
                 .copy(instance.communicationsSab, 5, infoPtr, infoPtr + infoSize);
 
             // Wait for the child Wasm to execute.
-            instance.int32Array[0] = 1;
+            Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
@@ -171,7 +171,7 @@ export default (config) => {
             selfMemory.copy(instance.communicationsSab, 5, returnValuePtr, returnValuePtr + returnValueSize);
 
             // Wait for the child Wasm to execute.
-            instance.int32Array[0] = 1;
+            Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
@@ -205,7 +205,7 @@ export default (config) => {
             selfMemory.copy(instance.communicationsSab, 5, namePtr, namePtr + nameSize);
 
             // Wait for the child Wasm to execute.
-            instance.int32Array[0] = 1;
+            Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
@@ -226,7 +226,7 @@ export default (config) => {
             instance.communicationsSab.writeUInt8(10, 4);  // `MemorySize`
 
             // Wait for the child Wasm to execute.
-            instance.int32Array[0] = 1;
+            Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
             Atomics.wait(instance.int32Array, 0, 1);
 
@@ -251,7 +251,7 @@ export default (config) => {
                 instance.communicationsSab.writeUInt32LE(sizeIter, 9);
 
                 // Wait for the child Wasm to execute.
-                instance.int32Array[0] = 1;
+                Atomics.store(instance.int32Array, 0, 1);
                 Atomics.notify(instance.int32Array, 0);
                 Atomics.wait(instance.int32Array, 0, 1);
 
@@ -283,7 +283,7 @@ export default (config) => {
                 selfMemory.copy(instance.communicationsSab, 13, dataPtr, dataPtr + sizeIter);
 
                 // Wait for the child Wasm to execute.
-                instance.int32Array[0] = 1;
+                Atomics.store(instance.int32Array, 0, 1);
                 Atomics.notify(instance.int32Array, 0);
                 Atomics.wait(instance.int32Array, 0, 1);
 
