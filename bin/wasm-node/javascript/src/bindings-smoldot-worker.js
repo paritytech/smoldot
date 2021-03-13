@@ -150,13 +150,13 @@ let state = {
 // TODO: figure this out ^ or, in the future, remove these functions and try if it works if we use `Buffer.writeBigInt64LE` and `Buffer.readBigInt64LE`
 const writeBigInt64LE = (value, buffer, offset) => {
   const lo = Number(value & BigInt(0xffffffff));
-  const hi = Number(value >> BigInt(32) & BigInt(0xffffffff));
-  buffer.writeUInt32LE(lo, offset);
-  buffer.writeUInt32LE(hi, offset + 4);
+  const hi = Number((value >> BigInt(32)) & BigInt(0xffffffff));
+  buffer.writeInt32LE(lo, offset);
+  buffer.writeInt32LE(hi, offset + 4);
 };
 const readBigInt64LE = (buffer, offset) => {
-  const lo = buffer.readUint32LE(offset);
-  const hi = buffer.readUint32LE(offset + 4);
+  const lo = buffer.readInt32LE(offset);
+  const hi = buffer.readInt32LE(offset + 4);
   return (BigInt(hi) << BigInt(32)) + BigInt(lo)
 };
 
