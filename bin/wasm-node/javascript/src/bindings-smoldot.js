@@ -34,6 +34,10 @@ export default (config) => {
     let nextIdAlloc = 0;
 
     return {
+        is_supported: () => {
+            return typeof SharedArrayBuffer != 'undefined'
+        },
+
         new_module: (module_ptr, module_size, idOut, numImportsOutPtr) => {
             const moduleBytes = Buffer.from(config.instance.exports.memory.buffer)
                 .subarray(module_ptr, module_ptr + module_size);

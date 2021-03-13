@@ -47,6 +47,12 @@ use core::{
 // TODO: properly document functions
 #[link(wasm_import_module = "javascript_wasm_vm")]
 extern "C" {
+    /// Returns a non-zero value if the browser VM is available.
+    ///
+    /// > **Note**: In particular, an implementation might require using `SharedArrayBuffer`,
+    /// >           which browsers sometimes annoyingly disable.
+    fn is_supported() -> i32;
+
     /// Parses the Wasm byte code found in the buffer represented by `module_ptr` and
     /// `module_size`.
     ///
@@ -207,6 +213,15 @@ extern "C" {
     /// > **Note**: This can be called while an instance has been interrupted by a host
     /// >           function call.
     fn write_memory(instance_id: i32, offset: u32, size: u32, data: *const u8);
+}
+
+/// Returns `true` if the functions in this module are supported.
+///
+/// If `false` is returned, all functions below might panic.
+pub fn is_browser_supported() -> bool {
+    unsafe {
+        is_supported() != 0
+    }
 }
 
 /// See [`super::Module`].
