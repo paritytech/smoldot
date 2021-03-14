@@ -100,7 +100,7 @@ export default (config) => {
             // The size of the buffer is arbitrary. Notably, memory transfers (reading and
             // writing memory) are notably done through this buffer, and if it is too small, these
             // transfers require multiple iterations.
-            const communicationsSab = new SharedArrayBuffer(2048);
+            const communicationsSab = new SharedArrayBuffer(16384);
             const communicationsSabBuffer = Buffer.from(communicationsSab);
             const int32Array = new Int32Array(communicationsSab);
             int32Array[0] = 1;
