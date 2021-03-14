@@ -154,7 +154,9 @@ export default (config) => {
             // Wait for the child Wasm to execute.
             Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
-            Atomics.wait(instance.int32Array, 0, 1);
+            do {
+                Atomics.wait(instance.int32Array, 0, 1);
+            } while (Atomics.load(instance.int32Array, 0) == 1);
 
             // The value in the `StartResult` matches what `instance_init` returns.
             if (instance.communicationsSab.readUInt8(4) != 2)
@@ -173,7 +175,9 @@ export default (config) => {
             // Wait for the child Wasm to execute.
             Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
-            Atomics.wait(instance.int32Array, 0, 1);
+            do {
+                Atomics.wait(instance.int32Array, 0, 1);
+            } while (Atomics.load(instance.int32Array, 0) == 1);
 
             // Make sure to not go beyond `outSize`.
             // TODO: we're copying too much data here
@@ -206,7 +210,9 @@ export default (config) => {
             // Wait for the child Wasm to execute.
             Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
-            Atomics.wait(instance.int32Array, 0, 1);
+            do {
+                Atomics.wait(instance.int32Array, 0, 1);
+            } while (Atomics.load(instance.int32Array, 0) == 1);
 
             const retMessageTy = instance.communicationsSab.readUInt8(4);
             if (retMessageTy == 13) {
@@ -227,7 +233,9 @@ export default (config) => {
             // Wait for the child Wasm to execute.
             Atomics.store(instance.int32Array, 0, 1);
             Atomics.notify(instance.int32Array, 0);
-            Atomics.wait(instance.int32Array, 0, 1);
+            do {
+                Atomics.wait(instance.int32Array, 0, 1);
+            } while (Atomics.load(instance.int32Array, 0) == 1);
 
             const messageTy = instance.communicationsSab.readUInt8(4);
             if (messageTy != 11)
@@ -253,7 +261,9 @@ export default (config) => {
                 // Wait for the child Wasm to execute.
                 Atomics.store(instance.int32Array, 0, 1);
                 Atomics.notify(instance.int32Array, 0);
-                Atomics.wait(instance.int32Array, 0, 1);
+                do {
+                    Atomics.wait(instance.int32Array, 0, 1);
+                } while (Atomics.load(instance.int32Array, 0) == 1);
 
                 const messageTy = instance.communicationsSab.readUInt8(4);
                 if (messageTy != 9)
@@ -286,7 +296,9 @@ export default (config) => {
                 // Wait for the child Wasm to execute.
                 Atomics.store(instance.int32Array, 0, 1);
                 Atomics.notify(instance.int32Array, 0);
-                Atomics.wait(instance.int32Array, 0, 1);
+                do {
+                    Atomics.wait(instance.int32Array, 0, 1);
+                } while (Atomics.load(instance.int32Array, 0) == 1);
 
                 const messageTy = instance.communicationsSab.readUInt8(4);
                 if (messageTy != 7)

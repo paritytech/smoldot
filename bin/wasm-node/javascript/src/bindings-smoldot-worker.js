@@ -234,7 +234,12 @@ const decodeVecWasmValue = (buffer, offset) => {
 const sendMessageWaitReply = () => {
   Atomics.store(state.int32Array, 0, 0);
   Atomics.notify(state.int32Array, 0);
-  Atomics.wait(state.int32Array, 0, 0);
+
+  // In theory, the `Atomics.load` check shouldn't be needed. In practice, though, it seems to
+  // prevent data races from happening.
+  do {
+    Atomics.wait(state.int32Array, 0, 0);
+  } while (Atomics.load(state.int32Array, 0) == 0);
 };
 
 // Encodes a number in its SCALE-compact encoding.
