@@ -228,7 +228,7 @@ pub fn calculate_genesis_block_header<'a>(
     let state_root = {
         let mut calculation = trie::calculate_root::root_merkle_value(None);
 
-        let mut storage_map: hashbrown::HashMap<&[u8], &[u8]> = genesis_storage.clone().collect();
+        let storage_map: hashbrown::HashMap<_, _> = genesis_storage.clone().collect();
 
         loop {
             match calculation {
