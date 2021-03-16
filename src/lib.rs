@@ -228,6 +228,8 @@ pub fn calculate_genesis_block_header<'a>(
     let state_root = {
         let mut calculation = trie::calculate_root::root_merkle_value(None);
 
+        let mut storage_map: hashbrown::HashMap<&[u8], &[u8]> = genesis_storage.clone().collect();
+
         loop {
             match calculation {
                 trie::calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
@@ -238,10 +240,8 @@ pub fn calculate_genesis_block_header<'a>(
                         keys.inject(genesis_storage.clone().map(|(k, _)| k.iter().cloned()));
                 }
                 trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                    let value = genesis_storage
-                        .clone()
-                        .find(|(k, _)| itertools::equal(k.iter().copied(), val.key()))
-                        .map(|(_, v)| v);
+                    let key: alloc::vec::Vec<u8> = val.key().collect();
+                    let value = storage_map.get(&key[..]);
                     calculation = val.inject(value);
                 }
             }
