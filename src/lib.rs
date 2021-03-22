@@ -219,17 +219,12 @@ mod util;
 /// let chain_spec = smoldot::chain_spec::ChainSpec::from_json_bytes(chain_spec_json)
 ///     .unwrap();
 /// let genesis_block_header =
-///     smoldot::calculate_genesis_block_header(chain_spec.genesis_storage());
+///     smoldot::calculate_genesis_block_header(&chain_spec);
 /// println!("{:?}", genesis_block_header);
 /// ```
-pub fn calculate_genesis_block_header<'a>(
-    genesis_storage: impl Iterator<Item = (&'a [u8], &'a [u8])> + Clone,
-) -> header::Header {
+pub fn calculate_genesis_block_header(chain_spec: &chain_spec::ChainSpec) -> header::Header {
     let state_root = {
         let mut calculation = trie::calculate_root::root_merkle_value(None);
-
-        let storage_map: hashbrown::HashMap<_, _, fnv::FnvBuildHasher> =
-            genesis_storage.clone().collect();
 
         loop {
             match calculation {
@@ -238,11 +233,11 @@ pub fn calculate_genesis_block_header<'a>(
                 }
                 trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
                     calculation =
-                        keys.inject(genesis_storage.clone().map(|(k, _)| k.iter().cloned()));
+                        keys.inject(chain_spec.genesis_storage().map(|(k, _)| k.iter().cloned()));
                 }
                 trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
                     let key: alloc::vec::Vec<u8> = val.key().collect();
-                    let value = storage_map.get(&key[..]);
+                    let value = chain_spec.genesis_storage_value(&key[..]);
                     calculation = val.inject(value);
                 }
             }

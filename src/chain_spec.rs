@@ -37,6 +37,7 @@
 use crate::chain::chain_information::{
     BabeEpochInformation, ChainInformation, ChainInformationConsensus, ChainInformationFinality,
 };
+use alloc::collections::BTreeMap;
 use alloc::{string::String, vec::Vec};
 use core::num::NonZeroU64;
 
@@ -123,6 +124,7 @@ impl LightSyncState {
 #[derive(Clone)]
 pub struct ChainSpec {
     client_spec: structs::ClientSpec,
+    genesis_storage: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 impl ChainSpec {
@@ -145,7 +147,16 @@ impl ChainSpec {
             let structs::Genesis::Raw(genesis) = &client_spec.genesis;
             genesis.children_default.is_empty()
         });
-        Ok(ChainSpec { client_spec })
+
+        let mut chain_spec = Self {
+            client_spec,
+            genesis_storage: BTreeMap::new(),
+        };
+        chain_spec.genesis_storage = chain_spec
+            .genesis_storage()
+            .map(|(key, value)| (key.to_vec(), value.to_vec()))
+            .collect();
+        Ok(chain_spec)
     }
 
     /// Returns the name of the chain. Meant to be displayed to the user.
@@ -218,6 +229,11 @@ impl ChainSpec {
     pub fn genesis_storage(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> + Clone {
         let structs::Genesis::Raw(genesis) = &self.client_spec.genesis;
         genesis.top.iter().map(|(k, v)| (&k.0[..], &v.0[..]))
+    }
+
+    /// Returns the genesis storage value for a key
+    pub fn genesis_storage_value(&self, key: &[u8]) -> Option<&[u8]> {
+        self.genesis_storage.get(key).map(|value| &value[..])
     }
 
     /// Returns a list of arbitrary properties contained in the chain specs, such as the name of
