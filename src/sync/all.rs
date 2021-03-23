@@ -777,7 +777,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     // TODO: error handling
                 }
 
-                // TODO: we use `Oneshot` because the VM is thrown away afterwards; ideally it wouldn't be be thrown away
                 Self::from_grandpa(
                     grandpa_warp_sync,
                     self.shared,
