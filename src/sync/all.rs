@@ -771,9 +771,15 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
+                let (grandpa_warp_sync, error) = sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot);
+
+                if let Some(error) = error {
+                    // TODO: error handling
+                }
+
                 // TODO: we use `Oneshot` because the VM is thrown away afterwards; ideally it wouldn't be be thrown away
                 Self::from_grandpa(
-                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot),
+                    grandpa_warp_sync,
                     self.shared,
                 )
             }
@@ -785,7 +791,13 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let value = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                Self::from_grandpa(sync.inject_value(value.map(iter::once)), self.shared)
+                let (grandpa_warp_sync, error) = sync.inject_value(value.map(iter::once));
+
+                if let Some(error) = error {
+                    // TODO: error handling
+                }
+
+                Self::from_grandpa(grandpa_warp_sync, self.shared)
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             _ => panic!(),
@@ -806,7 +818,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             grandpa_warp_sync::GrandpaWarpSync::InProgress(in_progress) => {
                 Self::from_in_progress_grandpa(in_progress, shared)
             }
-            grandpa_warp_sync::GrandpaWarpSync::Finished(Ok(success)) => {
+            grandpa_warp_sync::GrandpaWarpSync::Finished(success) => {
                 let (all_forks, next_actions) =
                     shared.transition_grandpa_warp_sync_all_forks(success);
                 // TODO: wrong enum being used variant
@@ -817,9 +829,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     },
                     next_actions,
                 };
-            }
-            grandpa_warp_sync::GrandpaWarpSync::Finished(Err(_)) => {
-                todo!()
             }
         }
     }
