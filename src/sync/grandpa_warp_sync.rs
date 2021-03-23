@@ -121,7 +121,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
         loop {
             match (query, fetched_current_epoch) {
                 (
-                    babe_fetch_epoch::Query::Finished(Ok((next_epoch, runtime))),
+                    babe_fetch_epoch::Query::Finished(Ok(next_epoch), runtime),
                     Some(current_epoch),
                 ) => {
                     let (slots_per_epoch, babe_config_c, babe_config_allowed_slots) =
@@ -171,7 +171,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                             .collect(),
                     }));
                 }
-                (babe_fetch_epoch::Query::Finished(Ok((current_epoch, runtime))), None) => {
+                (babe_fetch_epoch::Query::Finished(Ok(current_epoch), runtime), None) => {
                     let babe_next_epoch_query =
                         babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                             runtime,
@@ -183,7 +183,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         state,
                     );
                 }
-                (babe_fetch_epoch::Query::Finished(Err(error)), _) => {
+                (babe_fetch_epoch::Query::Finished(Err(error), _runtime), _) => {
                     return Self::Finished(Err(Error::BabeFetchEpoch(error)))
                 }
                 (babe_fetch_epoch::Query::StorageGet(storage_get), fetched_current_epoch) => {

@@ -45,10 +45,10 @@ pub struct Config {
 pub enum Error {
     /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
-    WasmStart(host::StartErr, host::HostVmPrototype),
+    WasmStart(host::StartErr),
     /// Error while running the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
-    WasmVm(read_only_runtime_host::Error),
+    WasmVm(read_only_runtime_host::ErrorDetail),
     /// Error while decoding the babe epoch.
     #[display(fmt = "{}", _0)]
     DecodeFailed(parity_scale_codec::Error),
@@ -70,7 +70,7 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
 
     match vm {
         Ok(vm) => Query::from_inner(vm),
-        Err((err, proto)) => Query::Finished(Err(Error::WasmStart(err, proto))),
+        Err((err, proto)) => Query::Finished(Err(Error::WasmStart(err)), proto),
     }
 }
 
@@ -86,7 +86,10 @@ pub struct PartialBabeEpochInformation {
 #[must_use]
 pub enum Query {
     /// Fetching the Babe epoch is over.
-    Finished(Result<(PartialBabeEpochInformation, host::HostVmPrototype), Error>),
+    Finished(
+        Result<PartialBabeEpochInformation, Error>,
+        host::HostVmPrototype,
+    ),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
     /// Fetching the key that follows a given one is required in order to continue.
@@ -103,9 +106,11 @@ impl Query {
                     &mut success.virtual_machine.value().as_ref(),
                 );
 
+                let prototype = success.virtual_machine.into_prototype();
+
                 match decoded {
-                    Ok(epoch) => Query::Finished(Ok((
-                        PartialBabeEpochInformation {
+                    Ok(epoch) => Query::Finished(
+                        Ok(PartialBabeEpochInformation {
                             epoch_index: epoch.epoch_index,
                             start_slot_number: Some(epoch.start_slot_number),
                             authorities: epoch
@@ -117,14 +122,14 @@ impl Query {
                                 })
                                 .collect(),
                             randomness: epoch.randomness,
-                        },
-                        success.virtual_machine.into_prototype(),
-                    ))),
-                    Err(error) => Query::Finished(Err(Error::DecodeFailed(error))),
+                        }),
+                        prototype,
+                    ),
+                    Err(error) => Query::Finished(Err(Error::DecodeFailed(error)), prototype),
                 }
             }
             read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => {
-                Query::Finished(Err(Error::WasmVm(err)))
+                Query::Finished(Err(Error::WasmVm(err.detail)), err.prototype)
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(inner) => {
                 Query::StorageGet(StorageGet(inner))
