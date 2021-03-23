@@ -771,16 +771,14 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                let (grandpa_warp_sync, error) = sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot);
+                let (grandpa_warp_sync, error) =
+                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot);
 
                 if let Some(error) = error {
                     // TODO: error handling
                 }
 
-                Self::from_grandpa(
-                    grandpa_warp_sync,
-                    self.shared,
-                )
+                Self::from_grandpa(grandpa_warp_sync, self.shared)
             }
             IdleInner::GrandpaWarpSync(
                 grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(sync),
