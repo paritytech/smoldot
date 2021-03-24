@@ -771,10 +771,11 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
+                // TODO: we use `Oneshot` because the VM is thrown away afterwards; ideally it wouldn't be be thrown away
                 let (grandpa_warp_sync, error) =
                     sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot);
 
-                if let Some(error) = error {
+                if let Some((error, _potentially_created_runtime)) = error {
                     // TODO: error handling
                 }
 

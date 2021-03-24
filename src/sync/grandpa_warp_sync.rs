@@ -117,8 +117,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
         mut query: babe_fetch_epoch::Query,
         mut fetched_current_epoch: Option<PartialBabeEpochInformation>,
         mut state: PostVerificationState<TSrc>,
-        previous_error: Option<Error>,
-    ) -> (Self, Option<Error>) {
+    ) -> (Self, Option<(Error, HostVmPrototype)>) {
         loop {
             match (query, fetched_current_epoch) {
                 (
@@ -194,7 +193,6 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         babe_next_epoch_query,
                         Some(current_epoch),
                         state,
-                        previous_error,
                     );
                 }
                 (
@@ -202,24 +200,20 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         result: Err(error),
                         virtual_machine,
                     },
-                    fetched_current_epoch,
+                    _,
                 ) => {
-                    let babe_next_epoch_query =
-                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                            runtime: virtual_machine,
-                            epoch_to_fetch: if fetched_current_epoch.is_some() {
-                                babe_fetch_epoch::BabeEpochToFetch::NextEpoch
-                            } else {
-                                babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch
-                            },
-                        });
-
-                    return return Self::from_babe_fetch_epoch_query(
-                        babe_next_epoch_query,
-                        fetched_current_epoch,
-                        state,
-                        Some(Error::BabeFetchEpoch(error)),
-                    );
+                    return (
+                        Self::InProgress(
+                            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                                state.sources,
+                                PreVerificationState {
+                                    start_chain_information: state.start_chain_information,
+                                },
+                                None,
+                            ),
+                        ),
+                        Some((Error::BabeFetchEpoch(error), virtual_machine)),
+                    )
                 }
                 (babe_fetch_epoch::Query::StorageGet(storage_get), fetched_current_epoch) => {
                     return (
@@ -228,7 +222,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                             fetched_current_epoch,
                             state,
                         })),
-                        previous_error,
+                        None,
                     )
                 }
                 (babe_fetch_epoch::Query::StorageRoot(storage_root), e) => {
@@ -242,7 +236,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                             fetched_current_epoch,
                             state,
                         })),
-                        previous_error,
+                        None,
                     )
                 }
             }
@@ -366,12 +360,11 @@ impl<TSrc> StorageGet<TSrc> {
     pub fn inject_value(
         self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
+    ) -> (GrandpaWarpSync<TSrc>, Option<(Error, HostVmPrototype)>) {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_value(value),
             self.fetched_current_epoch,
             self.state,
-            None,
         )
     }
 }
@@ -421,12 +414,11 @@ impl<TSrc> NextKey<TSrc> {
     pub fn inject_key(
         self,
         key: Option<impl AsRef<[u8]>>,
-    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
+    ) -> (GrandpaWarpSync<TSrc>, Option<(Error, HostVmPrototype)>) {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_key(key),
             self.fetched_current_epoch,
             self.state,
-            None,
         )
     }
 }
@@ -689,7 +681,10 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
-    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
+    ) -> (
+        GrandpaWarpSync<TSrc>,
+        Option<(Error, Option<HostVmPrototype>)>,
+    ) {
         let code = match code {
             Some(code) => code,
             None => {
@@ -697,7 +692,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                     GrandpaWarpSync::InProgress(
                         InProgressGrandpaWarpSync::VirtualMachineParamsGet(self),
                     ),
-                    Some(Error::MissingCode),
+                    Some((Error::MissingCode, None)),
                 )
             }
         };
@@ -710,7 +705,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                         GrandpaWarpSync::InProgress(
                             InProgressGrandpaWarpSync::VirtualMachineParamsGet(self),
                         ),
-                        Some(Error::InvalidHeapPages(err)),
+                        Some((Error::InvalidHeapPages(err), None)),
                     )
                 }
             };
@@ -723,18 +718,22 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                         epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
                     });
 
-                GrandpaWarpSync::from_babe_fetch_epoch_query(
+                let (grandpa_warp_sync, error) = GrandpaWarpSync::from_babe_fetch_epoch_query(
                     babe_current_epoch_query,
                     None,
                     self.state,
-                    None,
+                );
+
+                (
+                    grandpa_warp_sync,
+                    error.map(|(error, runtime)| (error, Some(runtime))),
                 )
             }
             Err(error) => (
                 GrandpaWarpSync::InProgress(InProgressGrandpaWarpSync::VirtualMachineParamsGet(
                     self,
                 )),
-                Some(Error::NewRuntime(error)),
+                Some((Error::NewRuntime(error), None)),
             ),
         }
     }
