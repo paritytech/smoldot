@@ -775,7 +775,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let (grandpa_warp_sync, error) =
                     sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot);
 
-                if let Some((error, _potentially_created_runtime)) = error {
+                if let Some((error, potentially_created_runtime)) = error {
                     // TODO: error handling
                 }
 
@@ -791,7 +791,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
 
                 let (grandpa_warp_sync, error) = sync.inject_value(value.map(iter::once));
 
-                if let Some(error) = error {
+                if let Some((error, runtime)) = error {
                     // TODO: error handling
                 }
 
