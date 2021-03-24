@@ -57,10 +57,11 @@ export default (config) => {
         // the given buffer.
         throw: (ptr, len) => {
             terminate();
+            const message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            const error = new Error(message);
             if (config.onTerminated)
-                config.onTerminated();
-            let message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
-            throw new Error(message);
+                config.onTerminated(error);
+            throw error;
         },
 
         // Used by the Rust side to emit a JSON-RPC response or subscription notification.
