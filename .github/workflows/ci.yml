@@ -59,8 +59,12 @@ jobs:
     - uses: Swatinem/rust-cache@v1
     - run: cargo check --package smoldot --locked --no-default-features
     - run: cargo check --package smoldot --locked --no-default-features --features database-sled
+    - run: cargo check --package smoldot --locked --no-default-features --features javascript-wasm-vm
     - run: cargo check --package smoldot --locked --no-default-features --features std
+    - run: cargo check --package smoldot --locked --no-default-features --features database-sled --features javascript-wasm-vm
     - run: cargo check --package smoldot --locked --no-default-features --features database-sled --features std
+    - run: cargo check --package smoldot --locked --no-default-features --features javascript-wasm-vm --features std
+    - run: cargo check --package smoldot --locked --no-default-features --features database-sled --features std --features javascript-wasm-vm
 
   check-rustdoc-links:
     name: Check rustdoc intra-doc links

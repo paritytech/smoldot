@@ -25,15 +25,35 @@ pub(crate) mod leb128;
 /// Returns a parser that decodes a SCALE-encoded `Option`.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
-/// >           the type of `E`. Use `nom::Err<nom::error::Error>`.
+/// >           the type of `E`. Use `nom::Err<nom::error::Error<&[u8]>>`.
 pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
-    inner_decode: impl Fn(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
+    inner_decode: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], O, E>,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Option<O>, E> {
     nom::branch::alt((
         nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| None),
         nom::combinator::map(
             nom::sequence::preceded(nom::bytes::complete::tag(&[1]), inner_decode),
             Some,
+        ),
+    ))
+}
+
+/// Returns a parser that decodes a SCALE-encoded `Result`.
+///
+/// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
+/// >           the type of `E`. Use `nom::Err<nom::error::Error<&[u8]>>`.
+pub(crate) fn nom_result_decode<'a, Ol, Oe, E: nom::error::ParseError<&'a [u8]>>(
+    ok_decode: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Ol, E>,
+    err_decode: impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Oe, E>,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], Result<Ol, Oe>, E> {
+    nom::branch::alt((
+        nom::combinator::map(
+            nom::sequence::preceded(nom::bytes::complete::tag(&[0]), ok_decode),
+            Ok,
+        ),
+        nom::combinator::map(
+            nom::sequence::preceded(nom::bytes::complete::tag(&[1]), err_decode),
+            Err,
         ),
     ))
 }

@@ -232,7 +232,7 @@ impl HostVmPrototype {
                 &module,
                 heap_pages,
                 // This closure is called back for each function that the runtime imports.
-                |mod_name, f_name, _signature| {
+                |mod_name, f_name| {
                     if mod_name != "env" {
                         return Err(());
                     }

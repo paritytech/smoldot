@@ -15,7 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Exports a function that provides bindings for the bindings found in the Rust part of the code.
+//! Exports a function that provides bindings for the bindings found in the Rust part of the code
+//! (i.e. the content of `bin/wasm-node/rust`).
 //!
 //! In order to use this code, call the function passing an object, then fill the `instance` field
 //! of that object with the Wasm instance.
