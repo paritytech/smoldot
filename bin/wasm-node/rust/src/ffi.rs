@@ -48,7 +48,13 @@ pub(crate) fn throw(message: String) -> ! {
             u32::try_from(message.as_bytes().len()).unwrap(),
         );
 
-        core::arch::wasm32::unreachable()
+        // Even though this code is intended to only ever be compiled for Wasm, it might, for
+        // various reasons, be compiled for the host platform as well. We use platform-specific
+        // code to make sure that it compiles for all platforms.
+        #[cfg(target_arch = "wasm32")]
+        core::arch::wasm32::unreachable();
+        #[cfg(not(target_arch = "wasm32"))]
+        unreachable!();
     }
 }
 
