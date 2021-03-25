@@ -6,7 +6,10 @@ smoldot.start({
   max_log_level: 3,
   chain_spec: '',
   database_content: '',
-  relay_chain_spec: '',
+  parachain_spec: '',
   json_rpc_callback: (resp) => {},
   database_save_callback: (content) => {},
+  log_callback: (level, target, message) => {},
+}).then(sm => {
+  sm.terminate();
 });
