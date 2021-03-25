@@ -48,9 +48,7 @@ pub(crate) fn throw(message: String) -> ! {
             u32::try_from(message.as_bytes().len()).unwrap(),
         );
 
-        // Note: we could theoretically use `unreachable_unchecked` here, but this relies on the
-        // fact that `ffi::throw` is correctly implemented, which isn't 100% guaranteed.
-        unreachable!();
+        core::arch::wasm32::unreachable()
     }
 }
 
