@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Worker, workerOnMessage } from './compat-nodejs.js';
+import { Worker, workerOnError, workerOnMessage } from './compat-nodejs.js';
 
 export class SmoldotError extends Error {
   constructor(message) {
@@ -46,17 +46,7 @@ export async function start(config) {
 
   // The worker can send us either a database save message, or a JSON-RPC answer.
   workerOnMessage(worker, (message) => {
-    if (message.kind == 'error') {
-      // A problem happened in the worker or the smoldot Wasm VM.
-      // We might still be initializing.
-      if (initPromiseReject) {
-        initPromiseReject(message.error);
-      }
-      initPromiseReject = null;
-      initPromiseResolve = null;
-      worker.terminate();
-
-    } else if (message.kind == 'jsonrpc') {
+    if (message.kind == 'jsonrpc') {
       // If `initPromiseResolve` is non-null, then this is the initial dummy JSON-RPC request
       // that is used to determine when initialization is over. See below. It is intentionally not
       // reported with the callback.
@@ -77,11 +67,23 @@ export async function start(config) {
     }
   });
 
+  workerOnError(worker, (error) => {
+    // A problem happened in the worker or the smoldot Wasm VM.
+    // We might still be initializing.
+    if (initPromiseReject) {
+      initPromiseReject(error);
+      initPromiseReject = null;
+      initPromiseResolve = null;
+    }
+
+    // Nothing is in place if we are no longer initializing.
+  });
+
   // The first message expected by the worker contains the configuration.
   worker.postMessage({
     chain_spec: config.chain_spec,
     database_content: config.database_content,
-    relay_chain_spec: config.relay_chain_spec,
+    parachain_spec: config.parachain_spec,
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     max_log_level: config.max_log_level || 5
