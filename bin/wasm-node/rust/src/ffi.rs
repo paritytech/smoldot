@@ -36,7 +36,6 @@ use futures::{
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
-    task,
 };
 
 pub mod bindings;
@@ -72,29 +71,31 @@ fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
         future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
     }
 
-    impl task::Wake for Waker {
-        fn wake(self: Arc<Self>) {
-            if self
+    impl futures::task::ArcWake for Waker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            if arc_self
                 .wake_up_registered
                 .swap(true, atomic::Ordering::Relaxed)
             {
                 return;
             }
 
+            let arc_self = arc_self.clone();
             start_timer_wrap(Duration::new(0, 0), move || {
-                if self.done.load(atomic::Ordering::SeqCst) {
+                if arc_self.done.load(atomic::Ordering::SeqCst) {
                     return;
                 }
 
-                let mut future = self.future.try_lock().unwrap();
-                self.wake_up_registered
+                let mut future = arc_self.future.try_lock().unwrap();
+                arc_self
+                    .wake_up_registered
                     .store(false, atomic::Ordering::SeqCst);
                 match Future::poll(
                     future.as_mut(),
-                    &mut Context::from_waker(&task::Waker::from(self.clone())),
+                    &mut Context::from_waker(&futures::task::waker_ref(&arc_self)),
                 ) {
                     Poll::Ready(()) => {
-                        self.done.store(true, atomic::Ordering::SeqCst);
+                        arc_self.done.store(true, atomic::Ordering::SeqCst);
                     }
                     Poll::Pending => {}
                 }
@@ -108,7 +109,7 @@ fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
         future: Mutex::new(Box::pin(future)),
     });
 
-    task::Wake::wake(waker);
+    futures::task::ArcWake::wake(waker);
 }
 
 /// Uses the environment to invoke `closure` after `duration` has elapsed.
