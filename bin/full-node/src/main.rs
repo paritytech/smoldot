@@ -380,15 +380,12 @@ async fn async_main() {
             },
 
             network_message = main_network_events_receiver.next() => {
-                match network_message.unwrap() {
-                    network_service::Event::BlockAnnounce { chain_index: 0, announce, .. } => {
-                        let decoded = announce.decode();
-                        match network_known_best {
-                            Some(n) if n >= decoded.header.number => {},
-                            _ => network_known_best = Some(decoded.header.number),
-                        }
+                if let network_service::Event::BlockAnnounce { chain_index: 0, announce, .. } = network_message.unwrap() {
+                    let decoded = announce.decode();
+                    match network_known_best {
+                        Some(n) if n >= decoded.header.number => {},
+                        _ => network_known_best = Some(decoded.header.number),
                     }
-                    _ => unreachable!()
                 }
             }
 
