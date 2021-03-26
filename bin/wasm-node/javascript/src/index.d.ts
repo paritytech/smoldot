@@ -26,14 +26,16 @@ export interface SmoldotClient {
 
 export type SmoldotJsonRpcCallback = (response: string) => void;
 export type SmoldotDatabaseSaveCallback = (response: string) => void;
+export type SmoldotLogCallback = (level: number, target: string, message: string) => void;
 
 export interface SmoldotOptions {
   max_log_level?: number;
   chain_spec: string;
   json_rpc_callback: SmoldotJsonRpcCallback;
   database_save_callback: SmoldotDatabaseSaveCallback;
+  log_callback: SmoldotLogCallback;
   database_content?: string;
-  relay_chain_spec?: string;
+  parachain_spec?: string;
 }
 
 export interface Smoldot {
