@@ -117,7 +117,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
         mut query: babe_fetch_epoch::Query,
         mut fetched_current_epoch: Option<PartialBabeEpochInformation>,
         mut state: PostVerificationState<TSrc>,
-    ) -> (Self, Option<(Error, HostVmPrototype)>) {
+    ) -> (Self, Option<Error>) {
         loop {
             match (query, fetched_current_epoch) {
                 (
@@ -198,7 +198,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                 (
                     babe_fetch_epoch::Query::Finished {
                         result: Err(error),
-                        virtual_machine,
+                        virtual_machine: _,
                     },
                     _,
                 ) => {
@@ -212,7 +212,7 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                                 None,
                             ),
                         ),
-                        Some((Error::BabeFetchEpoch(error), virtual_machine)),
+                        Some(Error::BabeFetchEpoch(error)),
                     )
                 }
                 (babe_fetch_epoch::Query::StorageGet(storage_get), fetched_current_epoch) => {
@@ -360,7 +360,7 @@ impl<TSrc> StorageGet<TSrc> {
     pub fn inject_value(
         self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> (GrandpaWarpSync<TSrc>, Option<(Error, HostVmPrototype)>) {
+    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_value(value),
             self.fetched_current_epoch,
@@ -414,7 +414,7 @@ impl<TSrc> NextKey<TSrc> {
     pub fn inject_key(
         self,
         key: Option<impl AsRef<[u8]>>,
-    ) -> (GrandpaWarpSync<TSrc>, Option<(Error, HostVmPrototype)>) {
+    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_key(key),
             self.fetched_current_epoch,
@@ -681,18 +681,21 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
-    ) -> (
-        GrandpaWarpSync<TSrc>,
-        Option<(Error, Option<HostVmPrototype>)>,
-    ) {
+    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
         let code = match code {
             Some(code) => code,
             None => {
                 return (
                     GrandpaWarpSync::InProgress(
-                        InProgressGrandpaWarpSync::VirtualMachineParamsGet(self),
+                        InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                            self.state.sources,
+                            PreVerificationState {
+                                start_chain_information: self.state.start_chain_information,
+                            },
+                            None,
+                        ),
                     ),
-                    Some((Error::MissingCode, None)),
+                    Some(Error::MissingCode),
                 )
             }
         };
@@ -703,9 +706,15 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 Err(err) => {
                     return (
                         GrandpaWarpSync::InProgress(
-                            InProgressGrandpaWarpSync::VirtualMachineParamsGet(self),
+                            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                                self.state.sources,
+                                PreVerificationState {
+                                    start_chain_information: self.state.start_chain_information,
+                                },
+                                None,
+                            ),
                         ),
-                        Some((Error::InvalidHeapPages(err), None)),
+                        Some(Error::InvalidHeapPages(err)),
                     )
                 }
             };
@@ -724,16 +733,19 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                     self.state,
                 );
 
-                (
-                    grandpa_warp_sync,
-                    error.map(|(error, runtime)| (error, Some(runtime))),
-                )
+                (grandpa_warp_sync, error)
             }
             Err(error) => (
-                GrandpaWarpSync::InProgress(InProgressGrandpaWarpSync::VirtualMachineParamsGet(
-                    self,
-                )),
-                Some((Error::NewRuntime(error), None)),
+                GrandpaWarpSync::InProgress(
+                    InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                        },
+                        None,
+                    ),
+                ),
+                Some(Error::NewRuntime(error)),
             ),
         }
     }
