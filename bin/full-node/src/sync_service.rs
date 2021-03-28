@@ -137,18 +137,9 @@ fn start_sync(
     // While reading the storage from the database is an option, doing so considerably slows down
     // the verification, and also makes it impossible to insert blocks in the database in
     // parallel of this verification.
-    // TODO: provide a database function to load everything at once instead of iterating through keys
-    let mut finalized_block_storage = BTreeMap::<Vec<u8>, Vec<u8>>::new();
-    for key in database
-        .finalized_block_storage_top_trie_keys(&database.finalized_block_hash().unwrap(), &[])
-        .unwrap()
-    {
-        let value = database
-            .finalized_block_storage_top_trie_get(&database.finalized_block_hash().unwrap(), &key)
-            .unwrap()
-            .unwrap();
-        finalized_block_storage.insert(key.to_owned(), value);
-    }
+    let mut finalized_block_storage: BTreeMap<Vec<u8>, Vec<u8>> = database
+        .finalized_block_storage_top_trie(&database.finalized_block_hash().unwrap())
+        .unwrap();
 
     let mut sync = optimistic::OptimisticSync::<_, libp2p::PeerId, ()>::new(optimistic::Config {
         chain_information: database

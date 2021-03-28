@@ -174,7 +174,12 @@
 
 use crate::{chain::chain_information, header, util};
 
-use core::{convert::TryFrom, fmt, iter, num::NonZeroU64};
+use core::{
+    convert::TryFrom,
+    fmt,
+    iter::{self, FromIterator},
+    num::NonZeroU64,
+};
 use parking_lot::Mutex;
 
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
@@ -739,6 +744,46 @@ impl SqliteFullDatabase {
         connection.execute("BEGIN TRANSACTION").unwrap();
 
         Ok(())
+    }
+
+    /// Returns all the keys and values in the storage of the finalized block.
+    ///
+    /// In order to avoid race conditions, the known finalized block hash must be passed as
+    /// parameter. If the finalized block in the database doesn't match the hash passed as
+    /// parameter, most likely because it has been updated in a parallel thread, a
+    /// [`FinalizedAccessError::Obsolete`] error is returned.
+    ///
+    /// The return value must implement the `FromIterator` trait, being passed an iterator that
+    /// produces tuples of keys and values.
+    pub fn finalized_block_storage_top_trie<T: FromIterator<(Vec<u8>, Vec<u8>)>>(
+        &self,
+        finalized_block_hash: &[u8; 32],
+    ) -> Result<T, FinalizedAccessError> {
+        let connection = self.database.lock();
+
+        if finalized_hash(&connection)? != *finalized_block_hash {
+            return Err(FinalizedAccessError::Obsolete);
+        }
+
+        let mut statement = connection
+            .prepare(r#"SELECT key, value FROM finalized_storage_top_trie"#)
+            .map_err(InternalError)
+            .map_err(CorruptedError::Internal)
+            .map_err(AccessError::Corrupted)
+            .map_err(FinalizedAccessError::Access)?;
+
+        let out: T = iter::from_fn(|| {
+            if !matches!(statement.next().unwrap(), sqlite::State::Row) {
+                return None;
+            }
+
+            let key = statement.read::<Vec<u8>>(0).unwrap();
+            let value = statement.read::<Vec<u8>>(1).unwrap();
+            Some((key, value))
+        })
+        .collect();
+
+        Ok(out)
     }
 
     /// Returns the value associated to a key in the storage of the finalized block.
