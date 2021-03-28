@@ -109,24 +109,28 @@ CREATE TABLE IF NOT EXISTS meta(
 CREATE TABLE IF NOT EXISTS blocks_by_number(
     number INTEGER NOT NULL,
     hash BLOB NOT NULL,
-    UNIQUE(number, hash)
+    UNIQUE(number, hash),
+    CHECK(length(hash) == 32)
 );
 
 CREATE TABLE IF NOT EXISTS block_header(
     hash BLOB NOT NULL PRIMARY KEY,
-    header BLOB NOT NULL
+    header BLOB NOT NULL,
+    CHECK(length(hash) == 32)
 );
 
 CREATE TABLE IF NOT EXISTS block_body(
     hash BLOB NOT NULL,
     idx INTEGER NOT NULL,
     extrinsic BLOB NOT NULL,
-    UNIQUE(hash, idx)
+    UNIQUE(hash, idx),
+    CHECK(length(hash) == 32)
 );
 
 CREATE TABLE IF NOT EXISTS block_justification(
     hash BLOB NOT NULL PRIMARY KEY,
-    justification BLOB NOT NULL
+    justification BLOB NOT NULL,
+    CHECK(length(hash) == 32)
 );
 
 CREATE TABLE IF NOT EXISTS finalized_storage_top_trie(
@@ -138,7 +142,8 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
     hash BLOB NOT NULL,
     key BLOB NOT NULL,
     value BLOB,
-    UNIQUE(hash, key)
+    UNIQUE(hash, key),
+    CHECK(length(hash) == 32)
 );
 
     "#,
