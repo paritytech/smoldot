@@ -23,7 +23,7 @@ use super::{
     encode_aura_authorities_list, encode_babe_epoch_information, encode_grandpa_authorities_list,
     AccessError, SqliteFullDatabase,
 };
-use crate::{chain::chain_information, header, util};
+use crate::{chain::chain_information, header};
 
 use std::{convert::TryFrom as _, path::Path};
 
@@ -52,6 +52,55 @@ PRAGMA auto_vacuum = FULL;
 PRAGMA encoding = 'UTF-8';
 PRAGMA trusted_schema = false; 
 
+/*
+Keys in that table:
+
+ - `best`: Hash of the best block.
+
+ - `finalized`: Height of the finalized block, as a 64bits big endian number.
+
+ - `grandpa_authorities_set_id`: A 64bits big endian number representing the id of the
+ authorities set that must finalize the block right after the finalized block. The value is
+ 0 at the genesis block, and increased by 1 at every authorities change. Missing if and only
+ if the chain doesn't use Grandpa.
+
+ - `grandpa_triggered_authorities`: List of public keys and weights of the GrandPa
+ authorities that must finalize the children of the finalized block. Consists in 40bytes
+ values concatenated together, each value being a 32bytes ed25519 public key and a 8bytes
+ little endian weight. Missing if and only if the chain doesn't use Grandpa.
+
+ - `grandpa_scheduled_target`: A 64bits big endian number representing the block where the
+ authorities found in `grandpa_scheduled_authorities` will be triggered. Blocks whose height
+ is strictly higher than this value must be finalized using the new set of authorities. This
+ authority change must have been scheduled in or before the finalized block. Missing if no
+ change is scheduled or if the chain doesn't use Grandpa.
+
+ - `grandpa_scheduled_authorities`: List of public keys and weights of the GrandPa
+ authorities that will be triggered at the block found in `grandpa_scheduled_target`.
+ Consists in 40bytes values concatenated together, each value being a 32bytes ed25519
+ public key and a 8bytes little endian weight. Missing if no change is scheduled or if the
+ chain doesn't use Grandpa.
+
+ - `aura_slot_duration`: A 64bits big endian number indicating the duration of an Aura
+ slot. Missing if and only if the chain doesn't use Aura.
+
+ - `aura_finalized_authorities`: List of public keys of the Aura authorities that must
+ author the children of the finalized block. Consists in 32bytes values concatenated
+ together. Missing if and only if the chain doesn't use Aura.
+
+ - `babe_slots_per_epoch`: A 64bits big endian number indicating the number of slots per
+ Babe epoch. Missing if and only if the chain doesn't use Babe.
+
+ - `babe_finalized_epoch`: SCALE encoding of a structure that contains the information
+ about the Babe epoch used for the finalized block. Missing if and only if the finalized
+ block is block #0 or the chain doesn't use Babe.
+
+ - `babe_finalized_next_epoch`: SCALE encoding of a structure that contains the information
+ about the Babe epoch that follows the one described by `babe_finalized_epoch`. If the
+ finalized block is block #0, then this contains information about epoch #0. Missing if and
+ only if the chain doesn't use Babe.
+
+*/
 CREATE TABLE IF NOT EXISTS meta(
     key BLOB NOT NULL PRIMARY KEY,
     value BLOB NOT NULL
@@ -105,8 +154,10 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
         statement.read::<i64>(0).unwrap() == 0
     };
 
+    // The database is *always* within a transaction.
+    database.execute("BEGIN TRANSACTION").unwrap();
+
     Ok(if !is_empty {
-        database.execute("BEGIN TRANSACTION").unwrap();
         DatabaseOpen::Open(SqliteFullDatabase {
             database: parking_lot::Mutex::new(database),
         })
@@ -173,10 +224,6 @@ impl DatabaseEmpty {
                 a.extend_from_slice(b.as_ref());
                 a
             });
-
-        // Try to apply changes. This is done atomically through a transaction.
-        // TODO: safer way to do transaction?
-        self.database.execute("BEGIN TRANSACTION").unwrap();
 
         let mut insert_meta = self
             .database

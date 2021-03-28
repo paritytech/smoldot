@@ -137,6 +137,7 @@ fn start_sync(
     // While reading the storage from the database is an option, doing so considerably slows down
     // the verification, and also makes it impossible to insert blocks in the database in
     // parallel of this verification.
+    // TODO: provide a database function to load everything at once instead of iterating through keys
     let mut finalized_block_storage = BTreeMap::<Vec<u8>, Vec<u8>>::new();
     for key in database
         .finalized_block_storage_top_trie_keys(&database.finalized_block_hash().unwrap(), &[])
