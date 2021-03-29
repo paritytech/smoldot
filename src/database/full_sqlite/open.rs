@@ -28,13 +28,24 @@ use std::{convert::TryFrom as _, path::Path};
 ///
 /// Note that this doesn't return a [`SqliteFullDatabase`], but rather a [`DatabaseOpen`].
 pub fn open(config: Config) -> Result<DatabaseOpen, super::InternalError> {
+    let flags = sqlite::OpenFlags::new()
+        .set_create()
+        .set_read_write()
+        // The "no mutex" option opens SQLite in "multi-threaded" mode, meaning that it can safely
+        // be used from multiple threads as long as we don't access the connection from multiple
+        // threads *at the same time*. Since we put the connection behind a `Mutex`, and that the
+        // underlying library implements `!Sync` for `Connection` as a safety measure anyway, it
+        // is safe to enable this option.
+        // See https://www.sqlite.org/threadsafe.html
+        .set_no_mutex();
+
     let database = match config.ty {
         ConfigTy::Disk(path) => {
             // We put a `/v1/` behind the path in case we change the schema.
             let path = path.join("v1").join("database.sqlite");
-            sqlite::open(path)
+            sqlite::Connection::open_with_flags(path, flags)
         }
-        ConfigTy::Memory => sqlite::open(":memory:"),
+        ConfigTy::Memory => sqlite::Connection::open_with_flags(":memory:", flags),
     }
     .map_err(super::InternalError)?;
 
