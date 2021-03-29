@@ -533,10 +533,9 @@ impl SqliteFullDatabase {
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
 
             if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information() {
-                // TODO: use direct SQL to transfer epoch
                 let epoch = meta_get_blob(&connection, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
                 let decoded_epoch = decode_babe_epoch_information(&epoch)?;
-                meta_set_blob(&connection, "babe_finalized_epoch", &epoch)?;
+                connection.execute(r#"UPDATE meta SET value_blob = (SELECT value_blob FROM meta WHERE key = "babe_finalized_next_epoch") WHERE key = "babe_finalized_epoch""#).unwrap();
 
                 let slot_number = block_header
                     .digest
