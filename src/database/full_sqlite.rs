@@ -90,7 +90,7 @@ impl SqliteFullDatabase {
     pub fn best_block_hash(&self) -> Result<[u8; 32], AccessError> {
         let connection = self.database.lock();
 
-        let val = meta_get(&connection, b"best")?
+        let val = meta_get_blob(&connection, "best")?
             .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))?;
         if val.len() == 32 {
             let mut out = [0; 32];
@@ -244,17 +244,17 @@ impl SqliteFullDatabase {
         };
 
         let consensus = match (
-            meta_get(&connection, b"aura_finalized_authorities")?,
-            meta_get(&connection, b"aura_slot_duration")?,
-            meta_get(&connection, b"babe_slots_per_epoch")?,
-            meta_get(&connection, b"babe_finalized_next_epoch")?,
+            meta_get_blob(&connection, "aura_finalized_authorities")?,
+            meta_get_number(&connection, "aura_slot_duration")?,
+            meta_get_number(&connection, "babe_slots_per_epoch")?,
+            meta_get_blob(&connection, "babe_finalized_next_epoch")?,
         ) {
             (None, None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
-                let slots_per_epoch = expect_be_nz_u64(&slots_per_epoch)?;
+                let slots_per_epoch = expect_nz_u64(slots_per_epoch)?;
                 let finalized_next_epoch_transition =
                     decode_babe_epoch_information(&finalized_next_epoch)?;
                 let finalized_block_epoch_information =
-                    meta_get(&connection, b"babe_finalized_epoch")?
+                    meta_get_blob(&connection, "babe_finalized_epoch")?
                         .map(|v| decode_babe_epoch_information(&v))
                         .transpose()?;
                 chain_information::ChainInformationConsensus::Babe {
@@ -264,7 +264,7 @@ impl SqliteFullDatabase {
                 }
             }
             (Some(finalized_authorities), Some(slot_duration), None, None) => {
-                let slot_duration = expect_be_nz_u64(&slot_duration)?;
+                let slot_duration = expect_nz_u64(slot_duration)?;
                 let finalized_authorities_list =
                     decode_aura_authorities_list(&finalized_authorities)?;
                 chain_information::ChainInformationConsensus::Aura {
@@ -370,7 +370,7 @@ impl SqliteFullDatabase {
 
         // Various other updates.
         if is_new_best {
-            meta_set(&connection, b"best", &block_hash)?;
+            meta_set_blob(&connection, "best", &block_hash)?;
         }
 
         Ok(())
@@ -418,11 +418,7 @@ impl SqliteFullDatabase {
         // At this point, we are sure that the operation will succeed unless the database is
         // corrupted.
         // Update the finalized block in meta.
-        meta_set(
-            &connection,
-            b"finalized",
-            &new_finalized_header.number.to_be_bytes()[..],
-        )?;
+        meta_set_number(&connection, "finalized", new_finalized_header.number)?;
 
         // Take each block height between `header.number` and `current_finalized + 1`
         // and remove blocks that aren't an ancestor of the new finalized block.
@@ -539,9 +535,9 @@ impl SqliteFullDatabase {
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
 
             if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information() {
-                let epoch = meta_get(&connection, b"babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
+                let epoch = meta_get_blob(&connection, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
                 let decoded_epoch = decode_babe_epoch_information(&epoch)?;
-                meta_set(&connection, b"babe_finalized_epoch", &epoch)?;
+                meta_set_blob(&connection, "babe_finalized_epoch", &epoch)?;
 
                 let slot_number = block_header
                     .digest
@@ -549,7 +545,7 @@ impl SqliteFullDatabase {
                     .unwrap()
                     .slot_number();
                 let slots_per_epoch =
-                    expect_be_nz_u64(&meta_get(&connection, b"babe_slots_per_epoch")?.unwrap())?; // TODO: don't unwrap
+                    expect_nz_u64(meta_get_number(&connection, "babe_slots_per_epoch")?.unwrap())?; // TODO: don't unwrap
 
                 let new_epoch = if let Some(next_config) = next_config {
                     chain_information::BabeEpochInformation {
@@ -583,9 +579,9 @@ impl SqliteFullDatabase {
                     }
                 };
 
-                meta_set(
+                meta_set_blob(
                     &connection,
-                    b"babe_finalized_next_epoch",
+                    "babe_finalized_next_epoch",
                     &encode_babe_epoch_information(From::from(&new_epoch)),
                 )?;
             }
@@ -600,19 +596,19 @@ impl SqliteFullDatabase {
                     match grandpa_digest_item {
                         header::GrandpaConsensusLogRef::ScheduledChange(change) => {
                             assert_eq!(change.delay, 0); // TODO: not implemented if != 0
-                            meta_set(
+                            meta_set_blob(
                                 &connection,
-                                b"grandpa_triggered_authorities",
+                                "grandpa_triggered_authorities",
                                 &encode_grandpa_authorities_list(change.next_authorities),
                             )?;
 
-                            let curr_set_id = expect_be_u64(
-                                &meta_get(&connection, b"grandpa_authorities_set_id")?.unwrap(),
-                            )?; // TODO: don't unwrap
-                            meta_set(
+                            let curr_set_id =
+                                meta_get_number(&connection, "grandpa_authorities_set_id")?
+                                    .unwrap(); // TODO: don't unwrap
+                            meta_set_number(
                                 &connection,
-                                b"grandpa_authorities_set_id",
-                                &(curr_set_id + 1).to_be_bytes()[..],
+                                "grandpa_authorities_set_id",
+                                curr_set_id + 1,
                             )?;
                         }
                         _ => {} // TODO: unimplemented
@@ -893,9 +889,9 @@ pub enum CorruptedError {
 #[derive(Debug, derive_more::Display)]
 pub struct InternalError(sqlite::Error);
 
-fn meta_get(database: &sqlite::Connection, key: &[u8]) -> Result<Option<Vec<u8>>, AccessError> {
+fn meta_get_blob(database: &sqlite::Connection, key: &str) -> Result<Option<Vec<u8>>, AccessError> {
     let mut statement = database
-        .prepare(r#"SELECT value FROM meta WHERE key = ?"#)
+        .prepare(r#"SELECT value_blob FROM meta WHERE key = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
@@ -913,14 +909,56 @@ fn meta_get(database: &sqlite::Connection, key: &[u8]) -> Result<Option<Vec<u8>>
     Ok(Some(value))
 }
 
-fn meta_set(database: &sqlite::Connection, key: &[u8], value: &[u8]) -> Result<(), AccessError> {
+fn meta_get_number(database: &sqlite::Connection, key: &str) -> Result<Option<u64>, AccessError> {
     let mut statement = database
-        .prepare(r#"INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)"#)
+        .prepare(r#"SELECT value_number FROM meta WHERE key = ?"#)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?;
+    statement.bind(1, key).unwrap();
+
+    if !matches!(statement.next().unwrap(), sqlite::State::Row) {
+        return Ok(None);
+    }
+
+    let value = statement
+        .read::<i64>(0)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?;
+    Ok(Some(u64::from_ne_bytes(value.to_ne_bytes())))
+}
+
+fn meta_set_blob(
+    database: &sqlite::Connection,
+    key: &str,
+    value: &[u8],
+) -> Result<(), AccessError> {
+    let mut statement = database
+        .prepare(r#"INSERT OR REPLACE INTO meta(key, value_blob) VALUES (?, ?)"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
     statement.bind(1, key).unwrap();
     statement.bind(2, value).unwrap();
+    statement.next().unwrap();
+    Ok(())
+}
+
+fn meta_set_number(
+    database: &sqlite::Connection,
+    key: &str,
+    value: u64,
+) -> Result<(), AccessError> {
+    let mut statement = database
+        .prepare(r#"INSERT OR REPLACE INTO meta(key, value_number) VALUES (?, ?)"#)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?;
+    statement.bind(1, key).unwrap();
+    statement
+        .bind(2, i64::from_ne_bytes(value.to_ne_bytes()))
+        .unwrap();
     statement.next().unwrap();
     Ok(())
 }
@@ -942,20 +980,16 @@ fn has_block(database: &sqlite::Connection, hash: &[u8]) -> Result<bool, AccessE
 
 // TODO: the fact that the meta table stores blobs makes it impossible to use joins ; fix that
 fn finalized_num(database: &sqlite::Connection) -> Result<u64, AccessError> {
-    let value = meta_get(database, b"finalized")?
-        .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))?;
-    expect_be_u64(&value)
+    meta_get_number(database, "finalized")?
+        .ok_or(AccessError::Corrupted(CorruptedError::MissingMetaKey))
 }
 
 fn finalized_hash(database: &sqlite::Connection) -> Result<[u8; 32], AccessError> {
-    let num = finalized_num(database)?;
-
     let mut statement = database
-        .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
+        .prepare(r#"SELECT hash FROM blocks WHERE number = (SELECT value_number FROM meta WHERE key = "finalized")"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
-    statement.bind(1, i64::try_from(num).unwrap()).unwrap();
 
     if !matches!(statement.next().unwrap(), sqlite::State::Row) {
         return Err(AccessError::Corrupted(CorruptedError::InvalidFinalizedNum).into());
@@ -1051,18 +1085,13 @@ fn purge_block(database: &sqlite::Connection, hash: &[u8; 32]) -> Result<(), Acc
 }
 
 fn grandpa_authorities_set_id(database: &sqlite::Connection) -> Result<Option<u64>, AccessError> {
-    let value = match meta_get(database, b"grandpa_authorities_set_id")? {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-
-    Ok(Some(expect_be_u64(&value)?))
+    meta_get_number(database, "grandpa_authorities_set_id")
 }
 
 fn grandpa_finalized_triggered_authorities(
     database: &sqlite::Connection,
 ) -> Result<Option<Vec<header::GrandpaAuthority>>, AccessError> {
-    let value = match meta_get(database, b"grandpa_triggered_authorities")? {
+    let value = match meta_get_blob(database, "grandpa_triggered_authorities")? {
         Some(v) => v,
         None => return Ok(None),
     };
@@ -1074,12 +1103,11 @@ fn grandpa_finalized_scheduled_change(
     database: &sqlite::Connection,
 ) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, AccessError> {
     match (
-        meta_get(database, b"grandpa_scheduled_authorities")?,
-        meta_get(database, b"grandpa_scheduled_target")?,
+        meta_get_blob(database, "grandpa_scheduled_authorities")?,
+        meta_get_number(database, "grandpa_scheduled_target")?,
     ) {
         (Some(authorities), Some(height)) => {
             let authorities = decode_grandpa_authorities_list(&authorities)?;
-            let height = expect_be_u64(&height)?;
             Ok(Some((height, authorities)))
         }
         (None, None) => Ok(None),
@@ -1087,16 +1115,8 @@ fn grandpa_finalized_scheduled_change(
     }
 }
 
-fn expect_be_u64(value: &[u8]) -> Result<u64, AccessError> {
-    <[u8; 8]>::try_from(value)
-        .map(u64::from_be_bytes)
-        .map_err(|_| CorruptedError::InvalidNumber)
-        .map_err(AccessError::Corrupted)
-}
-
-fn expect_be_nz_u64(value: &[u8]) -> Result<NonZeroU64, AccessError> {
-    let num = expect_be_u64(value)?;
-    NonZeroU64::new(num)
+fn expect_nz_u64(value: u64) -> Result<NonZeroU64, AccessError> {
+    NonZeroU64::new(value)
         .ok_or(CorruptedError::InvalidNumber)
         .map_err(AccessError::Corrupted)
 }

@@ -53,57 +53,63 @@ PRAGMA encoding = 'UTF-8';
 PRAGMA trusted_schema = false; 
 
 /*
+Contains all the "global" values in the database.
+A value must be present either in `value_blob` or `value_number` depending on the type of data.
+
 Keys in that table:
 
- - `best`: Hash of the best block.
+ - `best` (blob): Hash of the best block.
 
- - `finalized`: Height of the finalized block, as a 64bits big endian number.
+ - `finalized` (number): Height of the finalized block, as a 64bits big endian number.
 
- - `grandpa_authorities_set_id`: A 64bits big endian number representing the id of the
+ - `grandpa_authorities_set_id` (number): A 64bits big endian number representing the id of the
  authorities set that must finalize the block right after the finalized block. The value is
  0 at the genesis block, and increased by 1 at every authorities change. Missing if and only
  if the chain doesn't use Grandpa.
 
- - `grandpa_triggered_authorities`: List of public keys and weights of the GrandPa
+ - `grandpa_triggered_authorities` (blob): List of public keys and weights of the GrandPa
  authorities that must finalize the children of the finalized block. Consists in 40bytes
  values concatenated together, each value being a 32bytes ed25519 public key and a 8bytes
  little endian weight. Missing if and only if the chain doesn't use Grandpa.
 
- - `grandpa_scheduled_target`: A 64bits big endian number representing the block where the
+ - `grandpa_scheduled_target` (number): A 64bits big endian number representing the block where the
  authorities found in `grandpa_scheduled_authorities` will be triggered. Blocks whose height
  is strictly higher than this value must be finalized using the new set of authorities. This
  authority change must have been scheduled in or before the finalized block. Missing if no
  change is scheduled or if the chain doesn't use Grandpa.
 
- - `grandpa_scheduled_authorities`: List of public keys and weights of the GrandPa
+ - `grandpa_scheduled_authorities` (blob): List of public keys and weights of the GrandPa
  authorities that will be triggered at the block found in `grandpa_scheduled_target`.
  Consists in 40bytes values concatenated together, each value being a 32bytes ed25519
  public key and a 8bytes little endian weight. Missing if no change is scheduled or if the
  chain doesn't use Grandpa.
 
- - `aura_slot_duration`: A 64bits big endian number indicating the duration of an Aura
+ - `aura_slot_duration` (number): A 64bits big endian number indicating the duration of an Aura
  slot. Missing if and only if the chain doesn't use Aura.
 
- - `aura_finalized_authorities`: List of public keys of the Aura authorities that must
+ - `aura_finalized_authorities` (blob): List of public keys of the Aura authorities that must
  author the children of the finalized block. Consists in 32bytes values concatenated
  together. Missing if and only if the chain doesn't use Aura.
 
- - `babe_slots_per_epoch`: A 64bits big endian number indicating the number of slots per
+ - `babe_slots_per_epoch` (number): A 64bits big endian number indicating the number of slots per
  Babe epoch. Missing if and only if the chain doesn't use Babe.
 
- - `babe_finalized_epoch`: SCALE encoding of a structure that contains the information
+ - `babe_finalized_epoch` (blob): SCALE encoding of a structure that contains the information
  about the Babe epoch used for the finalized block. Missing if and only if the finalized
  block is block #0 or the chain doesn't use Babe.
 
- - `babe_finalized_next_epoch`: SCALE encoding of a structure that contains the information
+ - `babe_finalized_next_epoch` (blob): SCALE encoding of a structure that contains the information
  about the Babe epoch that follows the one described by `babe_finalized_epoch`. If the
  finalized block is block #0, then this contains information about epoch #0. Missing if and
  only if the chain doesn't use Babe.
 
 */
 CREATE TABLE IF NOT EXISTS meta(
-    key BLOB NOT NULL PRIMARY KEY,
-    value BLOB NOT NULL
+    key STRING NOT NULL PRIMARY KEY,
+    value_blob BLOB,
+    value_number NUMBER,
+    -- Either `value_blob` or `value_number` must be NULL but not both.
+    CHECK((value_blob IS NULL OR value_number IS NULL) AND (value_blob IS NOT NULL OR value_number IS NOT NULL))
 );
 
 /*
@@ -166,7 +172,7 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
         let mut statement = database
             .prepare("SELECT COUNT(*) FROM meta WHERE key = ?")
             .unwrap();
-        statement.bind(1, &b"best"[..]).unwrap();
+        statement.bind(1, "best").unwrap();
         statement.next().unwrap();
         statement.read::<i64>(0).unwrap() == 0
     };
@@ -242,11 +248,6 @@ impl DatabaseEmpty {
                 a
             });
 
-        let mut insert_meta = self
-            .database
-            .prepare("INSERT INTO meta(key, value) VALUES(?, ?)")
-            .unwrap();
-
         {
             let mut statement = self
                 .database
@@ -301,23 +302,13 @@ impl DatabaseEmpty {
             }
         }
 
-        insert_meta.reset().unwrap();
-        insert_meta.bind(1, &b"best"[..]).unwrap();
-        insert_meta.bind(2, &finalized_block_hash[..]).unwrap();
-        insert_meta.next().unwrap();
-
-        insert_meta.reset().unwrap();
-        insert_meta.bind(1, &b"finalized"[..]).unwrap();
-        insert_meta
-            .bind(
-                2,
-                &chain_information
-                    .finalized_block_header
-                    .number
-                    .to_be_bytes()[..],
-            )
-            .unwrap();
-        insert_meta.next().unwrap();
+        super::meta_set_blob(&self.database, "best", &finalized_block_hash[..]).unwrap();
+        super::meta_set_number(
+            &self.database,
+            "finalized",
+            chain_information.finalized_block_header.number,
+        )
+        .unwrap();
 
         match &chain_information.finality {
             chain_information::ChainInformationFinalityRef::Outsourced => {}
@@ -326,53 +317,31 @@ impl DatabaseEmpty {
                 after_finalized_block_authorities_set_id,
                 finalized_scheduled_change,
             } => {
-                insert_meta.reset().unwrap();
-                insert_meta
-                    .bind(1, &b"grandpa_authorities_set_id"[..])
-                    .unwrap();
-                insert_meta
-                    .bind(
-                        2,
-                        &after_finalized_block_authorities_set_id.to_be_bytes()[..],
-                    )
-                    .unwrap();
-                insert_meta.next().unwrap();
-
-                insert_meta.reset().unwrap();
-                insert_meta
-                    .bind(1, &b"grandpa_triggered_authorities"[..])
-                    .unwrap();
-                insert_meta
-                    .bind(
-                        2,
-                        &encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
-                            finalized_triggered_authorities,
-                        ))[..],
-                    )
-                    .unwrap();
-                insert_meta.next().unwrap();
+                super::meta_set_number(
+                    &self.database,
+                    "grandpa_authorities_set_id",
+                    *after_finalized_block_authorities_set_id,
+                )
+                .unwrap();
+                super::meta_set_blob(
+                    &self.database,
+                    "grandpa_triggered_authorities",
+                    &encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
+                        finalized_triggered_authorities,
+                    ))[..],
+                )
+                .unwrap();
 
                 if let Some((height, list)) = finalized_scheduled_change {
-                    insert_meta.reset().unwrap();
-                    insert_meta
-                        .bind(1, &b"grandpa_scheduled_target"[..])
+                    super::meta_set_number(&self.database, "grandpa_scheduled_target", *height)
                         .unwrap();
-                    insert_meta.bind(2, &height.to_be_bytes()[..]).unwrap();
-                    insert_meta.next().unwrap();
-
-                    insert_meta.reset().unwrap();
-                    insert_meta
-                        .bind(1, &b"grandpa_scheduled_authorities"[..])
-                        .unwrap();
-                    insert_meta
-                        .bind(
-                            2,
-                            &encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
-                                list,
-                            ))[..],
-                        )
-                        .unwrap();
-                    insert_meta.next().unwrap();
+                    super::meta_set_blob(
+                        &self.database,
+                        "grandpa_scheduled_authorities",
+                        &encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(list))
+                            [..],
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -383,61 +352,37 @@ impl DatabaseEmpty {
                 finalized_authorities_list,
                 slot_duration,
             } => {
-                insert_meta.reset().unwrap();
-                insert_meta.bind(1, &b"aura_slot_duration"[..]).unwrap();
-                insert_meta
-                    .bind(2, &slot_duration.get().to_be_bytes()[..])
+                super::meta_set_number(&self.database, "aura_slot_duration", slot_duration.get())
                     .unwrap();
-                insert_meta.next().unwrap();
-
-                insert_meta.reset().unwrap();
-                insert_meta
-                    .bind(1, &b"aura_finalized_authorities"[..])
-                    .unwrap();
-                insert_meta
-                    .bind(
-                        2,
-                        &encode_aura_authorities_list(finalized_authorities_list.clone())[..],
-                    )
-                    .unwrap();
-                insert_meta.next().unwrap();
+                super::meta_set_blob(
+                    &self.database,
+                    "aura_finalized_authorities",
+                    &encode_aura_authorities_list(finalized_authorities_list.clone())[..],
+                )
+                .unwrap();
             }
             chain_information::ChainInformationConsensusRef::Babe {
                 slots_per_epoch,
                 finalized_next_epoch_transition,
                 finalized_block_epoch_information,
             } => {
-                insert_meta.reset().unwrap();
-                insert_meta.bind(1, &b"babe_slots_per_epoch"[..]).unwrap();
-                insert_meta
-                    .bind(2, &slots_per_epoch.get().to_be_bytes()[..])
-                    .unwrap();
-                insert_meta.next().unwrap();
-
-                insert_meta.reset().unwrap();
-                insert_meta
-                    .bind(1, &b"babe_finalized_next_epoch"[..])
-                    .unwrap();
-                insert_meta
-                    .bind(
-                        2,
-                        &encode_babe_epoch_information(finalized_next_epoch_transition.clone())[..],
-                    )
-                    .unwrap();
-                insert_meta.next().unwrap();
+                super::meta_set_number(
+                    &self.database,
+                    "babe_slots_per_epoch",
+                    slots_per_epoch.get(),
+                )
+                .unwrap();
+                super::meta_set_blob(
+                    &self.database,
+                    "babe_finalized_next_epoch",
+                    &encode_babe_epoch_information(finalized_next_epoch_transition.clone())[..],
+                )
+                .unwrap();
 
                 if let Some(finalized_block_epoch_information) = finalized_block_epoch_information {
-                    insert_meta.reset().unwrap();
-                    insert_meta.bind(1, &b"babe_finalized_epoch"[..]).unwrap();
-                    insert_meta
-                        .bind(
-                            2,
-                            &encode_babe_epoch_information(
-                                finalized_block_epoch_information.clone(),
-                            )[..],
-                        )
-                        .unwrap();
-                    insert_meta.next().unwrap();
+                    super::meta_set_blob(&self.database, "babe_finalized_epoch", &encode_babe_epoch_information(
+            finalized_block_epoch_information.clone(),
+        )[..]).unwrap();
                 }
             }
         }
@@ -445,7 +390,6 @@ impl DatabaseEmpty {
         self.database.execute("COMMIT").unwrap();
         self.database.execute("BEGIN TRANSACTION").unwrap();
 
-        drop(insert_meta);
         Ok(SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),
         })
