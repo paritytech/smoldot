@@ -20,10 +20,9 @@
 //! Contains everything related to the opening and initialization of the database.
 
 use super::{
-    encode_aura_authorities_list, encode_babe_epoch_information, encode_grandpa_authorities_list,
-    AccessError, SqliteFullDatabase,
+    encode_babe_epoch_information, AccessError, SqliteFullDatabase,
 };
-use crate::{chain::chain_information, header};
+use crate::chain::chain_information;
 
 use std::{convert::TryFrom as _, path::Path};
 
@@ -67,29 +66,14 @@ Keys in that table:
  0 at the genesis block, and increased by 1 at every authorities change. Missing if and only
  if the chain doesn't use Grandpa.
 
- - `grandpa_triggered_authorities` (blob): List of public keys and weights of the GrandPa
- authorities that must finalize the children of the finalized block. Consists in 40bytes
- values concatenated together, each value being a 32bytes ed25519 public key and a 8bytes
- little endian weight. Missing if and only if the chain doesn't use Grandpa.
-
  - `grandpa_scheduled_target` (number): A 64bits big endian number representing the block where the
  authorities found in `grandpa_scheduled_authorities` will be triggered. Blocks whose height
  is strictly higher than this value must be finalized using the new set of authorities. This
  authority change must have been scheduled in or before the finalized block. Missing if no
  change is scheduled or if the chain doesn't use Grandpa.
 
- - `grandpa_scheduled_authorities` (blob): List of public keys and weights of the GrandPa
- authorities that will be triggered at the block found in `grandpa_scheduled_target`.
- Consists in 40bytes values concatenated together, each value being a 32bytes ed25519
- public key and a 8bytes little endian weight. Missing if no change is scheduled or if the
- chain doesn't use Grandpa.
-
  - `aura_slot_duration` (number): A 64bits big endian number indicating the duration of an Aura
  slot. Missing if and only if the chain doesn't use Aura.
-
- - `aura_finalized_authorities` (blob): List of public keys of the Aura authorities that must
- author the children of the finalized block. Consists in 32bytes values concatenated
- together. Missing if and only if the chain doesn't use Aura.
 
  - `babe_slots_per_epoch` (number): A 64bits big endian number indicating the number of slots per
  Babe epoch. Missing if and only if the chain doesn't use Babe.
@@ -107,7 +91,7 @@ Keys in that table:
 CREATE TABLE IF NOT EXISTS meta(
     key STRING NOT NULL PRIMARY KEY,
     value_blob BLOB,
-    value_number NUMBER,
+    value_number INTEGER,
     -- Either `value_blob` or `value_number` must be NULL but not both.
     CHECK((value_blob IS NULL OR value_number IS NULL) AND (value_blob IS NOT NULL OR value_number IS NOT NULL))
 );
@@ -162,6 +146,37 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
     UNIQUE(hash, key),
     CHECK(length(hash) == 32),
     FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+/*
+List of public keys and weights of the GrandPa authorities that will be triggered at the block
+found in `grandpa_scheduled_target` (see `meta`). Empty if the chain doesn't use Grandpa.
+*/
+CREATE TABLE IF NOT EXISTS grandpa_triggered_authorities(
+    idx INTEGER NOT NULL PRIMARY KEY,
+    public_key BLOB NOT NULL,
+    weight INTEGER NOT NULL,
+    CHECK(length(public_key) == 32)
+);
+
+/*
+List of public keys and weights of the GrandPa authorities that must finalize the children of the
+finalized block. Empty if the chain doesn't use Grandpa.
+ */
+CREATE TABLE IF NOT EXISTS grandpa_scheduled_authorities(
+    idx INTEGER NOT NULL PRIMARY KEY,
+    public_key BLOB NOT NULL,
+    weight INTEGER NOT NULL,
+    CHECK(length(public_key) == 32)
+);
+
+/*
+List of public keys of the Aura authorities that must author the children of the finalized block.
+ */
+CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
+    idx INTEGER NOT NULL PRIMARY KEY,
+    public_key BLOB NOT NULL,
+    CHECK(length(public_key) == 32)
 );
 
     "#,
@@ -323,25 +338,42 @@ impl DatabaseEmpty {
                     *after_finalized_block_authorities_set_id,
                 )
                 .unwrap();
-                super::meta_set_blob(
-                    &self.database,
-                    "grandpa_triggered_authorities",
-                    &encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(
-                        finalized_triggered_authorities,
-                    ))[..],
-                )
-                .unwrap();
+
+                let mut statement = self
+                    .database
+                    .prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
+                    .unwrap();
+                for (index, item) in finalized_triggered_authorities.iter().enumerate() {
+                    statement
+                        .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                        .unwrap();
+                    statement.bind(2, &item.public_key[..]).unwrap();
+                    statement
+                        .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
+                        .unwrap();
+                    statement.next().unwrap();
+                    statement.reset().unwrap();
+                }
 
                 if let Some((height, list)) = finalized_scheduled_change {
                     super::meta_set_number(&self.database, "grandpa_scheduled_target", *height)
                         .unwrap();
-                    super::meta_set_blob(
-                        &self.database,
-                        "grandpa_scheduled_authorities",
-                        &encode_grandpa_authorities_list(header::GrandpaAuthoritiesIter::new(list))
-                            [..],
-                    )
-                    .unwrap();
+
+                    let mut statement = self
+                        .database
+                        .prepare("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
+                        .unwrap();
+                    for (index, item) in list.iter().enumerate() {
+                        statement
+                            .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                            .unwrap();
+                        statement.bind(2, &item.public_key[..]).unwrap();
+                        statement
+                            .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
+                            .unwrap();
+                        statement.next().unwrap();
+                        statement.reset().unwrap();
+                    }
                 }
             }
         }
@@ -354,12 +386,19 @@ impl DatabaseEmpty {
             } => {
                 super::meta_set_number(&self.database, "aura_slot_duration", slot_duration.get())
                     .unwrap();
-                super::meta_set_blob(
-                    &self.database,
-                    "aura_finalized_authorities",
-                    &encode_aura_authorities_list(finalized_authorities_list.clone())[..],
-                )
-                .unwrap();
+
+                let mut statement = self
+                    .database
+                    .prepare("INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)")
+                    .unwrap();
+                for (index, item) in finalized_authorities_list.clone().enumerate() {
+                    statement
+                        .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                        .unwrap();
+                    statement.bind(2, &item.public_key[..]).unwrap();
+                    statement.next().unwrap();
+                    statement.reset().unwrap();
+                }
             }
             chain_information::ChainInformationConsensusRef::Babe {
                 slots_per_epoch,

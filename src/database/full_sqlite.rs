@@ -97,9 +97,7 @@ impl SqliteFullDatabase {
             out.copy_from_slice(&val);
             Ok(out)
         } else {
-            Err(AccessError::Corrupted(
-                CorruptedError::BestBlockHashBadLength,
-            ))
+            Err(AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))
         }
     }
 
@@ -228,14 +226,16 @@ impl SqliteFullDatabase {
         ) {
             (
                 Some(after_finalized_block_authorities_set_id),
-                Some(finalized_triggered_authorities),
+                finalized_triggered_authorities,
                 finalized_scheduled_change,
             ) => chain_information::ChainInformationFinality::Grandpa {
                 after_finalized_block_authorities_set_id,
                 finalized_triggered_authorities,
                 finalized_scheduled_change,
             },
-            (None, None, None) => chain_information::ChainInformationFinality::Outsourced,
+            (None, auth, None) if auth.is_empty() => {
+                chain_information::ChainInformationFinality::Outsourced
+            }
             _ => {
                 return Err(FinalizedAccessError::Access(AccessError::Corrupted(
                     CorruptedError::ConsensusAlgorithmMix,
@@ -244,12 +244,11 @@ impl SqliteFullDatabase {
         };
 
         let consensus = match (
-            meta_get_blob(&connection, "aura_finalized_authorities")?,
             meta_get_number(&connection, "aura_slot_duration")?,
             meta_get_number(&connection, "babe_slots_per_epoch")?,
             meta_get_blob(&connection, "babe_finalized_next_epoch")?,
         ) {
-            (None, None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
+            (None, Some(slots_per_epoch), Some(finalized_next_epoch)) => {
                 let slots_per_epoch = expect_nz_u64(slots_per_epoch)?;
                 let finalized_next_epoch_transition =
                     decode_babe_epoch_information(&finalized_next_epoch)?;
@@ -263,16 +262,15 @@ impl SqliteFullDatabase {
                     slots_per_epoch,
                 }
             }
-            (Some(finalized_authorities), Some(slot_duration), None, None) => {
+            (Some(slot_duration), None, None) => {
                 let slot_duration = expect_nz_u64(slot_duration)?;
-                let finalized_authorities_list =
-                    decode_aura_authorities_list(&finalized_authorities)?;
+                let finalized_authorities_list = aura_finalized_authorities(&connection)?;
                 chain_information::ChainInformationConsensus::Aura {
                     finalized_authorities_list,
                     slot_duration,
                 }
             }
-            (None, None, None, None) => chain_information::ChainInformationConsensus::AllAuthorized,
+            (None, None, None) => chain_information::ChainInformationConsensus::AllAuthorized,
             _ => {
                 return Err(FinalizedAccessError::Access(AccessError::Corrupted(
                     CorruptedError::ConsensusAlgorithmMix,
@@ -535,6 +533,7 @@ impl SqliteFullDatabase {
             // TODO: the code below is very verbose and redundant with other similar code in smoldot ; could be improved
 
             if let Some((new_epoch, next_config)) = block_header.digest.babe_epoch_information() {
+                // TODO: use direct SQL to transfer epoch
                 let epoch = meta_get_blob(&connection, "babe_finalized_next_epoch")?.unwrap(); // TODO: don't unwrap
                 let decoded_epoch = decode_babe_epoch_information(&epoch)?;
                 meta_set_blob(&connection, "babe_finalized_epoch", &epoch)?;
@@ -596,20 +595,25 @@ impl SqliteFullDatabase {
                     match grandpa_digest_item {
                         header::GrandpaConsensusLogRef::ScheduledChange(change) => {
                             assert_eq!(change.delay, 0); // TODO: not implemented if != 0
-                            meta_set_blob(
-                                &connection,
-                                "grandpa_triggered_authorities",
-                                &encode_grandpa_authorities_list(change.next_authorities),
-                            )?;
 
-                            let curr_set_id =
-                                meta_get_number(&connection, "grandpa_authorities_set_id")?
-                                    .unwrap(); // TODO: don't unwrap
-                            meta_set_number(
-                                &connection,
-                                "grandpa_authorities_set_id",
-                                curr_set_id + 1,
-                            )?;
+                            connection
+                                .execute("DELETE FROM grandpa_triggered_authorities")
+                                .unwrap();
+
+                            let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
+                            for (index, item) in change.next_authorities.enumerate() {
+                                statement
+                                    .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                                    .unwrap();
+                                statement.bind(2, &item.public_key[..]).unwrap();
+                                statement
+                                    .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
+                                    .unwrap();
+                                statement.next().unwrap();
+                                statement.reset().unwrap();
+                            }
+
+                            connection.execute(r#"UPDATE meta SET value_number = value_number + 1 WHERE key = "grandpa_authorities_set_id""#).unwrap();
                         }
                         _ => {} // TODO: unimplemented
                     }
@@ -875,12 +879,11 @@ pub enum CorruptedError {
     /// Some parts of the database refer to a block by its hash, but the block's constituents
     /// couldn't be found.
     MissingBlockHeader,
-    BestBlockHashBadLength,
+    /// The header of a block in the database has failed to decode.
     BlockHeaderCorrupted(header::Error),
-    BlockBodyCorrupted,
     /// Multiple different consensus algorithms are mixed within the database.
     ConsensusAlgorithmMix,
-    InvalidGrandpaAuthoritiesList,
+    /// The information about a Babe epoch found in the database has failed to decode.
     InvalidBabeEpochInformation,
     Internal(InternalError),
 }
@@ -1090,28 +1093,80 @@ fn grandpa_authorities_set_id(database: &sqlite::Connection) -> Result<Option<u6
 
 fn grandpa_finalized_triggered_authorities(
     database: &sqlite::Connection,
-) -> Result<Option<Vec<header::GrandpaAuthority>>, AccessError> {
-    let value = match meta_get_blob(database, "grandpa_triggered_authorities")? {
-        Some(v) => v,
-        None => return Ok(None),
-    };
+) -> Result<Vec<header::GrandpaAuthority>, AccessError> {
+    let mut statement = database
+        .prepare(r#"SELECT public_key, weight FROM grandpa_triggered_authorities ORDER BY idx ASC"#)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?;
 
-    Ok(Some(decode_grandpa_authorities_list(&value)?))
+    let mut out = Vec::new();
+    while matches!(statement.next().unwrap(), sqlite::State::Row) {
+        let public_key = statement
+            .read::<Vec<u8>>(0)
+            .map_err(InternalError)
+            .map_err(CorruptedError::Internal)
+            .map_err(AccessError::Corrupted)?;
+
+        let public_key = <[u8; 32]>::try_from(&public_key[..])
+            .map_err(|_| CorruptedError::InvalidBlockHashLen)
+            .map_err(AccessError::Corrupted)?;
+
+        let weight = statement
+            .read::<i64>(1)
+            .map_err(InternalError)
+            .map_err(CorruptedError::Internal)
+            .map_err(AccessError::Corrupted)?;
+
+        let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
+            .ok_or(CorruptedError::InvalidNumber)
+            .map_err(AccessError::Corrupted)?;
+        out.push(header::GrandpaAuthority { public_key, weight });
+    }
+
+    Ok(out)
 }
 
 fn grandpa_finalized_scheduled_change(
     database: &sqlite::Connection,
 ) -> Result<Option<(u64, Vec<header::GrandpaAuthority>)>, AccessError> {
-    match (
-        meta_get_blob(database, "grandpa_scheduled_authorities")?,
-        meta_get_number(database, "grandpa_scheduled_target")?,
-    ) {
-        (Some(authorities), Some(height)) => {
-            let authorities = decode_grandpa_authorities_list(&authorities)?;
-            Ok(Some((height, authorities)))
+    if let Some(height) = meta_get_number(database, "grandpa_scheduled_target")? {
+        // TODO: duplicated from above except different table name
+        let mut statement = database
+            .prepare(
+                r#"SELECT public_key, weight FROM grandpa_scheduled_authorities ORDER BY idx ASC"#,
+            )
+            .map_err(InternalError)
+            .map_err(CorruptedError::Internal)
+            .map_err(AccessError::Corrupted)?;
+
+        let mut out = Vec::new();
+        while matches!(statement.next().unwrap(), sqlite::State::Row) {
+            let public_key = statement
+                .read::<Vec<u8>>(0)
+                .map_err(InternalError)
+                .map_err(CorruptedError::Internal)
+                .map_err(AccessError::Corrupted)?;
+
+            let public_key = <[u8; 32]>::try_from(&public_key[..])
+                .map_err(|_| CorruptedError::InvalidBlockHashLen)
+                .map_err(AccessError::Corrupted)?;
+
+            let weight = statement
+                .read::<i64>(1)
+                .map_err(InternalError)
+                .map_err(CorruptedError::Internal)
+                .map_err(AccessError::Corrupted)?;
+
+            let weight = NonZeroU64::new(u64::from_ne_bytes(weight.to_ne_bytes()))
+                .ok_or(CorruptedError::InvalidNumber)
+                .map_err(AccessError::Corrupted)?;
+            out.push(header::GrandpaAuthority { public_key, weight });
         }
-        (None, None) => Ok(None),
-        _ => Err(AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList).into()),
+
+        Ok(Some((height, out)))
+    } else {
+        Ok(None)
     }
 }
 
@@ -1121,54 +1176,28 @@ fn expect_nz_u64(value: u64) -> Result<NonZeroU64, AccessError> {
         .map_err(AccessError::Corrupted)
 }
 
-fn encode_aura_authorities_list(list: header::AuraAuthoritiesIter) -> Vec<u8> {
-    let mut out = Vec::with_capacity(list.len() * 32);
-    for authority in list {
-        out.extend_from_slice(authority.public_key);
-    }
-    debug_assert_eq!(out.len(), out.capacity());
-    out
-}
+fn aura_finalized_authorities(
+    database: &sqlite::Connection,
+) -> Result<Vec<header::AuraAuthority>, AccessError> {
+    let mut statement = database
+        .prepare(r#"SELECT public_key FROM aura_finalized_authorities ORDER BY idx ASC"#)
+        .map_err(InternalError)
+        .map_err(CorruptedError::Internal)
+        .map_err(AccessError::Corrupted)?;
 
-fn decode_aura_authorities_list(value: &[u8]) -> Result<Vec<header::AuraAuthority>, AccessError> {
-    if value.len() % 32 != 0 {
-        return Err(AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList).into());
-    }
-
-    Ok(value
-        .chunks(32)
-        .map(|chunk| {
-            let public_key = <[u8; 32]>::try_from(chunk).unwrap();
-            header::AuraAuthority { public_key }
-        })
-        .collect())
-}
-
-fn encode_grandpa_authorities_list(list: header::GrandpaAuthoritiesIter) -> Vec<u8> {
-    let mut out = Vec::with_capacity(list.len() * 40);
-    for authority in list {
-        out.extend_from_slice(authority.public_key);
-        out.extend_from_slice(&authority.weight.get().to_le_bytes()[..]);
-    }
-    debug_assert_eq!(out.len(), out.capacity());
-    out
-}
-
-fn decode_grandpa_authorities_list(
-    value: &[u8],
-) -> Result<Vec<header::GrandpaAuthority>, AccessError> {
-    if value.len() % 40 != 0 {
-        return Err(AccessError::Corrupted(CorruptedError::InvalidGrandpaAuthoritiesList).into());
-    }
-
-    let mut out = Vec::with_capacity(value.len() / 40);
-    for chunk in value.chunks(40) {
-        let public_key = <[u8; 32]>::try_from(&chunk[..32]).unwrap();
-        let weight = u64::from_le_bytes(<[u8; 8]>::try_from(&chunk[32..]).unwrap());
-        let weight = NonZeroU64::new(weight)
-            .ok_or(CorruptedError::InvalidGrandpaAuthoritiesList)
+    let mut out = Vec::new();
+    while matches!(statement.next().unwrap(), sqlite::State::Row) {
+        let public_key = statement
+            .read::<Vec<u8>>(0)
+            .map_err(InternalError)
+            .map_err(CorruptedError::Internal)
             .map_err(AccessError::Corrupted)?;
-        out.push(header::GrandpaAuthority { public_key, weight });
+
+        let public_key = <[u8; 32]>::try_from(&public_key[..])
+            .map_err(|_| CorruptedError::InvalidBlockHashLen)
+            .map_err(AccessError::Corrupted)?;
+
+        out.push(header::AuraAuthority { public_key });
     }
 
     Ok(out)
