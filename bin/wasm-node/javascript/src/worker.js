@@ -98,11 +98,13 @@ const startInstance = async (config) => {
     config.maxLogLevel
   );
 
+  const source_index = 0;
+
   state.forEach((json_rpc_request) => {
     const len = Buffer.byteLength(json_rpc_request, 'utf8');
     const ptr = result.instance.exports.alloc(len);
     Buffer.from(result.instance.exports.memory.buffer).write(json_rpc_request, ptr);
-    result.instance.exports.json_rpc_send(ptr, len);
+    result.instance.exports.json_rpc_send(ptr, len, source_index);
   });
 
   state = result.instance;

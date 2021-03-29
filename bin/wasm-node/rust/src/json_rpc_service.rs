@@ -166,16 +166,17 @@ pub async fn start(config: Config) {
             // Each incoming request gets its own separate task.
             let client_clone = client.clone();
             (client.tasks_executor.lock().await)(Box::pin(async move {
-                let request_string = match String::from_utf8(Vec::from(json_rpc_request)) {
-                    Ok(s) => s,
-                    Err(error) => {
-                        log::warn!(
-                            target: "json-rpc",
-                            "Failed to parse JSON-RPC query as UTF-8: {}", error
-                        );
-                        return;
-                    }
-                };
+                let request_string =
+                    match String::from_utf8(Vec::from(json_rpc_request.method_name)) {
+                        Ok(s) => s,
+                        Err(error) => {
+                            log::warn!(
+                                target: "json-rpc",
+                                "Failed to parse JSON-RPC query as UTF-8: {}", error
+                            );
+                            return;
+                        }
+                    };
 
                 log::debug!(
                     target: "json-rpc",
@@ -195,10 +196,19 @@ pub async fn start(config: Config) {
                     }
                 };
 
-                client_clone.handle_rpc(request_id, call).await;
+                client_clone
+                    .handle_rpc(request_id, call, json_rpc_request.source_id)
+                    .await;
             }));
         }
     }));
+}
+
+/// Use for subscriptions that can be more than one subscription per source.
+#[derive(PartialEq, Eq, Hash)]
+struct SubscriptionId {
+    source_id: u32,
+    subscription_id: String,
 }
 
 struct JsonRpcService {
@@ -231,22 +241,22 @@ struct JsonRpcService {
     /// For each active finalized blocks subscription (the key), a sender. If the user
     /// unsubscribes, send the unsubscription request ID of the channel in order to close the
     /// subscription.
-    all_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    all_heads: Mutex<HashMap<u32, oneshot::Sender<String>>>,
 
     /// Same principle as [`JsonRpcService::all_heads`], but for new heads subscriptions.
-    new_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    new_heads: Mutex<HashMap<u32, oneshot::Sender<String>>>,
 
     /// Same principle as [`JsonRpcService::all_heads`], but for finalized heads subscriptions.
-    finalized_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    finalized_heads: Mutex<HashMap<u32, oneshot::Sender<String>>>,
 
     /// Same principle as [`JsonRpcService::all_heads`], but for storage subscriptions.
-    storage: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    storage: Mutex<HashMap<SubscriptionId, oneshot::Sender<String>>>,
 
     /// Same principle as [`JsonRpcService::all_heads`], but for transactions.
-    transactions: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    transactions: Mutex<HashMap<SubscriptionId, oneshot::Sender<String>>>,
 
     /// Same principle as [`JsonRpcService::all_heads`], but for runtime specs.
-    runtime_specs: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    runtime_specs: Mutex<HashMap<u32, oneshot::Sender<String>>>,
 }
 
 struct Blocks {
@@ -282,7 +292,12 @@ impl JsonRpcService {
     ///
     /// Depending on the request, either calls [`JsonRpcService::send_back`] immediately or
     /// spawns a background task for further processing.
-    async fn handle_rpc(self: Arc<JsonRpcService>, request_id: &str, call: MethodCall) {
+    async fn handle_rpc(
+        self: Arc<JsonRpcService>,
+        request_id: &str,
+        call: MethodCall,
+        source_id: u32,
+    ) {
         // Most calls are handled directly in this method's body. The most voluminous (in terms
         // of lines of code) have their dedicated methods.
         match call {
@@ -318,19 +333,25 @@ impl JsonRpcService {
                 );
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
-                self.submit_and_watch_extrinsic(request_id, transaction)
+                self.submit_and_watch_extrinsic(request_id, transaction, source_id)
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                let invalid =
-                    if let Some(cancel_tx) = self.transactions.lock().await.remove(&subscription) {
-                        // `cancel_tx` might have been closed if the channel from the transactions
-                        // service has been closed too. This is not an error.
-                        let _ = cancel_tx.send(request_id.to_owned());
-                        false
-                    } else {
-                        true
-                    };
+                let subscription_id = SubscriptionId {
+                    source_id,
+                    subscription_id: subscription,
+                };
+
+                let invalid = if let Some(cancel_tx) =
+                    self.transactions.lock().await.remove(&subscription_id)
+                {
+                    // `cancel_tx` might have been closed if the channel from the transactions
+                    // service has been closed too. This is not an error.
+                    let _ = cancel_tx.send(request_id.to_owned());
+                    false
+                } else {
+                    true
+                };
 
                 if invalid {
                     self.send_back(
@@ -409,22 +430,21 @@ impl JsonRpcService {
                 });
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.subscribe_all_heads(request_id).await;
+                self.subscribe_all_heads(request_id, source_id).await;
             }
             methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.subscribe_new_heads(request_id).await;
+                self.subscribe_new_heads(request_id, source_id).await;
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(request_id).await;
+                self.subscribe_finalized_heads(request_id, source_id).await;
             }
-            methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                let invalid = if let Some(cancel_tx) =
-                    self.finalized_heads.lock().await.remove(&subscription)
-                {
-                    cancel_tx.send(request_id.to_owned()).is_err()
-                } else {
-                    true
-                };
+            methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription: _ } => {
+                let invalid =
+                    if let Some(cancel_tx) = self.finalized_heads.lock().await.remove(&source_id) {
+                        cancel_tx.send(request_id.to_owned()).is_err()
+                    } else {
+                        true
+                    };
 
                 if invalid {
                     self.send_back(
@@ -560,11 +580,6 @@ impl JsonRpcService {
                 });
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                let subscription = self
-                    .next_subscription
-                    .fetch_add(1, atomic::Ordering::Relaxed)
-                    .to_string();
-
                 let (current_specs, spec_changes) =
                     self.runtime_service.subscribe_runtime_version().await;
 
@@ -572,7 +587,12 @@ impl JsonRpcService {
                 self.runtime_specs
                     .lock()
                     .await
-                    .insert(subscription.clone(), unsubscribe_tx);
+                    .insert(source_id, unsubscribe_tx);
+
+                let subscription = self
+                    .next_subscription
+                    .fetch_add(1, atomic::Ordering::Relaxed)
+                    .to_string();
 
                 self.send_back(
                     &methods::Response::state_subscribeRuntimeVersion(&subscription)
@@ -653,11 +673,16 @@ impl JsonRpcService {
                 }));
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                self.subscribe_storage(request_id, list).await;
+                self.subscribe_storage(request_id, list, source_id).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
+                let subscription_id = SubscriptionId {
+                    source_id,
+                    subscription_id: subscription,
+                };
+
                 let invalid =
-                    if let Some(cancel_tx) = self.storage.lock().await.remove(&subscription) {
+                    if let Some(cancel_tx) = self.storage.lock().await.remove(&subscription_id) {
                         cancel_tx.send(request_id.to_owned()).is_err()
                     } else {
                         true
@@ -796,6 +821,7 @@ impl JsonRpcService {
         self: Arc<JsonRpcService>,
         request_id: &str,
         transaction: methods::HexString,
+        source_id: u32,
     ) {
         let mut transaction_updates = self
             .transactions_service
@@ -807,11 +833,16 @@ impl JsonRpcService {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
+        let subscription_id = SubscriptionId {
+            source_id,
+            subscription_id: subscription.clone(),
+        };
+
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
         self.transactions
             .lock()
             .await
-            .insert(subscription.clone(), unsubscribe_tx);
+            .insert(subscription_id, unsubscribe_tx);
 
         let confirmation = methods::Response::author_submitAndWatchExtrinsic(&subscription)
             .to_json_response(request_id);
@@ -923,17 +954,18 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(self: Arc<JsonRpcService>, request_id: &str) {
+    async fn subscribe_all_heads(self: Arc<JsonRpcService>, request_id: &str, source_id: u32) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
+
         self.all_heads
             .lock()
             .await
-            .insert(subscription.clone(), unsubscribe_tx);
+            .insert(source_id, unsubscribe_tx);
 
         let mut blocks_list = {
             // TODO: best blocks != all heads
@@ -977,7 +1009,7 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(self: Arc<JsonRpcService>, request_id: &str) {
+    async fn subscribe_new_heads(self: Arc<JsonRpcService>, request_id: &str, source_id: u32) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -987,7 +1019,7 @@ impl JsonRpcService {
         self.new_heads
             .lock()
             .await
-            .insert(subscription.clone(), unsubscribe_tx);
+            .insert(source_id, unsubscribe_tx);
 
         let mut blocks_list = {
             let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
@@ -1030,7 +1062,11 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
-    async fn subscribe_finalized_heads(self: Arc<JsonRpcService>, request_id: &str) {
+    async fn subscribe_finalized_heads(
+        self: Arc<JsonRpcService>,
+        request_id: &str,
+        source_id: u32,
+    ) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1040,7 +1076,7 @@ impl JsonRpcService {
         self.finalized_heads
             .lock()
             .await
-            .insert(subscription.clone(), unsubscribe_tx);
+            .insert(source_id, unsubscribe_tx);
 
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
@@ -1088,17 +1124,23 @@ impl JsonRpcService {
         self: Arc<JsonRpcService>,
         request_id: &str,
         list: Vec<methods::HexString>,
+        source_id: u32,
     ) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
+        let subscription_id = SubscriptionId {
+            source_id,
+            subscription_id: subscription.clone(),
+        };
+
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
         self.storage
             .lock()
             .await
-            .insert(subscription.clone(), unsubscribe_tx);
+            .insert(subscription_id, unsubscribe_tx);
 
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {
