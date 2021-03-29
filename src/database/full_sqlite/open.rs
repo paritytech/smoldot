@@ -107,20 +107,17 @@ CREATE TABLE IF NOT EXISTS meta(
 );
 
 /*
-List of all known blocks, easily findable by their number.
+List of all known blocks, indexed by their hash or number.
 */
-CREATE TABLE IF NOT EXISTS blocks_by_number(
+CREATE TABLE IF NOT EXISTS blocks(
+    hash BLOB NOT NULL PRIMARY KEY,
     number INTEGER NOT NULL,
-    hash BLOB NOT NULL,
+    header BLOB NOT NULL,
+    justification BLOB,
     UNIQUE(number, hash),
     CHECK(length(hash) == 32)
 );
-
-CREATE TABLE IF NOT EXISTS block_header(
-    hash BLOB NOT NULL PRIMARY KEY,
-    header BLOB NOT NULL,
-    CHECK(length(hash) == 32)
-);
+CREATE INDEX IF NOT EXISTS blocks_by_number ON blocks(number);
 
 /*
 Each block has a body made from 0+ extrinsics (in practice, there's always at least one extrinsic,
@@ -128,18 +125,13 @@ but the database supports 0). This table contains these extrinsics.
 The `idx` field contains the index between `0` and `num_extrinsics - 1`. The values in `idx` must
 be contiguous for each block.
 */
-CREATE TABLE IF NOT EXISTS block_body(
+CREATE TABLE IF NOT EXISTS blocks_body(
     hash BLOB NOT NULL,
     idx INTEGER NOT NULL,
     extrinsic BLOB NOT NULL,
     UNIQUE(hash, idx),
-    CHECK(length(hash) == 32)
-);
-
-CREATE TABLE IF NOT EXISTS block_justification(
-    hash BLOB NOT NULL PRIMARY KEY,
-    justification BLOB NOT NULL,
-    CHECK(length(hash) == 32)
+    CHECK(length(hash) == 32),
+    FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
 /*
@@ -162,7 +154,8 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
     -- or replaces the value at the key.
     value BLOB,
     UNIQUE(hash, key),
-    CHECK(length(hash) == 32)
+    CHECK(length(hash) == 32),
+    FOREIGN KEY (hash) REFERENCES blocks(hash) ON UPDATE CASCADE ON DELETE CASCADE
 );
 
     "#,
@@ -270,34 +263,34 @@ impl DatabaseEmpty {
         {
             let mut statement = self
                 .database
-                .prepare("INSERT INTO blocks_by_number(number, hash) VALUES(?, ?)")
-                .unwrap();
-            statement
-                .bind(
-                    1,
-                    i64::try_from(chain_information.finalized_block_header.number).unwrap(),
+                .prepare(
+                    "INSERT INTO blocks(hash, number, header, justification) VALUES(?, ?, ?, ?)",
                 )
-                .unwrap();
-            statement.bind(2, &finalized_block_hash[..]).unwrap();
-            statement.next().unwrap();
-        }
-
-        {
-            let mut statement = self
-                .database
-                .prepare("INSERT INTO block_header(hash, header) VALUES(?, ?)")
                 .unwrap();
             statement.bind(1, &finalized_block_hash[..]).unwrap();
             statement
-                .bind(2, &scale_encoded_finalized_block_header[..])
+                .bind(
+                    2,
+                    i64::try_from(chain_information.finalized_block_header.number).unwrap(),
+                )
                 .unwrap();
+            statement
+                .bind(3, &scale_encoded_finalized_block_header[..])
+                .unwrap();
+            if let Some(finalized_block_justification) = &finalized_block_justification {
+                statement
+                    .bind(4, &finalized_block_justification[..])
+                    .unwrap();
+            } else {
+                statement.bind(4, ()).unwrap();
+            }
             statement.next().unwrap();
         }
 
         {
             let mut statement = self
                 .database
-                .prepare("INSERT INTO block_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
+                .prepare("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES(?, ?, ?)")
                 .unwrap();
             for (index, item) in finalized_block_body.enumerate() {
                 statement.bind(1, &finalized_block_hash[..]).unwrap();
@@ -306,18 +299,6 @@ impl DatabaseEmpty {
                 statement.next().unwrap();
                 statement.reset().unwrap();
             }
-        }
-
-        if let Some(finalized_block_justification) = &finalized_block_justification {
-            let mut statement = self
-                .database
-                .prepare("INSERT INTO block_justification(hash, justification) VALUES(?, ?)")
-                .unwrap();
-            statement.bind(1, &finalized_block_hash[..]).unwrap();
-            statement
-                .bind(2, &finalized_block_justification[..])
-                .unwrap();
-            statement.next().unwrap();
         }
 
         insert_meta.reset().unwrap();

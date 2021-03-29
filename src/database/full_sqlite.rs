@@ -121,7 +121,7 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         let mut statement = connection
-            .prepare(r#"SELECT header FROM block_header WHERE hash = ?"#)
+            .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)?;
         statement.bind(1, &block_hash[..]).unwrap();
@@ -151,7 +151,7 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         let mut statement = connection
-            .prepare(r#"SELECT extrinsic FROM block_body WHERE hash = ? ORDER BY idx ASC"#)
+            .prepare(r#"SELECT extrinsic FROM blocks_body WHERE hash = ? ORDER BY idx ASC"#)
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)?;
 
@@ -183,7 +183,7 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         let mut statement = connection
-            .prepare(r#"SELECT hash FROM blocks_by_number WHERE number = ?"#)
+            .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
             .map_err(InternalError)
             .map_err(CorruptedError::Internal)?;
         statement.bind(1, block_number).unwrap();
@@ -329,13 +329,27 @@ impl SqliteFullDatabase {
         }
 
         let mut statement = connection
-            .prepare("INSERT INTO blocks_by_number(number, hash) VALUES (?, ?)")
+            .prepare(
+                "INSERT INTO blocks(number, hash, header, justification) VALUES (?, ?, ?, NULL)",
+            )
             .unwrap();
         statement
             .bind(1, i64::try_from(header.number).unwrap())
             .unwrap();
         statement.bind(2, &block_hash[..]).unwrap();
+        statement.bind(3, &scale_encoded_header[..]).unwrap();
         statement.next().unwrap();
+
+        let mut statement = connection
+            .prepare("INSERT INTO blocks_body(hash, idx, extrinsic) VALUES (?, ?, ?)")
+            .unwrap();
+        for (index, item) in body.enumerate() {
+            statement.bind(1, &block_hash[..]).unwrap();
+            statement.bind(2, i64::try_from(index).unwrap()).unwrap();
+            statement.bind(3, item.as_ref()).unwrap();
+            statement.next().unwrap();
+            statement.reset().unwrap();
+        }
 
         // Insert the storage changes.
         let mut statement = connection
@@ -355,23 +369,6 @@ impl SqliteFullDatabase {
         }
 
         // Various other updates.
-        let mut statement = connection
-            .prepare("INSERT INTO block_header(hash, header) VALUES (?, ?)")
-            .unwrap();
-        statement.bind(1, &block_hash[..]).unwrap();
-        statement.bind(2, &scale_encoded_header[..]).unwrap();
-        statement.next().unwrap();
-
-        let mut statement = connection
-            .prepare("INSERT INTO block_body(hash, idx, extrinsic) VALUES (?, ?, ?)")
-            .unwrap();
-        for (index, item) in body.enumerate() {
-            statement.bind(1, &block_hash[..]).unwrap();
-            statement.bind(2, i64::try_from(index).unwrap()).unwrap();
-            statement.bind(3, item.as_ref()).unwrap();
-            statement.next().unwrap();
-            statement.reset().unwrap();
-        }
         if is_new_best {
             meta_set(&connection, b"best", &block_hash)?;
         }
@@ -446,7 +443,7 @@ impl SqliteFullDatabase {
                     }
 
                     // Remove the block from the database.
-                    purge_block(&connection, &hash_at_height, height)?;
+                    purge_block(&connection, &hash_at_height)?;
                 }
 
                 // `expected_hash` not found in the list of blocks with this number.
@@ -488,7 +485,7 @@ impl SqliteFullDatabase {
                     continue;
                 }
 
-                purge_block(&connection, &block_hash, height)?;
+                purge_block(&connection, &block_hash)?;
             }
 
             allowed_parents = next_iter_allowed_parents;
@@ -930,7 +927,7 @@ fn meta_set(database: &sqlite::Connection, key: &[u8], value: &[u8]) -> Result<(
 
 fn has_block(database: &sqlite::Connection, hash: &[u8]) -> Result<bool, AccessError> {
     let mut statement = database
-        .prepare(r#"SELECT COUNT(*) FROM block_header WHERE hash = ?"#)
+        .prepare(r#"SELECT COUNT(*) FROM blocks WHERE hash = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
@@ -954,7 +951,7 @@ fn finalized_hash(database: &sqlite::Connection) -> Result<[u8; 32], AccessError
     let num = finalized_num(database)?;
 
     let mut statement = database
-        .prepare(r#"SELECT hash FROM blocks_by_number WHERE number = ?"#)
+        .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
@@ -989,7 +986,7 @@ fn block_hashes_by_number(
     };
 
     let mut statement = database
-        .prepare(r#"SELECT hash FROM blocks_by_number WHERE number = ?"#)
+        .prepare(r#"SELECT hash FROM blocks WHERE number = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
@@ -1017,7 +1014,7 @@ fn block_header(
     hash: &[u8; 32],
 ) -> Result<Option<header::Header>, AccessError> {
     let mut statement = database
-        .prepare(r#"SELECT header FROM block_header WHERE hash = ?"#)
+        .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
         .map_err(InternalError)
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
@@ -1039,27 +1036,15 @@ fn block_header(
     }
 }
 
-fn purge_block(
-    database: &sqlite::Connection,
-    hash: &[u8; 32],
-    number: u64,
-) -> Result<(), AccessError> {
-    let number = match i64::try_from(number) {
-        Ok(n) => n,
-        Err(_) => return Ok(()),
-    };
-
+fn purge_block(database: &sqlite::Connection, hash: &[u8; 32]) -> Result<(), AccessError> {
     let mut statement = database
         .prepare(
             "DELETE FROM non_finalized_changes WHERE hash = :hash;
-        DELETE FROM block_body WHERE hash = :hash;
-        DELETE FROM block_justification WHERE hash = :hash;
-        DELETE FROM block_header WHERE hash = :hash;
-        DELETE FROM blocks_by_number WHERE hash = :hash AND number = :number",
+        DELETE FROM blocks_body WHERE hash = :hash;
+        DELETE FROM blocks WHERE hash = :hash;",
         )
         .unwrap();
     statement.bind_by_name(":hash", &hash[..]).unwrap();
-    statement.bind_by_name(":number", number).unwrap();
     statement.next().unwrap();
 
     Ok(())
