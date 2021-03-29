@@ -523,6 +523,10 @@ lazy_static::lazy_static! {
         let (tx, rx) = mpsc::unbounded();
         (tx, futures::lock::Mutex::new(rx))
     };
+    static ref UNSUBSCRIBE_ALL_CHANNEL: (mpsc::UnboundedSender<u32>, futures::lock::Mutex<mpsc::UnboundedReceiver<u32>>) = {
+        let (tx, rx) = mpsc::unbounded();
+        (tx, futures::lock::Mutex::new(rx))
+    };
 }
 
 fn json_rpc_send(ptr: u32, len: u32, request_source_id: u32) {
@@ -538,10 +542,20 @@ fn json_rpc_send(ptr: u32, len: u32, request_source_id: u32) {
     JSON_RPC_CHANNEL.0.unbounded_send(request).unwrap();
 }
 
+fn json_rpc_unsubscribe_all(source_id: u32) {
+    UNSUBSCRIBE_ALL_CHANNEL.0.unbounded_send(source_id).unwrap();
+}
+
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
 pub(crate) async fn next_json_rpc() -> Request {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
+    lock.next().await.unwrap()
+}
+
+/// Waits for the next unsubscribe_all message coming over ffi.
+pub(crate) async fn next_json_rpc_unsubscibe_all() -> u32 {
+    let mut lock = UNSUBSCRIBE_ALL_CHANNEL.1.lock().await;
     lock.next().await.unwrap()
 }
 

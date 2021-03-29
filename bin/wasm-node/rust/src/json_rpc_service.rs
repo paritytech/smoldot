@@ -159,49 +159,72 @@ pub async fn start(config: Config) {
     });
 
     // Spawn the main requests handling task.
-    (client.clone().tasks_executor.lock().await)(Box::pin(async move {
-        loop {
-            let json_rpc_request = ffi::next_json_rpc().await;
+    (client.clone().tasks_executor.lock().await)({
+        let client = client.clone();
 
-            // Each incoming request gets its own separate task.
-            let client_clone = client.clone();
-            (client.tasks_executor.lock().await)(Box::pin(async move {
-                let request_string =
-                    match String::from_utf8(Vec::from(json_rpc_request.method_name)) {
-                        Ok(s) => s,
+        Box::pin(async move {
+            loop {
+                let json_rpc_request = ffi::next_json_rpc().await;
+
+                // Each incoming request gets its own separate task.
+                let client_clone = client.clone();
+                (client.tasks_executor.lock().await)(Box::pin(async move {
+                    let request_string =
+                        match String::from_utf8(Vec::from(json_rpc_request.method_name)) {
+                            Ok(s) => s,
+                            Err(error) => {
+                                log::warn!(
+                                    target: "json-rpc",
+                                    "Failed to parse JSON-RPC query as UTF-8: {}", error
+                                );
+                                return;
+                            }
+                        };
+
+                    log::debug!(
+                        target: "json-rpc",
+                        "JSON-RPC => {:?}{}",
+                        if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
+                        if request_string.len() > 100 { "…" } else { "" }
+                    );
+
+                    let (request_id, call) = match methods::parse_json_call(&request_string) {
+                        Ok(rq) => rq,
                         Err(error) => {
                             log::warn!(
                                 target: "json-rpc",
-                                "Failed to parse JSON-RPC query as UTF-8: {}", error
+                                "Ignoring malformed JSON-RPC call: {}", error
                             );
                             return;
                         }
                     };
 
-                log::debug!(
-                    target: "json-rpc",
-                    "JSON-RPC => {:?}{}",
-                    if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
-                    if request_string.len() > 100 { "…" } else { "" }
-                );
+                    client_clone
+                        .handle_rpc(request_id, call, json_rpc_request.source_id)
+                        .await;
+                }));
+            }
+        })
+    });
 
-                let (request_id, call) = match methods::parse_json_call(&request_string) {
-                    Ok(rq) => rq,
-                    Err(error) => {
-                        log::warn!(
-                            target: "json-rpc",
-                            "Ignoring malformed JSON-RPC call: {}", error
-                        );
-                        return;
-                    }
-                };
+    // Spawn the unsubscibe all handling task.
+    (client.clone().tasks_executor.lock().await)({
+        let client = client.clone();
 
-                client_clone
-                    .handle_rpc(request_id, call, json_rpc_request.source_id)
-                    .await;
-            }));
-        }
-    }));
+        Box::pin(async move {
+            loop {
+                let source_to_unsubscribe = ffi::next_json_rpc_unsubscibe_all().await;
+
+                // Each incoming request gets its own separate task.
+                let client_clone = client.clone();
+                (client.tasks_executor.lock().await)(Box::pin(async move {
+                    client_clone
+                        .handle_unsubscribe_all(source_to_unsubscribe)
+                        .await;
+                }));
+            }
+        })
+    });
 }
 
 /// Use for subscriptions that can be more than one subscription per source.
@@ -814,6 +837,27 @@ impl JsonRpcService {
                 ));
             }
         }
+    }
+
+    async fn handle_unsubscribe_all(self: Arc<JsonRpcService>, source_id: u32) {
+        self.all_heads.lock().await.remove(&source_id);
+        self.new_heads.lock().await.remove(&source_id);
+        self.finalized_heads.lock().await.remove(&source_id);
+        self.runtime_specs.lock().await.remove(&source_id);
+
+        self.storage.lock().await.retain(
+            |&SubscriptionId {
+                 source_id: s_id, ..
+             },
+             _| s_id != source_id,
+        );
+
+        self.transactions.lock().await.retain(
+            |&SubscriptionId {
+                 source_id: s_id, ..
+             },
+             _| s_id != source_id,
+        );
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
