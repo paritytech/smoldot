@@ -418,6 +418,7 @@ async fn start_services(
     // Since multiple JSON-RPC services would conflict with each other, we start one for the first
     // chain in the list.
     let first_chain_services = per_chain.into_iter().next().unwrap().unwrap();
+    let json_rpc_chain_index = 0;
     let first_chain_finalized_header = genesis_chain_information
         .into_iter()
         .next()
@@ -448,6 +449,7 @@ async fn start_services(
                 chain_spec: chain_specs.into_iter().next().unwrap(),
                 genesis_block_hash: first_chain_finalized_header.hash(),
                 genesis_block_state_root: first_chain_finalized_header.state_root,
+                chain_index: json_rpc_chain_index,
             })
             .boxed(),
         )

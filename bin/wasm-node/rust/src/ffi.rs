@@ -26,6 +26,7 @@ use core::{
     ops::{Add, Sub},
     pin::Pin,
     slice,
+    sync::atomic::{AtomicU32, Ordering as AtomicOrdering},
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -445,7 +446,7 @@ fn init(
     parachain_specs_ptr: u32,
     parachain_specs_len: u32,
     max_log_level: u32,
-) {
+) -> u32 {
     let chain_specs_ptr = usize::try_from(chain_specs_ptr).unwrap();
     let chain_specs_len = usize::try_from(chain_specs_len).unwrap();
     let database_content_ptr = usize::try_from(database_content_ptr).unwrap();
@@ -510,6 +511,8 @@ fn init(
         ),
         max_log_level,
     ));
+
+    JSON_RPC_CHAIN_INDEX.load(AtomicOrdering::Relaxed)
 }
 
 lazy_static::lazy_static! {
@@ -519,13 +522,17 @@ lazy_static::lazy_static! {
     };
 }
 
-fn json_rpc_send(ptr: u32, len: u32) {
+pub(crate) static JSON_RPC_CHAIN_INDEX: AtomicU32 = AtomicU32::new(0);
+
+fn json_rpc_send(ptr: u32, len: u32) -> u32 {
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
 
     let request: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
     JSON_RPC_CHANNEL.0.unbounded_send(request).unwrap();
+
+    JSON_RPC_CHAIN_INDEX.load(AtomicOrdering::Relaxed)
 }
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
@@ -542,6 +549,7 @@ pub(crate) fn emit_json_rpc_response(rpc: &str) {
         bindings::json_rpc_respond(
             u32::try_from(rpc.as_ptr() as usize).unwrap(),
             u32::try_from(rpc.len()).unwrap(),
+            JSON_RPC_CHAIN_INDEX.load(AtomicOrdering::Relaxed),
         );
     }
 }

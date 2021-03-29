@@ -80,6 +80,9 @@ pub struct Config {
     /// >           this value, doing so is quite expensive. We prefer to require this value
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
+
+    /// The index of the chain in the list of that this service is handling requests for.
+    pub chain_index: usize,
 }
 
 /// Initializes the JSON-RPC service with the given configuration.
@@ -118,6 +121,12 @@ pub async fn start(config: Config) {
         transactions: Mutex::new(HashMap::new()),
         runtime_specs: Mutex::new(HashMap::new()),
     });
+
+    // Set the chain index to be returned by ffi calls.
+    ffi::JSON_RPC_CHAIN_INDEX.store(
+        u32::try_from(config.chain_index).unwrap(),
+        atomic::Ordering::Relaxed,
+    );
 
     // Spawns a task whose role is to update `blocks` with the new best and finalized blocks.
     (client.clone().tasks_executor.lock().await)({
