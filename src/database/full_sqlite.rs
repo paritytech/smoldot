@@ -33,10 +33,10 @@
 //!
 //! Use [`SqliteFullDatabase::set_finalized`] to mark a block already in the database as finalized.
 //! Any block that isn't an ancestor or descendant will be removed. Reverting finalization is
-//! not possible.
+//! not supported.
 //!
-//! Due to the database's schema, it is not possible to efficiently retrieve the storage items of
-//! blocks that are ancestors of the finalized block. When a block is finalized, the storage of
+//! In order to minimize disk usage, it is not possible to efficiently retrieve the storage items
+//! of blocks that are ancestors of the finalized block. When a block is finalized, the storage of
 //! its ancestors is lost, and the only way to reconstruct it is to execute all blocks starting
 //! from the genesis to the desired one.
 //!
@@ -80,8 +80,8 @@ pub struct SqliteFullDatabase {
     ///
     /// The database is constantly within a transaction.
     /// When the database is opened, `BEGIN TRANSACTION` is immediately run. We periodically
-    /// call `COMMIT; BEGIN_TRANSACTION` through heuristics. `COMMIT` is basically the equivalent
-    /// of `fsync`, and must be called carefully.
+    /// call `COMMIT; BEGIN_TRANSACTION` when deemed necessary. `COMMIT` is basically the
+    /// equivalent of `fsync`, and must be called carefully in order to not lose too much speed.
     database: Mutex<sqlite::Connection>,
 }
 
@@ -624,9 +624,8 @@ impl SqliteFullDatabase {
         // It is possible that the best block has been pruned.
         // TODO: ^ yeah, how do we handle that exactly ^ ?
 
-        // Perform a flush.
-        connection.execute("COMMIT").unwrap();
-        connection.execute("BEGIN TRANSACTION").unwrap();
+        // Make sure that everything is saved to disk after this point.
+        flush(&connection)?;
 
         Ok(())
     }
@@ -1071,6 +1070,11 @@ fn block_header(
         Ok(h) => Ok(Some(h.into())),
         Err(err) => Err(AccessError::Corrupted(CorruptedError::BlockHeaderCorrupted(err)).into()),
     }
+}
+
+fn flush(database: &sqlite::Connection) -> Result<(), AccessError> {
+    database.execute("COMMIT; BEGIN TRANSACTION;").unwrap();
+    Ok(())
 }
 
 fn purge_block(database: &sqlite::Connection, hash: &[u8; 32]) -> Result<(), AccessError> {

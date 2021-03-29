@@ -19,9 +19,7 @@
 //!
 //! Contains everything related to the opening and initialization of the database.
 
-use super::{
-    encode_babe_epoch_information, AccessError, SqliteFullDatabase,
-};
+use super::{encode_babe_epoch_information, AccessError, SqliteFullDatabase};
 use crate::chain::chain_information;
 
 use std::{convert::TryFrom as _, path::Path};
@@ -426,8 +424,7 @@ impl DatabaseEmpty {
             }
         }
 
-        self.database.execute("COMMIT").unwrap();
-        self.database.execute("BEGIN TRANSACTION").unwrap();
+        super::flush(&self.database)?;
 
         Ok(SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),
