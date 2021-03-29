@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS meta(
     value BLOB NOT NULL
 );
 
+/*
+List of all known blocks, easily findable by their number.
+*/
 CREATE TABLE IF NOT EXISTS blocks_by_number(
     number INTEGER NOT NULL,
     hash BLOB NOT NULL,
@@ -119,6 +122,12 @@ CREATE TABLE IF NOT EXISTS block_header(
     CHECK(length(hash) == 32)
 );
 
+/*
+Each block has a body made from 0+ extrinsics (in practice, there's always at least one extrinsic,
+but the database supports 0). This table contains these extrinsics.
+The `idx` field contains the index between `0` and `num_extrinsics - 1`. The values in `idx` must
+be contiguous for each block.
+*/
 CREATE TABLE IF NOT EXISTS block_body(
     hash BLOB NOT NULL,
     idx INTEGER NOT NULL,
@@ -133,14 +142,24 @@ CREATE TABLE IF NOT EXISTS block_justification(
     CHECK(length(hash) == 32)
 );
 
+/*
+Storage at the highest block that is considered finalized.
+*/
 CREATE TABLE IF NOT EXISTS finalized_storage_top_trie(
     key BLOB NOT NULL PRIMARY KEY,
     value BLOB NOT NULL
 );
 
+/*
+For non-finalized blocks (i.e. blocks that descend from the finalized block), contains changes
+that this block performs on the storage.
+When a block gets finalized, these changes get merged into `finalized_storage_top_trie`.
+*/
 CREATE TABLE IF NOT EXISTS non_finalized_changes(
     hash BLOB NOT NULL,
     key BLOB NOT NULL,
+    -- `value` is NULL if the block removes the key from the storage, and NON-NULL if it inserts
+    -- or replaces the value at the key.
     value BLOB,
     UNIQUE(hash, key),
     CHECK(length(hash) == 32)
