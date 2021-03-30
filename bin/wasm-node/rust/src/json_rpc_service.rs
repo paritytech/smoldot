@@ -236,19 +236,19 @@ struct PerSourceSubscriptions {
     /// subscription.
     all_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`JsonRpcService::all_heads`], but for new heads subscriptions.
+    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for new heads subscriptions.
     new_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`JsonRpcService::all_heads`], but for finalized heads subscriptions.
+    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for finalized heads subscriptions.
     finalized_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`JsonRpcService::all_heads`], but for storage subscriptions.
+    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for storage subscriptions.
     storage: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`JsonRpcService::all_heads`], but for transactions.
+    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for transactions.
     transactions: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`JsonRpcService::all_heads`], but for runtime specs.
+    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for runtime specs.
     runtime_specs: HashMap<String, oneshot::Sender<String>>,
 }
 
