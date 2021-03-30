@@ -26,7 +26,6 @@ use core::{
     ops::{Add, Sub},
     pin::Pin,
     slice,
-    sync::atomic::{AtomicU32, Ordering as AtomicOrdering},
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -446,7 +445,7 @@ fn init(
     parachain_specs_ptr: u32,
     parachain_specs_len: u32,
     max_log_level: u32,
-) -> u32 {
+) {
     let chain_specs_ptr = usize::try_from(chain_specs_ptr).unwrap();
     let chain_specs_len = usize::try_from(chain_specs_len).unwrap();
     let database_content_ptr = usize::try_from(database_content_ptr).unwrap();
@@ -500,6 +499,7 @@ fn init(
         iter::once(super::ChainConfig {
             specification: chain_specs,
             database_content,
+            json_rpc_running: true,
         })
         .chain(
             parachain_specs
@@ -507,39 +507,44 @@ fn init(
                 .map(|specification| super::ChainConfig {
                     specification,
                     database_content: None,
+                    json_rpc_running: true,
                 }),
         ),
         max_log_level,
     ));
+}
 
-    JSON_RPC_CHAIN_INDEX.load(AtomicOrdering::Relaxed)
+pub(crate) struct Request {
+    pub(crate) json_rpc_request: Box<[u8]>,
+    pub(crate) chain_index: usize,
 }
 
 lazy_static::lazy_static! {
-    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<Box<[u8]>>, futures::lock::Mutex<mpsc::UnboundedReceiver<Box<[u8]>>>) = {
+    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<Request>, futures::lock::Mutex<mpsc::UnboundedReceiver<Request>>) = {
         let (tx, rx) = mpsc::unbounded();
         (tx, futures::lock::Mutex::new(rx))
     };
 }
 
-pub(crate) static JSON_RPC_CHAIN_INDEX: AtomicU32 = AtomicU32::new(0);
-
-fn json_rpc_send(ptr: u32, len: u32) -> u32 {
+fn json_rpc_send(ptr: u32, len: u32, chain_index: u32) {
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
+    let chain_index = usize::try_from(chain_index).unwrap();
 
-    let request: Box<[u8]> =
+    let json_rpc_request: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+    let request = Request {
+        json_rpc_request,
+        chain_index,
+    };
     JSON_RPC_CHANNEL.0.unbounded_send(request).unwrap();
-
-    JSON_RPC_CHAIN_INDEX.load(AtomicOrdering::Relaxed)
 }
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
 pub(crate) async fn next_json_rpc() -> Box<[u8]> {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
-    lock.next().await.unwrap()
+    lock.next().await.unwrap().json_rpc_request
 }
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
@@ -549,7 +554,6 @@ pub(crate) fn emit_json_rpc_response(rpc: &str) {
         bindings::json_rpc_respond(
             u32::try_from(rpc.as_ptr() as usize).unwrap(),
             u32::try_from(rpc.len()).unwrap(),
-            JSON_RPC_CHAIN_INDEX.load(AtomicOrdering::Relaxed),
         );
     }
 }

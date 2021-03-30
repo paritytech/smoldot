@@ -122,12 +122,6 @@ pub async fn start(config: Config) {
         runtime_specs: Mutex::new(HashMap::new()),
     });
 
-    // Set the chain index to be returned by ffi calls.
-    ffi::JSON_RPC_CHAIN_INDEX.store(
-        u32::try_from(config.chain_index).unwrap(),
-        atomic::Ordering::Relaxed,
-    );
-
     // Spawns a task whose role is to update `blocks` with the new best and finalized blocks.
     (client.clone().tasks_executor.lock().await)({
         let client = client.clone();

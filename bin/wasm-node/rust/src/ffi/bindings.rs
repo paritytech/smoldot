@@ -72,9 +72,8 @@ extern "C" {
     /// Also used to send subscriptions notifications.
     ///
     /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
-    /// virtual machine at offset `ptr` and with length `len`. `chain_index` is the index
-    /// of the chain responding to the rpc request.
-    pub fn json_rpc_respond(ptr: u32, len: u32, chain_index: u32);
+    /// virtual machine at offset `ptr` and with length `len`.
+    pub fn json_rpc_respond(ptr: u32, len: u32);
 
     /// Client is emitting a log entry.
     ///
@@ -210,8 +209,6 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 ///
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
-///
-/// The return type is the index of the chain that will respond to rpc calls.
 #[no_mangle]
 pub extern "C" fn init(
     chain_specs_ptr: u32,
@@ -221,7 +218,7 @@ pub extern "C" fn init(
     parachain_specs_ptr: u32,
     parachain_specs_len: u32,
     max_log_level: u32,
-) -> u32 {
+) {
     super::init(
         chain_specs_ptr,
         chain_specs_len,
@@ -245,11 +242,9 @@ pub extern "C" fn init(
 /// this function is called.
 ///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
-///
-/// The return type is the index of the chain that will respond to the rpc call.
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32) -> u32 {
-    super::json_rpc_send(text_ptr, text_len)
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_index: u32) {
+    super::json_rpc_send(text_ptr, text_len, chain_index)
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
