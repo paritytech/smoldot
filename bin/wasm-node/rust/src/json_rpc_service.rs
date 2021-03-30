@@ -44,7 +44,8 @@ use std::{
     sync::{atomic, Arc},
 };
 
-pub async fn handle_rpc_incoming(
+/// Spawns a task to handle incoming JSON-RPC requests.
+pub async fn request_handling_task(
     mut tasks_executor: Arc<Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>>,
     clients: Arc<HashMap<usize, Arc<JsonRpcService>>>,
 ) {
