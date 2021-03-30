@@ -37,7 +37,7 @@ smoldot.start({
     chain_spec: fs.readFileSync('../../westend.json', 'utf8'),
     database_content: database_content,
     max_log_level: 3,  // Can be increased for more verbosity
-    json_rpc_callback: (resp) => {
+    json_rpc_callback: (resp, chain_index) => {
         if (ws_connection) {
             ws_connection.sendUTF(resp);
         }

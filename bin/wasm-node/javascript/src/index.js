@@ -69,7 +69,7 @@ export async function start(config) {
         initPromiseReject = null;
         initPromiseResolve = null;
       } else if (config.json_rpc_callback) {
-        config.json_rpc_callback(message.data);
+        config.json_rpc_callback(message.data, message.chain_index);
       }
 
     } else if (message.kind == 'database') {

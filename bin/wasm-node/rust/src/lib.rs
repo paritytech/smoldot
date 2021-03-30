@@ -475,7 +475,7 @@ async fn start_services(
                     let new_task_tx = new_task_tx.clone();
                     move |fut| new_task_tx.unbounded_send(fut).unwrap()
                 }))),
-                Arc::new(json_rpc_services),
+                json_rpc_services,
             )
             .boxed(),
         )

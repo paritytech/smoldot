@@ -72,8 +72,9 @@ extern "C" {
     /// Also used to send subscriptions notifications.
     ///
     /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
-    /// virtual machine at offset `ptr` and with length `len`.
-    pub fn json_rpc_respond(ptr: u32, len: u32);
+    /// virtual machine at offset `ptr` and with length `len`. `chain_index` is the chain
+    /// that the request was made to.
+    pub fn json_rpc_respond(ptr: u32, len: u32, chain_index: u32);
 
     /// Client is emitting a log entry.
     ///
