@@ -96,20 +96,20 @@ pub async fn request_handling_task(
                 match json_rpc_services.get(&chain_index).cloned() {
                     Some(service) => service.handle_rpc(request_id, call).await,
                     None => {
-                        // Just pick any service to send back an error response.
-                        let any_service = json_rpc_services.values().next().unwrap().clone();
-
-                        any_service.send_back(&json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ApplicationDefined(
-                                -32000,
-                                &format!(
+                        send_back(
+                            &json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ApplicationDefined(
+                                    -32000,
+                                    &format!(
                                     "A JSON-RPC service has not been started for chain index {}",
                                     chain_index
                                 ),
+                                ),
+                                None,
                             ),
-                            None,
-                        ));
+                            chain_index,
+                        );
                     }
                 }
             }));
@@ -302,20 +302,25 @@ struct Blocks {
     finalized_block: [u8; 32],
 }
 
+/// Send back a response or a notification to the JSON-RPC client.
+///
+/// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
+/// >           in order to print a log message.
+fn send_back(message: &str, chain_index: usize) {
+    log::debug!(
+        target: "json-rpc",
+        "JSON-RPC <= {}{}",
+        if message.len() > 100 { &message[..100] } else { &message[..] },
+        if message.len() > 100 { "…" } else { "" }
+    );
+
+    ffi::emit_json_rpc_response(message, chain_index);
+}
+
 impl JsonRpcService {
     /// Send back a response or a notification to the JSON-RPC client.
-    ///
-    /// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
-    /// >           in order to print a log message.
     fn send_back(&self, message: &str) {
-        log::debug!(
-            target: "json-rpc",
-            "JSON-RPC <= {}{}",
-            if message.len() > 100 { &message[..100] } else { &message[..] },
-            if message.len() > 100 { "…" } else { "" }
-        );
-
-        ffi::emit_json_rpc_response(message, self.chain_index);
+        send_back(message, self.chain_index)
     }
 
     /// Analyzes the given JSON-RPC call and processes it.

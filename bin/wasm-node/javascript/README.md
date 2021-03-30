@@ -15,6 +15,7 @@ import * as smoldot from 'smoldot';
 
 // Load a string chain specifications.
 const chain_spec = Buffer.from(fs.readFileSync('./westend.json')).toString('utf8');
+const chain_index = 0;
 
 smoldot
   .start({
@@ -22,11 +23,11 @@ smoldot
     json_rpc_callback: (resp, chain_index) => {
         // Called whenever the client emits a response to a JSON-RPC request,
         // or a JSON-RPC pub-sub notification.
-        console.log(resp, chain_index)
+        console.log(resp)
     }
   })
   .then((client) => {
-    client.send_json_rpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
+    client.send_json_rpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', chain_index);
   })
 ```
 
