@@ -499,6 +499,7 @@ fn init(
         iter::once(super::ChainConfig {
             specification: chain_specs,
             database_content,
+            json_rpc_running: true,
         })
         .chain(
             parachain_specs
@@ -506,58 +507,57 @@ fn init(
                 .map(|specification| super::ChainConfig {
                     specification,
                     database_content: None,
+                    json_rpc_running: false,
                 }),
         ),
         max_log_level,
     ));
 }
 
-#[derive(Debug)]
-pub(crate) struct Request {
-    pub(crate) method_name: Box<[u8]>,
-    pub(crate) source_id: u32,
+pub(crate) enum JsonRpcMessage {
+    Request {
+        json_rpc_request: Box<[u8]>,
+        chain_index: usize,
+        source_id: u32,
+    },
+    UnsubscribeAll {
+        source_id: u32,
+    }
 }
 
 lazy_static::lazy_static! {
-    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<Request>, futures::lock::Mutex<mpsc::UnboundedReceiver<Request>>) = {
-        let (tx, rx) = mpsc::unbounded();
-        (tx, futures::lock::Mutex::new(rx))
-    };
-    static ref UNSUBSCRIBE_ALL_CHANNEL: (mpsc::UnboundedSender<u32>, futures::lock::Mutex<mpsc::UnboundedReceiver<u32>>) = {
+    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<JsonRpcMessage>, futures::lock::Mutex<mpsc::UnboundedReceiver<JsonRpcMessage>>) = {
         let (tx, rx) = mpsc::unbounded();
         (tx, futures::lock::Mutex::new(rx))
     };
 }
 
-fn json_rpc_send(ptr: u32, len: u32, request_source_id: u32) {
+fn json_rpc_send(ptr: u32, len: u32, chain_index: u32, source_id: u32) {
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
+    let chain_index = usize::try_from(chain_index).unwrap();
 
-    let method_name: Box<[u8]> =
+    let json_rpc_request: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
-    let request = Request {
-        method_name,
-        source_id: request_source_id,
+    let message = JsonRpcMessage::Request {
+        json_rpc_request,
+        chain_index,
+        source_id
     };
-    JSON_RPC_CHANNEL.0.unbounded_send(request).unwrap();
+    JSON_RPC_CHANNEL.0.unbounded_send(message).unwrap();
 }
 
 fn json_rpc_unsubscribe_all(source_id: u32) {
-    UNSUBSCRIBE_ALL_CHANNEL.0.unbounded_send(source_id).unwrap();
+    JSON_RPC_CHANNEL.0.unbounded_send(JsonRpcMessage::UnsubscribeAll { source_id }).unwrap();
 }
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) async fn next_json_rpc() -> Request {
+pub(crate) async fn next_json_rpc() -> JsonRpcMessage {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
     lock.next().await.unwrap()
 }
 
-/// Waits for the next unsubscribe_all message coming over ffi.
-pub(crate) async fn next_json_rpc_unsubscibe_all() -> u32 {
-    let mut lock = UNSUBSCRIBE_ALL_CHANNEL.1.lock().await;
-    lock.next().await.unwrap()
-}
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?

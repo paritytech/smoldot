@@ -44,6 +44,72 @@ use std::{
     sync::{atomic, Arc},
 };
 
+/// Spawns a task to handle incoming JSON-RPC requests.
+pub async fn request_handling_task(
+    mut tasks_executor: Arc<Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>>,
+    clients: Arc<HashMap<usize, Arc<JsonRpcService>>>,
+) {
+    (tasks_executor.clone().lock().await)(Box::pin(async move {
+        loop {
+            match ffi::next_json_rpc().await {
+                ffi::JsonRpcMessage::Request { json_rpc_request, chain_index, source_id } => {
+                    // Each incoming request gets its own separate task.
+                    let clients = clients.clone();
+                    (tasks_executor.lock().await)(Box::pin(async move {
+                        let request_string = match String::from_utf8(Vec::from(json_rpc_request)) {
+                            Ok(s) => s,
+                            Err(error) => {
+                                log::warn!(
+                                    target: "json-rpc",
+                                    "Failed to parse JSON-RPC query as UTF-8: {}", error
+                                );
+                                return;
+                            }
+                        };
+
+                        log::debug!(
+                            target: "json-rpc",
+                            "JSON-RPC => {:?}{}",
+                            if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
+                            if request_string.len() > 100 { "…" } else { "" }
+                        );
+
+                        let (request_id, call) = match methods::parse_json_call(&request_string) {
+                            Ok(rq) => rq,
+                            Err(error) => {
+                                log::warn!(
+                                    target: "json-rpc",
+                                    "Ignoring malformed JSON-RPC call: {}", error
+                                );
+                                return;
+                            }
+                        };
+
+                        match clients.get(&chain_index).cloned() {
+                            Some(client) => client.handle_rpc(request_id, call, source_id).await,
+                            None => {
+                                log::warn!(
+                                    target: "json-rpc",
+                                    "Ignoring JSON-RPC call for chain index {}, for which a JSON-RPC service has not been started.",
+                                    chain_index
+                                )
+                            }
+                        }
+                    }));
+                },
+                ffi::JsonRpcMessage::UnsubscribeAll { source_id } => {
+                    let clients = clients.clone();
+                    (tasks_executor.lock().await)(Box::pin(async move {
+                        for client in clients.values().cloned() {
+                            client.handle_unsubscribe_all(source_id).await;
+                        }
+                    }));
+                }
+            }
+        }
+    }));
+}
+
 /// Configuration for a JSON-RPC service.
 pub struct Config {
     /// Closure that spawns background tasks.
@@ -80,10 +146,13 @@ pub struct Config {
     /// >           this value, doing so is quite expensive. We prefer to require this value
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
+
+    /// The index of the chain that this service is handling requests for.
+    pub chain_index: usize,
 }
 
 /// Initializes the JSON-RPC service with the given configuration.
-pub async fn start(config: Config) {
+pub async fn start(config: Config) -> Arc<JsonRpcService> {
     let (_finalized_block_header, finalized_blocks_subscription) =
         config.sync_service.subscribe_best().await;
     let (best_block_header, best_blocks_subscription) = config.sync_service.subscribe_best().await;
@@ -158,74 +227,9 @@ pub async fn start(config: Config) {
         })
     });
 
-    // Spawn the main requests handling task.
-    (client.clone().tasks_executor.lock().await)({
-        let client = client.clone();
-
-        Box::pin(async move {
-            loop {
-                let json_rpc_request = ffi::next_json_rpc().await;
-
-                // Each incoming request gets its own separate task.
-                let client_clone = client.clone();
-                (client.tasks_executor.lock().await)(Box::pin(async move {
-                    let request_string =
-                        match String::from_utf8(Vec::from(json_rpc_request.method_name)) {
-                            Ok(s) => s,
-                            Err(error) => {
-                                log::warn!(
-                                    target: "json-rpc",
-                                    "Failed to parse JSON-RPC query as UTF-8: {}", error
-                                );
-                                return;
-                            }
-                        };
-
-                    log::debug!(
-                        target: "json-rpc",
-                        "JSON-RPC => {:?}{}",
-                        if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
-                        if request_string.len() > 100 { "…" } else { "" }
-                    );
-
-                    let (request_id, call) = match methods::parse_json_call(&request_string) {
-                        Ok(rq) => rq,
-                        Err(error) => {
-                            log::warn!(
-                                target: "json-rpc",
-                                "Ignoring malformed JSON-RPC call: {}", error
-                            );
-                            return;
-                        }
-                    };
-
-                    client_clone
-                        .handle_rpc(request_id, call, json_rpc_request.source_id)
-                        .await;
-                }));
-            }
-        })
-    });
-
-    // Spawn the unsubscibe all handling task.
-    (client.clone().tasks_executor.lock().await)({
-        let client = client.clone();
-
-        Box::pin(async move {
-            loop {
-                let source_to_unsubscribe = ffi::next_json_rpc_unsubscibe_all().await;
-
-                // Each incoming request gets its own separate task.
-                let client_clone = client.clone();
-                (client.tasks_executor.lock().await)(Box::pin(async move {
-                    client_clone
-                        .handle_unsubscribe_all(source_to_unsubscribe)
-                        .await;
-                }));
-            }
-        })
-    });
+    client
 }
+
 
 /// Use for subscriptions that can be more than one subscription per source.
 #[derive(PartialEq, Eq, Hash)]
@@ -234,7 +238,7 @@ struct SubscriptionId {
     subscription_id: String,
 }
 
-struct JsonRpcService {
+pub struct JsonRpcService {
     /// See [`Config::tasks_executor`].
     tasks_executor: Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
 
@@ -315,7 +319,7 @@ impl JsonRpcService {
     ///
     /// Depending on the request, either calls [`JsonRpcService::send_back`] immediately or
     /// spawns a background task for further processing.
-    async fn handle_rpc(
+    pub async fn handle_rpc(
         self: Arc<JsonRpcService>,
         request_id: &str,
         call: MethodCall,

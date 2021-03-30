@@ -245,12 +245,13 @@ pub extern "C" fn init(
 ///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, request_source_id: u32) {
-    super::json_rpc_send(text_ptr, text_len, request_source_id)
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_index: u32, request_source_id: u32) {
+    super::json_rpc_send(text_ptr, text_len, chain_index, request_source_id)
 }
 
-/// Unsubscribe all the JSON-RPC subscriptions for a source. Should be called when closing a window
-/// that's connected to smoldot.
+
+/// Unsubscribe all the JSON-RPC subscriptions for a source. Should be called when disconnecting from
+/// a source that's connected to smoldot.
 #[no_mangle]
 pub extern "C" fn json_rpc_unsubscribe_all(source_id: u32) {
     super::json_rpc_unsubscribe_all(source_id)

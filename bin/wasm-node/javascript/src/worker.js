@@ -32,6 +32,9 @@ import { default as wasm_base64 } from './autogen/wasm.js';
 //
 let state = null;
 
+const chain_index = 0;
+const source_id = 0;
+
 const startInstance = async (config) => {
   // The actual Wasm bytecode is base64-decoded from a constant found in a different file.
   // This is suboptimal compared to using `instantiateStreaming`, but it is the most
@@ -98,13 +101,11 @@ const startInstance = async (config) => {
     config.maxLogLevel
   );
 
-  const source_index = 0;
-
   state.forEach((json_rpc_request) => {
     const len = Buffer.byteLength(json_rpc_request, 'utf8');
     const ptr = result.instance.exports.alloc(len);
     Buffer.from(result.instance.exports.memory.buffer).write(json_rpc_request, ptr);
-    result.instance.exports.json_rpc_send(ptr, len, source_index);
+    result.instance.exports.json_rpc_send(ptr, len, chain_index, source_id);
   });
 
   state = result.instance;
@@ -126,6 +127,6 @@ compat.setOnMessage((message) => {
     const len = Buffer.byteLength(message, 'utf8');
     const ptr = state.exports.alloc(len);
     Buffer.from(state.exports.memory.buffer).write(message, ptr);
-    state.exports.json_rpc_send(ptr, len);
+    state.exports.json_rpc_send(ptr, len, chain_index, source_id);
   }
 });
