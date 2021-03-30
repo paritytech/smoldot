@@ -22,12 +22,12 @@
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use futures::{channel::mpsc, prelude::*};
+use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     chain, chain_spec,
     libp2p::{multiaddr, peer_id::PeerId},
 };
-use std::{pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 
 pub mod ffi;
 
@@ -421,6 +421,7 @@ async fn start_services(
     debug_assert!(per_chain.iter().all(Option::is_some));
 
     // Spawn the JSON-RPC services. They are responsible for answering incoming JSON-RPC requests.
+    let mut json_rpc_services = HashMap::new();
     for (chain_index, (((services, json_rpc_running), genesis_chain_information), chain_spec)) in
         per_chain
             .into_iter()
@@ -429,6 +430,10 @@ async fn start_services(
             .zip(chain_specs)
             .enumerate()
     {
+        if !json_rpc_running {
+            continue;
+        }
+
         let (sync_service, runtime_service) = services.unwrap();
 
         let finalized_header = genesis_chain_information.finalized_block_header;
@@ -444,28 +449,37 @@ async fn start_services(
             .await,
         );
 
-        if json_rpc_running {
-            new_task_tx
-                .unbounded_send(
-                    json_rpc_service::start(json_rpc_service::Config {
-                        tasks_executor: Box::new({
-                            let new_task_tx = new_task_tx.clone();
-                            move |fut| new_task_tx.unbounded_send(fut).unwrap()
-                        }),
-                        network_service: (network_service.clone(), 0),
-                        sync_service,
-                        transactions_service,
-                        runtime_service,
-                        chain_spec,
-                        genesis_block_hash: finalized_header.hash(),
-                        genesis_block_state_root: finalized_header.state_root,
-                        chain_index,
-                    })
-                    .boxed(),
-                )
-                .unwrap();
-        }
+        let json_rpc_service = json_rpc_service::start(json_rpc_service::Config {
+            tasks_executor: Box::new({
+                let new_task_tx = new_task_tx.clone();
+                move |fut| new_task_tx.unbounded_send(fut).unwrap()
+            }),
+            network_service: (network_service.clone(), 0),
+            sync_service,
+            transactions_service,
+            runtime_service,
+            chain_spec,
+            genesis_block_hash: finalized_header.hash(),
+            genesis_block_state_root: finalized_header.state_root,
+            chain_index,
+        })
+        .await;
+
+        json_rpc_services.insert(chain_index, json_rpc_service);
     }
+
+    new_task_tx
+        .unbounded_send(
+            json_rpc_service::handle_rpc_incoming(
+                Arc::new(Mutex::new(Box::new({
+                    let new_task_tx = new_task_tx.clone();
+                    move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                }))),
+                Arc::new(json_rpc_services),
+            )
+            .boxed(),
+        )
+        .unwrap();
 
     log::info!("Initialization complete");
 }

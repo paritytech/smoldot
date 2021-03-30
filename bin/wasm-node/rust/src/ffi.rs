@@ -507,7 +507,7 @@ fn init(
                 .map(|specification| super::ChainConfig {
                     specification,
                     database_content: None,
-                    json_rpc_running: true,
+                    json_rpc_running: false,
                 }),
         ),
         max_log_level,
@@ -542,9 +542,9 @@ fn json_rpc_send(ptr: u32, len: u32, chain_index: u32) {
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) async fn next_json_rpc() -> Box<[u8]> {
+pub(crate) async fn next_json_rpc() -> Request {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
-    lock.next().await.unwrap().json_rpc_request
+    lock.next().await.unwrap()
 }
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
