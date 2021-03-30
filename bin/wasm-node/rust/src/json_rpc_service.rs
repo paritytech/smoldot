@@ -52,7 +52,11 @@ pub async fn request_handling_task(
     (tasks_executor.clone().lock().await)(Box::pin(async move {
         loop {
             match ffi::next_json_rpc().await {
-                ffi::JsonRpcMessage::Request { json_rpc_request, chain_index, source_id } => {
+                ffi::JsonRpcMessage::Request {
+                    json_rpc_request,
+                    chain_index,
+                    source_id,
+                } => {
                     // Each incoming request gets its own separate task.
                     let clients = clients.clone();
                     (tasks_executor.lock().await)(Box::pin(async move {
@@ -96,7 +100,7 @@ pub async fn request_handling_task(
                             }
                         }
                     }));
-                },
+                }
                 ffi::JsonRpcMessage::UnsubscribeAll { source_id } => {
                     let clients = clients.clone();
                     (tasks_executor.lock().await)(Box::pin(async move {
@@ -180,12 +184,7 @@ pub async fn start(config: Config) -> Arc<JsonRpcService> {
         }),
         genesis_block: config.genesis_block_hash,
         next_subscription: atomic::AtomicU64::new(0),
-        all_heads: Mutex::new(HashMap::new()),
-        new_heads: Mutex::new(HashMap::new()),
-        finalized_heads: Mutex::new(HashMap::new()),
-        storage: Mutex::new(HashMap::new()),
-        transactions: Mutex::new(HashMap::new()),
-        runtime_specs: Mutex::new(HashMap::new()),
+        per_source_subscriptions: Default::default(),
     });
 
     // Spawns a task whose role is to update `blocks` with the new best and finalized blocks.
@@ -230,12 +229,27 @@ pub async fn start(config: Config) -> Arc<JsonRpcService> {
     client
 }
 
+#[derive(Default)]
+struct PerSourceSubscriptions {
+    /// For each active finalized blocks subscription (the key), a sender. If the user
+    /// unsubscribes, send the unsubscription request ID of the channel in order to close the
+    /// subscription.
+    all_heads: HashMap<String, oneshot::Sender<String>>,
 
-/// Use for subscriptions that can be more than one subscription per source.
-#[derive(PartialEq, Eq, Hash)]
-struct SubscriptionId {
-    source_id: u32,
-    subscription_id: String,
+    /// Same principle as [`JsonRpcService::all_heads`], but for new heads subscriptions.
+    new_heads: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`JsonRpcService::all_heads`], but for finalized heads subscriptions.
+    finalized_heads: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`JsonRpcService::all_heads`], but for storage subscriptions.
+    storage: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`JsonRpcService::all_heads`], but for transactions.
+    transactions: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`JsonRpcService::all_heads`], but for runtime specs.
+    runtime_specs: HashMap<String, oneshot::Sender<String>>,
 }
 
 pub struct JsonRpcService {
@@ -265,25 +279,7 @@ pub struct JsonRpcService {
 
     next_subscription: atomic::AtomicU64,
 
-    /// For each active finalized blocks subscription (the key), a sender. If the user
-    /// unsubscribes, send the unsubscription request ID of the channel in order to close the
-    /// subscription.
-    all_heads: Mutex<HashMap<u32, oneshot::Sender<String>>>,
-
-    /// Same principle as [`JsonRpcService::all_heads`], but for new heads subscriptions.
-    new_heads: Mutex<HashMap<u32, oneshot::Sender<String>>>,
-
-    /// Same principle as [`JsonRpcService::all_heads`], but for finalized heads subscriptions.
-    finalized_heads: Mutex<HashMap<u32, oneshot::Sender<String>>>,
-
-    /// Same principle as [`JsonRpcService::all_heads`], but for storage subscriptions.
-    storage: Mutex<HashMap<SubscriptionId, oneshot::Sender<String>>>,
-
-    /// Same principle as [`JsonRpcService::all_heads`], but for transactions.
-    transactions: Mutex<HashMap<SubscriptionId, oneshot::Sender<String>>>,
-
-    /// Same principle as [`JsonRpcService::all_heads`], but for runtime specs.
-    runtime_specs: Mutex<HashMap<u32, oneshot::Sender<String>>>,
+    per_source_subscriptions: Mutex<HashMap<u32, PerSourceSubscriptions>>,
 }
 
 struct Blocks {
@@ -364,13 +360,12 @@ impl JsonRpcService {
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                let subscription_id = SubscriptionId {
-                    source_id,
-                    subscription_id: subscription,
-                };
-
-                let invalid = if let Some(cancel_tx) =
-                    self.transactions.lock().await.remove(&subscription_id)
+                let invalid = if let Some(cancel_tx) = self
+                    .per_source_subscriptions
+                    .lock()
+                    .await
+                    .get_mut(&source_id)
+                    .and_then(|subs| subs.transactions.remove(&subscription))
                 {
                     // `cancel_tx` might have been closed if the channel from the transactions
                     // service has been closed too. This is not an error.
@@ -465,13 +460,18 @@ impl JsonRpcService {
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
                 self.subscribe_finalized_heads(request_id, source_id).await;
             }
-            methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription: _ } => {
-                let invalid =
-                    if let Some(cancel_tx) = self.finalized_heads.lock().await.remove(&source_id) {
-                        cancel_tx.send(request_id.to_owned()).is_err()
-                    } else {
-                        true
-                    };
+            methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
+                let invalid = if let Some(cancel_tx) = self
+                    .per_source_subscriptions
+                    .lock()
+                    .await
+                    .get_mut(&source_id)
+                    .and_then(|subs| subs.finalized_heads.remove(&subscription))
+                {
+                    cancel_tx.send(request_id.to_owned()).is_err()
+                } else {
+                    true
+                };
 
                 if invalid {
                     self.send_back(
@@ -607,19 +607,22 @@ impl JsonRpcService {
                 });
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                let (current_specs, spec_changes) =
-                    self.runtime_service.subscribe_runtime_version().await;
-
-                let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-                self.runtime_specs
-                    .lock()
-                    .await
-                    .insert(source_id, unsubscribe_tx);
-
                 let subscription = self
                     .next_subscription
                     .fetch_add(1, atomic::Ordering::Relaxed)
                     .to_string();
+
+                let (current_specs, spec_changes) =
+                    self.runtime_service.subscribe_runtime_version().await;
+
+                let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
+                self.per_source_subscriptions
+                    .lock()
+                    .await
+                    .entry(source_id)
+                    .or_insert_with(PerSourceSubscriptions::default)
+                    .runtime_specs
+                    .insert(subscription.clone(), unsubscribe_tx);
 
                 self.send_back(
                     &methods::Response::state_subscribeRuntimeVersion(&subscription)
@@ -703,17 +706,17 @@ impl JsonRpcService {
                 self.subscribe_storage(request_id, list, source_id).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                let subscription_id = SubscriptionId {
-                    source_id,
-                    subscription_id: subscription,
+                let invalid = if let Some(cancel_tx) = self
+                    .per_source_subscriptions
+                    .lock()
+                    .await
+                    .get_mut(&source_id)
+                    .and_then(|subs| subs.storage.remove(&subscription))
+                {
+                    cancel_tx.send(request_id.to_owned()).is_err()
+                } else {
+                    true
                 };
-
-                let invalid =
-                    if let Some(cancel_tx) = self.storage.lock().await.remove(&subscription_id) {
-                        cancel_tx.send(request_id.to_owned()).is_err()
-                    } else {
-                        true
-                    };
 
                 if invalid {
                     self.send_back(
@@ -844,24 +847,10 @@ impl JsonRpcService {
     }
 
     async fn handle_unsubscribe_all(self: Arc<JsonRpcService>, source_id: u32) {
-        self.all_heads.lock().await.remove(&source_id);
-        self.new_heads.lock().await.remove(&source_id);
-        self.finalized_heads.lock().await.remove(&source_id);
-        self.runtime_specs.lock().await.remove(&source_id);
-
-        self.storage.lock().await.retain(
-            |&SubscriptionId {
-                 source_id: s_id, ..
-             },
-             _| s_id != source_id,
-        );
-
-        self.transactions.lock().await.retain(
-            |&SubscriptionId {
-                 source_id: s_id, ..
-             },
-             _| s_id != source_id,
-        );
+        self.per_source_subscriptions
+            .lock()
+            .await
+            .remove(&source_id);
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
@@ -881,16 +870,14 @@ impl JsonRpcService {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let subscription_id = SubscriptionId {
-            source_id,
-            subscription_id: subscription.clone(),
-        };
-
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.transactions
+        self.per_source_subscriptions
             .lock()
             .await
-            .insert(subscription_id, unsubscribe_tx);
+            .entry(source_id)
+            .or_insert_with(PerSourceSubscriptions::default)
+            .transactions
+            .insert(subscription.clone(), unsubscribe_tx);
 
         let confirmation = methods::Response::author_submitAndWatchExtrinsic(&subscription)
             .to_json_response(request_id);
@@ -1009,11 +996,13 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-
-        self.all_heads
+        self.per_source_subscriptions
             .lock()
             .await
-            .insert(source_id, unsubscribe_tx);
+            .entry(source_id)
+            .or_insert_with(PerSourceSubscriptions::default)
+            .all_heads
+            .insert(subscription.clone(), unsubscribe_tx);
 
         let mut blocks_list = {
             // TODO: best blocks != all heads
@@ -1064,10 +1053,13 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.new_heads
+        self.per_source_subscriptions
             .lock()
             .await
-            .insert(source_id, unsubscribe_tx);
+            .entry(source_id)
+            .or_insert_with(PerSourceSubscriptions::default)
+            .new_heads
+            .insert(subscription.clone(), unsubscribe_tx);
 
         let mut blocks_list = {
             let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
@@ -1121,10 +1113,13 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.finalized_heads
+        self.per_source_subscriptions
             .lock()
             .await
-            .insert(source_id, unsubscribe_tx);
+            .entry(source_id)
+            .or_insert_with(PerSourceSubscriptions::default)
+            .finalized_heads
+            .insert(subscription.clone(), unsubscribe_tx);
 
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
@@ -1179,16 +1174,14 @@ impl JsonRpcService {
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
-        let subscription_id = SubscriptionId {
-            source_id,
-            subscription_id: subscription.clone(),
-        };
-
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.storage
+        self.per_source_subscriptions
             .lock()
             .await
-            .insert(subscription_id, unsubscribe_tx);
+            .entry(source_id)
+            .or_insert_with(PerSourceSubscriptions::default)
+            .storage
+            .insert(subscription.clone(), unsubscribe_tx);
 
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {

@@ -241,14 +241,16 @@ pub extern "C" fn init(
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
-/// Additionally, an index that represents the source of the request is also passed as a parameter.
-///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_index: u32, request_source_id: u32) {
+pub extern "C" fn json_rpc_send(
+    text_ptr: u32,
+    text_len: u32,
+    chain_index: u32,
+    request_source_id: u32,
+) {
     super::json_rpc_send(text_ptr, text_len, chain_index, request_source_id)
 }
-
 
 /// Unsubscribe all the JSON-RPC subscriptions for a source. Should be called when disconnecting from
 /// a source that's connected to smoldot.

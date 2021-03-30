@@ -522,7 +522,7 @@ pub(crate) enum JsonRpcMessage {
     },
     UnsubscribeAll {
         source_id: u32,
-    }
+    },
 }
 
 lazy_static::lazy_static! {
@@ -542,13 +542,16 @@ fn json_rpc_send(ptr: u32, len: u32, chain_index: u32, source_id: u32) {
     let message = JsonRpcMessage::Request {
         json_rpc_request,
         chain_index,
-        source_id
+        source_id,
     };
     JSON_RPC_CHANNEL.0.unbounded_send(message).unwrap();
 }
 
 fn json_rpc_unsubscribe_all(source_id: u32) {
-    JSON_RPC_CHANNEL.0.unbounded_send(JsonRpcMessage::UnsubscribeAll { source_id }).unwrap();
+    JSON_RPC_CHANNEL
+        .0
+        .unbounded_send(JsonRpcMessage::UnsubscribeAll { source_id })
+        .unwrap();
 }
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
@@ -557,7 +560,6 @@ pub(crate) async fn next_json_rpc() -> JsonRpcMessage {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
     lock.next().await.unwrap()
 }
-
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
