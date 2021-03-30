@@ -470,7 +470,7 @@ async fn start_services(
 
     new_task_tx
         .unbounded_send(
-            json_rpc_service::handle_rpc_incoming(
+            json_rpc_service::request_handling_task(
                 Arc::new(Mutex::new(Box::new({
                     let new_task_tx = new_task_tx.clone();
                     move |fut| new_task_tx.unbounded_send(fut).unwrap()
