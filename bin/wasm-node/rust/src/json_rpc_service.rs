@@ -45,10 +45,15 @@ use std::{
 };
 
 /// Spawns a task to handle incoming JSON-RPC requests.
+///
+/// The task queries incoming requests and dispatches them to the JSON-RPC
+/// services passed as parameter.
 pub async fn request_handling_task(
-    mut tasks_executor: Arc<Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>>,
-    clients: Arc<HashMap<usize, Arc<JsonRpcService>>>,
+    tasks_executor: Arc<Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>>,
+    json_rpc_services: HashMap<usize, Arc<JsonRpcService>>,
 ) {
+    let json_rpc_services = Arc::new(json_rpc_services);
+
     (tasks_executor.clone().lock().await)(Box::pin(async move {
         loop {
             let ffi::Request {
@@ -57,7 +62,7 @@ pub async fn request_handling_task(
             } = ffi::next_json_rpc().await;
 
             // Each incoming request gets its own separate task.
-            let clients = clients.clone();
+            let json_rpc_services = json_rpc_services.clone();
             (tasks_executor.lock().await)(Box::pin(async move {
                 let request_string = match String::from_utf8(Vec::from(json_rpc_request)) {
                     Ok(s) => s,
@@ -88,14 +93,23 @@ pub async fn request_handling_task(
                     }
                 };
 
-                match clients.get(&chain_index).cloned() {
-                    Some(client) => client.handle_rpc(request_id, call).await,
+                match json_rpc_services.get(&chain_index).cloned() {
+                    Some(service) => service.handle_rpc(request_id, call).await,
                     None => {
-                        log::warn!(
-                            target: "json-rpc",
-                            "Ignoring JSON-RPC call for chain index {}, for which a JSON-RPC service has not been started.",
-                            chain_index
-                        )
+                        // Just pick any service to send back an error response.
+                        let any_service = json_rpc_services.values().next().unwrap().clone();
+
+                        any_service.send_back(&json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ApplicationDefined(
+                                -32000,
+                                &format!(
+                                    "A JSON-RPC service has not been started for chain index {}",
+                                    chain_index
+                                ),
+                            ),
+                            None,
+                        ));
                     }
                 }
             }));
@@ -179,6 +193,7 @@ pub async fn start(config: Config) -> Arc<JsonRpcService> {
         storage: Mutex::new(HashMap::new()),
         transactions: Mutex::new(HashMap::new()),
         runtime_specs: Mutex::new(HashMap::new()),
+        chain_index: config.chain_index,
     });
 
     // Spawns a task whose role is to update `blocks` with the new best and finalized blocks.
@@ -269,6 +284,9 @@ pub struct JsonRpcService {
 
     /// Same principle as [`JsonRpcService::all_heads`], but for runtime specs.
     runtime_specs: Mutex<HashMap<String, oneshot::Sender<String>>>,
+
+    /// The index of the chain that this service is handling requests for.
+    chain_index: usize,
 }
 
 struct Blocks {
@@ -297,7 +315,7 @@ impl JsonRpcService {
             if message.len() > 100 { "…" } else { "" }
         );
 
-        ffi::emit_json_rpc_response(message);
+        ffi::emit_json_rpc_response(message, self.chain_index);
     }
 
     /// Analyzes the given JSON-RPC call and processes it.

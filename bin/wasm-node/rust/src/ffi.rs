@@ -549,11 +549,12 @@ pub(crate) async fn next_json_rpc() -> Request {
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) fn emit_json_rpc_response(rpc: &str) {
+pub(crate) fn emit_json_rpc_response(rpc: &str, chain_index: usize) {
     unsafe {
         bindings::json_rpc_respond(
             u32::try_from(rpc.as_ptr() as usize).unwrap(),
             u32::try_from(rpc.len()).unwrap(),
+            u32::try_from(chain_index).unwrap(),
         );
     }
 }
