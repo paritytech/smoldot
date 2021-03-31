@@ -140,7 +140,7 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// Returns a buffer containing the SCALE-compact encoding of the parameter.
 pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> + Clone {
     // TODO: use usize::BITS after https://github.com/rust-lang/rust/issues/76904 is stable
-    // TODO: should be `(1 + 64 / usize::BITS)` instead of `9`, but this causes compilation errors
+    // TODO: should be `(1 + usize::BITS / 8)` instead of `9`, but this causes compilation errors
     let mut array = arrayvec::ArrayVec::<u8, 9>::new();
 
     if value < 64 {
