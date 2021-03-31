@@ -32,8 +32,6 @@ import { default as wasm_base64 } from './autogen/wasm.js';
 //
 let state = null;
 
-const chain_index = 0;
-
 const startInstance = async (config) => {
   // The actual Wasm bytecode is base64-decoded from a constant found in a different file.
   // This is suboptimal compared to using `instantiateStreaming`, but it is the most

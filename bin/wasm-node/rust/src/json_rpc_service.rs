@@ -154,7 +154,7 @@ pub struct Config {
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 
-    /// The index of the chain that this service is handling requests for.
+    /// The index of the chain that this service is handling requests for. Used only for the FFI layer.
     pub chain_index: usize,
 }
 
