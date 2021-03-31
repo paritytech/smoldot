@@ -50,7 +50,7 @@
 
 use crate::util::leb128;
 
-use super::{multistream_select, noise, yamux};
+use super::{multistream_select, noise, substream, yamux};
 
 use alloc::{
     string::String,
@@ -80,7 +80,7 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     /// Consists in a collection of substreams, each of which holding a [`Substream`] object.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
-    yamux: yamux::Yamux<Substream<TNow, TRqUd, TNotifUd>>,
+    yamux: yamux::Yamux<substream::Substream<TNow, TRqUd, TNotifUd>>,
 
     /// Next substream timeout. When the current time is superior to this value, means that one of
     /// the substreams in `yamux` might have timed out.
@@ -95,111 +95,6 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     notifications_protocols: Vec<ConfigNotifications>,
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
-}
-
-enum Substream<TNow, TRqUd, TNotifUd> {
-    /// Temporary transition state.
-    Poisoned,
-
-    /// Protocol negotiation in progress in an incoming substream.
-    InboundNegotiating(multistream_select::InProgress<vec::IntoIter<String>, String>),
-    /// Incoming substream has failed to negotiate a protocol. Waiting for a close from the remote.
-    /// In order to save a round-trip time, the remote might assume that the protocol negotiation
-    /// has succeeded. As such, it might send additional data on this substream that should be
-    /// ignored.
-    NegotiationFailed,
-
-    /// Negotiating a protocol for a notifications protocol substream.
-    NotificationsOutNegotiating {
-        /// When the opening will time out in the absence of response.
-        timeout: TNow,
-        /// State of the protocol negotiation.
-        negotiation: multistream_select::InProgress<vec::IntoIter<String>, String>,
-        /// Bytes of the handshake to send after the substream is open.
-        handshake: Vec<u8>,
-        /// Data passed by the user to [`Established::open_notifications_substream`].
-        user_data: TNotifUd,
-    },
-    /// A notifications protocol has been negotiated on a substream. Either a successful handshake
-    /// or an abrupt closing is now expected.
-    NotificationsOutHandshakeRecv {
-        /// Buffer for the incoming handshake.
-        handshake: leb128::FramedInProgress,
-        /// Data passed by the user to [`Established::open_notifications_substream`].
-        user_data: TNotifUd,
-    },
-    /// A notifications protocol has been negotiated, and the remote accepted it. Can now send
-    /// notifications.
-    NotificationsOut {
-        /// Data passed by the user to [`Established::open_notifications_substream`].
-        user_data: TNotifUd,
-    },
-    /// A notifications protocol has been closed. Waiting for the remote to close it as well.
-    NotificationsOutClosed,
-
-    /// A notifications protocol has been negotiated on an incoming substream. A handshake from
-    /// the remote is expected.
-    NotificationsInHandshake {
-        /// Buffer for the incoming handshake.
-        handshake: leb128::FramedInProgress,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-    },
-    /// A handshake on a notifications protocol has been received. Now waiting for an action from
-    /// the API user.
-    NotificationsInWait {
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-    },
-    /// A notifications protocol has been negotiated on a substream. Remote can now send
-    /// notifications.
-    NotificationsIn {
-        /// Buffer for the next notification.
-        next_notification: leb128::FramedInProgress,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-        /// Data passed by the user to [`Established::accept_in_notifications_substream`].
-        user_data: TNotifUd,
-    },
-
-    /// Negotiating a protocol for an outgoing request.
-    RequestOutNegotiating {
-        /// When the request will time out in the absence of response.
-        timeout: TNow,
-        /// State of the protocol negotiation.
-        negotiation: multistream_select::InProgress<vec::IntoIter<String>, String>,
-        /// Bytes of the request to send after the substream is open.
-        ///
-        /// If `None`, nothing should be sent on the substream at all, not even the length prefix.
-        /// This contrasts with `Some(empty_vec)` where a `0` length prefix must be sent.
-        request: Option<Vec<u8>>,
-        /// Data passed by the user to [`Established::add_request`].
-        user_data: TRqUd,
-    },
-    /// Outgoing request has been sent out or is queued for send out, and a response from the
-    /// remote is now expected. Substream has been closed.
-    RequestOut {
-        /// When the request will time out in the absence of response.
-        timeout: TNow,
-        /// Data passed by the user to [`Established::add_request`].
-        user_data: TRqUd,
-        /// Buffer for the incoming response.
-        response: leb128::FramedInProgress,
-    },
-
-    /// A request-response protocol has been negotiated on an inbound substream. A request is now
-    /// expected.
-    RequestInRecv {
-        /// Buffer for the incoming request.
-        request: leb128::FramedInProgress,
-        /// Protocol that was negotiated.
-        protocol_index: usize,
-    },
-    /// A request has been sent by the remote. API user must now send back the response.
-    RequestInSend,
-
-    /// Inbound ping substream. Waiting for the ping payload to be received.
-    PingIn(arrayvec::ArrayVec<[u8; 32]>),
 }
 
 impl<TNow, TRqUd, TNotifUd> Established<TNow, TRqUd, TNotifUd>
@@ -298,27 +193,25 @@ where
                     // Receive a request from the remote for a new incoming substream.
                     // These requests are automatically accepted.
                     // TODO: add a limit to the number of substreams
-                    let nego =
-                        multistream_select::InProgress::new(multistream_select::Config::Listener {
-                            supported_protocols: self
-                                .inner
-                                .request_protocols
+                    let supported_protocols = self
+                        .inner
+                        .request_protocols
+                        .iter()
+                        .filter(|p| p.inbound_allowed)
+                        .map(|p| p.name.clone())
+                        .chain(
+                            self.inner
+                                .notifications_protocols
                                 .iter()
-                                .filter(|p| p.inbound_allowed)
-                                .map(|p| p.name.clone())
-                                .chain(
-                                    self.inner
-                                        .notifications_protocols
-                                        .iter()
-                                        .map(|p| p.name.clone()),
-                                )
-                                .chain(iter::once(self.inner.ping_protocol.clone()))
-                                .collect::<Vec<_>>()
-                                .into_iter(),
-                        });
+                                .map(|p| p.name.clone()),
+                        )
+                        .chain(iter::once(self.inner.ping_protocol.clone()))
+                        .collect::<Vec<_>>();
                     self.inner
                         .yamux
-                        .accept_pending_substream(Substream::InboundNegotiating(nego));
+                        .accept_pending_substream(substream::Substream::inbound(
+                            supported_protocols,
+                        ));
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                 }
@@ -500,50 +393,6 @@ where
         })
     }
 
-    fn on_substream_reset(
-        &mut self,
-        substream_id: yamux::SubstreamId,
-        ty: Substream<TNow, TRqUd, TNotifUd>,
-    ) -> Option<Event<TRqUd, TNotifUd>> {
-        match ty {
-            Substream::Poisoned => unreachable!(),
-            Substream::InboundNegotiating(_) => None,
-            Substream::NegotiationFailed => None,
-            Substream::RequestOutNegotiating { user_data, .. }
-            | Substream::RequestOut { user_data, .. } => Some(Event::Response {
-                id: SubstreamId(substream_id),
-                user_data,
-                response: Err(RequestError::SubstreamReset),
-            }),
-            Substream::RequestInRecv { .. } => None,
-            Substream::NotificationsInHandshake { .. } => None,
-            Substream::NotificationsInWait { protocol_index, .. } => {
-                Some(Event::NotificationsInOpenCancel {
-                    id: SubstreamId(substream_id),
-                    protocol_index,
-                })
-            }
-            Substream::NotificationsIn { .. } => {
-                // TODO: report to user
-                None
-            }
-            Substream::NotificationsOutNegotiating { user_data, .. }
-            | Substream::NotificationsOutHandshakeRecv { user_data, .. } => {
-                Some(Event::NotificationsOutReject {
-                    id: SubstreamId(substream_id),
-                    user_data,
-                })
-            }
-            Substream::PingIn(_) => None,
-            Substream::NotificationsOut { user_data, .. } => Some(Event::NotificationsOutReset {
-                id: SubstreamId(substream_id),
-                user_data,
-            }),
-            Substream::NotificationsOutClosed { .. } => None,
-            Substream::RequestInSend => None,
-        }
-    }
-
     /// Updates the internal state machine, most notably `self.inner.next_timeout`, with the passage of
     /// time.
     ///
@@ -693,13 +542,11 @@ where
         &mut self,
         id: SubstreamId,
     ) -> Option<&mut TNotifUd> {
-        match self.inner.yamux.substream_by_id(id.0)?.into_user_data() {
-            Substream::NotificationsOutNegotiating { user_data, .. } => Some(user_data),
-            Substream::NotificationsOutHandshakeRecv { user_data, .. } => Some(user_data),
-            Substream::NotificationsOut { user_data } => Some(user_data),
-            Substream::NotificationsIn { user_data, .. } => Some(user_data),
-            _ => None,
-        }
+        self.inner
+            .yamux
+            .substream_by_id(id.0)?
+            .into_user_data()
+            .notifications_substream_user_data_mut()
     }
 
     /// Opens a outgoing substream with the given protocol, destined for a stream of
@@ -822,7 +669,7 @@ where
     ///
     pub fn write_notification_unbounded(&mut self, id: SubstreamId, notification: Vec<u8>) {
         let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
+        if !substream.user_data().is_outbound_notifications_substream() {
             panic!()
         }
         substream.write(leb128::encode_usize(notification.len()).collect());
@@ -841,7 +688,7 @@ where
     // TODO: shouldn't require `&mut self`
     pub fn notification_substream_queued_bytes(&mut self, id: SubstreamId) -> usize {
         let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
+        if !substream.user_data().is_outbound_notifications_substream() {
             panic!()
         }
         substream.queued_bytes()
@@ -854,12 +701,10 @@ where
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
     /// notifications substream isn't in the appropriate state.
     ///
+    // TODO: inbound? outbound?
     pub fn close_notifications_substream(&mut self, id: SubstreamId) {
         let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
-            panic!()
-        }
-        *substream.user_data() = Substream::NotificationsOutClosed;
+        substream.user_data().close_notifications_substream();
         substream.close();
     }
 
@@ -868,6 +713,11 @@ where
     /// Passing an `Err` corresponds, on the other side, to a [`RequestError::SubstreamClosed`].
     ///
     /// Returns an error if the [`SubstreamId`] is invalid.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] is valid but corresponds to a substream in a different state.
+    ///
     pub fn respond_in_request(
         &mut self,
         substream_id: SubstreamId,
@@ -879,21 +729,15 @@ where
             .substream_by_id(substream_id.0)
             .ok_or(RespondInRequestError::SubstreamClosed)?;
 
-        match substream.user_data() {
-            Substream::RequestInSend => {
-                if let Ok(response) = response {
-                    substream.write(leb128::encode_usize(response.len()).collect());
-                    substream.write(response);
-                }
+        // Panics if substream is in the wrong state, as indicated by documentation.
+        substream.user_data().respond_in_request().unwrap();
 
-                // TODO: proper state transition
-                *substream.user_data() = Substream::NegotiationFailed;
-
-                substream.close();
-                Ok(())
-            }
-            _ => panic!(),
+        if let Ok(response) = response {
+            substream.write(leb128::encode_usize(response.len()).collect());
+            substream.write(response);
         }
+
+        Ok(())
     }
 }
 
@@ -905,427 +749,6 @@ where
         f.debug_map()
             .entries(self.inner.yamux.user_datas())
             .finish()
-    }
-}
-
-impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
-    fn inject_substream_data(
-        &mut self,
-        substream_id: SubstreamId,
-        mut data: &[u8],
-    ) -> Option<Event<TRqUd, TNotifUd>> {
-        while !data.is_empty() {
-            let mut substream = self.yamux.substream_by_id(substream_id.0).unwrap();
-
-            // In order to solve borrowing-related issues, the block below temporarily
-            // replaces the state of the substream with `Poisoned`, then later puts back a
-            // proper state.
-            match mem::replace(substream.user_data(), Substream::Poisoned) {
-                Substream::Poisoned => unreachable!(),
-                Substream::InboundNegotiating(nego) => match nego.read_write_vec(data) {
-                    Ok((multistream_select::Negotiation::InProgress(nego), read, out_buffer)) => {
-                        debug_assert_eq!(read, data.len());
-                        data = &data[read..];
-                        substream.write(out_buffer);
-                        *substream.user_data() = Substream::InboundNegotiating(nego);
-                    }
-                    Ok((
-                        multistream_select::Negotiation::Success(protocol),
-                        num_read,
-                        out_buffer,
-                    )) => {
-                        substream.write(out_buffer);
-                        data = &data[num_read..];
-                        if protocol == self.ping_protocol {
-                            *substream.user_data() = Substream::PingIn(Default::default());
-                        } else {
-                            if let Some(protocol_index) = self
-                                .request_protocols
-                                .iter()
-                                .position(|p| p.name == protocol)
-                            {
-                                if let ConfigRequestResponseIn::Payload { max_size } =
-                                    self.request_protocols[protocol_index].inbound_config
-                                {
-                                    *substream.user_data() = Substream::RequestInRecv {
-                                        protocol_index,
-                                        request: leb128::FramedInProgress::new(max_size),
-                                    };
-                                } else {
-                                    // TODO: make sure that data is empty?
-                                    *substream.user_data() = Substream::RequestInSend;
-                                    return Some(Event::RequestIn {
-                                        id: substream_id,
-                                        protocol_index,
-                                        request: Vec::new(),
-                                    });
-                                }
-                            } else if let Some(protocol_index) = self
-                                .notifications_protocols
-                                .iter()
-                                .position(|p| p.name == protocol)
-                            {
-                                *substream.user_data() = Substream::NotificationsInHandshake {
-                                    protocol_index,
-                                    handshake: leb128::FramedInProgress::new(
-                                        self.notifications_protocols[protocol_index]
-                                            .max_handshake_size,
-                                    ),
-                                };
-                            } else {
-                                unreachable!()
-                            }
-                        }
-                    }
-                    Ok((multistream_select::Negotiation::NotAvailable, num_read, out_buffer)) => {
-                        data = &data[num_read..];
-                        substream.write(out_buffer);
-                        *substream.user_data() = Substream::NegotiationFailed;
-                        substream.close();
-                    }
-                    Err(_) => {
-                        substream.reset();
-                    }
-                },
-                Substream::NegotiationFailed => {
-                    // Substream is an inbound substream that has failed to negotiate a
-                    // protocol. The substream is expected to close soon, but the remote might
-                    // have been eagerly sending data (assuming that the negotiation would
-                    // succeed), which should be silently discarded.
-                    data = &[];
-                    *substream.user_data() = Substream::NegotiationFailed;
-                }
-                Substream::NotificationsOutNegotiating {
-                    negotiation,
-                    timeout,
-                    handshake,
-                    user_data,
-                } => {
-                    match negotiation.read_write_vec(data) {
-                        Ok((
-                            multistream_select::Negotiation::InProgress(nego),
-                            read,
-                            out_buffer,
-                        )) => {
-                            debug_assert_eq!(read, data.len());
-                            data = &data[read..];
-                            substream.write(out_buffer);
-                            *substream.user_data() = Substream::NotificationsOutNegotiating {
-                                negotiation: nego,
-                                timeout,
-                                handshake,
-                                user_data,
-                            };
-                        }
-                        Ok((multistream_select::Negotiation::Success(_), num_read, out_buffer)) => {
-                            substream.write(out_buffer);
-                            data = &data[num_read..];
-                            substream.write(leb128::encode_usize(handshake.len()).collect());
-                            substream.write(handshake);
-                            *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
-                                handshake: leb128::FramedInProgress::new(10 * 1024), // TODO: proper max size
-                                user_data,
-                            };
-                        }
-                        _err => todo!("{:?}", _err), // TODO:
-                    }
-                }
-                Substream::NotificationsOutHandshakeRecv {
-                    handshake,
-                    user_data,
-                } => {
-                    match handshake.update(&data) {
-                        Ok((num_read, leb128::Framed::Finished(remote_handshake))) => {
-                            if num_read != data.len() {
-                                todo!() // TODO:
-                            }
-
-                            *substream.user_data() = Substream::NotificationsOut { user_data };
-                            return Some(Event::NotificationsOutAccept {
-                                id: substream_id,
-                                remote_handshake,
-                            });
-                        }
-                        Ok((num_read, leb128::Framed::InProgress(handshake))) => {
-                            data = &data[num_read..];
-                            *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
-                                handshake,
-                                user_data,
-                            };
-                        }
-                        Err(_) => {
-                            todo!() // TODO: report to user and all
-                        }
-                    }
-                }
-                Substream::NotificationsOut { user_data } => {
-                    // Receiving data on an outgoing substream is forbidden by the protocol.
-                    data = &[];
-                    *substream.user_data() = Substream::NotificationsOut { user_data };
-                }
-                Substream::NotificationsOutClosed => {
-                    data = &[];
-                    *substream.user_data() = Substream::NotificationsOutClosed;
-                }
-                Substream::RequestOutNegotiating {
-                    negotiation,
-                    timeout,
-                    request,
-                    user_data,
-                } => {
-                    match negotiation.read_write_vec(data) {
-                        Ok((
-                            multistream_select::Negotiation::InProgress(nego),
-                            _read,
-                            out_buffer,
-                        )) => {
-                            debug_assert_eq!(_read, data.len());
-                            data = &data[_read..];
-                            substream.write(out_buffer);
-                            *substream.user_data() = Substream::RequestOutNegotiating {
-                                negotiation: nego,
-                                timeout,
-                                request,
-                                user_data,
-                            };
-                        }
-                        Ok((multistream_select::Negotiation::Success(_), num_read, out_buffer)) => {
-                            substream.write(out_buffer);
-                            data = &data[num_read..];
-                            if let Some(request) = request {
-                                substream.write(leb128::encode_usize(request.len()).collect());
-                                substream.write(request);
-                            }
-                            *substream.user_data() = Substream::RequestOut {
-                                timeout,
-                                user_data,
-                                response: leb128::FramedInProgress::new(10 * 1024 * 1024), // TODO: proper max size
-                            };
-                            let substream_id = substream.id();
-                            let _already_closed = substream.close();
-                            debug_assert!(_already_closed.is_none());
-                            substream = self.yamux.substream_by_id(substream_id).unwrap();
-                        }
-                        Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
-                            substream.reset();
-                            return Some(Event::Response {
-                                id: substream_id,
-                                user_data,
-                                response: Err(RequestError::ProtocolNotAvailable),
-                            });
-                        }
-                        Err(err) => {
-                            substream.reset();
-                            return Some(Event::Response {
-                                id: substream_id,
-                                user_data,
-                                response: Err(RequestError::NegotiationError(err)),
-                            });
-                        }
-                    }
-                }
-                Substream::RequestOut {
-                    timeout,
-                    user_data,
-                    response,
-                } => {
-                    match response.update(&data) {
-                        Ok((_num_read, leb128::Framed::Finished(response))) => {
-                            // TODO: proper state transition
-                            *substream.user_data() = Substream::NegotiationFailed;
-                            return Some(Event::Response {
-                                id: substream_id,
-                                user_data,
-                                response: Ok(response),
-                            });
-                        }
-                        Ok((num_read, leb128::Framed::InProgress(response))) => {
-                            debug_assert_eq!(num_read, data.len());
-                            data = &data[num_read..];
-                            *substream.user_data() = Substream::RequestOut {
-                                timeout,
-                                user_data,
-                                response,
-                            };
-                        }
-                        Err(err) => {
-                            substream.reset();
-                            return Some(Event::Response {
-                                id: substream_id,
-                                user_data,
-                                response: Err(RequestError::ResponseLebError(err)),
-                            });
-                        }
-                    }
-                }
-                Substream::RequestInRecv {
-                    request,
-                    protocol_index,
-                } => {
-                    match request.update(&data) {
-                        Ok((_num_read, leb128::Framed::Finished(request))) => {
-                            *substream.user_data() = Substream::RequestInSend;
-                            return Some(Event::RequestIn {
-                                id: substream_id,
-                                protocol_index,
-                                request,
-                            });
-                        }
-                        Ok((num_read, leb128::Framed::InProgress(request))) => {
-                            debug_assert_eq!(num_read, data.len());
-                            data = &data[num_read..];
-                            *substream.user_data() = Substream::RequestInRecv {
-                                request,
-                                protocol_index,
-                            };
-                        }
-                        Err(_err) => {
-                            substream.reset();
-                            // TODO: report to user
-                            todo!()
-                        }
-                    }
-                }
-                Substream::NotificationsInHandshake {
-                    handshake,
-                    protocol_index,
-                } => match handshake.update(&data) {
-                    Ok((num_read, leb128::Framed::Finished(handshake))) => {
-                        *substream.user_data() = Substream::NotificationsInWait { protocol_index };
-                        debug_assert_eq!(num_read, data.len());
-                        return Some(Event::NotificationsInOpen {
-                            id: substream_id,
-                            protocol_index,
-                            handshake,
-                        });
-                    }
-                    Ok((num_read, leb128::Framed::InProgress(handshake))) => {
-                        data = &data[num_read..];
-                        *substream.user_data() = Substream::NotificationsInHandshake {
-                            handshake,
-                            protocol_index,
-                        };
-                    }
-                    Err(_) => {
-                        substream.reset();
-                    }
-                },
-                Substream::NotificationsInWait { protocol_index } => {
-                    // TODO: what to do with data?
-                    data = &data[data.len()..];
-                    *substream.user_data() = Substream::NotificationsInWait { protocol_index };
-                }
-                Substream::NotificationsIn {
-                    mut next_notification,
-                    protocol_index,
-                    user_data,
-                } => {
-                    // TODO: rewrite this block to support sending one notification at a
-                    // time
-
-                    let mut notification = None;
-                    let max_notification_size =
-                        self.notifications_protocols[protocol_index].max_notification_size;
-
-                    loop {
-                        match next_notification.update(&data) {
-                            Ok((num_read, leb128::Framed::Finished(notif))) => {
-                                data = &data[num_read..];
-                                next_notification =
-                                    leb128::FramedInProgress::new(max_notification_size);
-                                //assert!(notification.is_none()); // TODO: outside API doesn't support multiple notifications
-                                notification = Some(notif);
-                            }
-                            Ok((num_read, leb128::Framed::InProgress(next))) => {
-                                debug_assert_eq!(num_read, data.len());
-                                next_notification = next;
-                                break;
-                            }
-                            Err(_) => {
-                                // TODO: report to user and all ; this is just a dummy
-                                next_notification =
-                                    leb128::FramedInProgress::new(max_notification_size);
-                                break;
-                            }
-                        }
-                    }
-
-                    *substream.user_data() = Substream::NotificationsIn {
-                        next_notification,
-                        protocol_index,
-                        user_data,
-                    };
-
-                    return Some(Event::NotificationIn {
-                        id: substream_id,
-                        notification: notification.unwrap(),
-                    });
-                }
-                Substream::PingIn(mut payload) => {
-                    // Inbound ping substream.
-                    // The ping protocol consists in sending 32 bytes of data, which the
-                    // remote has to send back.
-                    // The `payload` field contains these 32 bytes being received.
-                    while !data.is_empty() {
-                        debug_assert!(payload.len() < 32);
-                        payload.push(data[0]);
-                        data = &data[1..];
-
-                        if payload.len() == 32 {
-                            substream.write(payload.to_vec());
-                            payload.clear();
-                        }
-                    }
-
-                    *substream.user_data() = Substream::PingIn(payload);
-                }
-                _ => todo!("other substream kind"),
-            };
-        }
-
-        None
-    }
-}
-
-impl<TNow, TRqUd, TNotifUd> fmt::Debug for Substream<TNow, TRqUd, TNotifUd>
-where
-    TRqUd: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Substream::Poisoned => f.debug_tuple("poisoned").finish(),
-            Substream::NegotiationFailed => f.debug_tuple("incoming-negotiation-failed").finish(),
-            Substream::InboundNegotiating(_) => f.debug_tuple("incoming-negotiating").finish(),
-            Substream::NotificationsOutNegotiating { .. } => {
-                todo!() // TODO:
-            }
-            Substream::NotificationsOutHandshakeRecv { .. } => {
-                todo!() // TODO:
-            }
-            Substream::NotificationsOut { .. } => f.debug_tuple("notifications-out").finish(),
-            Substream::NotificationsOutClosed { .. } => {
-                f.debug_tuple("notifications-out-closed").finish()
-            }
-            Substream::NotificationsInHandshake { protocol_index, .. } => f
-                .debug_tuple("notifications-in-handshake")
-                .field(protocol_index)
-                .finish(),
-            Substream::NotificationsInWait { .. } => {
-                todo!() // TODO:
-            }
-            Substream::NotificationsIn { .. } => f.debug_tuple("notifications-in").finish(),
-            Substream::RequestOutNegotiating { user_data, .. }
-            | Substream::RequestOut { user_data, .. } => {
-                f.debug_tuple("request-out").field(&user_data).finish()
-            }
-            Substream::RequestInRecv { protocol_index, .. } => {
-                f.debug_tuple("request-in").field(protocol_index).finish()
-            }
-            Substream::RequestInSend => {
-                todo!() // TODO:
-            }
-            Substream::PingIn(_) => f.debug_tuple("ping-in").finish(),
-        }
     }
 }
 

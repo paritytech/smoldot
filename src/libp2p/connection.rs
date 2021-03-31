@@ -82,4 +82,5 @@ pub mod established;
 pub mod handshake;
 pub mod multistream_select;
 pub mod noise;
+pub mod substream;
 pub mod yamux;
