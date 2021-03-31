@@ -13,5 +13,7 @@ const sp = smoldot.start({
 
 sp.then(sm => {
   // $ExpectType void
+  sm.send_json_rpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}');
+  // $ExpectType void
   sm.terminate();
 });
