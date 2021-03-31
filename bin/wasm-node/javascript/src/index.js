@@ -96,6 +96,8 @@ export async function start(config) {
     // Nothing is in place if we are no longer initializing.
   });
 
+  const initialization_chain_index = 0;
+
   // The first message expected by the worker contains the configuration.
   worker.postMessage({
     chainSpec: config.chain_spec,
@@ -104,7 +106,7 @@ export async function start(config) {
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: config.max_log_level || 5
-  });
+  }, initialization_chain_index);
 
   // After the initialization message, all further messages expected by the worker are JSON-RPC
   // requests.
@@ -114,15 +116,18 @@ export async function start(config) {
   // JSON-RPC request and wait for the response. While this might seem like an unnecessary
   // overhead, it is the most straight-forward solution. Any alternative with a lower overhead
   // would have a higher complexity.
-  worker.postMessage('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}')
+  worker.postMessage(
+    '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
+    initialization_chain_index
+  );
 
   // Now blocking until the worker sends back the response.
   // This will throw if the initialization has failed.
   await initPromise;
 
   return {
-    send_json_rpc: (request) => {
-      worker.postMessage(request);
+    send_json_rpc: (request, chain_index) => {
+      worker.postMessage(request, chain_index);
     },
     terminate: () => {
       worker.terminate();

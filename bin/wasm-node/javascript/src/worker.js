@@ -98,7 +98,7 @@ const startInstance = async (config) => {
     config.maxLogLevel
   );
 
-  state.forEach((json_rpc_request) => {
+  state.forEach((json_rpc_request, chain_index) => {
     const len = Buffer.byteLength(json_rpc_request, 'utf8');
     const ptr = result.instance.exports.alloc(len);
     Buffer.from(result.instance.exports.memory.buffer).write(json_rpc_request, ptr);
@@ -109,7 +109,7 @@ const startInstance = async (config) => {
 };
 
 // `compat.setOnMessage` is the same as `onmessage = ...`, but works across environments.
-compat.setOnMessage((message) => {
+compat.setOnMessage((message, chain_index) => {
   // See the documentation of the `state` variable for information.
   if (state == null) {
     state = [];
