@@ -109,7 +109,7 @@ const startInstance = async (config) => {
 };
 
 // `compat.setOnMessage` is the same as `onmessage = ...`, but works across environments.
-compat.setOnMessage((message, chain_index) => {
+compat.setOnMessage((message) => {
   // See the documentation of the `state` variable for information.
   if (state == null) {
     state = [];
@@ -118,12 +118,12 @@ compat.setOnMessage((message, chain_index) => {
   } else if (Array.isArray(state)) {
     // A JSON-RPC request has been received while the Wasm VM is still initializing. Queue it
     // for when initialization is over.
-    state.push(message);
+    state.push((message.request, message.chain_index));
 
   } else {
-    const len = Buffer.byteLength(message, 'utf8');
+    const len = Buffer.byteLength(message.request, 'utf8');
     const ptr = state.exports.alloc(len);
-    Buffer.from(state.exports.memory.buffer).write(message, ptr);
-    state.exports.json_rpc_send(ptr, len, chain_index);
+    Buffer.from(state.exports.memory.buffer).write(message.request, ptr);
+    state.exports.json_rpc_send(ptr, len, message.chain_index);
   }
 });

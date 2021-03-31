@@ -54,7 +54,10 @@ const westendSpecs = fs.readFileSync('../../westend.json', 'utf8');
       }
     })
     .then((client) => {
-      client.send_json_rpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0);
+      client.send_json_rpc({
+        request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
+        chain_index: 0,
+      });
     })
     .catch((err) => process.exit(1));
 })();
