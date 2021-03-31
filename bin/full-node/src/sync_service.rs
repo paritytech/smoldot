@@ -28,7 +28,7 @@ use crate::network_service;
 
 use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
-use smoldot::{database::full_sled, executor, libp2p, network, sync::optimistic};
+use smoldot::{database::full_sqlite, executor, header, libp2p, network, sync::optimistic};
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 use tracing::Instrument as _;
 
@@ -38,7 +38,7 @@ pub struct Config {
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Database to use to read and write information about the chain.
-    pub database: Arc<full_sled::SledFullDatabase>,
+    pub database: Arc<full_sqlite::SqliteFullDatabase>,
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
@@ -75,12 +75,29 @@ impl SyncService {
         let (to_database, messages_rx) = mpsc::channel(4);
 
         let finalized_block_hash = config.database.finalized_block_hash().unwrap();
+        let best_block_hash = config.database.best_block_hash().unwrap();
 
         let sync_state = Arc::new(Mutex::new(SyncState {
-            best_block_hash: [0; 32],      // TODO:
-            best_block_number: 0,          // TODO:
-            finalized_block_hash: [0; 32], // TODO:
-            finalized_block_number: 0,     // TODO:
+            best_block_hash,
+            best_block_number: header::decode(
+                &config
+                    .database
+                    .block_scale_encoded_header(&best_block_hash)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap()
+            .number,
+            finalized_block_hash,
+            finalized_block_number: header::decode(
+                &config
+                    .database
+                    .block_scale_encoded_header(&finalized_block_hash)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap()
+            .number,
         }));
 
         (config.tasks_executor)(Box::pin(start_sync(
@@ -124,7 +141,7 @@ enum ToDatabase {
     to_database
 ))]
 fn start_sync(
-    database: Arc<full_sled::SledFullDatabase>,
+    database: Arc<full_sqlite::SqliteFullDatabase>,
     sync_state: Arc<Mutex<SyncState>>,
     network_service: Arc<network_service::NetworkService>,
     network_chain_index: usize,
@@ -137,18 +154,9 @@ fn start_sync(
     // While reading the storage from the database is an option, doing so considerably slows down
     // the verification, and also makes it impossible to insert blocks in the database in
     // parallel of this verification.
-    let mut finalized_block_storage = BTreeMap::<Vec<u8>, Vec<u8>>::new();
-    for key in database
-        .finalized_block_storage_top_trie_keys(&database.finalized_block_hash().unwrap(), &[])
-        .unwrap()
-    {
-        if let Some(value) = database
-            .finalized_block_storage_top_trie_get(&database.finalized_block_hash().unwrap(), &key)
-            .unwrap()
-        {
-            finalized_block_storage.insert(key.to_owned(), value.to_owned());
-        }
-    }
+    let mut finalized_block_storage: BTreeMap<Vec<u8>, Vec<u8>> = database
+        .finalized_block_storage_top_trie(&database.finalized_block_hash().unwrap())
+        .unwrap();
 
     let mut sync = optimistic::OptimisticSync::<_, libp2p::PeerId, ()>::new(optimistic::Config {
         chain_information: database
@@ -393,7 +401,7 @@ fn start_sync(
 /// Starts the task that writes blocks to the database.
 #[tracing::instrument(skip(database, messages_rx))]
 async fn start_database_write(
-    database: Arc<full_sled::SledFullDatabase>,
+    database: Arc<full_sqlite::SqliteFullDatabase>,
     mut messages_rx: mpsc::Receiver<ToDatabase>,
 ) {
     loop {
@@ -426,7 +434,7 @@ async fn start_database_write(
 
                     match result {
                         Ok(()) => {}
-                        Err(full_sled::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
                         Err(err) => panic!("{}", err),
                     }
                 }
