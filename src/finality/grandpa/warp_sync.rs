@@ -106,13 +106,14 @@ impl Verifier {
                     .map(|authority| *authority.public_key)
                     .collect()
             });
-        let authorities_list_is_some = authorities_list.is_some();
 
         self.index += 1;
 
         if let Some(authorities_list) = authorities_list {
             self.authorities_list = authorities_list;
             self.authorities_set_id += 1;
+        } else if self.index != self.fragments.len() {
+            return Err(Error::NonMinimalProof);
         }
 
         if self.index == self.fragments.len() {
@@ -145,10 +146,6 @@ impl Verifier {
                 },
             })
         } else {
-            if !authorities_list_is_some {
-                return Err(Error::NonMinimalProof);
-            }
-
             Ok(Next::NotFinished(self))
         }
     }
