@@ -30,6 +30,8 @@ pub enum Error {
     Verify(VerifyError),
     #[display(fmt = "Justification target hash doesn't match the hash of the associated header.")]
     TargetHashMismatch,
+    #[display(fmt = "Warp sync proof fragment doesn't contain an authorities list change.")]
+    NonMinimalProof,
 }
 
 #[derive(Debug)]
@@ -84,7 +86,7 @@ impl Verifier {
         })
         .map_err(Error::Verify)?;
 
-        self.authorities_list = fragment
+        let authorities_list = fragment
             .header
             .digest
             .logs()
@@ -98,12 +100,20 @@ impl Verifier {
                 },
                 _ => None,
             })
-            .flat_map(|next_authorities| next_authorities)
-            .map(|authority| *authority.public_key)
-            .collect();
+            .next()
+            .map(|next_authorities| {
+                next_authorities
+                    .map(|authority| *authority.public_key)
+                    .collect()
+            });
+        let authorities_list_is_some = authorities_list.is_some();
 
         self.index += 1;
-        self.authorities_set_id += 1;
+
+        if let Some(authorities_list) = authorities_list {
+            self.authorities_list = authorities_list;
+            self.authorities_set_id += 1;
+        }
 
         if self.index == self.fragments.len() {
             Ok(Next::Success {
@@ -135,6 +145,10 @@ impl Verifier {
                 },
             })
         } else {
+            if !authorities_list_is_some {
+                return Err(Error::NonMinimalProof);
+            }
+
             Ok(Next::NotFinished(self))
         }
     }
