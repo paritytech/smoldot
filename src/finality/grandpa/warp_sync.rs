@@ -40,12 +40,14 @@ pub struct Verifier {
     authorities_set_id: u64,
     authorities_list: Vec<[u8; 32]>,
     fragments: Vec<GrandpaWarpSyncResponseFragment>,
+    is_proof_complete: bool,
 }
 
 impl Verifier {
     pub fn new(
         start_chain_information_finality: ChainInformationFinalityRef,
         warp_sync_response_fragments: Vec<GrandpaWarpSyncResponseFragment>,
+        is_proof_complete: bool,
     ) -> Self {
         let (authorities_list, authorities_set_id) = match start_chain_information_finality {
             ChainInformationFinalityRef::Grandpa {
@@ -69,6 +71,7 @@ impl Verifier {
             authorities_set_id,
             authorities_list,
             fragments: warp_sync_response_fragments,
+            is_proof_complete,
         }
     }
 
@@ -112,7 +115,7 @@ impl Verifier {
         if let Some(authorities_list) = authorities_list {
             self.authorities_list = authorities_list;
             self.authorities_set_id += 1;
-        } else if self.index != self.fragments.len() {
+        } else if !self.is_proof_complete || self.index != self.fragments.len() {
             return Err(Error::NonMinimalProof);
         }
 
