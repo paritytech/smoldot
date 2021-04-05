@@ -43,6 +43,9 @@ pub fn open(config: Config) -> Result<DatabaseOpen, super::InternalError> {
         ConfigTy::Disk(path) => {
             // We put a `/v1/` behind the path in case we change the schema.
             let path = path.join("v1");
+            // Ignoring errors in `create_dir_all`, in order to avoid making the API of this
+            // function more complex. If `create_dir_all` fails, opening the database will most
+            // likely fail too.
             let _ = fs::create_dir_all(&path);
             sqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
         }
