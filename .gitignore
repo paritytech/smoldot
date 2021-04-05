@@ -1,4 +1,2 @@
 /target
 **/*.rs.bk
-# MacOS files that we do not want to be pushed
-.DS_Store
