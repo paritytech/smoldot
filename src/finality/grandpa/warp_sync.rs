@@ -62,8 +62,6 @@ impl Verifier {
             _ => unimplemented!(),
         };
 
-        dbg!(&authorities_list);
-
         Self {
             index: 0,
             authorities_set_id,
