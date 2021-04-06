@@ -476,9 +476,7 @@ fn init(
         .chain(
             parachain_specs
                 .into_iter()
-                .map(|specification| super::ChainConfig {
-                    specification,
-                }),
+                .map(|specification| super::ChainConfig { specification }),
         ),
         max_log_level,
     ));

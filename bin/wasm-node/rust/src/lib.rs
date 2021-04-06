@@ -98,22 +98,20 @@ pub async fn start_client(
     let chain_information = chain_specs
         .iter()
         .zip(genesis_chain_information.iter())
-        .map(
-            |(chain_spec, genesis_chain_information)| {
-                if let Some(light_sync_state) = chain_spec.light_sync_state() {
-                    log::info!(
-                        "Using light checkpoint starting at #{}",
-                        light_sync_state
-                            .as_chain_information()
-                            .finalized_block_header
-                            .number
-                    );
-                    light_sync_state.as_chain_information()
-                } else {
-                    genesis_chain_information.clone()
-                }
-            },
-        )
+        .map(|(chain_spec, genesis_chain_information)| {
+            if let Some(light_sync_state) = chain_spec.light_sync_state() {
+                log::info!(
+                    "Using light checkpoint starting at #{}",
+                    light_sync_state
+                        .as_chain_information()
+                        .finalized_block_header
+                        .number
+                );
+                light_sync_state.as_chain_information()
+            } else {
+                genesis_chain_information.clone()
+            }
+        })
         .collect::<Vec<_>>();
 
     // Starting here, the code below initializes the various "services" that make up the node.
