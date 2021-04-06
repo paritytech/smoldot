@@ -661,7 +661,7 @@ async fn start_relay_chain(
                                 sync: sync_idle, next_actions
                             } => {
                                 let finalized_num = sync_idle.finalized_block_header().number;
-                                log::info!(target: "sync-verify", "GrandPa warp sync finished: {}", finalized_num);
+                                log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
                                 has_new_finalized = true;
                                 sync = sync_idle.into();
                                 requests_to_start.extend(next_actions);
@@ -699,7 +699,7 @@ async fn start_relay_chain(
                                 sync: sync_idle, next_actions
                             } => {
                                 let finalized_num = sync_idle.finalized_block_header().number;
-                                log::info!(target: "sync-verify", "GrandPa warp sync finished: {}", finalized_num);
+                                log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
                                 has_new_finalized = true;
                                 sync = sync_idle.into();
                                 requests_to_start.extend(next_actions);
