@@ -34,8 +34,6 @@ smoldot.start({
         if (ws_connection) {
             ws_connection.sendUTF(resp);
         }
-    },
-    database_save_callback: (db_content) => {
     }
 })
     .then((c) => {
