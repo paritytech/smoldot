@@ -89,7 +89,7 @@ pub struct CommitMessageRef<'a> {
 pub struct CompactCommitRef<'a> {
     pub target_hash: &'a [u8; 32],
     pub target_number: u32,
-    pub precommits: Vec<PrecommitRef<'a>>,
+    pub precommits: Vec<UnsignedPrecommitRef<'a>>,
 
     /// List of ed25519 signatures and public keys.
     pub auth_data: Vec<(&'a [u8; 64], &'a [u8; 32])>,
@@ -306,16 +306,7 @@ fn compact_commit(bytes: &[u8]) -> nom::IResult<&[u8], CompactCommitRef> {
                 nom::bytes::complete::take(32u32),
                 nom::number::complete::le_u32,
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                    nom::multi::many_m_n(num_elems, num_elems, |s| {
-                        crate::finality::justification::decode::PrecommitRef::decode_partial(s)
-                            .map(|(a, b)| (b, a))
-                            .map_err(|_| {
-                                nom::Err::Failure(nom::error::make_error(
-                                    s,
-                                    nom::error::ErrorKind::Verify,
-                                ))
-                            })
-                    })
+                    nom::multi::many_m_n(num_elems, num_elems, unsigned_precommit)
                 }),
                 nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
                     nom::multi::many_m_n(
