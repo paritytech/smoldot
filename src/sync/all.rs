@@ -141,8 +141,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
         Idle {
-            inner: if true || config.full.is_some() {
-                // TODO: remove the `true ||` once GP warp sync is ready
+            inner: if config.full.is_some() {
                 IdleInner::Optimistic(optimistic::OptimisticSync::new(optimistic::Config {
                     chain_information: config.chain_information,
                     sources_capacity: config.sources_capacity,
@@ -626,7 +625,12 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             (IdleInner::AllForks(sync), RequestMapping::AllForks(source_id)) => {
                 match sync.ancestry_search_response(
                     source_id,
-                    blocks.map(|iter| iter.map(|block| block.scale_encoded_header)),
+                    blocks.map(|iter| {
+                        iter.map(|block| all_forks::RequestSuccessBlock {
+                            scale_encoded_header: block.scale_encoded_header,
+                            scale_encoded_justification: block.scale_encoded_justification,
+                        })
+                    }),
                 ) {
                     all_forks::AncestrySearchResponseOutcome::Verify(verify) => {
                         BlocksRequestResponseOutcome::VerifyHeader(HeaderVerify {
@@ -734,6 +738,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         };
 
         match from_grandpa_outcome {
+            FromGrandpaOutcome::WarpSyncFinished { sync, next_actions } => {
+                GrandpaWarpSyncResponseOutcome::WarpSyncFinished { sync, next_actions }
+            }
             FromGrandpaOutcome::Queued { sync, next_actions } => {
                 GrandpaWarpSyncResponseOutcome::Queued { sync, next_actions }
             }
@@ -802,6 +809,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
         };
 
         match from_grandpa_outcome {
+            FromGrandpaOutcome::WarpSyncFinished { sync, next_actions } => {
+                StorageGetResponseOutcome::WarpSyncFinished { sync, next_actions }
+            }
             FromGrandpaOutcome::Queued { sync, next_actions } => {
                 StorageGetResponseOutcome::Queued { sync, next_actions }
             }
@@ -819,8 +829,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             grandpa_warp_sync::GrandpaWarpSync::Finished(success) => {
                 let (all_forks, next_actions) =
                     shared.transition_grandpa_warp_sync_all_forks(success);
-                // TODO: wrong enum being used variant
-                return FromGrandpaOutcome::Queued {
+                return FromGrandpaOutcome::WarpSyncFinished {
                     sync: Idle {
                         inner: IdleInner::AllForks(all_forks),
                         shared,
@@ -1070,6 +1079,14 @@ pub enum BlocksRequestResponseOutcome<TRq, TSrc, TBl> {
 
 /// Outcome of calling [`Idle::grandpa_warp_sync_response`].
 pub enum GrandpaWarpSyncResponseOutcome<TRq, TSrc, TBl> {
+    /// GrandPa warp sync response has made it possible to finish warp syncing.
+    WarpSyncFinished {
+        sync: Idle<TRq, TSrc, TBl>,
+
+        /// Next requests that must be started.
+        next_actions: Vec<Action>,
+    },
+
     /// GrandPa warp sync response has been processed and might be used later.
     Queued {
         sync: Idle<TRq, TSrc, TBl>,
@@ -1081,6 +1098,14 @@ pub enum GrandpaWarpSyncResponseOutcome<TRq, TSrc, TBl> {
 
 /// Outcome of calling [`Idle::storage_get_response`].
 pub enum StorageGetResponseOutcome<TRq, TSrc, TBl> {
+    /// Storage proof response has made it possible to finish warp syncing.
+    WarpSyncFinished {
+        sync: Idle<TRq, TSrc, TBl>,
+
+        /// Next requests that must be started.
+        next_actions: Vec<Action>,
+    },
+
     /// Storage proof response has been processed and might be used later.
     Queued {
         sync: Idle<TRq, TSrc, TBl>,
@@ -1093,7 +1118,12 @@ pub enum StorageGetResponseOutcome<TRq, TSrc, TBl> {
 /// Outcome of calling [`Idle::from_grandpa`].
 // TODO: this hasn't received any brainstorming and is just laid out in a way to match the other two similar enums
 enum FromGrandpaOutcome<TRq, TSrc, TBl> {
-    /// Storage proof response has been processed and might be used later.
+    WarpSyncFinished {
+        sync: Idle<TRq, TSrc, TBl>,
+
+        /// Next requests that must be started.
+        next_actions: Vec<Action>,
+    },
     Queued {
         sync: Idle<TRq, TSrc, TBl>,
 
@@ -1124,17 +1154,17 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Idle { .. }) => unreachable!(),
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest { .. })
             | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Finalized { .. }) => {
-                let (mut sync, new_best_number) = match self.inner {
+                let (mut sync, new_best_number, is_new_finalized) = match self.inner {
                     HeaderVerifyInner::Optimistic(optimistic::ProcessOne::NewBest {
                         sync,
                         new_best_number,
                         ..
-                    }) => (sync, new_best_number),
+                    }) => (sync, new_best_number, false),
                     HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Finalized {
                         sync,
                         finalized_blocks,
                         ..
-                    }) => (sync, finalized_blocks.last().unwrap().header.number),
+                    }) => (sync, finalized_blocks.last().unwrap().header.number, true),
                     _ => unreachable!(),
                 };
 
@@ -1144,6 +1174,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         self.shared.transition_optimistic_all_forks(sync);
                     return HeaderVerifyOutcome::Success {
                         is_new_best: true,
+                        is_new_finalized,
                         sync: Idle {
                             inner: IdleInner::AllForks(all_forks),
                             shared: self.shared,
@@ -1161,6 +1192,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 match sync.process_one(now_from_unix_epoch) {
                     optimistic::ProcessOne::Idle { sync } => HeaderVerifyOutcome::Success {
                         is_new_best: true,
+                        is_new_finalized,
                         sync: Idle {
                             inner: IdleInner::Optimistic(sync),
                             shared: self.shared,
@@ -1171,6 +1203,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     other => {
                         self.inner = HeaderVerifyInner::Optimistic(other);
                         HeaderVerifyOutcome::Success {
+                            is_new_finalized,
                             is_new_best: true,
                             sync: self.into(),
                             next_actions,
@@ -1178,7 +1211,34 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     }
                 }
             }
-            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Reset { .. }) => todo!(),
+            HeaderVerifyInner::Optimistic(optimistic::ProcessOne::Reset { mut sync, .. }) => {
+                let mut next_actions = Vec::new();
+                while let Some(action) = sync.next_request_action() {
+                    next_actions.push(self.shared.optimistic_action_to_request(action));
+                }
+
+                match sync.process_one(now_from_unix_epoch) {
+                    optimistic::ProcessOne::Idle { sync } => HeaderVerifyOutcome::Error {
+                        sync: Idle {
+                            inner: IdleInner::Optimistic(sync),
+                            shared: self.shared,
+                        }
+                        .into(),
+                        next_actions,
+                        error: verify::header_only::Error::BadBlockNumber, // TODO: this is the completely wrong error; needs some deeper API changes
+                        user_data,
+                    },
+                    other => {
+                        self.inner = HeaderVerifyInner::Optimistic(other);
+                        HeaderVerifyOutcome::Error {
+                            sync: self.into(),
+                            next_actions,
+                            error: verify::header_only::Error::BadBlockNumber, // TODO: this is the completely wrong error; needs some deeper API changes
+                            user_data,
+                        }
+                    }
+                }
+            }
             HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageGet(_))
             | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStorageNextKey(_))
             | HeaderVerifyInner::Optimistic(optimistic::ProcessOne::FinalizedStoragePrefixKeys(
@@ -1194,6 +1254,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         mut sync,
                         next_request,
                         requests_replace,
+                        justification_verification,
                     } => {
                         let mut next_actions = Vec::with_capacity(
                             requests_replace.len() + if next_request.is_some() { 1 } else { 0 },
@@ -1229,6 +1290,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
 
                         HeaderVerifyOutcome::Success {
                             is_new_best,
+                            is_new_finalized: justification_verification.is_success(),
                             sync: Idle {
                                 inner: IdleInner::AllForks(sync),
                                 shared: self.shared,
@@ -1241,6 +1303,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         is_new_best,
                         next_block,
                         requests_replace,
+                        justification_verification,
                     } => {
                         let mut next_actions = Vec::with_capacity(requests_replace.len());
                         for (source, new_request) in requests_replace {
@@ -1262,6 +1325,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
 
                         HeaderVerifyOutcome::Success {
                             is_new_best,
+                            is_new_finalized: justification_verification.is_success(),
                             sync: HeaderVerify {
                                 inner: HeaderVerifyInner::AllForks(next_block),
                                 shared: self.shared,
@@ -1367,6 +1431,8 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
+        /// True if the newly-verified block is considered the latest finalized block.
+        is_new_finalized: bool,
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
         /// Next requests that must be started.
@@ -1485,35 +1551,29 @@ impl Shared {
             .into_user_data()
             .outer_source_id;
 
-        match request {
+        let (first_block, num_blocks) = match request {
             all_forks::Request::AncestrySearch {
                 first_block_hash,
                 num_blocks,
-            } => Action::Start {
-                request_id,
-                source_id: outer_source_id,
-                detail: RequestDetail::BlocksRequest {
-                    first_block: BlocksRequestFirstBlock::Hash(first_block_hash),
-                    ascending: false,
-                    num_blocks,
-                    request_bodies: false,
-                    request_headers: true,
-                    request_justification: false,
-                },
-            },
-            all_forks::Request::HeaderRequest { hash, .. } => Action::Start {
-                request_id,
-                source_id: outer_source_id,
-                detail: RequestDetail::BlocksRequest {
-                    first_block: BlocksRequestFirstBlock::Hash(hash),
-                    ascending: true,
-                    num_blocks: NonZeroU64::new(1).unwrap(),
-                    request_bodies: false,
-                    request_headers: true,
-                    request_justification: false,
-                },
-            },
+            } => (BlocksRequestFirstBlock::Hash(first_block_hash), num_blocks),
+            all_forks::Request::HeaderRequest { hash, .. } => (
+                BlocksRequestFirstBlock::Hash(hash),
+                NonZeroU64::new(1).unwrap(),
+            ),
             all_forks::Request::BodyRequest { .. } => todo!(),
+        };
+
+        Action::Start {
+            request_id,
+            source_id: outer_source_id,
+            detail: RequestDetail::BlocksRequest {
+                first_block,
+                ascending: false,
+                num_blocks,
+                request_bodies: false,
+                request_headers: true,
+                request_justification: true, // TODO: only do this on blocks that change the GP authorities?
+            },
         }
     }
 

@@ -123,21 +123,6 @@ impl SyncService {
         }
     }
 
-    /// Returns a string representing the state of the chain using the
-    /// [`smoldot::database::finalized_serialize`] module.
-    pub async fn serialize_chain(&self) -> String {
-        let (send_back, rx) = oneshot::channel();
-
-        self.to_background
-            .lock()
-            .await
-            .send(ToBackground::Serialize { send_back })
-            .await
-            .unwrap();
-
-        rx.await.unwrap()
-    }
-
     /// Returns the SCALE-encoded header of the current finalized block, alongside with a stream
     /// producing updates of the finalized block.
     ///
@@ -252,6 +237,7 @@ async fn start_relay_chain(
 
         // TODO: crappy way to handle that
         let mut has_new_best = false;
+        let mut has_new_finalized = false;
 
         // Main loop of the syncing logic.
         loop {
@@ -409,12 +395,16 @@ async fn start_relay_chain(
                         sync: sync_idle,
                         next_actions,
                         is_new_best,
+                        is_new_finalized,
                         ..
                     } => {
                         requests_to_start.extend(next_actions);
 
                         if is_new_best {
                             has_new_best = true;
+                        }
+                        if is_new_finalized {
+                            has_new_finalized = true;
                         }
 
                         sync = sync_idle.into();
@@ -440,9 +430,59 @@ async fn start_relay_chain(
 
             // TODO: handle this differently
             if has_new_best {
+                has_new_best = false;
+
                 let scale_encoded_header = sync_idle.best_block_header().scale_encoding_vec();
                 // TODO: remove expired senders
                 for notif in &mut best_notifications {
+                    let _ = notif.send(scale_encoded_header.clone());
+                }
+
+                // Since this task is verifying blocks, a heavy CPU-only operation, it is very
+                // much possible for it to take a long time before having to wait for some event.
+                // Since JavaScript/Wasm is single-threaded, this would prevent all the other
+                // tasks in the background from running.
+                // In order to provide a better granularity, we force a yield after each new serie
+                // of verifications.
+                crate::yield_once().await;
+            }
+
+            // TODO: handle this differently
+            if has_new_finalized {
+                has_new_finalized = false;
+
+                // If the chain uses GrandPa, the networking has to be kept up-to-date with the
+                // state of finalization for other peers to send back relevant gossip messages.
+                // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
+                // checker issues.
+                let grandpa_set_id =
+                    if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
+                        after_finalized_block_authorities_set_id,
+                        ..
+                    } = sync_idle.as_chain_information().finality
+                    {
+                        Some(after_finalized_block_authorities_set_id)
+                    } else {
+                        None
+                    };
+                if let Some(set_id) = grandpa_set_id {
+                    let commit_finalized_height =
+                        u32::try_from(sync_idle.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
+                    network_service
+                        .set_local_grandpa_state(
+                            network_chain_index,
+                            network::service::GrandpaState {
+                                set_id,
+                                round_number: 1, // TODO:
+                                commit_finalized_height,
+                            },
+                        )
+                        .await;
+                }
+
+                let scale_encoded_header = sync_idle.finalized_block_header().scale_encoding_vec();
+                // TODO: remove expired senders
+                for notif in &mut finalized_notifications {
                     let _ = notif.send(scale_encoded_header.clone());
                 }
 
@@ -541,11 +581,6 @@ async fn start_relay_chain(
                     };
 
                     match message {
-                        ToBackground::Serialize { send_back } => {
-                            let chain = sync_idle.as_chain_information();
-                            let serialized = smoldot::database::finalized_serialize::encode_chain(chain);
-                            let _ = send_back.send(serialized);
-                        }
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
                             let _ = send_back.send(sync_idle.is_near_head_of_chain_heuristic());
                         }
@@ -631,6 +666,15 @@ async fn start_relay_chain(
                         );
 
                         match outcome {
+                            all::GrandpaWarpSyncResponseOutcome::WarpSyncFinished {
+                                sync: sync_idle, next_actions
+                            } => {
+                                let finalized_num = sync_idle.finalized_block_header().number;
+                                log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
+                                has_new_finalized = true;
+                                sync = sync_idle.into();
+                                requests_to_start.extend(next_actions);
+                            }
                             all::GrandpaWarpSyncResponseOutcome::Queued {
                                 sync: sync_idle, next_actions
                             } => {
@@ -660,6 +704,15 @@ async fn start_relay_chain(
                         );
 
                         match outcome {
+                            all::StorageGetResponseOutcome::WarpSyncFinished {
+                                sync: sync_idle, next_actions
+                            } => {
+                                let finalized_num = sync_idle.finalized_block_header().number;
+                                log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
+                                has_new_finalized = true;
+                                sync = sync_idle.into();
+                                requests_to_start.extend(next_actions);
+                            }
                             all::StorageGetResponseOutcome::Queued {
                                 sync: sync_idle, next_actions
                             } => {
@@ -718,7 +771,6 @@ async fn start_parachain(
                 // but care should be taken about this.
 
                 match message {
-                    ToBackground::Serialize { .. } => todo!(),  // TODO: it doesn't make sense to serialize a parachain
                     ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
                         // TODO: that doesn't seem totally correct
                         let _ = send_back.send(previous_best_head_data_hash.is_some());
@@ -817,8 +869,6 @@ async fn start_parachain(
 }
 
 enum ToBackground {
-    /// See [`SyncService::serialize_chain`].
-    Serialize { send_back: oneshot::Sender<String> },
     /// See [`SyncService::is_near_head_of_chain_heuristic`].
     IsNearHeadOfChainHeuristic { send_back: oneshot::Sender<bool> },
     /// See [`SyncService::subscribe_finalized`].

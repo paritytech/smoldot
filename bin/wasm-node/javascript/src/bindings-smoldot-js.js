@@ -22,7 +22,7 @@
 
 import { Buffer } from 'buffer';
 import Websocket from 'websocket';
-import { default as now } from 'performance-now';
+import now from 'performance-now';
 import { net } from './compat-nodejs.js';
 
 export default (config) => {
@@ -77,14 +77,6 @@ export default (config) => {
                 setTimeout(() => {
                     config.instance.exports.timer_finished(id);
                 }, ms)
-            }
-        },
-
-        // Must set the content of the database to the given string.
-        database_save: (ptr, len) => {
-            if (config.databaseSaveCallback) {
-                let content = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
-                config.databaseSaveCallback(content);
             }
         },
 

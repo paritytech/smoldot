@@ -482,14 +482,44 @@ impl NetworkService {
             .grandpa_warp_sync_request(ffi::Instant::now(), target.clone(), chain_index, begin_hash)
             .await;
 
-        log::debug!(
-            target: "network",
-            "Connection({}) => GrandpaWarpSyncRequest({:?})",
-            target,
-            result.as_ref().map(|response| response.fragments.len()),
-        );
+        if let Ok(response) = result.as_ref() {
+            log::debug!(
+                target: "network",
+                "Connection({}) => GrandpaWarpSyncRequest(num_fragments: {:?}, finished: {:?})",
+                target,
+                response.fragments.len(),
+                response.is_finished,
+            );
+        } else {
+            log::debug!(
+                target: "network",
+                "Connection({}) => GrandpaWarpSyncRequest({:?})",
+                target,
+                result,
+            );
+        }
 
         result
+    }
+
+    pub async fn set_local_grandpa_state(
+        &self,
+        chain_index: usize,
+        grandpa_state: service::GrandpaState,
+    ) {
+        log::debug!(
+            target: "network",
+            "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
+            chain_index,
+            grandpa_state.set_id,
+            grandpa_state.commit_finalized_height,
+        );
+
+        // TODO: log the list of peers we sent the packet to
+
+        self.network
+            .set_local_grandpa_state(chain_index, grandpa_state)
+            .await
     }
 
     /// Performs one or more storage proof requests in order to find the value of the given

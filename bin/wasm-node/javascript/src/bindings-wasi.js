@@ -24,7 +24,7 @@
 //! of that object with the Wasm instance.
 
 import { Buffer } from 'buffer';
-import { default as randombytes } from 'randombytes';
+import randombytes from 'randombytes';
 
 export default (config) => {
     // List of environment variables to feed to the Rust program. An array of strings.
@@ -56,8 +56,8 @@ export default (config) => {
 
             // `fd_write` passes a buffer containing itself a list of pointers and lengths to the
             // actual buffers. See writev(2).
-            const toWrite = new String("");
-            const totalLength = 0;
+            let toWrite = new String("");
+            let totalLength = 0;
             for (let i = 0; i < num; i++) {
                 const buf = mem.readUInt32LE(addr + 4 * i * 2);
                 const bufLen = mem.readUInt32LE(addr + 4 * (i * 2 + 1));

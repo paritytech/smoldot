@@ -39,7 +39,7 @@ std = [
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
 ahash = { version = "0.6.2", default-features = false }
-arrayvec = { version = "0.5.2", default-features = false }
+arrayvec = { version = "0.7.0", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
 derive_more = "0.99.13"
@@ -85,11 +85,11 @@ soketto = { version = "0.4.2", optional = true }
 
 # BELOW: DEPENDENCIES TO REMOVE
 # TODO:
-parity-scale-codec = { version = "2.0.1", features = ["derive"] } # TODO: a lot of unnecessary overhead in terms of memory allocations
+parity-scale-codec = { version = "2.1.0", features = ["derive"] } # TODO: a lot of unnecessary overhead in terms of memory allocations
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "0.25.0", default-features = false, features = ["async"], optional = true }
+wasmtime = { version = "0.26.0", default-features = false, features = ["async"], optional = true }
 
 [build-dependencies]
 prost-build = "0.7.0"
