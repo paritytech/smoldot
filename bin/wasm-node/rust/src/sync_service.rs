@@ -451,6 +451,10 @@ async fn start_relay_chain(
             if has_new_finalized {
                 has_new_finalized = false;
 
+                // If the chain uses GrandPa, the networking has to be kept up-to-date with the
+                // state of finalization.
+                // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
+                // checker issues.
                 let grandpa_set_id =
                     if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
                         after_finalized_block_authorities_set_id,
@@ -461,7 +465,6 @@ async fn start_relay_chain(
                     } else {
                         None
                     };
-
                 if let Some(set_id) = grandpa_set_id {
                     let commit_finalized_height =
                         u32::try_from(sync_idle.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
