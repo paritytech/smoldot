@@ -457,7 +457,7 @@ async fn start_relay_chain(
                         ..
                     } = sync_idle.as_chain_information().finality
                     {
-                        Some(after_finalized_block_authorities_set_id) // TODO: is that correct?
+                        Some(after_finalized_block_authorities_set_id)
                     } else {
                         None
                     };
