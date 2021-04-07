@@ -486,13 +486,13 @@ fn init(
     ));
 }
 
-pub(crate) struct Request {
+pub(crate) struct JsonRpcRequest {
     pub(crate) json_rpc_request: Box<[u8]>,
     pub(crate) chain_index: usize,
 }
 
 lazy_static::lazy_static! {
-    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<Request>, futures::lock::Mutex<mpsc::UnboundedReceiver<Request>>) = {
+    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<JsonRpcRequest>, futures::lock::Mutex<mpsc::UnboundedReceiver<JsonRpcRequest>>) = {
         let (tx, rx) = mpsc::unbounded();
         (tx, futures::lock::Mutex::new(rx))
     };
@@ -505,7 +505,7 @@ fn json_rpc_send(ptr: u32, len: u32, chain_index: u32) {
 
     let json_rpc_request: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
-    let request = Request {
+    let request = JsonRpcRequest {
         json_rpc_request,
         chain_index,
     };
@@ -514,7 +514,7 @@ fn json_rpc_send(ptr: u32, len: u32, chain_index: u32) {
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) async fn next_json_rpc() -> Request {
+pub(crate) async fn next_json_rpc() -> JsonRpcRequest {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
     lock.next().await.unwrap()
 }

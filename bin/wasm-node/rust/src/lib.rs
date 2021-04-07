@@ -49,7 +49,6 @@ static ALLOC: std::alloc::System = std::alloc::System;
 
 pub struct ChainConfig {
     pub specification: String,
-    pub database_content: Option<String>,
     pub json_rpc_running: bool,
 }
 

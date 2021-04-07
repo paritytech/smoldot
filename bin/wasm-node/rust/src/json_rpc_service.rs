@@ -56,7 +56,7 @@ pub async fn request_handling_task(
 
     (tasks_executor.clone().lock().await)(Box::pin(async move {
         loop {
-            let ffi::Request {
+            let ffi::JsonRpcRequest {
                 json_rpc_request,
                 chain_index,
             } = ffi::next_json_rpc().await;

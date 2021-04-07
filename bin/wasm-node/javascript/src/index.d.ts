@@ -20,7 +20,7 @@ declare class SmoldotError extends Error {
 }
 
 export interface SmoldotClient {
-  send_json_rpc(rpc: string, chian_index: number): void;
+  send_json_rpc(rpc: string): void;
   terminate(): void;
 }
 

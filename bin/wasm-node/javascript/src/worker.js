@@ -86,11 +86,11 @@ const startInstance = async (config) => {
     config.maxLogLevel
   );
 
-  state.forEach((json_rpc_request, chain_index) => {
-    const len = Buffer.byteLength(json_rpc_request, 'utf8');
+  state.forEach((message) => {
+    const len = Buffer.byteLength(message.request, 'utf8');
     const ptr = result.instance.exports.alloc(len);
-    Buffer.from(result.instance.exports.memory.buffer).write(json_rpc_request, ptr);
-    result.instance.exports.json_rpc_send(ptr, len, chain_index);
+    Buffer.from(result.instance.exports.memory.buffer).write(message.request, ptr);
+    result.instance.exports.json_rpc_send(ptr, len, message.chain_index);
   });
 
   state = result.instance;
@@ -106,7 +106,7 @@ compat.setOnMessage((message) => {
   } else if (Array.isArray(state)) {
     // A JSON-RPC request has been received while the Wasm VM is still initializing. Queue it
     // for when initialization is over.
-    state.push((message.request, message.chain_index));
+    state.push(message);
 
   } else {
     const len = Buffer.byteLength(message.request, 'utf8');

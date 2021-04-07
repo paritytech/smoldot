@@ -97,8 +97,6 @@ export async function start(config) {
     }
   });
 
-  const initialization_chain_index = 0;
-
   // The first message expected by the worker contains the configuration.
   worker.postMessage({
     chainSpec: config.chain_spec,
@@ -118,7 +116,7 @@ export async function start(config) {
   // would have a higher complexity.
   worker.postMessage({
     request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
-    chain_index: initialization_chain_index
+    chain_index: 0
   });
 
   // Now blocking until the worker sends back the response.
@@ -126,9 +124,9 @@ export async function start(config) {
   await initPromise;
 
   return {
-    send_json_rpc: (request, chain_index) => {
+    send_json_rpc: (request) => {
       if (!workerError) {
-        worker.postMessage({ request, chain_index });
+        worker.postMessage({ request, chain_index: 0 });
       } else {
         throw workerError;
       }
