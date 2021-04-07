@@ -452,7 +452,7 @@ async fn start_relay_chain(
                 has_new_finalized = false;
 
                 // If the chain uses GrandPa, the networking has to be kept up-to-date with the
-                // state of finalization.
+                // state of finalization for other peers to send back relevant gossip messages.
                 // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
                 // checker issues.
                 let grandpa_set_id =
