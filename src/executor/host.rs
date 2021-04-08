@@ -225,7 +225,7 @@ pub struct HostVmPrototype {
 impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
     ///
-    /// The module can be either directly Wasm bytecode, or .
+    /// The module can be either directly Wasm bytecode, or zstandard-compressed.
     // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
     pub fn new(
         module: impl AsRef<[u8]>,
