@@ -141,12 +141,6 @@ impl Block {
     fn transactions(&self) -> Option<Vec<Vec<u8>>> {
         self.body.clone().map(|data| data.body).flatten()
     }
-
-    fn hash(&self) -> [u8; 32] {
-        let mut hash = [0; 32];
-        hash.copy_from_slice(&self.hash);
-        hash
-    }
 }
 
 #[derive(Clone)]
@@ -277,7 +271,7 @@ async fn background_task(
                             for transaction in found_transactions.iter_mut() {
                                 transaction.block = Some(block.clone());
                             }
-                            notify_transactions(found_transactions.clone(), TransactionStatus::Finalized(block.hash())).await;
+                            notify_transactions(found_transactions.clone(), TransactionStatus::Finalized(block.hash)).await;
                             clean_finalized_transactions(&mut pending_transactions, found_transactions);
                         }
                     },
@@ -308,7 +302,7 @@ async fn background_task(
                             // If a certain transaction was already found
                             // in a different block, then it must have been retracted.
                             if let Some(transaction_block) = &transaction.block {
-                                notify_transactions(vec![transaction.clone()], TransactionStatus::Retracted(transaction_block.hash())).await
+                                notify_transactions(vec![transaction.clone()], TransactionStatus::Retracted(transaction_block.hash)).await
                             }
                             transaction.block = Some(block.clone());
                         }
@@ -317,10 +311,10 @@ async fn background_task(
                         // Therefore, in this case we send the finalized status for that specific
                         // transaction.
                         let status = match block.status {
-                            BlockStatus::Finalized => TransactionStatus::Finalized(block.hash()),
+                            BlockStatus::Finalized => TransactionStatus::Finalized(block.hash),
                             _ => {
                                 block.status = BlockStatus::Downloaded;
-                                TransactionStatus::InBlock(block.hash())
+                                TransactionStatus::InBlock(block.hash)
                             },
                         };
 
