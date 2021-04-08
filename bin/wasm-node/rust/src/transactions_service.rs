@@ -27,7 +27,11 @@
 
 use crate::{network_service, sync_service};
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesOrdered};
-use smoldot::{header, libp2p::peer_id::PeerId, network::protocol::{self, BlockData}};
+use smoldot::{
+    header,
+    libp2p::peer_id::PeerId,
+    network::protocol::{self, BlockData},
+};
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 /// Configuration for a [`TransactionsService`].
@@ -182,7 +186,8 @@ async fn background_task(
     // TODO: DROP transaction in case we fall behind
 
     let (_, mut best_block_receiver) = sync_service.subscribe_best().await;
-    let (current_finalized_block_header, mut finalized_block_receiver) = sync_service.subscribe_finalized().await;
+    let (current_finalized_block_header, mut finalized_block_receiver) =
+        sync_service.subscribe_finalized().await;
 
     // The current finalized_block_number is the start of our "timer" which
     // is used to decide whether to rebroadcast a specific transaction.
@@ -382,7 +387,13 @@ fn transactions_in_block(
 
     let mut found_transactions = vec![];
     for (transaction_bytes, transaction) in transactions.iter_mut() {
-        if block_transactions.iter().skip(1).filter(|t| **t == *transaction_bytes).count() > 0 {
+        if block_transactions
+            .iter()
+            .skip(1)
+            .filter(|t| **t == *transaction_bytes)
+            .count()
+            > 0
+        {
             found_transactions.push(transaction.clone());
         }
     }
@@ -391,9 +402,6 @@ fn transactions_in_block(
 
 async fn notify_transactions(transactions: Vec<Transaction>, status: TransactionStatus) {
     for mut transaction in transactions {
-        let _ = transaction
-            .updates_report
-            .send(status.clone())
-            .await;
+        let _ = transaction.updates_report.send(status.clone()).await;
     }
 }
