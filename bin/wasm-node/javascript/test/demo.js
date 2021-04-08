@@ -28,7 +28,7 @@ var unsent_queue = [];
 let ws_connection = null;
 
 smoldot.start({
-    chain_spec: fs.readFileSync('../../westend.json', 'utf8'),
+    chain_spec: fs.readFileSync('../../rococo.json', 'utf8'),
     max_log_level: 3,  // Can be increased for more verbosity
     json_rpc_callback: (resp, chain_index) => {
         if (ws_connection) {
