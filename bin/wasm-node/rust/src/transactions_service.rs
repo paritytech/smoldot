@@ -132,7 +132,7 @@ enum BlockStatus {
 
 #[derive(Clone)]
 struct Block {
-    hash: Vec<u8>,
+    hash: [u8; 32],
     body: Option<BlockData>,
     status: BlockStatus,
 }
@@ -177,7 +177,7 @@ async fn background_task(
     let mut blocks_to_download = FuturesOrdered::new();
     // A list of block hashes which this task receives to prevent
     // downloading the blocks multiple times.
-    let mut known_blocks = HashMap::<Vec<u8>, Block>::new();
+    let mut known_blocks = HashMap::<[u8; 32], Block>::new();
 
     let mut pending_transactions =
         HashMap::<_, _, fnv::FnvBuildHasher>::with_capacity_and_hasher(16, Default::default());
@@ -246,11 +246,11 @@ async fn background_task(
                 let best_hash = header::hash_from_scale_encoded_header(&best_header);
 
                 let block = Block {
-                    hash: best_hash.to_vec(),
+                    hash: best_hash,
                     status: BlockStatus::Pending,
                     body: None,
                 };
-                known_blocks.insert(best_hash.to_vec(), block);
+                known_blocks.insert(best_hash, block);
                 blocks_to_download.push(download_block(network_service.clone(), network_chain_index, best_hash));
             },
             finalized_header = finalized_block_receiver.select_next_some() => {
@@ -267,7 +267,7 @@ async fn background_task(
                 };
                 finalized_block_number = finalized_header.number;
 
-                let finalized_hash = finalized_header.hash().to_vec();
+                let finalized_hash = finalized_header.hash();
 
                 match known_blocks.get_mut(&finalized_hash) {
                     Some(block) => {
@@ -299,7 +299,7 @@ async fn background_task(
                     Ok(block_data) => block_data,
                     Err(_) => continue,
                 };
-                match known_blocks.get_mut(&downloaded_block_data.hash.to_vec()) {
+                match known_blocks.get_mut(&downloaded_block_data.hash) {
                     Some(block) => {
                         block.body = Some(downloaded_block_data);
                         let mut found_transactions = transactions_in_block(block, &mut pending_transactions);
