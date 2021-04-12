@@ -31,8 +31,8 @@ pub fn decode_grandpa(scale_encoded: &[u8]) -> Result<GrandpaJustificationRef, E
 
 /// Attempt to decode the given SCALE-encoded justification.
 ///
-/// Contrary to [`decode`], doesn't return an error if the slice is too long but returns the
-/// remainder.
+/// Contrary to [`decode_grandpa`], doesn't return an error if the slice is too long but returns
+/// the remainder.
 pub fn decode_partial_grandpa(
     scale_encoded: &[u8],
 ) -> Result<(GrandpaJustificationRef, &[u8]), Error> {
