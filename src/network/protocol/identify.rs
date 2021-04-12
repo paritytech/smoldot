@@ -24,7 +24,7 @@
 //! The response's body consists in various useful general-purpose information about the node.
 //! See [`IdentifyResponse`] for details.
 //!
-//! The two most important fields are [`IdentifyResponse::listen_addr`] and
+//! The two most important fields are [`IdentifyResponse::listen_addrs`] and
 //! [`IdentifyResponse::observed_addr`]. They are necessary in order for nodes to discover their
 //! public address, and in order to insert peers in the Kademlia k-buckets.
 //!
