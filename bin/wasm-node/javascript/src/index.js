@@ -48,6 +48,7 @@ export async function start(config) {
   // (https://webpack.js.org/guides/web-workers/), and parcel
   // (https://github.com/parcel-bundler/parcel/pull/5846)
   const worker = new Worker(new URL('./worker.js', import.meta.url));
+  let workerError = null;
 
   // Build a promise that will be resolved or rejected after the initalization (that happens in
   // the worker) has finished.
@@ -72,10 +73,6 @@ export async function start(config) {
         config.json_rpc_callback(message.data, message.chain_index);
       }
 
-    } else if (message.kind == 'database') {
-      if (config.database_save_callback)
-        config.database_save_callback(message.data);
-
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
 
@@ -91,15 +88,18 @@ export async function start(config) {
       initPromiseReject(error);
       initPromiseReject = null;
       initPromiseResolve = null;
+    } else {
+      // This situation should only happen in case of a critical error as the result of a bug
+      // somewhere. Consequently, nothing is in place to cleanly report the error if we are no
+      // longer initializing.
+      console.error(error);
+      workerError = error;
     }
-
-    // Nothing is in place if we are no longer initializing.
   });
 
   // The first message expected by the worker contains the configuration.
   worker.postMessage({
     chainSpec: config.chain_spec,
-    databaseContent: config.database_content,
     parachainSpec: config.parachain_spec,
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
@@ -114,7 +114,10 @@ export async function start(config) {
   // JSON-RPC request and wait for the response. While this might seem like an unnecessary
   // overhead, it is the most straight-forward solution. Any alternative with a lower overhead
   // would have a higher complexity.
-  worker.postMessage('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}')
+  worker.postMessage({
+    request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
+    chain_index: 0
+  });
 
   // Now blocking until the worker sends back the response.
   // This will throw if the initialization has failed.
@@ -122,10 +125,16 @@ export async function start(config) {
 
   return {
     send_json_rpc: (request) => {
-      worker.postMessage(request);
+      if (!workerError) {
+        worker.postMessage({ request, chain_index: 0 });
+      } else {
+        throw workerError;
+      }
     },
     terminate: () => {
       worker.terminate();
+      if (!workerError)
+        workerError = new Error("terminate() has been called");
     }
   }
 }

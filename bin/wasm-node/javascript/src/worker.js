@@ -51,10 +51,6 @@ const startInstance = async (config) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'jsonrpc', data, chain_index });
     },
-    databaseSaveCallback: (data) => {
-      // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'database', data });
-    }
   };
 
   const { bindings: smoldotJsBindings } = smoldot_js_builder(smoldotJsConfig);
@@ -80,13 +76,6 @@ const startInstance = async (config) => {
   Buffer.from(result.instance.exports.memory.buffer)
     .write(config.chainSpec, chainSpecPtr);
 
-  const databaseLen = config.databaseContent ? Buffer.byteLength(config.databaseContent, 'utf8') : 0;
-  const databasePtr = (databaseLen != 0) ? result.instance.exports.alloc(databaseLen) : 0;
-  if (databaseLen != 0) {
-    Buffer.from(result.instance.exports.memory.buffer)
-      .write(config.databaseContent, databasePtr);
-  }
-
   const parachainSpecLen = config.parachainSpec ? Buffer.byteLength(config.parachainSpec, 'utf8') : 0;
   const parachainSpecPtr = (parachainSpecLen != 0) ? result.instance.exports.alloc(parachainSpecLen) : 0;
   if (parachainSpecLen != 0) {
@@ -96,16 +85,15 @@ const startInstance = async (config) => {
 
   result.instance.exports.init(
     chainSpecPtr, chainSpecLen,
-    databasePtr, databaseLen,
     parachainSpecPtr, parachainSpecLen,
     config.maxLogLevel
   );
 
-  state.forEach((json_rpc_request) => {
-    const len = Buffer.byteLength(json_rpc_request, 'utf8');
+  state.forEach((message) => {
+    const len = Buffer.byteLength(message.request, 'utf8');
     const ptr = result.instance.exports.alloc(len);
-    Buffer.from(result.instance.exports.memory.buffer).write(json_rpc_request, ptr);
-    result.instance.exports.json_rpc_send(ptr, len, chain_index, source_id);
+    Buffer.from(result.instance.exports.memory.buffer).write(message.request, ptr);
+    result.instance.exports.json_rpc_send(ptr, len, message.chain_index);
   });
 
   state = result.instance;
@@ -124,9 +112,9 @@ compat.setOnMessage((message) => {
     state.push(message);
 
   } else {
-    const len = Buffer.byteLength(message, 'utf8');
+    const len = Buffer.byteLength(message.request, 'utf8');
     const ptr = state.exports.alloc(len);
-    Buffer.from(state.exports.memory.buffer).write(message, ptr);
-    state.exports.json_rpc_send(ptr, len, chain_index, source_id);
+    Buffer.from(state.exports.memory.buffer).write(message.request, ptr);
+    state.exports.json_rpc_send(ptr, len, message.chain_index);
   }
 });

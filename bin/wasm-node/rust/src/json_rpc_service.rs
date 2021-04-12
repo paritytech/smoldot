@@ -32,7 +32,7 @@ use crate::{ffi, network_service, runtime_service, sync_service, transactions_se
 use futures::{channel::oneshot, lock::Mutex, prelude::*};
 use methods::MethodCall;
 use smoldot::{
-    chain_spec, executor, header,
+    chain_spec, header,
     json_rpc::{self, methods},
     network::protocol,
 };
@@ -41,6 +41,7 @@ use std::{
     convert::TryFrom as _,
     iter,
     pin::Pin,
+    str,
     sync::{atomic, Arc},
 };
 
@@ -65,12 +66,13 @@ pub async fn request_handling_task(
                     // Each incoming request gets its own separate task.
                     let json_rpc_services = json_rpc_services.clone();
                     (tasks_executor.lock().await)(Box::pin(async move {
-                        let request_string = match String::from_utf8(Vec::from(json_rpc_request)) {
+                        let request_str = match str::from_utf8(&*json_rpc_request) {
                             Ok(s) => s,
                             Err(error) => {
                                 log::warn!(
                                     target: "json-rpc",
-                                    "Failed to parse JSON-RPC query as UTF-8: {}", error
+                                    "Failed to parse JSON-RPC query as UTF-8 (chain_index: {}): {}",
+                                    chain_index, error
                                 );
                                 return;
                             }
@@ -79,12 +81,20 @@ pub async fn request_handling_task(
                         log::debug!(
                             target: "json-rpc",
                             "JSON-RPC => {:?}{}",
-                            if request_string.len() > 100 { &request_string[..100] } else { &request_string[..] },
-                            if request_string.len() > 100 { "…" } else { "" }
+                            if request_str.len() > 100 { &request_str[..100] } else { &request_str[..] },
+                            if request_str.len() > 100 { "…" } else { "" }
                         );
 
-                        let (request_id, call) = match methods::parse_json_call(&request_string) {
+                        let (request_id, call) = match methods::parse_json_call(request_str) {
                             Ok(rq) => rq,
+                            Err(methods::ParseError::Method { request_id, error }) => {
+                                log::warn!(
+                                    target: "json-rpc",
+                                    "Error in JSON-RPC method call: {}", error
+                                );
+                                send_back(&error.to_json_error(request_id), chain_index);
+                                return;
+                            }
                             Err(error) => {
                                 log::warn!(
                                     target: "json-rpc",
@@ -97,17 +107,20 @@ pub async fn request_handling_task(
                         match json_rpc_services.get(&chain_index).cloned() {
                             Some(service) => service.handle_rpc(request_id, call, source_id).await,
                             None => {
-                                send_back(&json_rpc::parse::build_error_response(
-                                    request_id,
-                                    json_rpc::parse::ErrorResponse::ApplicationDefined(
-                                        -32000,
-                                        &format!(
+                                send_back(
+                                    &json_rpc::parse::build_error_response(
+                                        request_id,
+                                        json_rpc::parse::ErrorResponse::ApplicationDefined(
+                                            -33000,
+                                            &format!(
                                             "A JSON-RPC service has not been started for chain index {}",
                                             chain_index
                                         ),
+                                        ),
+                                        None,
                                     ),
-                                    None,
-                                ), chain_index);
+                                    chain_index,
+                                );
                             }
                         }
                     }));
@@ -162,7 +175,7 @@ pub struct Config {
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 
-    /// The index of the chain that this service is handling requests for.
+    /// The index of the chain that this service is handling requests for. Used only for the FFI layer.
     pub chain_index: usize,
 }
 
@@ -441,7 +454,7 @@ impl JsonRpcService {
                     })
                     .to_json_response(request_id)
                 } else {
-                    "null".to_owned()
+                    json_rpc::parse::build_success_response(request_id, "null")
                 });
             }
             methods::MethodCall::chain_getBlockHash { height } => {

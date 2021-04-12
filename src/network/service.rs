@@ -113,7 +113,10 @@ pub struct ChainConfig {
 // TODO: link to some doc about how GrandPa works: what is a round, what is the set id, etc.
 pub struct GrandpaState {
     pub round_number: u64,
+    /// Set of authorities that will be used by the node to try finalize the children of the block
+    /// of [`GrandpaState::commit_finalized_height`].
     pub set_id: u64,
+    /// Height of the highest block considered final by the node.
     pub commit_finalized_height: u32,
 }
 
@@ -163,7 +166,7 @@ where
             .chains
             .iter()
             .flat_map(|chain| {
-                iter::once(libp2p::OverlayNetwork {
+                iter::once(libp2p::OverlayNetworkConfig {
                     protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
@@ -172,7 +175,7 @@ where
                     in_slots: chain.in_slots,
                     out_slots: chain.out_slots,
                 })
-                .chain(iter::once(libp2p::OverlayNetwork {
+                .chain(iter::once(libp2p::OverlayNetworkConfig {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
@@ -186,7 +189,7 @@ where
                     // Note, however, that GrandPa is technically left enabled (but unused) on all
                     // chains, in order to make the rest of the code of this module more
                     // comprehensible.
-                    iter::once(libp2p::OverlayNetwork {
+                    iter::once(libp2p::OverlayNetworkConfig {
                         protocol_name: "/paritytech/grandpa/1".to_string(),
                         fallback_protocol_names: Vec::new(),
                         max_handshake_size: 256,      // TODO: arbitrary
@@ -243,7 +246,7 @@ where
             .chain(iter::once(libp2p::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
                 inbound_config: libp2p::ConfigRequestResponseIn::Payload { max_size: 32 },
-                max_response_size: 16 * 1024 * 1024,
+                max_response_size: 128 * 1024 * 1024, // TODO: this is way too large at the moment ; see https://github.com/paritytech/substrate/pull/8578
                 // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
                 timeout: Duration::from_secs(20),
@@ -731,8 +734,16 @@ where
                         // TODO: transaction announce
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
                         // TODO: don't unwrap
-                        let _notif = protocol::decode_grandpa_notification(&notification).unwrap();
-                    // TODO: do something with these notifs
+                        let decoded_notif =
+                            protocol::decode_grandpa_notification(&notification).unwrap();
+                        // Commit messages are the only type of message that is important for
+                        // light clients. Anything else is presently ignored.
+                        if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
+                            return Event::GrandpaCommitMessage {
+                                chain_index,
+                                message: EncodedGrandpaCommitMessage(notification),
+                            };
+                        }
                     } else {
                         unreachable!()
                     }
@@ -893,6 +904,12 @@ pub enum Event<'a, TNow, TPeer, TConn> {
         announce: EncodedBlockAnnounce,
     },
 
+    /// Received a GrandPa commit message from the network.
+    GrandpaCommitMessage {
+        chain_index: usize,
+        message: EncodedGrandpaCommitMessage,
+    },
+
     /// A remote has sent a request for identification information.
     ///
     /// You are strongly encouraged to call [`IdentifyRequestIn::respond`].
@@ -936,6 +953,26 @@ impl EncodedBlockAnnounce {
 }
 
 impl fmt::Debug for EncodedBlockAnnounce {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid GrandPa commit message.
+#[derive(Clone)]
+pub struct EncodedGrandpaCommitMessage(Vec<u8>);
+
+impl EncodedGrandpaCommitMessage {
+    /// Returns the decoded version of the commit message.
+    pub fn decode(&self) -> protocol::CommitMessageRef {
+        match protocol::decode_grandpa_notification(&self.0) {
+            Ok(protocol::GrandpaNotificationRef::Commit(msg)) => msg,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedGrandpaCommitMessage {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
     }

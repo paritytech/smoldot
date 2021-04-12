@@ -49,7 +49,6 @@ static ALLOC: std::alloc::System = std::alloc::System;
 
 pub struct ChainConfig {
     pub specification: String,
-    pub database_content: Option<String>,
     pub json_rpc_running: bool,
 }
 
@@ -71,12 +70,9 @@ pub async fn start_client(
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-    // Decode the chain specifications, database content and whether the chain
-    // should be running a JSON-RPC service.
-    // Any error while decoding is treated as if there was no database.
-    let (chain_specs, database_content, json_rpc_running) = {
+    // Decode the chain specifications, and whether the chain should be running a JSON-RPC service.
+    let (chain_specs, json_rpc_running) = {
         let mut chain_specs = Vec::new();
-        let mut database_content = Vec::new();
         let mut json_rpc_running = Vec::new();
 
         for chain in chains {
@@ -90,22 +86,10 @@ pub async fn start_client(
                 },
             );
 
-            database_content.push(if let Some(database_content) = &chain.database_content {
-                match smoldot::database::finalized_serialize::decode_chain(database_content) {
-                    Ok((parsed, _)) => Some(parsed),
-                    Err(error) => {
-                        log::warn!("Failed to decode chain information: {}", error);
-                        None
-                    }
-                }
-            } else {
-                None
-            });
-
             json_rpc_running.push(chain.json_rpc_running);
         }
 
-        (chain_specs, database_content, json_rpc_running)
+        (chain_specs, json_rpc_running)
     };
 
     // Load the information about the chains from the chain specs. If a light sync state is
@@ -119,38 +103,21 @@ pub async fn start_client(
         .collect::<Vec<_>>();
     let chain_information = chain_specs
         .iter()
-        .zip(database_content.into_iter())
         .zip(genesis_chain_information.iter())
-        .map(
-            |((chain_spec, database_content), genesis_chain_information)| {
-                let base = if let Some(light_sync_state) = chain_spec.light_sync_state() {
-                    log::info!(
-                        "Using light checkpoint starting at #{}",
-                        light_sync_state
-                            .as_chain_information()
-                            .finalized_block_header
-                            .number
-                    );
-                    light_sync_state.as_chain_information()
-                } else {
-                    genesis_chain_information.clone()
-                };
-
-                // Only use the existing database if it is ahead of `base`.
-                if let Some(database_content) = database_content {
-                    if database_content.finalized_block_header.number
-                        > base.finalized_block_header.number
-                    {
-                        database_content
-                    } else {
-                        log::info!("Skipping database as it is older than checkpoint");
-                        base
-                    }
-                } else {
-                    base
-                }
-            },
-        )
+        .map(|(chain_spec, genesis_chain_information)| {
+            if let Some(light_sync_state) = chain_spec.light_sync_state() {
+                log::info!(
+                    "Using light checkpoint starting at #{}",
+                    light_sync_state
+                        .as_chain_information()
+                        .finalized_block_header
+                        .number
+                );
+                light_sync_state.as_chain_information()
+            } else {
+                genesis_chain_information.clone()
+            }
+        })
         .collect::<Vec<_>>();
 
     // Starting here, the code below initializes the various "services" that make up the node.
@@ -323,27 +290,6 @@ async fn start_services(
 
         debug_assert!(per_chain[chain_index].is_none());
         per_chain[chain_index] = Some((sync_service.clone(), runtime_service));
-
-        // Spawn a task responsible for serializing the chain from the sync service at
-        // a periodic interval.
-        // This is only done for relay chains. Since multiple database services would conflict
-        // with each other, this is done for the first relay chain in the list. This will change
-        // in the future.
-        if relay_chain_index == 0 {
-            new_task_tx
-                .unbounded_send(
-                    async move {
-                        loop {
-                            ffi::Delay::new(Duration::from_secs(15)).await;
-                            log::debug!("Database save start");
-                            let database_content = sync_service.serialize_chain().await;
-                            ffi::database_save(&database_content);
-                        }
-                    }
-                    .boxed(),
-                )
-                .unwrap();
-        }
     }
 
     // Start the services of the parachains.

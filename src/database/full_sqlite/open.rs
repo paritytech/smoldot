@@ -22,7 +22,7 @@
 use super::{encode_babe_epoch_information, AccessError, SqliteFullDatabase};
 use crate::chain::chain_information;
 
-use std::{convert::TryFrom as _, path::Path};
+use std::{convert::TryFrom as _, fs, path::Path};
 
 /// Opens the database using the given [`Config`].
 ///
@@ -42,8 +42,12 @@ pub fn open(config: Config) -> Result<DatabaseOpen, super::InternalError> {
     let database = match config.ty {
         ConfigTy::Disk(path) => {
             // We put a `/v1/` behind the path in case we change the schema.
-            let path = path.join("v1").join("database.sqlite");
-            sqlite::Connection::open_with_flags(path, flags)
+            let path = path.join("v1");
+            // Ignoring errors in `create_dir_all`, in order to avoid making the API of this
+            // function more complex. If `create_dir_all` fails, opening the database will most
+            // likely fail too.
+            let _ = fs::create_dir_all(&path);
+            sqlite::Connection::open_with_flags(path.join("database.sqlite"), flags)
         }
         ConfigTy::Memory => sqlite::Connection::open_with_flags(":memory:", flags),
     }
@@ -70,22 +74,21 @@ Keys in that table:
 
  - `finalized` (number): Height of the finalized block, as a 64bits big endian number.
 
- - `grandpa_authorities_set_id` (number): A 64bits big endian number representing the id of the
- authorities set that must finalize the block right after the finalized block. The value is
- 0 at the genesis block, and increased by 1 at every authorities change. Missing if and only
- if the chain doesn't use Grandpa.
+ - `grandpa_authorities_set_id` (number): Id of the authorities set that must finalize the block
+ right after the finalized block. The value is 0 at the genesis block, and increased by 1 at every
+ authorities change. Missing if and only if the chain doesn't use Grandpa.
 
- - `grandpa_scheduled_target` (number): A 64bits big endian number representing the block where the
- authorities found in `grandpa_scheduled_authorities` will be triggered. Blocks whose height
- is strictly higher than this value must be finalized using the new set of authorities. This
- authority change must have been scheduled in or before the finalized block. Missing if no
- change is scheduled or if the chain doesn't use Grandpa.
+ - `grandpa_scheduled_target` (number): Height of the block where the authorities found in
+ `grandpa_scheduled_authorities` will be triggered. Blocks whose height is strictly higher than
+ this value must be finalized using the new set of authorities. This authority change must have
+ been scheduled in or before the finalized block. Missing if no change is scheduled or if the
+ chain doesn't use Grandpa.
 
- - `aura_slot_duration` (number): A 64bits big endian number indicating the duration of an Aura
- slot. Missing if and only if the chain doesn't use Aura.
+ - `aura_slot_duration` (number): Duration of an Aura slot in milliseconds. Missing if and only if
+ the chain doesn't use Aura.
 
- - `babe_slots_per_epoch` (number): A 64bits big endian number indicating the number of slots per
- Babe epoch. Missing if and only if the chain doesn't use Babe.
+ - `babe_slots_per_epoch` (number): Number of slots per Babe epoch. Missing if and only if the
+ chain doesn't use Babe.
 
  - `babe_finalized_epoch` (blob): SCALE encoding of a structure that contains the information
  about the Babe epoch used for the finalized block. Missing if and only if the finalized
@@ -158,8 +161,8 @@ CREATE TABLE IF NOT EXISTS non_finalized_changes(
 );
 
 /*
-List of public keys and weights of the GrandPa authorities that will be triggered at the block
-found in `grandpa_scheduled_target` (see `meta`). Empty if the chain doesn't use Grandpa.
+List of public keys and weights of the GrandPa authorities that must finalize the children of the
+finalized block. Empty if the chain doesn't use Grandpa.
 */
 CREATE TABLE IF NOT EXISTS grandpa_triggered_authorities(
     idx INTEGER NOT NULL PRIMARY KEY,
@@ -169,9 +172,9 @@ CREATE TABLE IF NOT EXISTS grandpa_triggered_authorities(
 );
 
 /*
-List of public keys and weights of the GrandPa authorities that must finalize the children of the
-finalized block. Empty if the chain doesn't use Grandpa.
- */
+List of public keys and weights of the GrandPa authorities that will be triggered at the block
+found in `grandpa_scheduled_target` (see `meta`). Empty if the chain doesn't use Grandpa.
+*/
 CREATE TABLE IF NOT EXISTS grandpa_scheduled_authorities(
     idx INTEGER NOT NULL PRIMARY KEY,
     public_key BLOB NOT NULL,
@@ -181,7 +184,7 @@ CREATE TABLE IF NOT EXISTS grandpa_scheduled_authorities(
 
 /*
 List of public keys of the Aura authorities that must author the children of the finalized block.
- */
+*/
 CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
     idx INTEGER NOT NULL PRIMARY KEY,
     public_key BLOB NOT NULL,
