@@ -227,7 +227,7 @@ pub extern "C" fn init(
 /// this function is called.
 ///
 /// Additionally, an index that represents the source of the request is also passed as a parameter.
-/// This source ID is completel opaque and can be chosen freely by the caller.
+/// This source ID is completely opaque and can be chosen freely by the caller.
 ///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
