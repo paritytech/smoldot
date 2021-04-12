@@ -15,7 +15,6 @@ import * as smoldot from 'smoldot';
 
 // Load a string chain specifications.
 const chain_spec = Buffer.from(fs.readFileSync('./westend.json')).toString('utf8');
-const chain_index = 0;
 
 smoldot
   .start({

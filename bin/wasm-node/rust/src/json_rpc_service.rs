@@ -105,7 +105,7 @@ pub async fn request_handling_task(
                         };
 
                         match json_rpc_services.get(&chain_index).cloned() {
-                            Some(service) => service.handle_rpc(request_id, call, source_id).await,
+                            Some(service) => service.handle_rpc(source_id, request_id, call).await,
                             None => {
                                 send_back(
                                     &json_rpc::parse::build_error_response(
@@ -350,9 +350,9 @@ impl JsonRpcService {
     /// spawns a background task for further processing.
     pub async fn handle_rpc(
         self: Arc<JsonRpcService>,
+        source_id: u32,
         request_id: &str,
         call: MethodCall,
-        source_id: u32,
     ) {
         // Most calls are handled directly in this method's body. The most voluminous (in terms
         // of lines of code) have their dedicated methods.
@@ -389,7 +389,7 @@ impl JsonRpcService {
                 );
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
-                self.submit_and_watch_extrinsic(request_id, transaction, source_id)
+                self.submit_and_watch_extrinsic(source_id, request_id, transaction)
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
@@ -485,13 +485,13 @@ impl JsonRpcService {
                 });
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.subscribe_all_heads(request_id, source_id).await;
+                self.subscribe_all_heads(source_id, request_id).await;
             }
             methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.subscribe_new_heads(request_id, source_id).await;
+                self.subscribe_new_heads(source_id, request_id).await;
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(request_id, source_id).await;
+                self.subscribe_finalized_heads(source_id, request_id).await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
@@ -736,7 +736,7 @@ impl JsonRpcService {
                 }));
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                self.subscribe_storage(request_id, list, source_id).await;
+                self.subscribe_storage(source_id, request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
@@ -889,9 +889,9 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
     async fn submit_and_watch_extrinsic(
         self: Arc<JsonRpcService>,
+        source_id: u32,
         request_id: &str,
         transaction: methods::HexString,
-        source_id: u32,
     ) {
         let mut transaction_updates = self
             .transactions_service
@@ -1022,7 +1022,7 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(self: Arc<JsonRpcService>, request_id: &str, source_id: u32) {
+    async fn subscribe_all_heads(self: Arc<JsonRpcService>, source_id: u32, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1079,7 +1079,7 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(self: Arc<JsonRpcService>, request_id: &str, source_id: u32) {
+    async fn subscribe_new_heads(self: Arc<JsonRpcService>, source_id: u32, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1137,8 +1137,8 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
     async fn subscribe_finalized_heads(
         self: Arc<JsonRpcService>,
-        request_id: &str,
         source_id: u32,
+        request_id: &str,
     ) {
         let subscription = self
             .next_subscription
@@ -1198,9 +1198,9 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
     async fn subscribe_storage(
         self: Arc<JsonRpcService>,
+        source_id: u32,
         request_id: &str,
         list: Vec<methods::HexString>,
-        source_id: u32,
     ) {
         let subscription = self
             .next_subscription
