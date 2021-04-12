@@ -199,7 +199,7 @@ enum Substream<TNow, TRqUd, TNotifUd> {
     RequestInSend,
 
     /// Inbound ping substream. Waiting for the ping payload to be received.
-    PingIn(arrayvec::ArrayVec<[u8; 32]>),
+    PingIn(arrayvec::ArrayVec<u8, 32>),
 }
 
 impl<TNow, TRqUd, TNotifUd> Established<TNow, TRqUd, TNotifUd>
@@ -1099,7 +1099,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                             *substream.user_data() = Substream::RequestOut {
                                 timeout,
                                 user_data,
-                                response: leb128::FramedInProgress::new(10 * 1024 * 1024), // TODO: proper max size
+                                response: leb128::FramedInProgress::new(128 * 1024 * 1024), // TODO: proper max size
                             };
                             let substream_id = substream.id();
                             let _already_closed = substream.close();

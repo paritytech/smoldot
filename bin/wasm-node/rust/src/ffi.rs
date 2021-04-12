@@ -36,6 +36,7 @@ use futures::{
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
+    task,
 };
 
 pub mod bindings;
@@ -48,8 +49,12 @@ pub(crate) fn throw(message: String) -> ! {
             u32::try_from(message.as_bytes().len()).unwrap(),
         );
 
-        // Note: we could theoretically use `unreachable_unchecked` here, but this relies on the
-        // fact that `ffi::throw` is correctly implemented, which isn't 100% guaranteed.
+        // Even though this code is intended to only ever be compiled for Wasm, it might, for
+        // various reasons, be compiled for the host platform as well. We use platform-specific
+        // code to make sure that it compiles for all platforms.
+        #[cfg(target_arch = "wasm32")]
+        core::arch::wasm32::unreachable();
+        #[cfg(not(target_arch = "wasm32"))]
         unreachable!();
     }
 }
@@ -67,31 +72,29 @@ fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
         future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
     }
 
-    impl futures::task::ArcWake for Waker {
-        fn wake_by_ref(arc_self: &Arc<Self>) {
-            if arc_self
+    impl task::Wake for Waker {
+        fn wake(self: Arc<Self>) {
+            if self
                 .wake_up_registered
                 .swap(true, atomic::Ordering::Relaxed)
             {
                 return;
             }
 
-            let arc_self = arc_self.clone();
             start_timer_wrap(Duration::new(0, 0), move || {
-                if arc_self.done.load(atomic::Ordering::SeqCst) {
+                if self.done.load(atomic::Ordering::SeqCst) {
                     return;
                 }
 
-                let mut future = arc_self.future.try_lock().unwrap();
-                arc_self
-                    .wake_up_registered
+                let mut future = self.future.try_lock().unwrap();
+                self.wake_up_registered
                     .store(false, atomic::Ordering::SeqCst);
                 match Future::poll(
                     future.as_mut(),
-                    &mut Context::from_waker(&futures::task::waker_ref(&arc_self)),
+                    &mut Context::from_waker(&task::Waker::from(self.clone())),
                 ) {
                     Poll::Ready(()) => {
-                        arc_self.done.store(true, atomic::Ordering::SeqCst);
+                        self.done.store(true, atomic::Ordering::SeqCst);
                     }
                     Poll::Pending => {}
                 }
@@ -105,7 +108,7 @@ fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
         future: Mutex::new(Box::pin(future)),
     });
 
-    futures::task::ArcWake::wake(waker);
+    task::Wake::wake(waker);
 }
 
 /// Uses the environment to invoke `closure` after `duration` has elapsed.
@@ -210,16 +213,6 @@ impl Sub<Instant> for Instant {
         let ms = self.inner - other.inner;
         assert!(ms >= 0.0);
         Duration::from_millis(ms as u64)
-    }
-}
-
-/// Sets the content of the database to the given string.
-pub(crate) fn database_save(content: &str) {
-    unsafe {
-        bindings::database_save(
-            u32::try_from(content.as_bytes().as_ptr() as usize).unwrap(),
-            u32::try_from(content.as_bytes().len()).unwrap(),
-        );
     }
 }
 
@@ -437,18 +430,14 @@ fn alloc(len: u32) -> u32 {
 fn init(
     chain_specs_ptr: u32,
     chain_specs_len: u32,
-    database_content_ptr: u32,
-    database_content_len: u32,
-    relay_chain_specs_ptr: u32,
-    relay_chain_specs_len: u32,
+    parachain_specs_ptr: u32,
+    parachain_specs_len: u32,
     max_log_level: u32,
 ) {
     let chain_specs_ptr = usize::try_from(chain_specs_ptr).unwrap();
     let chain_specs_len = usize::try_from(chain_specs_len).unwrap();
-    let database_content_ptr = usize::try_from(database_content_ptr).unwrap();
-    let database_content_len = usize::try_from(database_content_len).unwrap();
-    let relay_chain_specs_ptr = usize::try_from(relay_chain_specs_ptr).unwrap();
-    let relay_chain_specs_len = usize::try_from(relay_chain_specs_len).unwrap();
+    let parachain_specs_ptr = usize::try_from(parachain_specs_ptr).unwrap();
+    let parachain_specs_len = usize::try_from(parachain_specs_len).unwrap();
 
     let chain_specs: Box<[u8]> = unsafe {
         Box::from_raw(slice::from_raw_parts_mut(
@@ -459,23 +448,11 @@ fn init(
 
     let chain_specs = String::from_utf8(Vec::from(chain_specs)).expect("non-utf8 chain specs");
 
-    let database_content = if database_content_ptr != 0 {
+    let parachain_specs = if parachain_specs_ptr != 0 {
         let data: Box<[u8]> = unsafe {
             Box::from_raw(slice::from_raw_parts_mut(
-                database_content_ptr as *mut u8,
-                database_content_len,
-            ))
-        };
-        String::from_utf8(Vec::from(data)).ok()
-    } else {
-        None
-    };
-
-    let relay_chain_specs = if relay_chain_specs_ptr != 0 {
-        let data: Box<[u8]> = unsafe {
-            Box::from_raw(slice::from_raw_parts_mut(
-                relay_chain_specs_ptr as *mut u8,
-                relay_chain_specs_len,
+                parachain_specs_ptr as *mut u8,
+                parachain_specs_len,
             ))
         };
         Some(String::from_utf8(Vec::from(data)).expect("non-utf8 relay chain specs"))
@@ -495,50 +472,61 @@ fn init(
     spawn_task(super::start_client(
         iter::once(super::ChainConfig {
             specification: chain_specs,
-            database_content,
+            json_rpc_running: true,
         })
         .chain(
-            relay_chain_specs
+            parachain_specs
                 .into_iter()
                 .map(|specification| super::ChainConfig {
                     specification,
-                    database_content: None,
+                    json_rpc_running: false,
                 }),
         ),
         max_log_level,
     ));
 }
 
+pub(crate) struct JsonRpcRequest {
+    pub(crate) json_rpc_request: Box<[u8]>,
+    pub(crate) chain_index: usize,
+}
+
 lazy_static::lazy_static! {
-    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<Box<[u8]>>, futures::lock::Mutex<mpsc::UnboundedReceiver<Box<[u8]>>>) = {
+    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<JsonRpcRequest>, futures::lock::Mutex<mpsc::UnboundedReceiver<JsonRpcRequest>>) = {
         let (tx, rx) = mpsc::unbounded();
         (tx, futures::lock::Mutex::new(rx))
     };
 }
 
-fn json_rpc_send(ptr: u32, len: u32) {
+fn json_rpc_send(ptr: u32, len: u32, chain_index: u32) {
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
+    let chain_index = usize::try_from(chain_index).unwrap();
 
-    let request: Box<[u8]> =
+    let json_rpc_request: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+    let request = JsonRpcRequest {
+        json_rpc_request,
+        chain_index,
+    };
     JSON_RPC_CHANNEL.0.unbounded_send(request).unwrap();
 }
 
 /// Waits for the next JSON-RPC request coming from the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) async fn next_json_rpc() -> Box<[u8]> {
+pub(crate) async fn next_json_rpc() -> JsonRpcRequest {
     let mut lock = JSON_RPC_CHANNEL.1.lock().await;
     lock.next().await.unwrap()
 }
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) fn emit_json_rpc_response(rpc: &str) {
+pub(crate) fn emit_json_rpc_response(rpc: &str, chain_index: usize) {
     unsafe {
         bindings::json_rpc_respond(
-            u32::try_from(rpc.as_ptr() as usize).unwrap(),
-            u32::try_from(rpc.len()).unwrap(),
+            u32::try_from(rpc.as_bytes().as_ptr() as usize).unwrap(),
+            u32::try_from(rpc.as_bytes().len()).unwrap(),
+            u32::try_from(chain_index).unwrap(),
         );
     }
 }

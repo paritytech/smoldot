@@ -22,7 +22,7 @@
 use futures::{channel::oneshot, prelude::*};
 use smoldot::{
     chain, chain_spec,
-    database::full_sled,
+    database::full_sqlite,
     header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id::PeerId},
@@ -93,11 +93,9 @@ async fn async_main() {
             .expect("Failed to decode chain specs")
     };
 
+    // TODO: don't unwrap?
     let genesis_chain_information =
-        chain::chain_information::ChainInformation::from_genesis_storage(
-            chain_spec.genesis_storage(),
-        )
-        .unwrap(); // TODO: don't unwrap?
+        chain::chain_information::ChainInformation::from_chain_spec(&chain_spec).unwrap();
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
     let (relay_chain_spec, _parachain_id) =
@@ -129,12 +127,8 @@ async fn async_main() {
         };
 
     let relay_genesis_chain_information = if let Some(relay_chain_spec) = &relay_chain_spec {
-        Some(
-            chain::chain_information::ChainInformation::from_genesis_storage(
-                relay_chain_spec.genesis_storage(),
-            )
-            .unwrap(),
-        ) // TODO: don't unwrap?
+        // TODO: don't unwrap?
+        Some(chain::chain_information::ChainInformation::from_chain_spec(relay_chain_spec).unwrap())
     } else {
         None
     };
@@ -173,96 +167,102 @@ async fn async_main() {
         smoldot::metadata::decode(&metadata).unwrap()
     );*/
 
-    let network_service = network_service::NetworkService::new(network_service::Config {
-        listen_addresses: Vec::new(),
-        chains: iter::once(network_service::ChainConfig {
-            protocol_id: chain_spec.protocol_id().to_owned(),
-            has_grandpa_protocol: matches!(
-                genesis_chain_information.finality,
-                chain::chain_information::ChainInformationFinality::Grandpa { .. }
-            ),
-            genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-            best_block: {
-                let hash = database.finalized_block_hash().unwrap();
-                let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
-                let number = header::decode(&header).unwrap().number;
-                (number, hash)
-            },
-            bootstrap_nodes: {
-                let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-                for node in chain_spec.boot_nodes().iter() {
-                    let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                    if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                        let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
-                        list.push((peer_id, address));
-                    } else {
-                        panic!() // TODO:
+    let (network_service, network_events_receivers) =
+        network_service::NetworkService::new(network_service::Config {
+            listen_addresses: Vec::new(),
+            num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
+            chains: iter::once(network_service::ChainConfig {
+                protocol_id: chain_spec.protocol_id().to_owned(),
+                has_grandpa_protocol: matches!(
+                    genesis_chain_information.finality,
+                    chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                ),
+                genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
+                best_block: {
+                    let hash = database.finalized_block_hash().unwrap();
+                    let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
+                    let number = header::decode(&header).unwrap().number;
+                    (number, hash)
+                },
+                bootstrap_nodes: {
+                    let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
+                    for node in chain_spec.boot_nodes().iter() {
+                        let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                        if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                            let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                            list.push((peer_id, address));
+                        } else {
+                            panic!() // TODO:
+                        }
                     }
-                }
-                list
+                    list
+                },
+            })
+            .chain(
+                relay_chain_spec
+                    .as_ref()
+                    .map(|relay_chains_specs| {
+                        network_service::ChainConfig {
+                            protocol_id: relay_chains_specs.protocol_id().to_owned(),
+                            has_grandpa_protocol: matches!(
+                                relay_genesis_chain_information.as_ref().unwrap().finality,
+                                chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                            ),
+                            genesis_block_hash: relay_genesis_chain_information
+                                .as_ref()
+                                .unwrap()
+                                .finalized_block_header
+                                .hash(),
+                            best_block: {
+                                let db = relay_chain_database.as_ref().unwrap();
+                                let hash = db.finalized_block_hash().unwrap();
+                                let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
+                                let number = header::decode(&header).unwrap().number;
+                                (number, hash)
+                            },
+                            bootstrap_nodes: {
+                                let mut list =
+                                    Vec::with_capacity(relay_chains_specs.boot_nodes().len());
+                                for node in relay_chains_specs.boot_nodes().iter() {
+                                    let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                                    if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                                        let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                                        list.push((peer_id, address));
+                                    } else {
+                                        panic!() // TODO:
+                                    }
+                                }
+                                list
+                            },
+                        }
+                    })
+                    .into_iter(),
+            )
+            .collect(),
+            noise_key: if let Some(node_key) = cli_options.node_key {
+                connection::NoiseKey::new(node_key.as_ref())
+            } else {
+                // TODO: load from disk or something instead
+                connection::NoiseKey::new(&rand::random())
+            },
+            tasks_executor: {
+                let threads_pool = threads_pool.clone();
+                Box::new(move |task| threads_pool.spawn_ok(task))
             },
         })
-        .chain(
-            relay_chain_spec
-                .as_ref()
-                .map(|relay_chains_specs| {
-                    network_service::ChainConfig {
-                        protocol_id: relay_chains_specs.protocol_id().to_owned(),
-                        has_grandpa_protocol: matches!(
-                            relay_genesis_chain_information.as_ref().unwrap().finality,
-                            chain::chain_information::ChainInformationFinality::Grandpa { .. }
-                        ),
-                        genesis_block_hash: relay_genesis_chain_information
-                            .as_ref()
-                            .unwrap()
-                            .finalized_block_header
-                            .hash(),
-                        best_block: {
-                            let db = relay_chain_database.as_ref().unwrap();
-                            let hash = db.finalized_block_hash().unwrap();
-                            let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
-                            let number = header::decode(&header).unwrap().number;
-                            (number, hash)
-                        },
-                        bootstrap_nodes: {
-                            let mut list =
-                                Vec::with_capacity(relay_chains_specs.boot_nodes().len());
-                            for node in relay_chains_specs.boot_nodes().iter() {
-                                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
-                                    list.push((peer_id, address));
-                                } else {
-                                    panic!() // TODO:
-                                }
-                            }
-                            list
-                        },
-                    }
-                })
-                .into_iter(),
-        )
-        .collect(),
-        noise_key: if let Some(node_key) = cli_options.node_key {
-            connection::NoiseKey::new(node_key.as_ref())
-        } else {
-            // TODO: load from disk or something instead
-            connection::NoiseKey::new(&rand::random())
-        },
-        tasks_executor: {
-            let threads_pool = threads_pool.clone();
-            Box::new(move |task| threads_pool.spawn_ok(task))
-        },
-    })
-    .instrument(tracing::debug_span!("network-service-init"))
-    .await
-    .unwrap();
+        .instrument(tracing::debug_span!("network-service-init"))
+        .await
+        .unwrap();
+
+    let mut network_events_receivers = network_events_receivers.into_iter();
 
     let sync_service = sync_service::SyncService::new(sync_service::Config {
         tasks_executor: {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
+        network_events_receiver: network_events_receivers.next().unwrap(),
+        network_service: (network_service.clone(), 0),
         database,
     })
     .instrument(tracing::debug_span!("sync-service-init"))
@@ -275,6 +275,8 @@ async fn async_main() {
                     let threads_pool = threads_pool.clone();
                     Box::new(move |task| threads_pool.spawn_ok(task))
                 },
+                network_events_receiver: network_events_receivers.next().unwrap(),
+                network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
             })
             .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
@@ -333,6 +335,8 @@ async fn async_main() {
     );
 
     let mut network_known_best = None;
+    let mut main_network_events_receiver = network_events_receivers.next().unwrap();
+    debug_assert!(network_events_receivers.next().is_none());
 
     loop {
         futures::select! {
@@ -369,78 +373,12 @@ async fn async_main() {
                 }
             },
 
-            network_message = network_service.next_event().fuse() => {
-                match network_message {
-                    network_service::Event::Connected { chain_index: 0, peer_id, best_block_number } => {
-                        sync_service.add_source(peer_id, best_block_number).await;
-                    }
-                    network_service::Event::Connected { chain_index: 1, peer_id, best_block_number } => {
-                        relay_chain_sync_service.as_ref().unwrap().add_source(peer_id, best_block_number).await;
-                    }
-                    network_service::Event::Disconnected { chain_index: 0, peer_id } => {
-                        sync_service.remove_source(peer_id).await;
-                    }
-                    network_service::Event::Disconnected { chain_index: 1, peer_id } => {
-                        relay_chain_sync_service.as_ref().unwrap().remove_source(peer_id).await;
-                    }
-                    network_service::Event::BlockAnnounce { chain_index: 0, peer_id, announce } => {
-                        let decoded = announce.decode();
-                        sync_service.raise_source_best_block(peer_id, decoded.header.number).await;
-                        match network_known_best {
-                            Some(n) if n >= decoded.header.number => {},
-                            _ => network_known_best = Some(decoded.header.number),
-                        }
-                    }
-                    network_service::Event::BlockAnnounce { chain_index: 1, peer_id, announce } => {
-                        let decoded = announce.decode();
-                        relay_chain_sync_service.as_ref().unwrap().raise_source_best_block(peer_id, decoded.header.number).await;
-                    }
-                    _ => unreachable!()
-                }
-            }
-
-            sync_message = sync_service.next_event().fuse() => {
-                match sync_message {
-                    sync_service::Event::BlocksRequest { id, target, request } => {
-                        let block_request = network_service.clone().blocks_request(
-                            target,
-                            0,
-                            request,
-                        );
-
-                        threads_pool.spawn_ok({
-                            let sync_service = sync_service.clone();
-                            async move {
-                                let result = block_request.await;
-                                sync_service.answer_blocks_request(id, result.map_err(|_| ())).await;
-                            }
-                        });
-                    }
-                }
-            }
-
-            relay_chain_sync_message = async {
-                if let Some(relay_chain_sync_service) = &relay_chain_sync_service {
-                    relay_chain_sync_service.next_event().await
-                } else {
-                    future::pending().await
-                }
-            }.fuse() => {
-                match relay_chain_sync_message {
-                    sync_service::Event::BlocksRequest { id, target, request } => {
-                        let block_request = network_service.clone().blocks_request(
-                            target,
-                            1,
-                            request
-                        );
-
-                        threads_pool.spawn_ok({
-                            let relay_chain_sync_service = relay_chain_sync_service.as_ref().unwrap().clone();
-                            async move {
-                                let result = block_request.await;
-                                relay_chain_sync_service.answer_blocks_request(id, result.map_err(|_| ())).await;
-                            }
-                        });
+            network_message = main_network_events_receiver.next() => {
+                if let network_service::Event::BlockAnnounce { chain_index: 0, announce, .. } = network_message.unwrap() {
+                    let decoded = announce.decode();
+                    match network_known_best {
+                        Some(n) if n >= decoded.header.number => {},
+                        _ => network_known_best = Some(decoded.header.number),
                     }
                 }
             }
@@ -507,7 +445,7 @@ async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: &chain::chain_information::ChainInformation,
     tmp: bool,
-) -> Arc<full_sled::SledFullDatabase> {
+) -> Arc<full_sqlite::SqliteFullDatabase> {
     Arc::new({
         // Directory supposed to contain the database.
         let db_path = if !tmp {
@@ -522,7 +460,7 @@ async fn open_database(
         // The `unwrap()` here can panic for example in case of access denied.
         match background_open_database(db_path.clone()).await.unwrap() {
             // Database already exists and contains data.
-            full_sled::DatabaseOpen::Open(database) => {
+            full_sqlite::DatabaseOpen::Open(database) => {
                 // TODO: verify that the database matches the chain spec
                 let finalized_block_hash = database.finalized_block_hash().unwrap();
                 let finalized_block = database
@@ -538,7 +476,7 @@ async fn open_database(
             }
 
             // The database doesn't exist or is empty.
-            full_sled::DatabaseOpen::Empty(empty) => {
+            full_sqlite::DatabaseOpen::Empty(empty) => {
                 // The finalized block is the genesis block. As such, it has an empty body and
                 // no justification.
                 empty
@@ -561,18 +499,18 @@ async fn open_database(
 #[tracing::instrument]
 async fn background_open_database(
     path: Option<PathBuf>,
-) -> Result<full_sled::DatabaseOpen, full_sled::SledError> {
+) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {
     let (tx, rx) = oneshot::channel();
     let mut rx = rx.fuse();
 
     let thread_spawn_result = thread::Builder::new().name("database-open".into()).spawn({
         let path = path.clone();
         move || {
-            let result = full_sled::open(full_sled::Config {
+            let result = full_sqlite::open(full_sqlite::Config {
                 ty: if let Some(path) = &path {
-                    full_sled::ConfigTy::Disk(path)
+                    full_sqlite::ConfigTy::Disk(path)
                 } else {
-                    full_sled::ConfigTy::Memory
+                    full_sqlite::ConfigTy::Memory
                 },
             });
             let _ = tx.send(result);
@@ -581,11 +519,11 @@ async fn background_open_database(
 
     // Fall back to opening the database on the same thread if the thread spawn failed.
     if thread_spawn_result.is_err() {
-        return full_sled::open(full_sled::Config {
+        return full_sqlite::open(full_sqlite::Config {
             ty: if let Some(path) = &path {
-                full_sled::ConfigTy::Disk(path)
+                full_sqlite::ConfigTy::Disk(path)
             } else {
-                full_sled::ConfigTy::Memory
+                full_sqlite::ConfigTy::Memory
             },
         });
     }

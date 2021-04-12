@@ -48,11 +48,7 @@ use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     header,
     informant::HashDisplay,
-    libp2p::{
-        connection,
-        multiaddr::{Multiaddr, Protocol},
-        peer_id::PeerId,
-    },
+    libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId},
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
 };
@@ -282,6 +278,21 @@ impl NetworkService {
                                 );
                                 request.respond("smoldot").await;
                             }
+                            service::Event::GrandpaCommitMessage {
+                                chain_index,
+                                message,
+                            } => {
+                                log::debug!(
+                                    target: "network",
+                                    "Connection(?) => GrandpaCommitMessage({}, {})",
+                                    chain_index,
+                                    HashDisplay(message.decode().message.target_hash),
+                                );
+                                break Event::GrandpaCommitMessage {
+                                    chain_index,
+                                    message,
+                                };
+                            }
                         }
                     };
 
@@ -486,14 +497,44 @@ impl NetworkService {
             .grandpa_warp_sync_request(ffi::Instant::now(), target.clone(), chain_index, begin_hash)
             .await;
 
-        log::debug!(
-            target: "network",
-            "Connection({}) => GrandpaWarpSyncRequest({:?})",
-            target,
-            result.as_ref().map(|response| response.fragments.len()),
-        );
+        if let Ok(response) = result.as_ref() {
+            log::debug!(
+                target: "network",
+                "Connection({}) => GrandpaWarpSyncRequest(num_fragments: {:?}, finished: {:?})",
+                target,
+                response.fragments.len(),
+                response.is_finished,
+            );
+        } else {
+            log::debug!(
+                target: "network",
+                "Connection({}) => GrandpaWarpSyncRequest({:?})",
+                target,
+                result,
+            );
+        }
 
         result
+    }
+
+    pub async fn set_local_grandpa_state(
+        &self,
+        chain_index: usize,
+        grandpa_state: service::GrandpaState,
+    ) {
+        log::debug!(
+            target: "network",
+            "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
+            chain_index,
+            grandpa_state.set_id,
+            grandpa_state.commit_finalized_height,
+        );
+
+        // TODO: log the list of peers we sent the packet to
+
+        self.network
+            .set_local_grandpa_state(chain_index, grandpa_state)
+            .await
     }
 
     /// Performs one or more storage proof requests in order to find the value of the given
@@ -788,6 +829,11 @@ pub enum Event {
         chain_index: usize,
         announce: service::EncodedBlockAnnounce,
     },
+    /// Received a GrandPa commit message from the network.
+    GrandpaCommitMessage {
+        chain_index: usize,
+        message: service::EncodedGrandpaCommitMessage,
+    },
 }
 
 /// Error that can happen when calling [`NetworkService::storage_query`].
@@ -973,44 +1019,5 @@ async fn connection_task(
             poll_after,
         )
         .await;
-    }
-}
-
-/// Returns the URL that corresponds to the given multiaddress. Returns an error if the
-/// multiaddress protocols aren't supported.
-fn multiaddr_to_url(addr: &Multiaddr) -> Result<String, ()> {
-    let mut iter = addr.iter();
-    let proto1 = iter.next().ok_or(())?;
-    let proto2 = iter.next().ok_or(())?;
-    let proto3 = iter.next().ok_or(())?;
-
-    if iter.next().is_some() {
-        return Err(());
-    }
-
-    match (proto1, proto2, proto3) {
-        (Protocol::Ip4(ip), Protocol::Tcp(port), Protocol::Ws(url)) => {
-            Ok(format!("ws://{}:{}{}", ip, port, url))
-        }
-        (Protocol::Ip6(ip), Protocol::Tcp(port), Protocol::Ws(url)) => {
-            Ok(format!("ws://[{}]:{}{}", ip, port, url))
-        }
-        (Protocol::Ip4(ip), Protocol::Tcp(port), Protocol::Wss(url)) => {
-            Ok(format!("wss://{}:{}{}", ip, port, url))
-        }
-        (Protocol::Ip6(ip), Protocol::Tcp(port), Protocol::Wss(url)) => {
-            Ok(format!("wss://[{}]:{}{}", ip, port, url))
-        }
-        (Protocol::Dns(domain), Protocol::Tcp(port), Protocol::Ws(url))
-        | (Protocol::Dns4(domain), Protocol::Tcp(port), Protocol::Ws(url))
-        | (Protocol::Dns6(domain), Protocol::Tcp(port), Protocol::Ws(url)) => {
-            Ok(format!("ws://{}:{}{}", domain, port, url))
-        }
-        (Protocol::Dns(domain), Protocol::Tcp(port), Protocol::Wss(url))
-        | (Protocol::Dns4(domain), Protocol::Tcp(port), Protocol::Wss(url))
-        | (Protocol::Dns6(domain), Protocol::Tcp(port), Protocol::Wss(url)) => {
-            Ok(format!("wss://{}:{}{}", domain, port, url))
-        }
-        _ => Err(()),
     }
 }

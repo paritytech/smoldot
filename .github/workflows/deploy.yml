@@ -39,7 +39,7 @@ jobs:
         registry: docker.pkg.github.com
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - uses: docker/build-push-action@v2.3.0
+    - uses: docker/build-push-action@v2.4.0
       with:
         context: .
         file: ./bin/full-node/Dockerfile
@@ -61,7 +61,7 @@ jobs:
       - uses: actions-rs/toolchain@v1
         with:
           # The Rust version used for compiling the Wasm node is pinned.
-          toolchain: 1.48.0
+          toolchain: 1.51.0
           target: wasm32-wasi
           profile: minimal
       - uses: Swatinem/rust-cache@v1

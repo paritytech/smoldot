@@ -84,7 +84,7 @@ pub struct Success<TSrc> {
 #[derive(derive_more::From)]
 pub enum GrandpaWarpSync<TSrc> {
     /// Warp syncing is over.
-    Finished(Result<Success<TSrc>, Error>),
+    Finished(Success<TSrc>),
     /// Warp syncing is in progress,
     InProgress(InProgressGrandpaWarpSync<TSrc>),
 }
@@ -116,11 +116,14 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
         mut query: babe_fetch_epoch::Query,
         mut fetched_current_epoch: Option<BabeEpochInformation>,
         mut state: PostVerificationState<TSrc>,
-    ) -> Self {
+    ) -> (Self, Option<Error>) {
         loop {
             match (query, fetched_current_epoch) {
                 (
-                    babe_fetch_epoch::Query::Finished(Ok((next_epoch, runtime))),
+                    babe_fetch_epoch::Query::Finished {
+                        result: Ok(next_epoch),
+                        virtual_machine,
+                    },
                     Some(current_epoch),
                 ) => {
                     let (slots_per_epoch, babe_config_c, babe_config_allowed_slots) =
@@ -138,28 +141,37 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                             _ => unreachable!(),
                         };
 
-                    return Self::Finished(Ok(Success {
-                        chain_information: ChainInformation {
-                            finalized_block_header: state.header,
-                            finality: state.chain_information_finality,
-                            consensus: ChainInformationConsensus::Babe {
-                                finalized_block_epoch_information: Some(current_epoch),
-                                finalized_next_epoch_transition: next_epoch,
-                                slots_per_epoch,
+                    return (
+                        Self::Finished(Success {
+                            chain_information: ChainInformation {
+                                finalized_block_header: state.header,
+                                finality: state.chain_information_finality,
+                                consensus: ChainInformationConsensus::Babe {
+                                    finalized_block_epoch_information: Some(current_epoch),
+                                    finalized_next_epoch_transition: next_epoch,
+                                    slots_per_epoch,
+                                },
                             },
-                        },
-                        runtime,
-                        sources: state
-                            .sources
-                            .drain()
-                            .map(|source| source.user_data)
-                            .collect(),
-                    }));
+                            runtime: virtual_machine,
+                            sources: state
+                                .sources
+                                .drain()
+                                .map(|source| source.user_data)
+                                .collect(),
+                        }),
+                        None,
+                    );
                 }
-                (babe_fetch_epoch::Query::Finished(Ok((current_epoch, runtime))), None) => {
+                (
+                    babe_fetch_epoch::Query::Finished {
+                        result: Ok(current_epoch),
+                        virtual_machine,
+                    },
+                    None,
+                ) => {
                     let babe_next_epoch_query =
                         babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                            runtime,
+                            runtime: virtual_machine,
                             epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
                         });
                     return Self::from_babe_fetch_epoch_query(
@@ -168,26 +180,49 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                         state,
                     );
                 }
-                (babe_fetch_epoch::Query::Finished(Err(error)), _) => {
-                    return Self::Finished(Err(Error::BabeFetchEpoch(error)))
+                (
+                    babe_fetch_epoch::Query::Finished {
+                        result: Err(error),
+                        virtual_machine: _,
+                    },
+                    _,
+                ) => {
+                    return (
+                        Self::InProgress(
+                            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                                state.sources,
+                                PreVerificationState {
+                                    start_chain_information: state.start_chain_information,
+                                },
+                                None,
+                            ),
+                        ),
+                        Some(Error::BabeFetchEpoch(error)),
+                    )
                 }
                 (babe_fetch_epoch::Query::StorageGet(storage_get), fetched_current_epoch) => {
-                    return Self::InProgress(InProgressGrandpaWarpSync::StorageGet(StorageGet {
-                        inner: storage_get,
-                        fetched_current_epoch,
-                        state,
-                    }))
+                    return (
+                        Self::InProgress(InProgressGrandpaWarpSync::StorageGet(StorageGet {
+                            inner: storage_get,
+                            fetched_current_epoch,
+                            state,
+                        })),
+                        None,
+                    )
                 }
                 (babe_fetch_epoch::Query::StorageRoot(storage_root), e) => {
                     fetched_current_epoch = e;
                     query = storage_root.resume(&state.header.state_root);
                 }
                 (babe_fetch_epoch::Query::NextKey(next_key), fetched_current_epoch) => {
-                    return Self::InProgress(InProgressGrandpaWarpSync::NextKey(NextKey {
-                        inner: next_key,
-                        fetched_current_epoch,
-                        state,
-                    }))
+                    return (
+                        Self::InProgress(InProgressGrandpaWarpSync::NextKey(NextKey {
+                            inner: next_key,
+                            fetched_current_epoch,
+                            state,
+                        })),
+                        None,
+                    )
                 }
             }
         }
@@ -310,7 +345,7 @@ impl<TSrc> StorageGet<TSrc> {
     pub fn inject_value(
         self,
         value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> GrandpaWarpSync<TSrc> {
+    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_value(value),
             self.fetched_current_epoch,
@@ -361,7 +396,10 @@ impl<TSrc> NextKey<TSrc> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> GrandpaWarpSync<TSrc> {
+    pub fn inject_key(
+        self,
+        key: Option<impl AsRef<[u8]>>,
+    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
         GrandpaWarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_key(key),
             self.fetched_current_epoch,
@@ -558,20 +596,18 @@ impl<TSrc> WarpSyncRequest<TSrc> {
 
         match response {
             Some(response) => {
-                // TODO: remove this `unwrap_or` when a polkadot version that
-                // serves `is_finished` is released.
-                let final_set_of_fragments = response
-                    .is_finished
-                    .unwrap_or(response.fragments.len() == 1);
+                let final_set_of_fragments = response.is_finished;
 
                 let verifier = match &self.previous_verifier_values {
                     Some((_, chain_information_finality)) => warp_sync::Verifier::new(
                         chain_information_finality.into(),
                         response.fragments,
+                        final_set_of_fragments,
                     ),
                     None => warp_sync::Verifier::new(
                         (&self.state.start_chain_information.finality).into(),
                         response.fragments,
+                        final_set_of_fragments,
                     ),
                 };
 
@@ -628,16 +664,42 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
-    ) -> GrandpaWarpSync<TSrc> {
+    ) -> (GrandpaWarpSync<TSrc>, Option<Error>) {
         let code = match code {
             Some(code) => code,
-            None => return GrandpaWarpSync::Finished(Err(Error::MissingCode)),
+            None => {
+                return (
+                    GrandpaWarpSync::InProgress(
+                        InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                            self.state.sources,
+                            PreVerificationState {
+                                start_chain_information: self.state.start_chain_information,
+                            },
+                            None,
+                        ),
+                    ),
+                    Some(Error::MissingCode),
+                )
+            }
         };
 
         let heap_pages =
             match executor::storage_heap_pages_to_value(heap_pages.as_ref().map(|p| p.as_ref())) {
                 Ok(hp) => hp,
-                Err(err) => return GrandpaWarpSync::Finished(Err(Error::InvalidHeapPages(err))),
+                Err(err) => {
+                    return (
+                        GrandpaWarpSync::InProgress(
+                            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                                self.state.sources,
+                                PreVerificationState {
+                                    start_chain_information: self.state.start_chain_information,
+                                },
+                                None,
+                            ),
+                        ),
+                        Some(Error::InvalidHeapPages(err)),
+                    )
+                }
             };
 
         match HostVmPrototype::new(code, heap_pages, exec_hint) {
@@ -648,13 +710,26 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                         epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
                     });
 
-                GrandpaWarpSync::from_babe_fetch_epoch_query(
+                let (grandpa_warp_sync, error) = GrandpaWarpSync::from_babe_fetch_epoch_query(
                     babe_current_epoch_query,
                     None,
                     self.state,
-                )
+                );
+
+                (grandpa_warp_sync, error)
             }
-            Err(error) => GrandpaWarpSync::Finished(Err(Error::NewRuntime(error))),
+            Err(error) => (
+                GrandpaWarpSync::InProgress(
+                    InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                        },
+                        None,
+                    ),
+                ),
+                Some(Error::NewRuntime(error)),
+            ),
         }
     }
 }
