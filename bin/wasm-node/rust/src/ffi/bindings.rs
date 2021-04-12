@@ -226,6 +226,9 @@ pub extern "C" fn init(
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
+/// Additionally, an index that represents the source of the request is also passed as a parameter.
+/// This source ID is completel opaque and can be chosen freely by the caller.
+///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
 pub extern "C" fn json_rpc_send(
