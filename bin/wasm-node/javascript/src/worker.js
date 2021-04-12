@@ -44,9 +44,9 @@ const startInstance = async (config) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'log', level, target, message });
     },
-    jsonRpcCallback: (data, chain_index) => {
+    jsonRpcCallback: (data, chain_index, source_id) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'jsonrpc', data, chain_index });
+      compat.postMessage({ kind: 'jsonrpc', data, chain_index, source_id });
     },
   };
 

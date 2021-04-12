@@ -116,7 +116,8 @@ export async function start(config) {
   // would have a higher complexity.
   worker.postMessage({
     request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
-    chain_index: 0
+    chain_index: 0,
+    source_id: 0,
   });
 
   // Now blocking until the worker sends back the response.
@@ -126,7 +127,7 @@ export async function start(config) {
   return {
     send_json_rpc: (request) => {
       if (!workerError) {
-        worker.postMessage({ request, chain_index: 0 });
+        worker.postMessage({ request, chain_index: 0, source_id: 0 });
       } else {
         throw workerError;
       }
