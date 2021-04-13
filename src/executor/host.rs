@@ -124,7 +124,7 @@
 //! ## Example
 //!
 //! ```
-//! use smoldot::executor::{host::{HostVm, HostVmPrototype}, HeapPages};
+//! use smoldot::executor::host::{HeapPages, HostVm, HostVmPrototype};
 //!
 //! # let wasm_binary_code: &[u8] = return;
 //!
