@@ -349,11 +349,11 @@ impl JsonRpcService {
     ///
     /// Depending on the request, either calls [`JsonRpcService::send_back`] immediately or
     /// spawns a background task for further processing.
-    pub async fn handle_rpc(
+    pub async fn handle_rpc<'a>(
         self: Arc<JsonRpcService>,
         source_id: u32,
-        request_id: &str,
-        call: MethodCall,
+        request_id: &'a str,
+        call: MethodCall<'a>,
     ) {
         // Most calls are handled directly in this method's body. The most voluminous (in terms
         // of lines of code) have their dedicated methods.
