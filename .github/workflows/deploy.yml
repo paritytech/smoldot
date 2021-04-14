@@ -59,6 +59,8 @@ jobs:
           node-version: 12
       - run: apt-get update && apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
       - uses: Swatinem/rust-cache@v1
       - run: npm install
         working-directory: ./bin/wasm-node/javascript
