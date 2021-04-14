@@ -601,7 +601,7 @@ impl<TSrc> PostVerificationState<TSrc> {
                 ),
             )
         } else {
-            (removed, StateRemoveSourceResult::PostVerification(self))
+            (removed, StateRemoveSourceResult::RemovedOther(self))
         }
     }
 }
