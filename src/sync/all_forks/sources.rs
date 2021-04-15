@@ -57,6 +57,16 @@ pub struct AllForksSources<TSrc> {
     finalized_block_height: u64,
 }
 
+/// Extra fields specific to each blocks source.
+///
+/// `best_block_number`/`best_block_hash` must be present in the known blocks.
+#[derive(Debug)]
+struct Source<TSrc> {
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
+    user_data: TSrc,
+}
+
 impl<TSrc> AllForksSources<TSrc> {
     /// Creates a new container. Must be passed the height of the known finalized block.
     pub fn new(sources_capacity: usize, finalized_block_height: u64) -> Self {
@@ -72,12 +82,23 @@ impl<TSrc> AllForksSources<TSrc> {
         }
     }
 
+    /// Returns the list of all [`SourceId`]s.
+    pub fn keys<'a>(&'a self) -> impl ExactSizeIterator<Item = SourceId> + 'a {
+        self.sources.keys().copied()
+    }
+
+    /// Returns true if the data structure is empty.
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
     /// Returns the number of sources in the data structure.
-    pub fn num_sources(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.sources.len()
     }
 
     /// Returns the number of unique blocks in the data structure.
+    // TODO: is this method needed at all?
     pub fn num_blocks(&self) -> usize {
         // TODO: optimize; shouldn't be O(n)
         self.known_blocks2
@@ -91,9 +112,9 @@ impl<TSrc> AllForksSources<TSrc> {
             .0
     }
 
-    /// Returns true if the data structure is empty.
-    pub fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+    /// Returns the finalized block height this state machine knows about.
+    pub fn finalized_block_height(&self) -> u64 {
+        self.finalized_block_height
     }
 
     /// Add a new source to the container.
@@ -104,10 +125,10 @@ impl<TSrc> AllForksSources<TSrc> {
     /// Returns the newly-created source entry.
     pub fn add_source(
         &mut self,
-        user_data: TSrc,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> SourceMutAccess<TSrc> {
+        user_data: TSrc,
+    ) -> SourceId {
         let new_id = {
             let id = self.next_source_id;
             self.next_source_id.0 += 1;
@@ -130,36 +151,40 @@ impl<TSrc> AllForksSources<TSrc> {
                 .insert((best_block_number, best_block_hash, new_id));
         }
 
-        SourceMutAccess {
-            parent: self,
-            source_id: new_id,
-        }
+        new_id
     }
 
-    /// Removes a block from the list of blocks the sources are aware of.
+    /// Removes the source from the [`AllForksSources`].
     ///
-    /// > **Note**: Use this method to prevent the data structure from growing undefinitely.
-    pub fn remove_known_block(&mut self, height: u64, hash: [u8; 32]) {
-        let sources = self
-            .known_blocks2
-            .range(
-                (height, hash, SourceId(u64::min_value()))
-                    ..=(height, hash, SourceId(u64::max_value())),
-            )
-            .map(|(_, _, source)| *source)
-            .collect::<Vec<_>>();
+    /// Returns the user data that was originally passed to [`AllForksSources::add_source`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn remove(&mut self, source_id: SourceId) -> TSrc {
+        let source = self.sources.remove(&source_id).unwrap();
 
-        for source_id in sources {
-            self.known_blocks2.remove(&(height, hash, source_id));
-            let _was_in = self.known_blocks1.remove(&(source_id, height, hash));
-            debug_assert!(_was_in);
+        // Purge `known_blocks1` and `known_blocks2`.
+        let known_blocks = self
+            .known_blocks1
+            .range((source_id, 0, [0; 32])..=(source_id, u64::max_value(), [0xff; 32]))
+            .map(|(_, n, h)| (*n, *h))
+            .collect::<Vec<_>>();
+        for (height, hash) in known_blocks {
+            let _was_in1 = self.known_blocks1.remove(&(source_id, height, hash));
+            let _was_in2 = self.known_blocks2.remove(&(height, hash, source_id));
+            debug_assert!(_was_in1);
+            debug_assert!(_was_in2);
         }
+
+        source.user_data
     }
 
     /// Updates the height of the finalized block.
     ///
-    /// This removes from the collection all blocks whose height is inferior or equal to this
-    /// value.
+    /// This removes from the collection, and will ignore in the future, all blocks whose height
+    /// is inferior or equal to this value.
     ///
     /// # Panic
     ///
@@ -200,63 +225,39 @@ impl<TSrc> AllForksSources<TSrc> {
         self.finalized_block_height = height;
     }
 
-    /// Grants access to a source, using its identifier.
-    pub fn source_mut(&mut self, id: SourceId) -> Option<SourceMutAccess<TSrc>> {
-        if self.sources.contains_key(&id) {
-            Some(SourceMutAccess {
-                parent: self,
-                source_id: id,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-impl<TSrc: fmt::Debug> fmt::Debug for AllForksSources<TSrc> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("AllForksSources")
-            .field("sources", &self.sources)
-            .field("finalized_block_height", &self.finalized_block_height)
-            .finish()
-    }
-}
-
-/// Extra fields specific to each blocks source.
-///
-/// `best_block_number`/`best_block_hash` must be present in the known blocks.
-#[derive(Debug)]
-struct Source<TSrc> {
-    best_block_number: u64,
-    best_block_hash: [u8; 32],
-    user_data: TSrc,
-}
-
-/// Access to a source in a [`AllForksSources`]. Obtained through [`AllForksSources::source_mut`].
-pub struct SourceMutAccess<'a, TSrc> {
-    parent: &'a mut AllForksSources<TSrc>,
-
-    /// Guaranteed to be a valid entry in [`AllForksSources::sources`].
-    source_id: SourceId,
-}
-
-impl<'a, TSrc> SourceMutAccess<'a, TSrc> {
-    /// Returns the identifier of this source.
-    pub fn id(&self) -> SourceId {
-        self.source_id
-    }
-
     /// Registers a new block that the source is aware of.
     ///
     /// Has no effect if `height` is inferior or equal to the finalized block height.
-    pub fn add_known_block(&mut self, height: u64, hash: [u8; 32]) {
-        if height > self.parent.finalized_block_height {
-            self.parent
-                .known_blocks1
-                .insert((self.source_id, height, hash));
-            self.parent
-                .known_blocks2
-                .insert((height, hash, self.source_id));
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn add_known_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
+        if height > self.finalized_block_height {
+            self.known_blocks1.insert((source_id, height, hash));
+            self.known_blocks2.insert((height, hash, source_id));
+        }
+    }
+
+    /// Removes a block from the list of blocks the sources are aware of.
+    ///
+    /// > **Note**: Alongside with [`AllForksSources::set_finalized_block_height`], this method
+    /// >           can be used to prevent the data structure from growing indefinitely.
+    pub fn remove_known_block(&mut self, height: u64, hash: &[u8; 32]) {
+        let sources = self
+            .known_blocks2
+            .range(
+                (height, *hash, SourceId(u64::min_value()))
+                    ..=(height, *hash, SourceId(u64::max_value())),
+            )
+            .map(|(_, _, source)| *source)
+            .collect::<Vec<_>>();
+
+        for source_id in sources {
+            self.known_blocks2.remove(&(height, *hash, source_id));
+            let _was_in = self.known_blocks1.remove(&(source_id, height, *hash));
+            debug_assert!(_was_in);
         }
     }
 
@@ -266,25 +267,52 @@ impl<'a, TSrc> SourceMutAccess<'a, TSrc> {
     ///
     /// > **Note**: Can be used when a request is sent to a node, and the node answers that it
     /// >           doesn't know about the requested block contrary to previously believed.
-    pub fn remove_known_block(&mut self, height: u64, hash: [u8; 32]) {
-        let _was_in1 = self
-            .parent
-            .known_blocks1
-            .remove(&(self.source_id, height, hash));
-        let _was_in2 = self
-            .parent
-            .known_blocks2
-            .remove(&(height, hash, self.source_id));
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn source_remove_known_block(&mut self, source_id: SourceId, height: u64, hash: &[u8; 32]) {
+        let _was_in1 = self.known_blocks1.remove(&(source_id, height, *hash));
+        let _was_in2 = self.known_blocks2.remove(&(height, *hash, source_id));
         debug_assert_eq!(_was_in1, _was_in2);
     }
 
     /// Sets the best block of this source.
-    pub fn set_best_block(&mut self, height: u64, hash: [u8; 32]) {
-        self.add_known_block(height, hash);
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn set_best_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
+        self.add_known_block(source_id, height, hash);
 
-        let source = self.parent.sources.get_mut(&self.source_id).unwrap();
+        let source = self.sources.get_mut(&source_id).unwrap();
         source.best_block_number = height;
         source.best_block_hash = hash;
+    }
+
+    /// Returns the list of sources for which [`SourceMutAccess::knows_non_finalized_block`]
+    /// would return `true`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `height` is inferior or equal to the finalized block height. Finalized blocks
+    /// are intentionally not tracked by this data structure, and panicking when asking for a
+    /// potentially-finalized block prevents potentially confusing or erroneous situations.
+    ///
+    pub fn knows_non_finalized_block<'a>(
+        &'a self,
+        height: u64,
+        hash: &[u8; 32],
+    ) -> impl Iterator<Item = SourceId> + 'a {
+        assert!(height > self.finalized_block_height);
+        self.known_blocks2
+            .range(
+                (height, *hash, SourceId(u64::min_value()))
+                    ..=(height, *hash, SourceId(u64::max_value())),
+            )
+            .map(|(_, _, id)| *id)
     }
 
     /// Returns true if [`SourceMutAccess::add_known_block`] or [`SourceMutAccess::set_best_block`]
@@ -293,66 +321,52 @@ impl<'a, TSrc> SourceMutAccess<'a, TSrc> {
     ///
     /// # Panic
     ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
     /// Panics if `height` is inferior or equal to the finalized block height. Finalized blocks
-    /// are intentionally not tracked by this data structure, and panicking prevents confusing
-    /// situations.
+    /// are intentionally not tracked by this data structure, and panicking when asking for a
+    /// potentially-finalized block prevents potentially confusing or erroneous situations.
     ///
-    pub fn knows_block(&self, height: u64, hash: &[u8; 32]) -> bool {
-        assert!(height > self.parent.finalized_block_height);
-        self.parent
-            .known_blocks1
-            .contains(&(self.source_id, height, *hash))
-    }
-
-    /// Removes the source from the [`AllForksSources`].
-    ///
-    /// Returns the user data that was originally passed to [`AllForksSources::add_source`].
-    pub fn remove(self) -> TSrc {
-        let source = self.parent.sources.remove(&self.source_id).unwrap();
-
-        // Purge `known_blocks1` and `known_blocks2`.
-        let known_blocks = self
-            .parent
-            .known_blocks1
-            .range((self.source_id, 0, [0; 32])..=(self.source_id, u64::max_value(), [0xff; 32]))
-            .map(|(_, n, h)| (*n, *h))
-            .collect::<Vec<_>>();
-        for (height, hash) in known_blocks {
-            let _was_in1 = self
-                .parent
-                .known_blocks1
-                .remove(&(self.source_id, height, hash));
-            let _was_in2 = self
-                .parent
-                .known_blocks2
-                .remove(&(height, hash, self.source_id));
-            debug_assert!(_was_in1);
-            debug_assert!(_was_in2);
-        }
-
-        source.user_data
+    pub fn source_knows_non_finalized_block(
+        &self,
+        source_id: SourceId,
+        height: u64,
+        hash: &[u8; 32],
+    ) -> bool {
+        assert!(height > self.finalized_block_height);
+        self.known_blocks1.contains(&(source_id, height, *hash))
     }
 
     /// Returns the user data associated to the source. This is the value originally passed
     /// through [`AllForksSources::add_source`].
-    pub fn user_data(&mut self) -> &mut TSrc {
-        let source = self.parent.sources.get_mut(&self.source_id).unwrap();
-        &mut source.user_data
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn user_data(&self, source_id: SourceId) -> &TSrc {
+        let source = self.sources.get(&source_id).unwrap();
+        &source.user_data
     }
 
     /// Returns the user data associated to the source. This is the value originally passed
     /// through [`AllForksSources::add_source`].
-    pub fn into_user_data(self) -> &'a mut TSrc {
-        let source = self.parent.sources.get_mut(&self.source_id).unwrap();
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        let source = self.sources.get_mut(&source_id).unwrap();
         &mut source.user_data
     }
 }
 
-impl<'a, TSrc: fmt::Debug> fmt::Debug for SourceMutAccess<'a, TSrc> {
+impl<TSrc: fmt::Debug> fmt::Debug for AllForksSources<TSrc> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("SourceMutAccess")
-            .field(&self.source_id)
-            .field(&self.parent.sources.get(&self.source_id).unwrap().user_data)
+        f.debug_struct("AllForksSources")
+            .field("sources", &self.sources)
+            .field("finalized_block_height", &self.finalized_block_height)
             .finish()
     }
 }
@@ -367,43 +381,25 @@ mod tests {
 
         let source1 = sources.add_source((), 12, [1; 32]).id();
         assert!(!sources.is_empty());
-        assert_eq!(sources.num_sources(), 1);
+        assert_eq!(sources.len(), 1);
         assert_eq!(sources.num_blocks(), 1);
-        assert!(sources
-            .source_mut(source1)
-            .unwrap()
-            .knows_block(12, &[1; 32]));
+        assert!(sources.knows_non_finalized_block(source1, 12, &[1; 32]));
 
-        sources
-            .source_mut(source1)
-            .unwrap()
-            .set_best_block(13, [2; 32]);
+        sources.set_best_block(source1, 13, [2; 32]);
         assert_eq!(sources.num_blocks(), 2);
-        assert!(sources
-            .source_mut(source1)
-            .unwrap()
-            .knows_block(12, &[1; 32]));
-        assert!(sources
-            .source_mut(source1)
-            .unwrap()
-            .knows_block(13, &[2; 32]));
+        assert!(sources.knows_non_finalized_block(source1, 12, &[1; 32]));
+        assert!(sources.knows_non_finalized_block(source1, 13, &[2; 32]));
 
         sources.remove_known_block(13, [2; 32]);
         assert_eq!(sources.num_blocks(), 1);
-        assert!(sources
-            .source_mut(source1)
-            .unwrap()
-            .knows_block(12, &[1; 32]));
-        assert!(!sources
-            .source_mut(source1)
-            .unwrap()
-            .knows_block(13, &[2; 32]));
+        assert!(sources.knows_non_finalized_block(source1, 12, &[1; 32]));
+        assert!(!sources.knows_non_finalized_block(source1, 13, &[2; 32]));
 
         sources.set_finalized_block_height(12);
         assert_eq!(sources.num_blocks(), 0);
 
-        let () = sources.source_mut(source1).unwrap().remove();
+        sources.remove(source1);
         assert!(sources.is_empty());
-        assert_eq!(sources.num_sources(), 0);
+        assert_eq!(sources.len(), 0);
     }
 }

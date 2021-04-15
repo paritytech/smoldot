@@ -1467,9 +1467,11 @@ impl Shared {
         &mut self,
         all_forks: &mut all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>,
         source_id: all_forks::SourceId,
+        request_id: all_forks::RequestId,
         request: all_forks::Request,
     ) -> Action {
-        let request_id = RequestId(self.requests.insert(RequestMapping::AllForks(source_id)));
+        let outer_request_id =
+            RequestId(self.requests.insert(RequestMapping::AllForks(request_id)));
 
         let outer_source_id = all_forks
             .source_mut(source_id)
@@ -1490,7 +1492,7 @@ impl Shared {
         };
 
         Action::Start {
-            request_id,
+            request_id: outer_request_id,
             source_id: outer_source_id,
             detail: RequestDetail::BlocksRequest {
                 first_block,
@@ -1658,7 +1660,7 @@ impl Shared {
 enum RequestMapping {
     Optimistic(optimistic::RequestId),
     GrandpaWarpSync,
-    AllForks(all_forks::SourceId),
+    AllForks(all_forks::RequestId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
