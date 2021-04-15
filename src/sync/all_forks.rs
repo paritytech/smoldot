@@ -239,7 +239,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     /// Inform the [`AllForksSync`] of a new potential source of blocks.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`SourceMutAccess::user_data`].
+    /// retrieved using [`AllForksSync::source_user_data`].
     ///
     /// Returns the newly-created source entry, plus optionally a request that should be started
     /// towards this source.
@@ -248,11 +248,11 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         user_data: TSrc,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> (SourceMutAccess<TSrc, TBl>, Option<Request>) {
-        let new_source =
-            self.inner
-                .blocks
-                .add_source(user_data, best_block_number, best_block_hash);
+    ) -> (SourceId, Option<Request>) {
+        let source_id = self
+            .inner
+            .blocks
+            .add_source(user_data, best_block_number, best_block_hash);
 
         if best_block_number > self.chain.finalized_block_header().number
             && self
@@ -268,28 +268,73 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 });
         }
 
-        let source_id = new_source.id();
-        let request = self.source_next_request(source_id);
-
-        (
-            SourceMutAccess {
-                parent: self,
-                source_id,
-            },
-            request,
-        )
+        (source_id, self.source_next_request(source_id))
     }
 
-    /// Grants access to a source, using its identifier.
-    pub fn source_mut(&mut self, id: SourceId) -> Option<SourceMutAccess<TSrc, TBl>> {
-        if self.inner.blocks.source_mut(id).is_some() {
-            Some(SourceMutAccess {
-                parent: self,
-                source_id: id,
-            })
-        } else {
-            None
-        }
+    /// Removes the source from the [`AllForksSync`].
+    ///
+    /// Removing the source implicitly cancels the request that is associated to it (if any).
+    ///
+    /// Returns the user data that was originally passed to [`AllForksSync::add_source`], plus
+    /// an `Option`.
+    /// If this `Option` is `Some`, it contains a request that must be started towards the source
+    /// indicated by the [`SourceId`].
+    ///
+    /// > **Note**: For example, if the source that has just been removed was performing an
+    /// >           ancestry search, the `Option` might contain that same ancestry search.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn remove_source(&mut self, source_id: SourceId) -> (TSrc, Option<(SourceId, Request)>) {
+        let user_data = self.inner.blocks.source_mut(source_id).unwrap().remove();
+        // TODO: None hardcoded
+        (user_data, None)
+    }
+
+    /// Returns true if the source has earlier announced the block passed as parameter or one of
+    /// its descendants.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    // TODO: document precisely what it means
+    // TODO: shouldn't take &mut self but just &self
+    pub fn source_knows_block(
+        &mut self,
+        source_id: SourceId,
+        height: u64,
+        hash: &[u8; 32],
+    ) -> bool {
+        self.inner
+            .blocks
+            .source_mut(source_id)
+            .unwrap()
+            .knows_non_finalized_block(height, hash) // TODO: doesn't match the outer API
+    }
+
+    /// Returns the user data associated to the source. This is the value originally passed
+    /// through [`AllForksSync::add_source`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
+        &self.inner.blocks.source_user_data(source_id).user_data
+    }
+
+    /// Returns the user data associated to the source. This is the value originally passed
+    /// through [`AllForksSync::add_source`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        &mut self.inner.blocks.source_user_data(source_id).user_data
     }
 
     /// Call in response to a [`Request::AncestrySearch`].
@@ -723,72 +768,6 @@ pub struct RequestSuccessBlock<THdr, TJs> {
     pub scale_encoded_header: THdr,
     /// SCALE-encoded justification returned by the remote.
     pub scale_encoded_justification: Option<TJs>,
-}
-
-/// Access to a source in a [`AllForksSync`]. Obtained through [`AllForksSync::source_mut`].
-pub struct SourceMutAccess<'a, TSrc, TBl> {
-    parent: &'a mut AllForksSync<TSrc, TBl>,
-
-    /// Guaranteed to be a valid entry in [`Inner::sources`].
-    source_id: SourceId,
-}
-
-impl<'a, TSrc, TBl> SourceMutAccess<'a, TSrc, TBl> {
-    /// Returns the identifier of this source.
-    pub fn id(&self) -> SourceId {
-        self.source_id
-    }
-
-    /// Returns true if the source has earlier announced the block passed as parameter or one of
-    /// its descendants.
-    // TODO: document precisely what it means
-    // TODO: shouldn't take &mut self but just &self
-    pub fn knows_block(&mut self, height: u64, hash: &[u8; 32]) -> bool {
-        self.parent
-            .inner
-            .blocks
-            .source_mut(self.source_id)
-            .unwrap()
-            .knows_non_finalized_block(height, hash) // TODO: doesn't match the outer API
-    }
-
-    /// Removes the source from the [`AllForksSync`].
-    ///
-    /// Removing the source implicitly cancels the request that is associated to it (if any).
-    ///
-    /// Returns the user data that was originally passed to [`AllForksSync::add_source`], plus
-    /// an `Option`.
-    /// If this `Option` is `Some`, it contains a request that must be started towards the source
-    /// indicated by the [`SourceId`].
-    ///
-    /// > **Note**: For example, if the source that has just been removed was performing an
-    /// >           ancestry search, the `Option` might contain that same ancestry search.
-    pub fn remove(self) -> (TSrc, Option<(SourceId, Request)>) {
-        let user_data = self
-            .parent
-            .inner
-            .blocks
-            .source_mut(self.source_id)
-            .unwrap()
-            .remove();
-
-        // TODO: None hardcoded
-        (user_data, None)
-    }
-
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSync::add_source`].
-    pub fn user_data(&mut self) -> &mut TSrc {
-        let source = self.parent.inner.blocks.source_mut(self.source_id).unwrap();
-        source.user_data()
-    }
-
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSync::add_source`].
-    pub fn into_user_data(self) -> &'a mut TSrc {
-        let source = self.parent.inner.blocks.source_mut(self.source_id).unwrap();
-        source.into_user_data()
-    }
 }
 
 /// Outcome of calling [`AllForksSync::header_from_source`].

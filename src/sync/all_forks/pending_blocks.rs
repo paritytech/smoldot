@@ -110,6 +110,27 @@ pub struct Config {
     pub banned_blocks: Vec<[u8; 64]>,
 }
 
+/// State of a block in the data structure.
+pub enum UnverifiedBlockState {
+    /// Only the height and hash of the block is known.
+    HeightHashKnown,
+    /// The header of the block is known, but not its body.
+    HeaderKnown { parent_hash: [u8; 32] },
+    /// The header and body of the block are both known. The block is waiting to be verified.
+    BodyKnown { parent_hash: [u8; 32] },
+}
+
+impl UnverifiedBlockState {
+    /// Returns the parent block hash stored in this type.
+    pub fn parent_hash(&self) -> Option<&[u8; 32]> {
+        match self {
+            UnverifiedBlockState::HeightHashKnown => None,
+            UnverifiedBlockState::HeaderKnown { parent_hash } => Some(parent_hash),
+            UnverifiedBlockState::BodyKnown { parent_hash } => Some(parent_hash),
+        }
+    }
+}
+
 /// Identifier for a request in the [`PendingBlocks`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
@@ -120,7 +141,7 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     sources: sources::AllForksSources<Source<TSrc>>,
 
     /// Blocks whose header validity couldn't be determined yet.
-    unverified_headers: disjoint::DisjointBlocks<UnverifiedHeaderBlock<TBl>>,
+    unverified_headers: disjoint::DisjointBlocks<UnverifiedBlock<TBl>>,
 
     /// List of blocks whose header has been determined to be valid, but whose body isn't known
     /// yet.
@@ -145,13 +166,14 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     max_requests_per_block: usize,
 }
 
-struct UnverifiedHeaderBlock<TBl> {
+struct UnverifiedBlock<TBl> {
+    state: UnverifiedBlockState,
     user_data: TBl,
-    known_body: Option<Vec<u8>>,
 }
 
 struct Request<TRq> {
     detail: DesiredRequest,
+    source_id: SourceId,
     user_data: TRq,
 }
 
@@ -218,13 +240,18 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Removes the source from the [`PendingBlocks`].
     ///
-    /// Returns the user data that was originally passed to [`PendingBlocks::add_source`].
+    /// Returns the user data that was originally passed to [`PendingBlocks::add_source`], plus
+    /// a list of all the requests that were targetting this source. These request are now
+    /// invalid.
     ///
     /// # Panic
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn remove_source(&mut self, source_id: SourceId) -> TSrc {
+    pub fn remove_source(
+        &mut self,
+        source_id: SourceId,
+    ) -> (TSrc, Vec<(RequestId, DesiredRequest, TRq)>) {
         let user_data = self.sources.remove(source_id);
 
         todo!()
@@ -268,7 +295,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// are intentionally not tracked by this data structure, and panicking when asking for a
     /// potentially-finalized block prevents potentially confusing or erroneous situations.
     ///
-    pub fn knows_non_finalized_block(
+    pub fn source_knows_non_finalized_block(
         &self,
         source_id: SourceId,
         height: u64,
@@ -285,7 +312,18 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn source_user_data(&mut self, source_id: SourceId) -> &mut TSrc {
+    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
+        &self.sources.user_data(source_id).user_data
+    }
+
+    /// Returns the user data associated to the source. This is the value originally passed
+    /// through [`PendingBlocks::add_source`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         &mut self.sources.user_data_mut(source_id).user_data
     }
 
@@ -294,18 +332,36 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         &mut self,
         height: u64,
         hash: [u8; 32],
-        parent_hash: Option<[u8; 32]>,
+        state: UnverifiedBlockState,
         user_data: TBl,
     ) {
+        let parent_hash = state.parent_hash().map(|h| *h);
         self.unverified_headers.insert(
             height,
             hash,
             parent_hash,
-            UnverifiedHeaderBlock {
-                known_body: None,
-                user_data,
-            },
+            UnverifiedBlock { state, user_data },
         );
+    }
+
+    /// Modifies the state of the given block.
+    ///
+    /// This influences the outcome of [`PendingBlocks::desired_queries`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn set_block_state(&mut self, height: u64, hash: &[u8; 32], state: UnverifiedBlockState) {
+        if let Some(parent_hash) = state.parent_hash() {
+            self.unverified_headers
+                .set_parent_hash(height, hash, *parent_hash);
+        }
+
+        self.unverified_headers
+            .user_data_mut(height, hash)
+            .unwrap()
+            .state = state;
     }
 
     /// Removes the given block from the collection after it has successfully been verified.
@@ -357,7 +413,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             request_id,
         ));
 
-        request_entry.insert(Request { detail, user_data });
+        request_entry.insert(Request {
+            detail,
+            source_id,
+            user_data,
+        });
 
         request_id
     }
@@ -387,6 +447,21 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         // TODO: remove occupation from source
 
         (request.detail, request.user_data)
+    }
+
+    /// Returns the source that the given request is being performed on.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is out of range.
+    ///
+    pub fn request_source(&self, request_id: RequestId) -> SourceId {
+        self.requests.get(request_id.0).unwrap().source_id
+    }
+
+    /// Returns a list of requests that are considered obsolete and can be removed.
+    pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
+        iter::empty()
     }
 
     /// Returns the details of a request to start towards a source.
@@ -424,7 +499,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// # Panic
     ///
-    /// Panics if `source_id` is invalid.
+    /// Panics if the [`SourceId`] is out of range.
     ///
     fn desired_queries_inner(
         &'_ self,
