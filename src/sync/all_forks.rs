@@ -168,6 +168,8 @@ struct Inner<TSrc> {
 }
 
 struct PendingBlock {
+    header: Option<header::Header>,
+    body: Option<Vec<Vec<u8>>>,
     justification: Option<Vec<u8>>,
 }
 
@@ -260,12 +262,17 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .non_finalized_block_by_hash(&best_block_hash)
                 .is_none()
         {
-            self.inner
-                .blocks
-                .block_mut(best_block_number, &best_block_hash)
-                .or_insert(PendingBlock {
+            // TODO: what if already inserted?
+            self.inner.blocks.insert_unverified_block(
+                best_block_number,
+                &best_block_hash,
+                pending_blocks::UnverifiedBlockState::HeightHashKnown,
+                PendingBlock {
+                    header: None,
+                    body: None,
                     justification: None,
-                });
+                },
+            );
         }
 
         (source_id, self.source_next_request(source_id))
@@ -288,9 +295,8 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     /// Panics if the [`SourceId`] is out of range.
     ///
     pub fn remove_source(&mut self, source_id: SourceId) -> (TSrc, Option<(SourceId, Request)>) {
-        let user_data = self.inner.blocks.source_mut(source_id).unwrap().remove();
-        // TODO: None hardcoded
-        (user_data, None)
+        self.inner.blocks.remove_source(source_id);
+        todo!()
     }
 
     /// Returns true if the source has earlier announced the block passed as parameter or one of

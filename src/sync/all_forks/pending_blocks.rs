@@ -328,6 +328,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Inserts an unverified block in the collection.
+    // TODO: what if already inserted?
     pub fn insert_unverified_block(
         &mut self,
         height: u64,
@@ -579,6 +580,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 }
 
+/// Information about a blocks request to be performed on a source.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DesiredRequest {
     /// Height of the first block to request.
@@ -593,15 +595,4 @@ pub struct DesiredRequest {
     /// than requested. If that happens, the state machine might later send out further
     /// ancestry search requests to complete the chain.
     pub num_blocks: NonZeroU64,
-}
-
-/// Outcome of removing a block from the collection.
-#[must_use]
-pub struct RemoveOutcome<TBl, TRq> {
-    /// User data of the block that has been removed.
-    pub user_data: TBl,
-
-    /// List of requests that concerned the block that has been successfully verified. These
-    /// request IDs are now invalid.
-    pub cancelled_requests: Vec<(RequestId, TRq)>,
 }

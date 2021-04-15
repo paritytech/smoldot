@@ -97,6 +97,7 @@ impl<TBl> DisjointBlocks<TBl> {
     /// Inserts the block in the collection, passing a user data.
     ///
     /// Returns the previous user data associated to this block, if any.
+    // TODO: what if already inserted?
     pub fn insert(
         &mut self,
         height: u64,
