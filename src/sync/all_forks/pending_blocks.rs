@@ -111,17 +111,24 @@ pub struct Config {
 }
 
 /// State of a block in the data structure.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum UnverifiedBlockState {
     /// Only the height and hash of the block is known.
     HeightHashKnown,
     /// The header of the block is known, but not its body.
-    HeaderKnown { parent_hash: [u8; 32] },
+    HeaderKnown {
+        /// Hash of the block that is parent of this one.
+        parent_hash: [u8; 32],
+    },
     /// The header and body of the block are both known. The block is waiting to be verified.
-    BodyKnown { parent_hash: [u8; 32] },
+    BodyKnown {
+        /// Hash of the block that is parent of this one.
+        parent_hash: [u8; 32],
+    },
 }
 
 impl UnverifiedBlockState {
-    /// Returns the parent block hash stored in this type.
+    /// Returns the parent block hash stored in this instance, if any.
     pub fn parent_hash(&self) -> Option<&[u8; 32]> {
         match self {
             UnverifiedBlockState::HeightHashKnown => None,
@@ -327,6 +334,20 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         &mut self.sources.user_data_mut(source_id).user_data
     }
 
+    /// Updates the height of the finalized block.
+    ///
+    /// This removes from the collection, and will ignore in the future, all blocks whose height
+    /// is inferior or equal to this value.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the new height is inferior to the previous value.
+    ///
+    pub fn set_finalized_block_height(&mut self, height: u64) {
+        self.sources.set_finalized_block_height(height);
+        // TODO: remove unverified blocks
+    }
+
     /// Inserts an unverified block in the collection.
     // TODO: what if already inserted?
     pub fn insert_unverified_block(
@@ -435,7 +456,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_request(&mut self, request_id: RequestId) -> (DesiredRequest, TRq) {
+    pub fn finish_request(&mut self, request_id: RequestId) -> (DesiredRequest, SourceId, TRq) {
         let request = self.requests.remove(request_id.0);
 
         let _was_in = self.blocks_requests.remove(&(
@@ -447,7 +468,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
         // TODO: remove occupation from source
 
-        (request.detail, request.user_data)
+        (request.detail, request.source_id, request.user_data)
     }
 
     /// Returns the source that the given request is being performed on.
@@ -460,16 +481,17 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.requests.get(request_id.0).unwrap().source_id
     }
 
-    /// Returns a list of requests that are considered obsolete and can be removed.
+    /// Returns a list of requests that are considered obsolete and can be removed using
+    /// [`PendingBlocks::finish_request`].
     pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
-        iter::empty()
+        iter::empty() // TODO:
     }
 
     /// Returns the details of a request to start towards a source.
     ///
     /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`] must be
     /// called in order for the request to actually be marked as started.
-    pub fn desired_queries(&self) -> impl Iterator<Item = (SourceId, DesiredRequest)> + '_ {
+    pub fn desired_queries(&'_ self) -> impl Iterator<Item = (SourceId, DesiredRequest)> + '_ {
         self.desired_queries_inner(None)
     }
 
@@ -483,7 +505,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`SourceId`] is out of range.
     ///
     pub fn source_desired_queries(
-        &self,
+        &'_ self,
         source_id: SourceId,
     ) -> impl Iterator<Item = DesiredRequest> + '_ {
         self.desired_queries_inner(Some(source_id))

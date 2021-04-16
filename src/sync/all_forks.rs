@@ -265,7 +265,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             // TODO: what if already inserted?
             self.inner.blocks.insert_unverified_block(
                 best_block_number,
-                &best_block_hash,
+                best_block_hash,
                 pending_blocks::UnverifiedBlockState::HeightHashKnown,
                 PendingBlock {
                     header: None,
@@ -316,9 +316,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> bool {
         self.inner
             .blocks
-            .source_mut(source_id)
-            .unwrap()
-            .knows_non_finalized_block(height, hash) // TODO: doesn't match the outer API
+            .source_knows_non_finalized_block(source_id, height, hash) // TODO: doesn't match the outer API
     }
 
     /// Returns the user data associated to the source. This is the value originally passed
@@ -366,8 +364,15 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         >,
     ) -> AncestrySearchResponseOutcome<TSrc, TBl> {
         // Sets the `occupation` of `source_id` back to `Idle`.
-        let (source_id, requested_block_height, requested_block_hash) =
-            self.inner.blocks.finish_request(request_id);
+        let (
+            pending_blocks::DesiredRequest {
+                first_block_hash: requested_block_hash,
+                first_block_height: requested_block_height,
+                ..
+            },
+            source_id,
+            _, // TODO: unused
+        ) = self.inner.blocks.finish_request(request_id);
 
         // Set to true below if any block is inserted in `disjoint_headers`.
         let mut any_progress = false;
