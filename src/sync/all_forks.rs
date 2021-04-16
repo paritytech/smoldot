@@ -574,6 +574,11 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> HeaderFromSourceOutcome<TSrc, TBl> {
         debug_assert_eq!(header.hash(), *header_hash);
 
+        // Some code below does `header.number - 1`. Make sure that `header.number` isn't 0.
+        if header.number == 0 {
+            return HeaderFromSourceOutcome::TooOld(self);
+        }
+
         // No matter what is done below, start by updating the view the state machine maintains
         // for this source.
         if known_to_be_source_best {
@@ -586,7 +591,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .add_known_block(source_id, header.number, *header_hash);
         }
 
-        // Source also knows the parent of the block.
+        // Source also knows the parent of the announced block.
         self.inner
             .blocks
             .add_known_block(source_id, header.number - 1, *header.parent_hash);
@@ -609,22 +614,24 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             return HeaderFromSourceOutcome::AlreadyInChain(self);
         }
 
-        // TODO: somehow optimize? the encoded block is normally known from it being decoded
-        let scale_encoded_header = header.scale_encoding_vec();
+        // TODO: what if it's already present?
+        self.inner.blocks.insert_unverified_block(
+            header.number,
+            *header_hash,
+            pending_blocks::UnverifiedBlockState::HeaderKnown {
+                parent_hash: *header.parent_hash,
+            },
+            PendingBlock {
+                body: None,
+                header: Some(header.into()),
+                // TODO: what if the pending block already contains a justification and it is not the
+                //       same as here? since justifications aren't immediately verified, it is possible
+                //       for a malicious peer to send us bad justifications
+                justification: justification.map(|j| j.to_vec()),
+            },
+        );
 
         // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
-
-        let mut block_access = self
-            .inner
-            .blocks
-            .block_mut(header.number, header_hash)
-            .or_insert(PendingBlock {
-                justification: justification.map(|j| j.to_vec()),
-            }); // TODO: don't always invert
-
-        // TODO: what if the pending block already contains a justification and it is not the
-        //       same as here? since justifications aren't immediately verified, it is possible
-        //       for a malicious peer to send us bad justifications
 
         if *header.parent_hash == self.chain.finalized_block_hash()
             || self
