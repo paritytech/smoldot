@@ -623,7 +623,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 }
             }
             (IdleInner::AllForks(sync), RequestMapping::AllForks(source_id)) => {
-                match sync.ancestry_search_response(
+                match sync.finish_ancestry_search(
                     source_id,
                     blocks.map(|iter| {
                         iter.map(|block| all_forks::RequestSuccessBlock {

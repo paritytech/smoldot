@@ -52,9 +52,9 @@
 //! In addition to a list of blocks, this data structure also stores a list of ongoing requests.
 //! Each block has zero, one, or more requests associated to it.
 //!
-//! Call [`PendingBlocks::next_desired_query`] to obtain the next query that should be started.
+//! Call [`PendingBlocks::next_desired_request`] to obtain the next query that should be started.
 //! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request. This has
-//! the effect of changing the outcome of calling [`PendingBlocks::next_desired_query`].
+//! the effect of changing the outcome of calling [`PendingBlocks::next_desired_request`].
 //! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished.
 //!
 
@@ -147,14 +147,11 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     /// All sources in the collection.
     sources: sources::AllForksSources<Source<TSrc>>,
 
-    /// Blocks whose header validity couldn't be determined yet.
-    unverified_headers: disjoint::DisjointBlocks<UnverifiedBlock<TBl>>,
+    /// Blocks whose validity couldn't be determined yet.
+    blocks: disjoint::DisjointBlocks<UnverifiedBlock<TBl>>,
 
-    /// List of blocks whose header has been determined to be valid, but whose body isn't known
-    /// yet.
-    ///
-    /// `Some` if and only if [`Config::verify_bodies`] was true.
-    valid_header_pending_body: Option<BTreeSet<()>>,
+    /// See [`Config::verify_bodies`].
+    verify_bodies: bool,
 
     /// Set of `(block_height, block_hash, request_id)`.
     /// Contains the list of all requests, associated to their block.
@@ -203,14 +200,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 config.sources_capacity,
                 config.finalized_block_height,
             ),
-            unverified_headers: disjoint::DisjointBlocks::new(disjoint::Config {
+            blocks: disjoint::DisjointBlocks::new(disjoint::Config {
                 blocks_capacity: config.blocks_capacity,
             }),
-            valid_header_pending_body: if config.verify_bodies {
-                Some(BTreeSet::default())
-            } else {
-                None
-            },
+            verify_bodies: config.verify_bodies,
             blocks_requests: Default::default(),
             requests: slab::Slab::with_capacity(
                 config.blocks_capacity
@@ -255,6 +248,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
+    // TODO: don't return a `Vec` but an iterator
     pub fn remove_source(
         &mut self,
         source_id: SourceId,
@@ -349,26 +343,55 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Inserts an unverified block in the collection.
-    // TODO: what if already inserted?
+    ///
+    /// Returns the previous user data associated to this block, if any.
+    // TODO: what if height <= known_finalized?
     pub fn insert_unverified_block(
         &mut self,
         height: u64,
         hash: [u8; 32],
         state: UnverifiedBlockState,
         user_data: TBl,
-    ) {
+    ) -> Option<(TBl, UnverifiedBlockState)> {
         let parent_hash = state.parent_hash().map(|h| *h);
-        self.unverified_headers.insert(
-            height,
-            hash,
-            parent_hash,
-            UnverifiedBlock { state, user_data },
-        );
+        self.blocks
+            .insert(
+                height,
+                hash,
+                parent_hash,
+                UnverifiedBlock { state, user_data },
+            )
+            .map(|b| (b.user_data, b.state))
+    }
+
+    /// Returns `true` if the block with the given height and hash is in the collection.
+    pub fn contains(&self, height: u64, hash: &[u8; 32]) -> bool {
+        self.blocks.contains(height, hash)
+    }
+
+    /// Gives access to the user data stored for this block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn block_user_data(&self, height: u64, hash: &[u8; 32]) -> &TBl {
+        &self.blocks.user_data(height, hash).unwrap().user_data
+    }
+
+    /// Gives access to the user data stored for this block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
+        &mut self.blocks.user_data_mut(height, hash).unwrap().user_data
     }
 
     /// Modifies the state of the given block.
     ///
-    /// This influences the outcome of [`PendingBlocks::desired_queries`].
+    /// This influences the outcome of [`PendingBlocks::desired_requests`].
     ///
     /// # Panic
     ///
@@ -376,14 +399,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     pub fn set_block_state(&mut self, height: u64, hash: &[u8; 32], state: UnverifiedBlockState) {
         if let Some(parent_hash) = state.parent_hash() {
-            self.unverified_headers
-                .set_parent_hash(height, hash, *parent_hash);
+            self.blocks.set_parent_hash(height, hash, *parent_hash);
         }
 
-        self.unverified_headers
-            .user_data_mut(height, hash)
-            .unwrap()
-            .state = state;
+        self.blocks.user_data_mut(height, hash).unwrap().state = state;
     }
 
     /// Removes the given block from the collection after it has successfully been verified.
@@ -392,26 +411,36 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn remove_verify_success(&mut self, height: u64, hash: [u8; 32]) -> TBl {
+    pub fn remove_verify_success(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
+        todo!()
+    }
+
+    /// Removes the given block from the collection after it has been determined to be bad.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn remove_verify_failed(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
         todo!()
     }
 
     /// Returns the number of blocks stored in the data structure.
     pub fn num_blocks(&self) -> usize {
-        self.unverified_headers.len()
+        self.blocks.len()
     }
 
     /// Returns the list of blocks whose parent hash is known but absent from the list of disjoint
     /// blocks. These blocks can potentially be verified.
     pub fn unverified_leaves(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
-        self.unverified_headers.good_leaves()
+        self.blocks.good_leaves()
     }
 
     /// Inserts a new request in the data structure.
     ///
     /// > **Note**: The request doesn't necessarily have to match a request returned by
-    /// >           [`PendingBlocks::next_desired_query`] or
-    /// >           [`PendingBlocks::source_next_desired_query`].
+    /// >           [`PendingBlocks::next_desired_request`] or
+    /// >           [`PendingBlocks::source_next_desired_request`].
     ///
     /// # Panic
     ///
@@ -448,7 +477,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Returns the parameters that were passed to [`PendingBlocks::add_request`].
     ///
-    /// The next call to [`PendingBlocks::next_desired_query`] might return the same request again.
+    /// The next call to [`PendingBlocks::next_desired_request`] might return the same request again.
     /// In order to avoid that, you are encouraged to update the state of the sources and blocks
     /// in the container with the outcome of the request.
     ///
@@ -483,6 +512,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Returns a list of requests that are considered obsolete and can be removed using
     /// [`PendingBlocks::finish_request`].
+    ///
+    /// A request becomes obsolete if the state of the request blocks changes in such a way that
+    /// they don't need to be requested anymore. The response to the request will be useless.
+    ///
+    /// > **Note**: It is in no way mandatory to actually call this function and cancel the
+    /// >           requests that are returned.
     pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
         iter::empty() // TODO:
     }
@@ -491,8 +526,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`] must be
     /// called in order for the request to actually be marked as started.
-    pub fn desired_queries(&'_ self) -> impl Iterator<Item = (SourceId, DesiredRequest)> + '_ {
-        self.desired_queries_inner(None)
+    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, DesiredRequest)> + '_ {
+        self.desired_requests_inner(None)
     }
 
     /// Returns the details of a request to start towards the source.
@@ -504,19 +539,19 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn source_desired_queries(
+    pub fn source_desired_requests(
         &'_ self,
         source_id: SourceId,
     ) -> impl Iterator<Item = DesiredRequest> + '_ {
-        self.desired_queries_inner(Some(source_id))
+        self.desired_requests_inner(Some(source_id))
             .map(move |(_actual_source, request)| {
                 debug_assert_eq!(_actual_source, source_id);
                 request
             })
     }
 
-    /// Inner implementation of [`PendingBlocks::next_desired_query`] and
-    /// [`SourceMutAccess::next_desired_query`].
+    /// Inner implementation of [`PendingBlocks::next_desired_request`] and
+    /// [`PendingBlocks::source_desired_requests`].
     ///
     /// If `force_source` is `Some`, only the given source will be considered.
     ///
@@ -524,15 +559,26 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    fn desired_queries_inner(
+    fn desired_requests_inner(
         &'_ self,
         force_source: Option<SourceId>,
     ) -> impl Iterator<Item = (SourceId, DesiredRequest)> + '_ {
-        // TODO: need to start requests for bodies
-
         // TODO: this is O(n²); maybe do something more optimized once it's fully working and has unit tests
-        self.unverified_headers.unknown_blocks().filter_map(
+        self.blocks.unknown_blocks().filter_map(
             move |(unknown_block_height, unknown_block_hash)| {
+                // Don't request blocks that don't need to be requested.
+                match self
+                    .blocks
+                    .user_data(unknown_block_height, unknown_block_hash)
+                    .unwrap()
+                    .state
+                {
+                    UnverifiedBlockState::HeightHashKnown => {}
+                    UnverifiedBlockState::HeaderKnown { .. } if self.verify_bodies => {}
+                    UnverifiedBlockState::HeaderKnown { .. }
+                    | UnverifiedBlockState::BodyKnown { .. } => return None,
+                }
+
                 // TODO: is that correct?
                 let num_existing_requests = self
                     .blocks_requests

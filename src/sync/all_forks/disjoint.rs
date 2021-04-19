@@ -97,7 +97,6 @@ impl<TBl> DisjointBlocks<TBl> {
     /// Inserts the block in the collection, passing a user data.
     ///
     /// Returns the previous user data associated to this block, if any.
-    // TODO: what if already inserted?
     pub fn insert(
         &mut self,
         height: u64,
@@ -128,6 +127,11 @@ impl<TBl> DisjointBlocks<TBl> {
     /// Returns the number of blocks stored in the data structure.
     pub fn len(&self) -> usize {
         self.blocks.len()
+    }
+
+    /// Returns `true` if the block with the given height and hash is in the collection.
+    pub fn contains(&self, height: u64, hash: &[u8; 32]) -> bool {
+        self.blocks.contains_key(&(height, *hash))
     }
 
     /// Returns the list of blocks whose parent hash is known but absent from the list of disjoint
