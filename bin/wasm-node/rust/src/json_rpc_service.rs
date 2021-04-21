@@ -127,12 +127,9 @@ pub async fn request_handling_task(
                     }));
                 }
                 ffi::JsonRpcMessage::UnsubscribeAll { source_id } => {
-                    let json_rpc_services = json_rpc_services.clone();
-                    (tasks_executor.lock().await)(Box::pin(async move {
-                        for service in json_rpc_services.values().cloned() {
-                            service.handle_unsubscribe_all(source_id).await;
-                        }
-                    }));
+                    for service in json_rpc_services.values().cloned() {
+                        service.handle_unsubscribe_all(source_id).await;
+                    }
                 }
             }
         }
