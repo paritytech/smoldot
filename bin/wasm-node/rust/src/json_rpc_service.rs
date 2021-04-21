@@ -29,7 +29,7 @@
 
 use crate::{ffi, network_service, runtime_service, sync_service, transactions_service};
 
-use futures::{channel::oneshot, future::Shared, lock::Mutex, prelude::*};
+use futures::{channel::oneshot, lock::Mutex, prelude::*};
 use methods::MethodCall;
 use smoldot::{
     chain_spec, header,
@@ -255,6 +255,7 @@ pub async fn start(config: Config) -> Arc<JsonRpcService> {
     client
 }
 
+#[derive(Default)]
 struct PerSourceSubscriptions {
     /// For each active finalized blocks subscription (the key), a sender. If the user
     /// unsubscribes, send the unsubscription request ID of the channel in order to close the
@@ -276,29 +277,9 @@ struct PerSourceSubscriptions {
     /// Same principle as [`PerSourceSubscriptions::all_heads`], but for runtime specs.
     runtime_specs: HashMap<String, oneshot::Sender<String>>,
 
+    /// Whether the source has been disconnected.
     /// Use to communicate to the subscription tasks should be shut down.
-    source_disconnected_rx: Shared<oneshot::Receiver<()>>,
-
-    /// Use to communicate to the subscription tasks should be shut down.
-    source_disconnected_tx: oneshot::Sender<()>,
-}
-
-impl Default for PerSourceSubscriptions {
-    fn default() -> Self {
-        let (source_disconnected_tx, source_disconnected_rx) = oneshot::channel();
-        let source_disconnected_rx = source_disconnected_rx.shared();
-
-        Self {
-            all_heads: Default::default(),
-            new_heads: Default::default(),
-            finalized_heads: Default::default(),
-            storage: Default::default(),
-            transactions: Default::default(),
-            runtime_specs: Default::default(),
-            source_disconnected_tx,
-            source_disconnected_rx,
-        }
-    }
+    source_disconnected: Arc<atomic::AtomicBool>,
 }
 
 pub struct JsonRpcService {
@@ -735,59 +716,58 @@ impl JsonRpcService {
                 );
 
                 let client = self.clone();
-                let mut source_disconnected_rx = subscriptions.source_disconnected_rx.clone();
+                let source_disconnected = subscriptions.source_disconnected.clone();
                 (self.tasks_executor.lock().await)(Box::pin(async move {
                     futures::pin_mut!(spec_changes);
 
                     loop {
+                        if source_disconnected.load(atomic::Ordering::Relaxed) {
+                            break;
+                        }
+
                         // Wait for either a new storage update, or for the subscription to be canceled.
                         let next_change = spec_changes.next();
                         futures::pin_mut!(next_change);
-                        let inner = future::select(next_change, &mut unsubscribe_rx);
+                        match future::select(next_change, &mut unsubscribe_rx).await {
+                            future::Either::Left((new_runtime, _)) => {
+                                let notification_body =
+                                    if let Ok(runtime_spec) = new_runtime.unwrap() {
+                                        let runtime_spec = runtime_spec.decode();
+                                        serde_json::to_string(&methods::RuntimeVersion {
+                                            spec_name: runtime_spec.spec_name.into(),
+                                            impl_name: runtime_spec.impl_name.into(),
+                                            authoring_version: u64::from(
+                                                runtime_spec.authoring_version,
+                                            ),
+                                            spec_version: u64::from(runtime_spec.spec_version),
+                                            impl_version: u64::from(runtime_spec.impl_version),
+                                            transaction_version: runtime_spec
+                                                .transaction_version
+                                                .map(u64::from),
+                                            apis: runtime_spec.apis,
+                                        })
+                                        .unwrap()
+                                    } else {
+                                        "null".to_string()
+                                    };
 
-                        match future::select(&mut source_disconnected_rx, inner).await {
-                            future::Either::Left(_) => break,
-                            future::Either::Right((inner, _)) => match inner {
-                                future::Either::Left((new_runtime, _)) => {
-                                    let notification_body =
-                                        if let Ok(runtime_spec) = new_runtime.unwrap() {
-                                            let runtime_spec = runtime_spec.decode();
-                                            serde_json::to_string(&methods::RuntimeVersion {
-                                                spec_name: runtime_spec.spec_name.into(),
-                                                impl_name: runtime_spec.impl_name.into(),
-                                                authoring_version: u64::from(
-                                                    runtime_spec.authoring_version,
-                                                ),
-                                                spec_version: u64::from(runtime_spec.spec_version),
-                                                impl_version: u64::from(runtime_spec.impl_version),
-                                                transaction_version: runtime_spec
-                                                    .transaction_version
-                                                    .map(u64::from),
-                                                apis: runtime_spec.apis,
-                                            })
-                                            .unwrap()
-                                        } else {
-                                            "null".to_string()
-                                        };
-
-                                    client.send_back(
-                                        &smoldot::json_rpc::parse::build_subscription_event(
-                                            "state_runtimeVersion",
-                                            &subscription,
-                                            &notification_body,
-                                        ),
-                                        source_id,
-                                    );
-                                }
-                                future::Either::Right((Ok(unsub_request_id), _)) => {
-                                    let response =
-                                        methods::Response::state_unsubscribeRuntimeVersion(true)
-                                            .to_json_response(&unsub_request_id);
-                                    client.send_back(&response, source_id);
-                                    break;
-                                }
-                                future::Either::Right((Err(_), _)) => break,
-                            },
+                                client.send_back(
+                                    &smoldot::json_rpc::parse::build_subscription_event(
+                                        "state_runtimeVersion",
+                                        &subscription,
+                                        &notification_body,
+                                    ),
+                                    source_id,
+                                );
+                            }
+                            future::Either::Right((Ok(unsub_request_id), _)) => {
+                                let response =
+                                    methods::Response::state_unsubscribeRuntimeVersion(true)
+                                        .to_json_response(&unsub_request_id);
+                                client.send_back(&response, source_id);
+                                break;
+                            }
+                            future::Either::Right((Err(_), _)) => break,
                         }
                     }
                 }));
@@ -961,7 +941,9 @@ impl JsonRpcService {
             .remove(&source_id);
 
         if let Some(subscriptions) = subscriptions {
-            subscriptions.source_disconnected_tx.send(()).unwrap();
+            subscriptions
+                .source_disconnected
+                .store(true, atomic::Ordering::Relaxed);
         }
     }
 
@@ -996,70 +978,69 @@ impl JsonRpcService {
 
         // Spawn a separate task for the transaction updates.
         let client = self.clone();
-        let mut source_disconnected_rx = subscriptions.source_disconnected_rx.clone();
+        let source_disconnected = subscriptions.source_disconnected.clone();
         (self.tasks_executor.lock().await)(Box::pin(async move {
             // Send back to the user the confirmation of the registration.
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a status update block, or for the subscription to
                 // be canceled.
                 let next_update = transaction_updates.next();
                 futures::pin_mut!(next_update);
-                let inner = future::select(next_update, &mut unsubscribe_rx);
+                match future::select(next_update, &mut unsubscribe_rx).await {
+                    future::Either::Left((Some(update), _)) => {
+                        let update = match update {
+                            transactions_service::TransactionStatus::Broadcast(peers) => {
+                                methods::TransactionStatus::Broadcast(
+                                    peers.into_iter().map(|peer| peer.to_base58()).collect(),
+                                )
+                            }
+                            transactions_service::TransactionStatus::InBlock(block) => {
+                                methods::TransactionStatus::InBlock(block)
+                            }
+                            transactions_service::TransactionStatus::Retracted(block) => {
+                                methods::TransactionStatus::Retracted(block)
+                            }
+                            transactions_service::TransactionStatus::Dropped => {
+                                methods::TransactionStatus::Dropped
+                            }
+                            transactions_service::TransactionStatus::Finalized(block) => {
+                                methods::TransactionStatus::Finalized(block)
+                            }
+                            transactions_service::TransactionStatus::FinalityTimeout(block) => {
+                                methods::TransactionStatus::FinalityTimeout(block)
+                            }
+                        };
 
-                match future::select(&mut source_disconnected_rx, inner).await {
-                    future::Either::Left(_) => break,
-                    future::Either::Right((inner, _)) => match inner {
-                        future::Either::Left((Some(update), _)) => {
-                            let update = match update {
-                                transactions_service::TransactionStatus::Broadcast(peers) => {
-                                    methods::TransactionStatus::Broadcast(
-                                        peers.into_iter().map(|peer| peer.to_base58()).collect(),
-                                    )
-                                }
-                                transactions_service::TransactionStatus::InBlock(block) => {
-                                    methods::TransactionStatus::InBlock(block)
-                                }
-                                transactions_service::TransactionStatus::Retracted(block) => {
-                                    methods::TransactionStatus::Retracted(block)
-                                }
-                                transactions_service::TransactionStatus::Dropped => {
-                                    methods::TransactionStatus::Dropped
-                                }
-                                transactions_service::TransactionStatus::Finalized(block) => {
-                                    methods::TransactionStatus::Finalized(block)
-                                }
-                                transactions_service::TransactionStatus::FinalityTimeout(block) => {
-                                    methods::TransactionStatus::FinalityTimeout(block)
-                                }
-                            };
-
-                            client.send_back(
-                                &smoldot::json_rpc::parse::build_subscription_event(
-                                    "author_extrinsicUpdate",
-                                    &subscription,
-                                    &serde_json::to_string(&update).unwrap(),
-                                ),
-                                source_id,
-                            );
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeNewHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response, source_id);
-                            break;
-                        }
-                        future::Either::Left((None, _)) => {
-                            // Channel from the transactions service has been closed.
-                            // Stop the task.
-                            // There is nothing more that can be done except hope that the
-                            // client understands that no new notification is expected and
-                            // unsubscribes.
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
-                    },
+                        client.send_back(
+                            &smoldot::json_rpc::parse::build_subscription_event(
+                                "author_extrinsicUpdate",
+                                &subscription,
+                                &serde_json::to_string(&update).unwrap(),
+                            ),
+                            source_id,
+                        );
+                    }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeNewHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        client.send_back(&response, source_id);
+                        break;
+                    }
+                    future::Either::Left((None, _)) => {
+                        // Channel from the transactions service has been closed.
+                        // Stop the task.
+                        // There is nothing more that can be done except hope that the
+                        // client understands that no new notification is expected and
+                        // unsubscribes.
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
             }
         }));
@@ -1143,7 +1124,7 @@ impl JsonRpcService {
             methods::Response::chain_subscribeAllHeads(&subscription).to_json_response(request_id);
 
         let client = self.clone();
-        let mut source_disconnected_rx = subscriptions.source_disconnected_rx.clone();
+        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1151,33 +1132,32 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
-                let inner = future::select(next_block, &mut unsubscribe_rx);
-
-                match future::select(&mut source_disconnected_rx, inner).await {
-                    future::Either::Left(_) => break,
-                    future::Either::Right((inner, _)) => match inner {
-                        future::Either::Left((block, _)) => {
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                            client.send_back(
-                                &smoldot::json_rpc::parse::build_subscription_event(
-                                    "chain_newHead",
-                                    &subscription,
-                                    &serde_json::to_string(&header).unwrap(),
-                                ),
-                                source_id,
-                            );
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeAllHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response, source_id);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
-                    },
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((block, _)) => {
+                        let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                        client.send_back(
+                            &smoldot::json_rpc::parse::build_subscription_event(
+                                "chain_newHead",
+                                &subscription,
+                                &serde_json::to_string(&header).unwrap(),
+                            ),
+                            source_id,
+                        );
+                    }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeAllHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        client.send_back(&response, source_id);
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
             }
         }));
@@ -1208,7 +1188,7 @@ impl JsonRpcService {
             methods::Response::chain_subscribeNewHeads(&subscription).to_json_response(request_id);
 
         let client = self.clone();
-        let mut source_disconnected_rx = subscriptions.source_disconnected_rx.clone();
+        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1216,33 +1196,32 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
-                let inner = future::select(next_block, &mut unsubscribe_rx);
-
-                match future::select(&mut source_disconnected_rx, inner).await {
-                    future::Either::Left(_) => break,
-                    future::Either::Right((inner, _)) => match inner {
-                        future::Either::Left((block, _)) => {
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                            client.send_back(
-                                &smoldot::json_rpc::parse::build_subscription_event(
-                                    "chain_newHead",
-                                    &subscription,
-                                    &serde_json::to_string(&header).unwrap(),
-                                ),
-                                source_id,
-                            );
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeNewHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response, source_id);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
-                    },
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((block, _)) => {
+                        let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                        client.send_back(
+                            &smoldot::json_rpc::parse::build_subscription_event(
+                                "chain_newHead",
+                                &subscription,
+                                &serde_json::to_string(&header).unwrap(),
+                            ),
+                            source_id,
+                        );
+                    }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeNewHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        client.send_back(&response, source_id);
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
             }
         }));
@@ -1278,7 +1257,7 @@ impl JsonRpcService {
             .to_json_response(request_id);
 
         let client = self.clone();
-        let mut source_disconnected_rx = subscriptions.source_disconnected_rx.clone();
+        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1286,33 +1265,32 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
-                let inner = future::select(next_block, &mut unsubscribe_rx);
-
-                match future::select(&mut source_disconnected_rx, inner).await {
-                    future::Either::Left(_) => break,
-                    future::Either::Right((inner, _)) => match inner {
-                        future::Either::Left((block, _)) => {
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                            client.send_back(
-                                &smoldot::json_rpc::parse::build_subscription_event(
-                                    "chain_finalizedHead",
-                                    &subscription,
-                                    &serde_json::to_string(&header).unwrap(),
-                                ),
-                                source_id,
-                            );
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response, source_id);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
-                    },
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((block, _)) => {
+                        let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                        client.send_back(
+                            &smoldot::json_rpc::parse::build_subscription_event(
+                                "chain_finalizedHead",
+                                &subscription,
+                                &serde_json::to_string(&header).unwrap(),
+                            ),
+                            source_id,
+                        );
+                    }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        client.send_back(&response, source_id);
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
             }
         }));
@@ -1412,7 +1390,7 @@ impl JsonRpcService {
             methods::Response::state_subscribeStorage(&subscription).to_json_response(request_id);
 
         let client = self.clone();
-        let mut source_disconnected_rx = subscriptions.source_disconnected_rx.clone();
+        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1422,32 +1400,31 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new storage update, or for the subscription to be canceled.
                 let next_block = storage_updates.next();
                 futures::pin_mut!(next_block);
-                let inner = future::select(next_block, &mut unsubscribe_rx);
-
-                match future::select(&mut source_disconnected_rx, inner).await {
-                    future::Either::Left(_) => break,
-                    future::Either::Right((inner, _)) => match inner {
-                        future::Either::Left((changes, _)) => {
-                            client.send_back(
-                                &smoldot::json_rpc::parse::build_subscription_event(
-                                    "state_storage",
-                                    &subscription,
-                                    &serde_json::to_string(&changes).unwrap(),
-                                ),
-                                source_id,
-                            );
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::state_unsubscribeStorage(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response, source_id);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
-                    },
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((changes, _)) => {
+                        client.send_back(
+                            &smoldot::json_rpc::parse::build_subscription_event(
+                                "state_storage",
+                                &subscription,
+                                &serde_json::to_string(&changes).unwrap(),
+                            ),
+                            source_id,
+                        );
+                    }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::state_unsubscribeStorage(true)
+                            .to_json_response(&unsub_request_id);
+                        client.send_back(&response, source_id);
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
             }
         }));
