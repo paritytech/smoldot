@@ -28,7 +28,7 @@ mod keys_proto {
 
 /// Public key of a node's identity.
 ///
-/// Libp2p specifies multiple different possible algorithms, but  only ed25519 support is
+/// Libp2p specifies multiple different possible algorithms, but only ed25519 support is
 /// mandatory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicKey {
