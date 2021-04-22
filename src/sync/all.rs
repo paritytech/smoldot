@@ -350,7 +350,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
-                let (source, request) = all_forks.add_source(
+                let source_id = all_forks.add_source(
                     AllForksSourceExtra {
                         user_data,
                         outer_source_id,
@@ -359,18 +359,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     best_block_number,
                     best_block_hash,
                 );
-                let source_id = source.id();
                 outer_source_id_entry.insert(SourceMapping::AllForks(source_id));
 
-                let next_actions = if let Some(request) = request {
-                    vec![self.shared.all_forks_request_to_request(
-                        &mut all_forks,
-                        source_id,
-                        request,
-                    )]
-                } else {
-                    Vec::new()
-                };
+                let next_actions = self.shared.all_forks_next_actions(&mut all_forks);
 
                 self.inner = IdleInner::AllForks(all_forks);
                 (outer_source_id, next_actions)
@@ -442,7 +433,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 &mut sync.source_user_data_mut(*src).user_data
             }
             (IdleInner::AllForks(sync), SourceMapping::AllForks(src)) => {
-                &mut sync.source_mut(*src).unwrap().into_user_data().user_data
+                &mut sync.source_user_data_mut(*src).user_data
             }
             (IdleInner::GrandpaWarpSync(sync), SourceMapping::GrandpaWarpSync(src)) => {
                 &mut sync.source_user_data_mut(*src).user_data
@@ -510,18 +501,8 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     all_forks::BlockAnnounceOutcome::NotFinalizedChain => {
                         BlockAnnounceOutcome::NotFinalizedChain(self)
                     }
-                    all_forks::BlockAnnounceOutcome::Disjoint {
-                        mut sync,
-                        next_request,
-                    } => {
-                        let next_actions = match next_request {
-                            Some(nr) => {
-                                vec![self
-                                    .shared
-                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
-                            }
-                            None => Vec::new(),
-                        };
+                    all_forks::BlockAnnounceOutcome::Disjoint => {
+                        let next_actions = self.shared.all_forks_next_actions(&mut sync);
                         self.inner = IdleInner::AllForks(sync);
                         BlockAnnounceOutcome::Disjoint {
                             sync: self,
@@ -641,14 +622,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     all_forks::AncestrySearchResponseOutcome::NotFinalizedChain {
                         discarded_unverified_block_headers,
                     } => {
-                        let next_actions = match next_request {
-                            Some(nr) => {
-                                vec![self
-                                    .shared
-                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
-                            }
-                            None => Vec::new(),
-                        };
+                        let next_actions = self.shared.all_forks_next_actions(&mut sync);
                         ResponseOutcome::NotFinalizedChain {
                             sync: Idle {
                                 inner: IdleInner::AllForks(sync),
@@ -658,18 +632,8 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                             discarded_unverified_block_headers,
                         }
                     }
-                    all_forks::AncestrySearchResponseOutcome::Inconclusive {
-                        mut sync,
-                        next_request,
-                    } => {
-                        let next_actions = match next_request {
-                            Some(nr) => {
-                                vec![self
-                                    .shared
-                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
-                            }
-                            None => Vec::new(),
-                        };
+                    all_forks::AncestrySearchResponseOutcome::Inconclusive => {
+                        let next_actions = self.shared.all_forks_next_actions(&mut sync);
                         ResponseOutcome::Queued {
                             sync: Idle {
                                 inner: IdleInner::AllForks(sync),
@@ -678,18 +642,8 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                             next_actions,
                         }
                     }
-                    all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain {
-                        mut sync,
-                        next_request,
-                    } => {
-                        let next_actions = match next_request {
-                            Some(nr) => {
-                                vec![self
-                                    .shared
-                                    .all_forks_request_to_request(&mut sync, source_id, nr)]
-                            }
-                            None => Vec::new(),
-                        };
+                    all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain => {
+                        let next_actions = self.shared.all_forks_next_actions(&mut sync);
                         ResponseOutcome::AllAlreadyInChain {
                             sync: Idle {
                                 inner: IdleInner::AllForks(sync),
@@ -1460,42 +1414,43 @@ impl Shared {
         }
     }
 
+    fn all_forks_next_actions<TRq, TSrc, TBl>(
+        &mut self,
+        all_forks: &mut all_forks::AllForksSync<TBl, TRq, AllForksSourceExtra<TRq, TSrc>>,
+    ) -> Vec<Action> {
+        let mut out = Vec::new();
+        while let Some((source_id, request_details)) = all_forks.desired_requests().next() {
+            let inner_request_id = all_forks.add_request(source_id, request_details, ());
+            out.push(self.all_forks_request_to_request(
+                all_forks,
+                source_id,
+                inner_request_id,
+                request_details,
+            ));
+        }
+        out
+    }
+
     // TODO: don't take the AllForksSync by &mut but by &
     fn all_forks_request_to_request<TRq, TSrc, TBl>(
         &mut self,
         all_forks: &mut all_forks::AllForksSync<TBl, TRq, AllForksSourceExtra<TRq, TSrc>>,
         source_id: all_forks::SourceId,
         request_id: all_forks::RequestId,
-        request: all_forks::Request,
+        request: all_forks::RequestParams,
     ) -> Action {
         let outer_request_id =
             RequestId(self.requests.insert(RequestMapping::AllForks(request_id)));
 
-        let outer_source_id = all_forks
-            .source_mut(source_id)
-            .unwrap()
-            .into_user_data()
-            .outer_source_id;
-
-        let (first_block, num_blocks) = match request {
-            all_forks::Request::AncestrySearch {
-                first_block_hash,
-                num_blocks,
-            } => (BlocksRequestFirstBlock::Hash(first_block_hash), num_blocks),
-            all_forks::Request::HeaderRequest { hash, .. } => (
-                BlocksRequestFirstBlock::Hash(hash),
-                NonZeroU64::new(1).unwrap(),
-            ),
-            all_forks::Request::BodyRequest { .. } => todo!(),
-        };
+        let outer_source_id = all_forks.source_user_data(source_id).outer_source_id;
 
         Action::Start {
             request_id: outer_request_id,
             source_id: outer_source_id,
             detail: RequestDetail::BlocksRequest {
-                first_block,
+                first_block: BlocksRequestFirstBlock::Hash(request.first_block_hash),
                 ascending: false,
-                num_blocks,
+                num_blocks: request.num_blocks,
                 request_bodies: false,
                 request_headers: true,
                 request_justification: true, // TODO: only do this on blocks that change the GP authorities?
@@ -1552,7 +1507,7 @@ impl Shared {
         let mut all_forks_demands = Vec::with_capacity(disassembled.sources.len());
 
         for source in disassembled.sources {
-            let (updated_source_id, request) = all_forks.add_source(
+            let updated_source_id = all_forks.add_source(
                 AllForksSourceExtra {
                     user_data: source.user_data.user_data,
                     outer_source_id: source.user_data.outer_source_id,

@@ -649,6 +649,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 }
 
 /// Information about a blocks request to be performed on a source.
+// TODO: needs more documentation
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestParams {
     /// Height of the first block to request.

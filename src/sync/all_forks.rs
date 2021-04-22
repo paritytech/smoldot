@@ -748,57 +748,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     }*/
 }
 
-/// Request that should be performed towards a source.
-#[must_use]
-pub enum Request {
-    /// An ancestry search is necessary in situations where there are links missing between some
-    /// block headers and the local chain of valid blocks. It consists in asking the source for
-    /// its block headers in descending order starting from `first_block_height`. The answer will
-    /// make it possible for the local state machine to determine how the chain is connected.
-    ///
-    /// > **Note**: This situation can happen for instance after a network split (also called
-    /// >           *netsplit*) ends. During the split, some nodes have produced one chain, while
-    /// >           some other nodes have produced a different chain.
-    AncestrySearch {
-        /// Hash of the first block to request.
-        first_block_hash: [u8; 32],
-
-        /// Number of blocks the request should return.
-        ///
-        /// Note that this is only an indication, and the source is free to give fewer blocks
-        /// than requested. If that happens, the state machine might later send out further
-        /// ancestry search requests to complete the chain.
-        num_blocks: NonZeroU64,
-    },
-
-    /// The header of the block with the given hash is requested.
-    // TODO: which method should the user call in response?
-    HeaderRequest {
-        /// Height of the block.
-        ///
-        /// > **Note**: This value is passed because it is always known, but the hash alone is
-        /// >           expected to be enough to fetch the block header.
-        number: u64,
-
-        /// Hash of the block whose header to obtain.
-        hash: [u8; 32],
-    },
-
-    /// The body of the block with the given hash is requested.
-    ///
-    /// Can only happen if [`Config::full`].
-    BodyRequest {
-        /// Height of the block.
-        ///
-        /// > **Note**: This value is passed because it is always known, but the hash alone is
-        /// >           expected to be enough to fetch the block body.
-        number: u64,
-
-        /// Hash of the block whose body to obtain.
-        hash: [u8; 32],
-    },
-}
-
 /// Struct to pass back when a block request has succeeded.
 #[derive(Debug)]
 pub struct RequestSuccessBlock<THdr, TJs> {
