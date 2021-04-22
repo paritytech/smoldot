@@ -494,22 +494,20 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             }
             (IdleInner::AllForks(sync), &SourceMapping::AllForks(source_id)) => {
                 match sync.block_announce(source_id, announced_scale_encoded_header, is_best) {
-                    all_forks::BlockAnnounceOutcome::HeaderVerify(verify) => {
+                    all_forks::BlockAnnounceOutcome::HeaderVerify => {
                         BlockAnnounceOutcome::HeaderVerify(HeaderVerify {
-                            inner: HeaderVerifyInner::AllForks(verify),
+                            inner: HeaderVerifyInner::AllForks(match sync.process_one() {
+                                all_forks::ProcessOne::Idle { .. } => unreachable!(),
+                                all_forks::ProcessOne::HeaderVerify(verify) => verify,
+                            }),
                             shared: self.shared,
                         })
                     }
-                    all_forks::BlockAnnounceOutcome::TooOld(sync) => {
-                        self.inner = IdleInner::AllForks(sync);
-                        BlockAnnounceOutcome::TooOld(self)
-                    }
-                    all_forks::BlockAnnounceOutcome::AlreadyInChain(sync) => {
-                        self.inner = IdleInner::AllForks(sync);
+                    all_forks::BlockAnnounceOutcome::TooOld => BlockAnnounceOutcome::TooOld(self),
+                    all_forks::BlockAnnounceOutcome::AlreadyInChain => {
                         BlockAnnounceOutcome::AlreadyInChain(self)
                     }
-                    all_forks::BlockAnnounceOutcome::NotFinalizedChain(sync) => {
-                        self.inner = IdleInner::AllForks(sync);
+                    all_forks::BlockAnnounceOutcome::NotFinalizedChain => {
                         BlockAnnounceOutcome::NotFinalizedChain(self)
                     }
                     all_forks::BlockAnnounceOutcome::Disjoint {
@@ -530,8 +528,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                             next_actions,
                         }
                     }
-                    all_forks::BlockAnnounceOutcome::InvalidHeader { sync, error } => {
-                        self.inner = IdleInner::AllForks(sync);
+                    all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                         BlockAnnounceOutcome::InvalidHeader { sync: self, error }
                     }
                 }
@@ -622,9 +619,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                     }),
                 }
             }
-            (IdleInner::AllForks(sync), RequestMapping::AllForks(source_id)) => {
+            (IdleInner::AllForks(sync), RequestMapping::AllForks(request_id)) => {
                 match sync.finish_ancestry_search(
-                    source_id,
+                    request_id,
                     blocks.map(|iter| {
                         iter.map(|block| all_forks::RequestSuccessBlock {
                             scale_encoded_header: block.scale_encoded_header,
@@ -632,15 +629,16 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         })
                     }),
                 ) {
-                    all_forks::AncestrySearchResponseOutcome::Verify(verify) => {
+                    all_forks::AncestrySearchResponseOutcome::Verify => {
                         ResponseOutcome::VerifyHeader(HeaderVerify {
-                            inner: HeaderVerifyInner::AllForks(verify),
+                            inner: HeaderVerifyInner::AllForks(match sync.process_one() {
+                                all_forks::ProcessOne::Idle { .. } => unreachable!(),
+                                all_forks::ProcessOne::HeaderVerify(verify) => verify,
+                            }),
                             shared: self.shared,
                         })
                     }
                     all_forks::AncestrySearchResponseOutcome::NotFinalizedChain {
-                        mut sync,
-                        next_request,
                         discarded_unverified_block_headers,
                     } => {
                         let next_actions = match next_request {
@@ -1064,7 +1062,7 @@ pub struct HeaderVerify<TRq, TSrc, TBl> {
 }
 
 enum HeaderVerifyInner<TRq, TSrc, TBl> {
-    AllForks(all_forks::HeaderVerify<AllForksSourceExtra<TRq, TSrc>, TBl>),
+    AllForks(all_forks::HeaderVerify<TBl, TRq, AllForksSourceExtra<TRq, TSrc>>),
     Optimistic(optimistic::ProcessOne<(), OptimisticSourceExtra<TSrc>, TBl>),
 }
 
@@ -1382,7 +1380,7 @@ enum IdleInner<TRq, TSrc, TBl> {
     Optimistic(optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>),
     /// > **Note**: Must never contain [`grandpa_warp_sync::GrandpaWarpSync::Finished`].
     GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>),
-    AllForks(all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>),
+    AllForks(all_forks::AllForksSync<TBl, TRq, AllForksSourceExtra<TRq, TSrc>>),
     Poisoned,
 }
 
@@ -1465,7 +1463,7 @@ impl Shared {
     // TODO: don't take the AllForksSync by &mut but by &
     fn all_forks_request_to_request<TRq, TSrc, TBl>(
         &mut self,
-        all_forks: &mut all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>,
+        all_forks: &mut all_forks::AllForksSync<TBl, TRq, AllForksSourceExtra<TRq, TSrc>>,
         source_id: all_forks::SourceId,
         request_id: all_forks::RequestId,
         request: all_forks::Request,
@@ -1527,7 +1525,7 @@ impl Shared {
         &mut self,
         optimistic: optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>,
     ) -> (
-        all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>,
+        all_forks::AllForksSync<TBl, TRq, AllForksSourceExtra<TRq, TSrc>>,
         Vec<Action>,
     ) {
         debug_assert!(self
@@ -1601,7 +1599,7 @@ impl Shared {
         &mut self,
         grandpa: grandpa_warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
     ) -> (
-        all_forks::AllForksSync<AllForksSourceExtra<TRq, TSrc>, TBl>,
+        all_forks::AllForksSync<TBl, TRq, AllForksSourceExtra<TRq, TSrc>>,
         Vec<Action>,
     ) {
         debug_assert!(self.requests.is_empty()); // GrandPa only does one request at a time
@@ -1623,7 +1621,7 @@ impl Shared {
         let mut all_forks_demands = Vec::with_capacity(grandpa.sources.len());
 
         for source in grandpa.sources {
-            let (updated_source_id, request) = all_forks.add_source(
+            let updated_source_id = all_forks.add_source(
                 AllForksSourceExtra {
                     user_data: source.user_data,
                     outer_source_id: source.outer_source_id,

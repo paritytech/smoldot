@@ -97,7 +97,7 @@ mod disjoint;
 mod pending_blocks;
 mod sources;
 
-pub use pending_blocks::{RequestId, SourceId};
+pub use pending_blocks::{RequestId, RequestParams, SourceId};
 
 /// Configuration for the [`AllForksSync`].
 #[derive(Debug)]
@@ -151,19 +151,20 @@ pub struct Config {
     pub full: bool,
 }
 
-pub struct AllForksSync<TSrc, TBl> {
+pub struct AllForksSync<TBl, TRq, TSrc> {
     /// Data structure containing the non-finalized blocks.
     ///
     /// If [`Inner::full`], this only contains blocks whose header *and* body have been verified.
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 
     /// Extra fields. In a separate structure in order to be moved around.
-    inner: Inner<TSrc>,
+    inner: Inner<TRq, TSrc>,
 }
 
 /// Extra fields. In a separate structure in order to be moved around.
-struct Inner<TSrc> {
-    blocks: pending_blocks::PendingBlocks<PendingBlock, SourceId, TSrc>,
+struct Inner<TRq, TSrc> {
+    // TODO: TBl
+    blocks: pending_blocks::PendingBlocks<PendingBlock, TRq, TSrc>,
 }
 
 struct PendingBlock {
@@ -177,7 +178,7 @@ struct Block<TBl> {
     user_data: TBl,
 }
 
-impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
+impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Initializes a new [`AllForksSync`].
     pub fn new(config: Config) -> Self {
         let finalized_block_height = config.chain_information.finalized_block_header.number;
@@ -249,7 +250,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         user_data: TSrc,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> (SourceId, Option<Request>) {
+    ) -> SourceId {
         let source_id = self
             .inner
             .blocks
@@ -260,13 +261,13 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .chain
                 .non_finalized_block_by_hash(&best_block_hash)
                 .is_none();
-        let is_in_collection = self
+        let is_in_disjoints_list = self
             .inner
             .blocks
             .contains(best_block_number, &best_block_hash);
-        debug_assert!(!(!needs_verification && is_in_collection));
+        debug_assert!(!(!needs_verification && is_in_disjoints_list));
 
-        if needs_verification && !is_in_collection {
+        if needs_verification && !is_in_disjoints_list {
             self.inner.blocks.insert_unverified_block(
                 best_block_number,
                 best_block_hash,
@@ -279,7 +280,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
             );
         }
 
-        (source_id, self.source_next_request(source_id))
+        source_id
     }
 
     /// Removes the source from the [`AllForksSync`].
@@ -345,6 +346,46 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         self.inner.blocks.source_user_data_mut(source_id)
     }
 
+    /// Returns the details of a request to start towards a source.
+    ///
+    /// This method doesn't modify the state machine in any way. [`AllForksSync::add_request`]
+    /// must be called in order for the request to actually be marked as started.
+    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
+        // TODO: need to periodically query for justifications of non-finalized blocks that change GrandPa authorities
+
+        self.inner.blocks.desired_requests()
+    }
+
+    /// Inserts a new request in the data structure.
+    ///
+    /// > **Note**: The request doesn't necessarily have to match a request returned by
+    /// >           [`AllForksSync::desired_requests`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn add_request(
+        &mut self,
+        source_id: SourceId,
+        detail: RequestParams,
+        user_data: TRq,
+    ) -> RequestId {
+        self.inner.blocks.add_request(source_id, detail, user_data)
+    }
+
+    /// Returns a list of requests that are considered obsolete and can be removed using
+    /// [`AllForksSync::finish_request`].
+    ///
+    /// A request becomes obsolete if the state of the request blocks changes in such a way that
+    /// they don't need to be requested anymore. The response to the request will be useless.
+    ///
+    /// > **Note**: It is in no way mandatory to actually call this function and cancel the
+    /// >           requests that are returned.
+    pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
+        self.inner.blocks.obsolete_requests()
+    }
+
     /// Call in response to a [`Request::AncestrySearch`].
     ///
     /// The headers are expected to be sorted in decreasing order. The first element of the
@@ -369,7 +410,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ) -> AncestrySearchResponseOutcome {
         // Sets the `occupation` of `source_id` back to `Idle`.
         let (
-            pending_blocks::DesiredRequest {
+            pending_blocks::RequestParams {
                 first_block_hash: requested_block_hash,
                 first_block_height: requested_block_height,
                 ..
@@ -467,32 +508,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
                 .remove_known_block(requested_block_height, requested_block_hash);
         }*/
 
-        let next_request = self.source_next_request(source_id);
         AncestrySearchResponseOutcome::Inconclusive
-    }
-
-    /// Finds a request that the given source could start performing.
-    ///
-    /// If `Some` is returned, updates `self` and returns the request that must be started.
-    #[must_use]
-    fn source_next_request(&mut self, source_id: SourceId) -> Option<Request> {
-        // TODO: need to periodically query for justifications of non-finalized blocks that change GrandPa authorities
-
-        // Ask for a query that is appropriate for this source.
-        let query_to_start = self
-            .inner
-            .blocks
-            .source_desired_requests(source_id)
-            .next()?;
-        let request_id = self
-            .inner
-            .blocks
-            .add_request(source_id, query_to_start, source_id);
-
-        Some(Request::AncestrySearch {
-            first_block_hash: query_to_start.first_block_hash,
-            num_blocks: query_to_start.num_blocks,
-        })
     }
 
     fn verifiable_headers(&'_ mut self) -> impl Iterator<Item = (u64, [u8; 32], Vec<u8>)> + '_ {
@@ -547,7 +563,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
     ///
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
-    pub fn process_one(mut self) -> ProcessOne<TSrc, TBl> {
+    pub fn process_one(mut self) -> ProcessOne<TBl, TRq, TSrc> {
         if let Some(block) = self.inner.blocks.unverified_leaves().next() {
             ProcessOne::HeaderVerify(HeaderVerify {
                 parent: self,
@@ -689,7 +705,7 @@ impl<TSrc, TBl> AllForksSync<TSrc, TBl> {
         now_from_unix_epoch: Duration,
         request_id: RequestId,
         block_body: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> (BlockBodyVerify<TSrc, TBl>, Option<Request>) {
+    ) -> (BlockBodyVerify<TBl, TRq, TSrc>, Option<Request>) {
         // TODO: unfinished
 
         todo!()
@@ -868,13 +884,13 @@ pub enum AncestrySearchResponseOutcome {
 /// Header verification to be performed.
 ///
 /// Internally holds the [`AllForksSync`].
-pub struct HeaderVerify<TSrc, TBl> {
-    parent: AllForksSync<TSrc, TBl>,
+pub struct HeaderVerify<TBl, TRq, TSrc> {
+    parent: AllForksSync<TBl, TRq, TSrc>,
     /// Block that can be verified.
     block_to_verify: pending_blocks::PendingVerificationBlock,
 }
 
-impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
+impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
     /// Returns the height of the block to be verified.
     pub fn height(&self) -> u64 {
         self.block_to_verify.block_number
@@ -890,7 +906,7 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
         mut self,
         now_from_unix_epoch: Duration,
         user_data: TBl,
-    ) -> HeaderVerifyOutcome<TSrc, TBl> {
+    ) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
         let to_verify_scale_encoded_header = self
             .parent
             .inner
@@ -956,66 +972,28 @@ impl<TSrc, TBl> HeaderVerify<TSrc, TBl> {
             JustificationVerification::NoJustification
         };
 
-        let requests_replace = cancelled_requests
-            .into_iter()
-            .map(|(_, replace_source_id)| {
-                let new_request = self.parent.source_next_request(replace_source_id);
-                (replace_source_id, new_request)
-            })
-            .collect();
-
-        match (result, self.verifiable_blocks.is_empty()) {
-            (Ok(is_new_best), false) => HeaderVerifyOutcome::SuccessContinue {
+        match result {
+            Ok(is_new_best) => HeaderVerifyOutcome::Success {
                 is_new_best,
                 justification_verification,
-                next_block: HeaderVerify {
-                    parent: self.parent,
-                    source_id: self.source_id,
-                    verifiable_blocks: self.verifiable_blocks,
-                },
-                requests_replace,
+                sync: self.parent,
             },
-            (Ok(is_new_best), true) => {
-                let next_request = self.parent.source_next_request(self.source_id);
-                HeaderVerifyOutcome::Success {
-                    is_new_best,
-                    justification_verification,
-                    sync: self.parent,
-                    next_request,
-                    requests_replace,
-                }
-            }
-            (Err((error, user_data)), false) => HeaderVerifyOutcome::ErrorContinue {
-                next_block: HeaderVerify {
-                    parent: self.parent,
-                    source_id: self.source_id,
-                    verifiable_blocks: self.verifiable_blocks,
-                },
+            Err((error, user_data)) => HeaderVerifyOutcome::Error {
+                sync: self.parent,
                 error,
                 user_data,
-                requests_replace,
             },
-            (Err((error, user_data)), true) => {
-                let next_request = self.parent.source_next_request(self.source_id);
-                HeaderVerifyOutcome::Error {
-                    sync: self.parent,
-                    error,
-                    user_data,
-                    next_request,
-                    requests_replace,
-                }
-            }
         }
     }
 
     /// Do not actually proceed with the verification.
-    pub fn cancel(self) -> AllForksSync<TSrc, TBl> {
+    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
         self.parent
     }
 }
 
 /// State of the processing of blocks.
-pub enum ProcessOne<TSrc, TBl> {
+pub enum ProcessOne<TBl, TRq, TSrc> {
     /// No processing is necessary.
     ///
     /// Calling [`AllForksSync::process_one`] again is unnecessary.
@@ -1023,15 +1001,15 @@ pub enum ProcessOne<TSrc, TBl> {
         /// The state machine.
         /// The [`AllForksSync::process_one`] method takes ownership of the [`AllForksSync`]. This
         /// field yields it back.
-        sync: AllForksSync<TSrc, TBl>,
+        sync: AllForksSync<TBl, TRq, TSrc>,
     },
 
     /// A header is ready for verification.
-    HeaderVerify(HeaderVerify<TSrc, TBl>),
+    HeaderVerify(HeaderVerify<TBl, TRq, TSrc>),
 }
 
 /// Outcome of calling [`HeaderVerify::perform`].
-pub enum HeaderVerifyOutcome<TSrc, TBl> {
+pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
     /// Header has been successfully verified.
     Success {
         /// True if the newly-verified block is considered the new best block.
@@ -1040,58 +1018,17 @@ pub enum HeaderVerifyOutcome<TSrc, TBl> {
         /// outcome.
         justification_verification: JustificationVerification<TBl>,
         /// State machine yielded back. Use to continue the processing.
-        sync: AllForksSync<TSrc, TBl>,
-        /// Next request that must be performed on the source.
-        next_request: Option<Request>,
-        /// For each element in this list, the request made towards this source should be replaced
-        /// with a new one (if the request is `Some`) or cancelled (if the request is `None`).
-        /// Sources are guaranteed to never be the source that has sent back the header.
-        requests_replace: Vec<(SourceId, Option<Request>)>,
-    },
-
-    /// Header has been successfully verified. A follow-up header is ready to be verified.
-    SuccessContinue {
-        /// True if the newly-verified block is considered the new best block.
-        is_new_best: bool,
-        /// If a justification was attached to this block, it has also been verified. Contains the
-        /// outcome.
-        justification_verification: JustificationVerification<TBl>,
-        /// Next verification.
-        next_block: HeaderVerify<TSrc, TBl>,
-        /// For each element in this list, the request made towards this source should be replaced
-        /// with a new one (if the request is `Some`) or cancelled (if the request is `None`).
-        /// Sources are guaranteed to never be the source that has sent back the header.
-        requests_replace: Vec<(SourceId, Option<Request>)>,
+        sync: AllForksSync<TBl, TRq, TSrc>,
     },
 
     /// Header verification failed.
     Error {
         /// State machine yielded back. Use to continue the processing.
-        sync: AllForksSync<TSrc, TBl>,
+        sync: AllForksSync<TBl, TRq, TSrc>,
         /// Error that happened.
         error: verify::header_only::Error,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
-        /// Next request that must be performed on the source.
-        next_request: Option<Request>,
-        /// For each element in this list, the request made towards this source should be replaced
-        /// with a new one (if the request is `Some`) or cancelled (if the request is `None`).
-        /// Sources are guaranteed to never be the source that has sent back the header.
-        requests_replace: Vec<(SourceId, Option<Request>)>,
-    },
-
-    /// Header verification failed. A follow-up header is ready to be verified.
-    ErrorContinue {
-        /// Next verification.
-        next_block: HeaderVerify<TSrc, TBl>,
-        /// Error that happened.
-        error: verify::header_only::Error,
-        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
-        user_data: TBl,
-        /// For each element in this list, the request made towards this source should be replaced
-        /// with a new one (if the request is `Some`) or cancelled (if the request is `None`).
-        /// Sources are guaranteed to never be the source that has sent back the header.
-        requests_replace: Vec<(SourceId, Option<Request>)>,
     },
 }
 
@@ -1114,9 +1051,9 @@ impl<TBl> JustificationVerification<TBl> {
 }
 
 /// State of the processing of blocks.
-pub enum BlockBodyVerify<TSrc, TBl> {
+pub enum BlockBodyVerify<TBl, TRq, TSrc> {
     #[doc(hidden)]
-    Foo(core::marker::PhantomData<(TSrc, TBl)>),
+    Foo(core::marker::PhantomData<(TBl, TRq, TSrc)>),
     // TODO: finish
     /*/// Processing of the block is over.
     ///
@@ -1125,7 +1062,7 @@ pub enum BlockBodyVerify<TSrc, TBl> {
         /// The state machine.
         /// The [`AllForksSync::process_one`] method takes ownership of the
         /// [`AllForksSync`]. This field yields it back.
-        sync: AllForksSync<TSrc, TBl>,
+        sync: AllForksSync<TBl, TRq, TSrc>,
 
         new_best_number: u64,
         new_best_hash: [u8; 32],
@@ -1138,20 +1075,20 @@ pub enum BlockBodyVerify<TSrc, TBl> {
         /// The state machine.
         /// The [`AllForksSync::process_one`] method takes ownership of the
         /// [`AllForksSync`]. This field yields it back.
-        sync: AllForksSync<TSrc, TBl>,
+        sync: AllForksSync<TBl, TRq, TSrc>,
 
         /// Blocks that have been finalized. Includes the block that has just been verified.
         finalized_blocks: Vec<Block<TBl>>,
     },
 
     /// Loading a storage value of the finalized block is required in order to continue.
-    FinalizedStorageGet(StorageGet<TSrc, TBl>),
+    FinalizedStorageGet(StorageGet<TBl, TRq, TSrc>),
 
     /// Fetching the list of keys of the finalized block with a given prefix is required in order
     /// to continue.
-    FinalizedStoragePrefixKeys(StoragePrefixKeys<TSrc, TBl>),
+    FinalizedStoragePrefixKeys(StoragePrefixKeys<TBl, TRq, TSrc>),
 
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
-    FinalizedStorageNextKey(StorageNextKey<TSrc, TBl>),*/
+    FinalizedStorageNextKey(StorageNextKey<TBl, TRq, TSrc>),*/
 }

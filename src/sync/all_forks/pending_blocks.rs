@@ -52,9 +52,9 @@
 //! In addition to a list of blocks, this data structure also stores a list of ongoing requests.
 //! Each block has zero, one, or more requests associated to it.
 //!
-//! Call [`PendingBlocks::next_desired_request`] to obtain the next query that should be started.
+//! Call [`PendingBlocks::desired_requests`] to obtain the next query that should be started.
 //! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request. This has
-//! the effect of changing the outcome of calling [`PendingBlocks::next_desired_request`].
+//! the effect of changing the outcome of calling [`PendingBlocks::desired_requests`].
 //! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished.
 //!
 
@@ -176,7 +176,7 @@ struct UnverifiedBlock<TBl> {
 }
 
 struct Request<TRq> {
-    detail: DesiredRequest,
+    detail: RequestParams,
     source_id: SourceId,
     user_data: TRq,
 }
@@ -252,7 +252,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     pub fn remove_source(
         &mut self,
         source_id: SourceId,
-    ) -> (TSrc, Vec<(RequestId, DesiredRequest, TRq)>) {
+    ) -> (TSrc, Vec<(RequestId, RequestParams, TRq)>) {
         let user_data = self.sources.remove(source_id);
 
         todo!()
@@ -439,8 +439,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Inserts a new request in the data structure.
     ///
     /// > **Note**: The request doesn't necessarily have to match a request returned by
-    /// >           [`PendingBlocks::next_desired_request`] or
-    /// >           [`PendingBlocks::source_next_desired_request`].
+    /// >           [`PendingBlocks::desired_requests`] or
+    /// >           [`PendingBlocks::source_desired_requests`].
     ///
     /// # Panic
     ///
@@ -449,7 +449,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     pub fn add_request(
         &mut self,
         source_id: SourceId,
-        detail: DesiredRequest,
+        detail: RequestParams,
         user_data: TRq,
     ) -> RequestId {
         // TODO: update source
@@ -477,7 +477,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Returns the parameters that were passed to [`PendingBlocks::add_request`].
     ///
-    /// The next call to [`PendingBlocks::next_desired_request`] might return the same request again.
+    /// The next call to [`PendingBlocks::desired_requests`] might return the same request again.
     /// In order to avoid that, you are encouraged to update the state of the sources and blocks
     /// in the container with the outcome of the request.
     ///
@@ -485,7 +485,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_request(&mut self, request_id: RequestId) -> (DesiredRequest, SourceId, TRq) {
+    pub fn finish_request(&mut self, request_id: RequestId) -> (RequestParams, SourceId, TRq) {
         let request = self.requests.remove(request_id.0);
 
         let _was_in = self.blocks_requests.remove(&(
@@ -524,16 +524,16 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Returns the details of a request to start towards a source.
     ///
-    /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`] must be
-    /// called in order for the request to actually be marked as started.
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, DesiredRequest)> + '_ {
+    /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`]
+    /// must be called in order for the request to actually be marked as started.
+    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
         self.desired_requests_inner(None)
     }
 
     /// Returns the details of a request to start towards the source.
     ///
-    /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`] must be
-    /// called in order for the request to actually be marked as started.
+    /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`]
+    /// must be called in order for the request to actually be marked as started.
     ///
     /// # Panic
     ///
@@ -542,7 +542,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     pub fn source_desired_requests(
         &'_ self,
         source_id: SourceId,
-    ) -> impl Iterator<Item = DesiredRequest> + '_ {
+    ) -> impl Iterator<Item = RequestParams> + '_ {
         self.desired_requests_inner(Some(source_id))
             .map(move |(_actual_source, request)| {
                 debug_assert_eq!(_actual_source, source_id);
@@ -550,7 +550,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             })
     }
 
-    /// Inner implementation of [`PendingBlocks::next_desired_request`] and
+    /// Inner implementation of [`PendingBlocks::desired_requests`] and
     /// [`PendingBlocks::source_desired_requests`].
     ///
     /// If `force_source` is `Some`, only the given source will be considered.
@@ -562,7 +562,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     fn desired_requests_inner(
         &'_ self,
         force_source: Option<SourceId>,
-    ) -> impl Iterator<Item = (SourceId, DesiredRequest)> + '_ {
+    ) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
         // TODO: this is O(n²); maybe do something more optimized once it's fully working and has unit tests
         self.blocks.unknown_blocks().filter_map(
             move |(unknown_block_height, unknown_block_hash)| {
@@ -634,7 +634,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     // doesn't actually start the query yet.
                     return Some((
                         source_id,
-                        DesiredRequest {
+                        RequestParams {
                             first_block_hash: *unknown_block_hash,
                             first_block_height: unknown_block_height,
                             num_blocks: NonZeroU64::new(128).unwrap(), // TODO: *unknown_block_height - ...
@@ -650,7 +650,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
 /// Information about a blocks request to be performed on a source.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DesiredRequest {
+pub struct RequestParams {
     /// Height of the first block to request.
     pub first_block_height: u64,
 
