@@ -88,10 +88,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{
-    num::{NonZeroU32, NonZeroU64},
-    time::Duration,
-};
+use core::{num::NonZeroU32, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -299,9 +296,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn remove_source(&mut self, source_id: SourceId) -> (TSrc, Option<(SourceId, Request)>) {
-        self.inner.blocks.remove_source(source_id);
-        todo!()
+    pub fn remove_source(
+        &mut self,
+        source_id: SourceId,
+    ) -> (TSrc, Vec<(RequestId, RequestParams, TRq)>) {
+        self.inner.blocks.remove_source(source_id)
     }
 
     /// Returns true if the source has earlier announced the block passed as parameter or one of
