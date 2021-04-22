@@ -562,8 +562,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
-    pub fn process_one(mut self) -> ProcessOne<TBl, TRq, TSrc> {
-        if let Some(block) = self.inner.blocks.unverified_leaves().next() {
+    pub fn process_one(self) -> ProcessOne<TBl, TRq, TSrc> {
+        let block = self.inner.blocks.unverified_leaves().next();
+        if let Some(block) = block {
             ProcessOne::HeaderVerify(HeaderVerify {
                 parent: self,
                 block_to_verify: block,
@@ -645,7 +646,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 },
                 PendingBlock {
                     body: None,
-                    header: Some(header.into()),
+                    header: Some(header.clone().into()),
                     justification: justification.map(|j| j.to_vec()),
                 },
             );
@@ -657,7 +658,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 .blocks
                 .block_user_data_mut(header.number, header_hash);
             match &mut block_user_data.header {
-                h @ &mut None => *h = Some(header.into()), // TODO: copying bytes :-/
+                h @ &mut None => *h = Some(header.clone().into()), // TODO: copying bytes :-/
                 &mut Some(ref h) => {
                     // Considering that blocks are indexed by hash, the header can never change.
                     // TODO: debug_assert_eq!(header::HeaderRef::from(h), header);
