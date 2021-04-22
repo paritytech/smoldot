@@ -412,7 +412,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the block wasn't present in the data structure.
     ///
     pub fn remove_verify_success(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
-        todo!()
+        self.blocks.remove_verify_success(height, hash).user_data
     }
 
     /// Removes the given block from the collection after it has been determined to be bad.
@@ -570,13 +570,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 match self
                     .blocks
                     .user_data(unknown_block_height, unknown_block_hash)
-                    .unwrap()
-                    .state
+                    .map(|ud| &ud.state)
                 {
-                    UnverifiedBlockState::HeightHashKnown => {}
-                    UnverifiedBlockState::HeaderKnown { .. } if self.verify_bodies => {}
-                    UnverifiedBlockState::HeaderKnown { .. }
-                    | UnverifiedBlockState::BodyKnown { .. } => return None,
+                    None | Some(UnverifiedBlockState::HeightHashKnown) => {}
+                    Some(UnverifiedBlockState::HeaderKnown { .. }) if self.verify_bodies => {}
+                    Some(UnverifiedBlockState::HeaderKnown { .. })
+                    | Some(UnverifiedBlockState::BodyKnown { .. }) => return None,
                 }
 
                 // TODO: is that correct?
