@@ -646,9 +646,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     justification: justification.map(|j| j.to_vec()),
                 },
             );
-        }
+        } else {
+            self.inner.blocks.set_block_header_known(
+                header.number,
+                header_hash,
+                *header.parent_hash,
+            );
 
-        {
             let block_user_data = self
                 .inner
                 .blocks
@@ -661,8 +665,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // TODO: what if the pending block already contains a justification and it is not the
         //       same as here? since justifications aren't immediately verified, it is possible
         //       for a malicious peer to send us bad justifications
-
-        // TODO: update state of block if it was already in the container
 
         // Block is not part of the finalized chain.
         if header.number == self.chain.finalized_block_header().number + 1
