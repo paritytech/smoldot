@@ -379,7 +379,8 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     /// Panics if the [`SourceId`] doesn't correspond to a valid source.
     ///
     // TODO: return requests as iterator
-    pub fn remove_source(&mut self, source_id: SourceId) -> (Vec<(RequestId, TRq)>, TSrc) {
+    // TODO: return the `TRq`s as well
+    pub fn remove_source(&mut self, source_id: SourceId) -> (Vec<RequestId>, TSrc) {
         debug_assert!(self.shared.sources.contains(source_id.0));
         match (&mut self.inner, self.shared.sources.remove(source_id.0)) {
             (IdleInner::Optimistic(sync), SourceMapping::Optimistic(src)) => {
@@ -402,7 +403,20 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             }
             (IdleInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
                 let (user_data, requests) = sync.remove_source(source_id);
-                (Vec::new(), user_data.user_data) // TODO: empty Vec is wrong
+                let requests = requests
+                    .into_iter()
+                    .map(|(inner_request_id, _, request_inner_user_data)| {
+                        debug_assert!(self
+                            .shared
+                            .requests
+                            .contains(request_inner_user_data.outer_request_id.0));
+                        self.shared
+                            .requests
+                            .remove(request_inner_user_data.outer_request_id.0);
+                        request_inner_user_data.outer_request_id
+                    })
+                    .collect();
+                (requests, user_data.user_data)
             }
             (IdleInner::GrandpaWarpSync(sync), SourceMapping::GrandpaWarpSync(src)) => {
                 todo!()
@@ -1031,7 +1045,7 @@ pub struct HeaderVerify<TRq, TSrc, TBl> {
 }
 
 enum HeaderVerifyInner<TRq, TSrc, TBl> {
-    AllForks(all_forks::HeaderVerify<TBl, Option<TRq>, AllForksSourceExtra<TSrc>>),
+    AllForks(all_forks::HeaderVerify<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>),
     Optimistic(optimistic::ProcessOne<(), OptimisticSourceExtra<TSrc>, TBl>),
 }
 
@@ -1212,7 +1226,7 @@ enum IdleInner<TRq, TSrc, TBl> {
     Optimistic(optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>),
     /// > **Note**: Must never contain [`grandpa_warp_sync::GrandpaWarpSync::Finished`].
     GrandpaWarpSync(grandpa_warp_sync::InProgressGrandpaWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>),
-    AllForks(all_forks::AllForksSync<TBl, Option<TRq>, AllForksSourceExtra<TSrc>>),
+    AllForks(all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>),
     Poisoned,
 }
 
@@ -1225,6 +1239,11 @@ struct OptimisticSourceExtra<TSrc> {
 struct AllForksSourceExtra<TSrc> {
     outer_source_id: SourceId,
     user_data: TSrc,
+}
+
+struct AllForksRequestExtra<TRq> {
+    outer_request_id: RequestId,
+    user_data: Option<TRq>,
 }
 
 struct GrandpaWarpSyncSourceExtra<TSrc> {
@@ -1293,7 +1312,11 @@ impl Shared {
 
     fn all_forks_next_actions<TRq, TSrc, TBl>(
         &mut self,
-        all_forks: &mut all_forks::AllForksSync<TBl, Option<TRq>, AllForksSourceExtra<TSrc>>,
+        all_forks: &mut all_forks::AllForksSync<
+            TBl,
+            AllForksRequestExtra<TRq>,
+            AllForksSourceExtra<TSrc>,
+        >,
     ) -> Vec<Action> {
         let mut out = Vec::new();
 
@@ -1303,43 +1326,37 @@ impl Shared {
                 None => break,
             };
 
-            let inner_request_id = all_forks.add_request(source_id, request_details, None);
-            out.push(self.all_forks_request_to_request(
-                all_forks,
+            let request_mapping_entry = self.requests.vacant_entry();
+            let outer_request_id = RequestId(request_mapping_entry.key());
+
+            let inner_request_id = all_forks.add_request(
                 source_id,
-                inner_request_id,
                 request_details,
-            ));
+                AllForksRequestExtra {
+                    outer_request_id,
+                    user_data: None,
+                },
+            );
+
+            request_mapping_entry.insert(RequestMapping::AllForks(inner_request_id));
+
+            let outer_source_id = all_forks.source_user_data(source_id).outer_source_id;
+
+            out.push(Action::Start {
+                request_id: outer_request_id,
+                source_id: outer_source_id,
+                detail: RequestDetail::BlocksRequest {
+                    first_block: BlocksRequestFirstBlock::Hash(request_details.first_block_hash),
+                    ascending: false,
+                    num_blocks: request_details.num_blocks,
+                    request_bodies: false,
+                    request_headers: true,
+                    request_justification: true, // TODO: only do this on blocks that change the GP authorities?
+                },
+            });
         }
 
         out
-    }
-
-    // TODO: don't take the AllForksSync by &mut but by &
-    fn all_forks_request_to_request<TRq, TSrc, TBl>(
-        &mut self,
-        all_forks: &mut all_forks::AllForksSync<TBl, Option<TRq>, AllForksSourceExtra<TSrc>>,
-        source_id: all_forks::SourceId,
-        request_id: all_forks::RequestId,
-        request: all_forks::RequestParams,
-    ) -> Action {
-        let outer_request_id =
-            RequestId(self.requests.insert(RequestMapping::AllForks(request_id)));
-
-        let outer_source_id = all_forks.source_user_data(source_id).outer_source_id;
-
-        Action::Start {
-            request_id: outer_request_id,
-            source_id: outer_source_id,
-            detail: RequestDetail::BlocksRequest {
-                first_block: BlocksRequestFirstBlock::Hash(request.first_block_hash),
-                ascending: false,
-                num_blocks: request.num_blocks,
-                request_bodies: false,
-                request_headers: true,
-                request_justification: true, // TODO: only do this on blocks that change the GP authorities?
-            },
-        }
     }
 
     fn grandpa_warp_sync_request_to_request<TSrc>(
@@ -1364,7 +1381,7 @@ impl Shared {
         &mut self,
         optimistic: optimistic::OptimisticSync<(), OptimisticSourceExtra<TSrc>, TBl>,
     ) -> (
-        all_forks::AllForksSync<TBl, Option<TRq>, AllForksSourceExtra<TSrc>>,
+        all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         Vec<Action>,
     ) {
         debug_assert!(self
@@ -1428,7 +1445,7 @@ impl Shared {
         &mut self,
         grandpa: grandpa_warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
     ) -> (
-        all_forks::AllForksSync<TBl, Option<TRq>, AllForksSourceExtra<TSrc>>,
+        all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         Vec<Action>,
     ) {
         debug_assert!(self.requests.is_empty()); // GrandPa only does one request at a time
