@@ -405,14 +405,19 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                 let (user_data, requests) = sync.remove_source(source_id);
                 let requests = requests
                     .into_iter()
-                    .map(|(inner_request_id, _, request_inner_user_data)| {
+                    .map(|(_inner_request_id, _, request_inner_user_data)| {
                         debug_assert!(self
                             .shared
                             .requests
                             .contains(request_inner_user_data.outer_request_id.0));
-                        self.shared
+                        let _removed = self
+                            .shared
                             .requests
                             .remove(request_inner_user_data.outer_request_id.0);
+                        debug_assert!(matches!(
+                            _removed,
+                            RequestMapping::AllForks(_inner_request_id)
+                        ));
                         request_inner_user_data.outer_request_id
                     })
                     .collect();

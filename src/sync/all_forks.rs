@@ -510,17 +510,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         AncestrySearchResponseOutcome::Inconclusive
     }
 
-    fn verifiable_headers(&'_ mut self) -> impl Iterator<Item = (u64, [u8; 32], Vec<u8>)> + '_ {
-        let chain = &mut self.chain;
-        self.inner
-            .blocks
-            .unverified_leaves()
-            .filter_map(move |block| {
-                let parent = chain.non_finalized_block_by_hash(&block.parent_block_hash)?;
-                Some((block.block_number, block.block_hash, Vec::new())) // TODO:
-            })
-    }
-
     /// Update the source with a newly-announced block.
     ///
     /// > **Note**: This information is normally reported by the source itself. In the case of a
@@ -563,7 +552,18 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
     pub fn process_one(self) -> ProcessOne<TBl, TRq, TSrc> {
-        let block = self.inner.blocks.unverified_leaves().next();
+        let block = self
+            .inner
+            .blocks
+            .unverified_leaves()
+            .filter(|block| {
+                block.parent_block_hash == self.chain.finalized_block_hash()
+                    || self
+                        .chain
+                        .contains_non_finalized_block(&block.parent_block_hash)
+            })
+            .next();
+
         if let Some(block) = block {
             ProcessOne::HeaderVerify(HeaderVerify {
                 parent: self,
@@ -626,11 +626,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         }
 
         // If the block is already part of the local tree of blocks, nothing more to do.
-        if self
-            .chain
-            .non_finalized_block_by_hash(&header_hash)
-            .is_some()
-        {
+        if self.chain.contains_non_finalized_block(&header_hash) {
             return HeaderFromSourceOutcome::AlreadyInChain;
         }
 
@@ -657,12 +653,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 .inner
                 .blocks
                 .block_user_data_mut(header.number, header_hash);
-            match &mut block_user_data.header {
-                h @ &mut None => *h = Some(header.clone().into()), // TODO: copying bytes :-/
-                &mut Some(ref h) => {
-                    // Considering that blocks are indexed by hash, the header can never change.
-                    // TODO: debug_assert_eq!(header::HeaderRef::from(h), header);
-                }
+            if block_user_data.header.is_none() {
+                block_user_data.header = Some(header.clone().into()); // TODO: copying bytes :-/
             }
         }
 

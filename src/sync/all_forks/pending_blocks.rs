@@ -587,45 +587,47 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         force_source: Option<SourceId>,
     ) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
         // TODO: this is O(n²); maybe do something more optimized once it's fully working and has unit tests
-        self.blocks.unknown_blocks().filter_map(
-            move |(unknown_block_height, unknown_block_hash)| {
+        self.blocks
+            .unknown_blocks()
+            .filter(move |(unknown_block_height, unknown_block_hash)| {
                 // Don't request blocks that don't need to be requested.
                 match self
                     .blocks
-                    .user_data(unknown_block_height, unknown_block_hash)
+                    .user_data(*unknown_block_height, unknown_block_hash)
                     .map(|ud| &ud.state)
                 {
-                    None | Some(UnverifiedBlockState::HeightHashKnown) => {}
-                    Some(UnverifiedBlockState::HeaderKnown { .. }) if self.verify_bodies => {}
+                    None | Some(UnverifiedBlockState::HeightHashKnown) => true,
+                    Some(UnverifiedBlockState::HeaderKnown { .. }) if self.verify_bodies => true,
                     Some(UnverifiedBlockState::HeaderKnown { .. })
-                    | Some(UnverifiedBlockState::BodyKnown { .. }) => return None,
+                    | Some(UnverifiedBlockState::BodyKnown { .. }) => false,
                 }
-
+            })
+            .filter(move |(unknown_block_height, unknown_block_hash)| {
+                // Cap by `max_requests_per_block`.
                 // TODO: is that correct?
                 let num_existing_requests = self
                     .blocks_requests
                     .range(
                         (
-                            unknown_block_height,
-                            *unknown_block_hash,
+                            *unknown_block_height,
+                            **unknown_block_hash,
                             RequestId(usize::min_value()),
                         )
                             ..=(
-                                unknown_block_height,
-                                *unknown_block_hash,
+                                *unknown_block_height,
+                                **unknown_block_hash,
                                 RequestId(usize::max_value()),
                             ),
                     )
                     .count();
 
                 debug_assert!(num_existing_requests <= self.max_requests_per_block);
-                if num_existing_requests == self.max_requests_per_block {
-                    return None;
-                }
-
-                // Try to find an appropriate source.
+                num_existing_requests < self.max_requests_per_block
+            })
+            .flat_map(move |(unknown_block_height, unknown_block_hash)| {
+                // Try to find all appropriate sources.
                 let possible_sources = if let Some(force_source) = force_source {
-                    either::Left(iter::once(force_source).filter(|id| {
+                    either::Left(iter::once(force_source).filter(move |id| {
                         self.sources.source_knows_non_finalized_block(
                             *id,
                             unknown_block_height,
@@ -639,7 +641,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     )
                 };
 
-                for source_id in possible_sources {
+                possible_sources.filter_map(move |source_id| {
                     debug_assert!(self.sources.source_knows_non_finalized_block(
                         source_id,
                         unknown_block_height,
@@ -649,24 +651,21 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     // Don't start more than one request at a time.
                     // TODO: in the future, allow multiple requests
                     if self.sources.user_data(source_id).occupation.is_some() {
-                        continue;
+                        return None;
                     }
 
                     // As documented, this only returns an informative object to the user, and
                     // doesn't actually start the query yet.
-                    return Some((
+                    Some((
                         source_id,
                         RequestParams {
                             first_block_hash: *unknown_block_hash,
                             first_block_height: unknown_block_height,
                             num_blocks: NonZeroU64::new(128).unwrap(), // TODO: *unknown_block_height - ...
                         },
-                    ));
-                }
-
-                None
-            },
-        )
+                    ))
+                })
+            })
     }
 }
 
