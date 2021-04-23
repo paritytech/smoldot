@@ -378,6 +378,7 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`SourceId`] doesn't correspond to a valid source.
     ///
+    // TODO: return requests as iterator
     pub fn remove_source(&mut self, source_id: SourceId) -> (Vec<(RequestId, TRq)>, TSrc) {
         debug_assert!(self.shared.sources.contains(source_id.0));
         match (&mut self.inner, self.shared.sources.remove(source_id.0)) {
@@ -399,8 +400,9 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
 
                 todo!()
             }
-            (IdleInner::AllForks(sync), SourceMapping::AllForks(src)) => {
-                todo!()
+            (IdleInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
+                let (user_data, requests) = sync.remove_source(source_id);
+                (Vec::new(), user_data.user_data) // TODO: empty Vec is wrong
             }
             (IdleInner::GrandpaWarpSync(sync), SourceMapping::GrandpaWarpSync(src)) => {
                 todo!()
@@ -614,15 +616,24 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
                         })
                     }),
                 ) {
-                    all_forks::AncestrySearchResponseOutcome::Verify => {
-                        ResponseOutcome::VerifyHeader(HeaderVerify {
-                            inner: HeaderVerifyInner::AllForks(match sync.process_one() {
-                                all_forks::ProcessOne::Idle { .. } => unreachable!(),
-                                all_forks::ProcessOne::HeaderVerify(verify) => verify,
-                            }),
-                            shared: self.shared,
-                        })
-                    }
+                    all_forks::AncestrySearchResponseOutcome::Verify => match sync.process_one() {
+                        all_forks::ProcessOne::Idle { mut sync } => {
+                            let next_actions = self.shared.all_forks_next_actions(&mut sync);
+                            ResponseOutcome::Queued {
+                                sync: Idle {
+                                    inner: IdleInner::AllForks(sync),
+                                    shared: self.shared,
+                                },
+                                next_actions,
+                            }
+                        }
+                        all_forks::ProcessOne::HeaderVerify(verify) => {
+                            ResponseOutcome::VerifyHeader(HeaderVerify {
+                                inner: HeaderVerifyInner::AllForks(verify),
+                                shared: self.shared,
+                            })
+                        }
+                    },
                     all_forks::AncestrySearchResponseOutcome::NotFinalizedChain {
                         discarded_unverified_block_headers,
                     } => {

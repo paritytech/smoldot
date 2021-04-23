@@ -60,7 +60,7 @@
 
 use super::{disjoint, sources};
 
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 use core::{
     convert::TryFrom as _,
     iter,
@@ -255,7 +255,23 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ) -> (TSrc, Vec<(RequestId, RequestParams, TRq)>) {
         let user_data = self.sources.remove(source_id);
 
-        todo!()
+        let pending_requests = if let Some(pending_request_id) = user_data.occupation {
+            debug_assert!(self.requests.contains(pending_request_id.0));
+            let request = self.requests.remove(pending_request_id.0);
+
+            let _was_in = self.blocks_requests.remove(&(
+                request.detail.first_block_height,
+                request.detail.first_block_hash,
+                pending_request_id,
+            ));
+            debug_assert!(_was_in);
+
+            vec![(pending_request_id, request.detail, request.user_data)]
+        } else {
+            Vec::new()
+        };
+
+        (user_data.user_data, pending_requests)
     }
 
     /// Registers a new block that the source is aware of.
@@ -452,11 +468,14 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         detail: RequestParams,
         user_data: TRq,
     ) -> RequestId {
-        // TODO: update source
-
         let request_entry = self.requests.vacant_entry();
 
         let request_id = RequestId(request_entry.key());
+
+        // TODO: what if source was already busy?
+        let source_occupation = &mut self.sources.user_data_mut(source_id).occupation;
+        debug_assert!(source_occupation.is_none());
+        *source_occupation = Some(request_id);
 
         self.blocks_requests.insert((
             detail.first_block_height,
@@ -485,7 +504,9 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
+    #[track_caller]
     pub fn finish_request(&mut self, request_id: RequestId) -> (RequestParams, SourceId, TRq) {
+        assert!(self.requests.contains(request_id.0));
         let request = self.requests.remove(request_id.0);
 
         let _was_in = self.blocks_requests.remove(&(
@@ -495,7 +516,9 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         ));
         debug_assert!(_was_in);
 
-        // TODO: remove occupation from source
+        let source_occupation = &mut self.sources.user_data_mut(request.source_id).occupation;
+        debug_assert_eq!(*source_occupation, Some(request_id));
+        *source_occupation = None;
 
         (request.detail, request.source_id, request.user_data)
     }

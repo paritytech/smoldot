@@ -205,6 +205,7 @@ impl<TBl> DisjointBlocks<TBl> {
     ///
     /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
+    #[track_caller]
     pub fn set_parent_hash(&mut self, height: u64, hash: &[u8; 32], parent_hash: [u8; 32]) {
         let block = self.blocks.get_mut(&(height, *hash)).unwrap();
         match &block.inner {
@@ -231,6 +232,7 @@ impl<TBl> DisjointBlocks<TBl> {
     ///
     /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
+    #[track_caller]
     pub fn remove_verify_success(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
         self.blocks.remove(&(height, *hash)).unwrap().user_data
     }
@@ -241,6 +243,7 @@ impl<TBl> DisjointBlocks<TBl> {
     ///
     /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
+    #[track_caller]
     pub fn remove_verify_failed(&mut self, height: u64, hash: &[u8; 32]) {
         //self.blocks.remove(&(height, *hash)).unwrap().user_data
 
@@ -254,6 +257,7 @@ impl<TBl> DisjointBlocks<TBl> {
     ///
     /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
+    #[track_caller]
     pub fn remove_uninteresting(&mut self, height: u64, hash: &[u8; 32]) {
         // TODO: temporary implementation
         self.remove_verify_failed(height, hash);

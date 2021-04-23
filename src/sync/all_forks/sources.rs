@@ -162,6 +162,7 @@ impl<TSrc> AllForksSources<TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
+    #[track_caller]
     pub fn remove(&mut self, source_id: SourceId) -> TSrc {
         let source = self.sources.remove(&source_id).unwrap();
 
@@ -284,6 +285,7 @@ impl<TSrc> AllForksSources<TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
+    #[track_caller]
     pub fn set_best_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
         self.add_known_block(source_id, height, hash);
 
@@ -344,6 +346,7 @@ impl<TSrc> AllForksSources<TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
+    #[track_caller]
     pub fn user_data(&self, source_id: SourceId) -> &TSrc {
         let source = self.sources.get(&source_id).unwrap();
         &source.user_data
@@ -356,6 +359,7 @@ impl<TSrc> AllForksSources<TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
+    #[track_caller]
     pub fn user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         let source = self.sources.get_mut(&source_id).unwrap();
         &mut source.user_data
@@ -379,21 +383,21 @@ mod tests {
         assert!(sources.is_empty());
         assert_eq!(sources.num_blocks(), 0);
 
-        let source1 = sources.add_source((), 12, [1; 32]).id();
+        let source1 = sources.add_source(12, [1; 32], ());
         assert!(!sources.is_empty());
         assert_eq!(sources.len(), 1);
         assert_eq!(sources.num_blocks(), 1);
-        assert!(sources.knows_non_finalized_block(source1, 12, &[1; 32]));
+        assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
 
         sources.set_best_block(source1, 13, [2; 32]);
         assert_eq!(sources.num_blocks(), 2);
-        assert!(sources.knows_non_finalized_block(source1, 12, &[1; 32]));
-        assert!(sources.knows_non_finalized_block(source1, 13, &[2; 32]));
+        assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
+        assert!(sources.source_knows_non_finalized_block(source1, 13, &[2; 32]));
 
-        sources.remove_known_block(13, [2; 32]);
+        sources.remove_known_block(13, &[2; 32]);
         assert_eq!(sources.num_blocks(), 1);
-        assert!(sources.knows_non_finalized_block(source1, 12, &[1; 32]));
-        assert!(!sources.knows_non_finalized_block(source1, 13, &[2; 32]));
+        assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
+        assert!(!sources.source_knows_non_finalized_block(source1, 13, &[2; 32]));
 
         sources.set_finalized_block_height(12);
         assert_eq!(sources.num_blocks(), 0);

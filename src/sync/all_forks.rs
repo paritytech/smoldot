@@ -686,6 +686,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 .non_finalized_block_by_hash(header.parent_hash)
                 .is_some()
         {
+            // TODO: ambiguous naming
             return HeaderFromSourceOutcome::HeaderVerify;
         }
 
@@ -806,6 +807,7 @@ pub enum BlockAnnounceOutcome {
 /// Outcome of calling [`AllForksSync::ancestry_search_response`].
 pub enum AncestrySearchResponseOutcome {
     /// Ready to start verifying one or more headers returned in the ancestry search.
+    // TODO: might not actually mean that ProcessOne isn't Idle; confusing
     Verify,
 
     /// Source has given blocks that aren't part of the finalized chain.
