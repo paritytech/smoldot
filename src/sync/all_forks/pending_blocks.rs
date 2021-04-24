@@ -201,9 +201,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 config.sources_capacity,
                 config.finalized_block_height,
             ),
-            blocks: disjoint::DisjointBlocks::new(disjoint::Config {
-                blocks_capacity: config.blocks_capacity,
-            }),
+            blocks: disjoint::DisjointBlocks::with_capacity(config.blocks_capacity),
             verify_bodies: config.verify_bodies,
             blocks_requests: Default::default(),
             source_occupations: Default::default(),
@@ -464,7 +462,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the block wasn't present in the data structure.
     ///
     pub fn remove_verify_success(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
-        self.blocks.remove_verify_success(height, hash).user_data
+        self.blocks.remove(height, hash).user_data
     }
 
     /// Removes the given block from the collection after it has been determined to be bad.
@@ -485,7 +483,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Returns the list of blocks whose parent hash is known but absent from the list of disjoint
     /// blocks. These blocks can potentially be verified.
     pub fn unverified_leaves(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
-        self.blocks.good_leaves()
+        self.blocks.good_tree_roots()
     }
 
     /// Inserts a new request in the data structure.

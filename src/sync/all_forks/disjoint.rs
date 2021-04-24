@@ -18,40 +18,34 @@
 //! Collection of "disjoint" blocks, in other words blocks whose existence is known but which
 //! can't be verified yet.
 //!
-//! Example: the local node knows about block 5. A peer announces block 7. Since the local node
-//! doesn't know block 6, it has to store block 7 for later, then download block 6. The container
-//! in this module is where block 7 is temporarily stored.
+//! > **Example**: The local node knows about block 5. A peer announces block 7. Since the local
+//! >              node doesn't know block 6, it has to store block 7 for later, then download
+//! >              block 6. The container in this module is where block 7 is temporarily stored.
 //!
-//! # Details
+//! Each block stored in this collection has the following properties associated to it:
 //!
-//! The [`DisjointBlocks`] collection stores a list of pending blocks. In context, of syncing,
-//! these blocks are blocks that cannot be verified yet or are about to be verified.
+//! - A height.
+//! - A hash.
+//! - An optional parent block hash.
+//! - Whether the block is known to be bad.
+//! - A opaque user data decided by the user of type `TBl`.
 //!
-//! Each block consists in an optional parent hash (present if and only if it is known) and a
-//! user data.
+//! This data structure is only able to link parent and children together if the heights are
+//! linearly increasing. For example, if block A is the parent of block B, then the height of
+//! block B must be equal to the height of block A plus one. Otherwise, this data structure will
+//! not be able to detect the parent-child relationship.
 //!
-//! Blocks can only be removed in three different ways:
-//!
-//! - Calling [`OccupiedBlockEntry::remove_verify_success`] marks a block as valid and removes
-//! it, as it is not pending anymore.
-//! - Calling [`OccupiedBlockEntry::remove_verify_failed`] marks a block and all its descendants
-//! as invalid. This may or may not remove the block itself and all its descendants.
-//! - Calling [`OccupiedBlockEntry::remove_uninteresting`] removes a block in order to reduce
-//! the memory usage of the data structure.
+//! If a block is marked as bad, all its children (i.e. other blocks in the collection whose
+//! parent hash is the bad block) are automatically marked as bad as well. This process is
+//! recursive, such that not only direct children but all descendants of a bad block are
+//! automatically marked as bad.
 //!
 
-// TODO: details in docs concerning "KnownBad"
-
-use alloc::collections::BTreeMap;
-
-/// Configuration for the [`DisjointBlocks`].
-// TODO: exaggerated to have a config with one field
-#[derive(Debug)]
-pub struct Config {
-    /// Pre-allocated capacity for the number of blocks between the finalized block and the head
-    /// of the chain.
-    pub blocks_capacity: usize,
-}
+use alloc::{
+    collections::{btree_map::Entry, BTreeMap},
+    vec,
+};
+use core::{fmt, mem};
 
 /// Collection of pending blocks.
 pub struct DisjointBlocks<TBl> {
@@ -59,64 +53,24 @@ pub struct DisjointBlocks<TBl> {
     blocks: BTreeMap<(u64, [u8; 32]), Block<TBl>>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct Block<TBl> {
+    parent_hash: Option<[u8; 32]>,
+    bad: bool,
     user_data: TBl,
-    inner: BlockInner,
-}
-
-enum BlockInner {
-    /// Header of the block isn't known.
-    Unknown,
-    /// Header of the block is known.
-    // TODO: rename
-    UnverifiedHeader { parent_hash: [u8; 32] },
-    /// Block is considered as bad by the API user. It is stored in the collection in order to be
-    /// able to immediately rejecting children of this block without having to re-download it.
-    KnownBad { parent_hash: [u8; 32] },
-}
-
-impl BlockInner {
-    /// Returns the parent hash of this block, if it is known.
-    fn parent_hash(&self) -> Option<&[u8; 32]> {
-        match self {
-            BlockInner::Unknown => None,
-            BlockInner::KnownBad { parent_hash } => Some(parent_hash),
-            BlockInner::UnverifiedHeader { parent_hash } => Some(parent_hash),
-        }
-    }
 }
 
 impl<TBl> DisjointBlocks<TBl> {
     /// Initializes a new empty collection of blocks.
-    pub fn new(config: Config) -> Self {
-        DisjointBlocks {
-            blocks: Default::default(),
-        }
+    pub fn new() -> Self {
+        Self::with_capacity(0)
     }
 
-    /// Inserts the block in the collection, passing a user data.
-    ///
-    /// Returns the previous user data associated to this block, if any.
-    pub fn insert(
-        &mut self,
-        height: u64,
-        hash: [u8; 32],
-        parent_hash: Option<[u8; 32]>,
-        user_data: TBl,
-    ) -> Option<TBl> {
-        self.blocks
-            .insert(
-                (height, hash),
-                Block {
-                    user_data,
-                    inner: if let Some(parent_hash) = parent_hash {
-                        BlockInner::UnverifiedHeader { parent_hash }
-                    } else {
-                        BlockInner::Unknown
-                    },
-                },
-            )
-            .map(|b| b.user_data)
+    /// Initializes a new collection of blocks with the given capacity.
+    pub fn with_capacity(_capacity: usize) -> Self {
+        DisjointBlocks {
+            blocks: BTreeMap::default(),
+        }
     }
 
     /// Returns `true` if this data structure doesn't contain any block.
@@ -134,53 +88,62 @@ impl<TBl> DisjointBlocks<TBl> {
         self.blocks.contains_key(&(height, *hash))
     }
 
-    /// Returns the list of blocks whose parent hash is known but absent from the list of disjoint
-    /// blocks. These blocks can potentially be verified.
-    pub fn good_leaves(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
-        self.blocks
-            .iter()
-            .filter_map(move |((height, hash), block)| {
-                let parent_hash = block.inner.parent_hash()?;
+    /// Inserts the block in the collection, passing a user data.
+    ///
+    /// If a `parent_hash` is passed, and the parent is known to be bad, the newly-inserted block
+    /// is immediately marked as bad as well.
+    ///
+    /// Returns the previous user data associated to this block, if any.
+    pub fn insert(
+        &mut self,
+        height: u64,
+        hash: [u8; 32],
+        parent_hash: Option<[u8; 32]>,
+        user_data: TBl,
+    ) -> Option<TBl> {
+        let parent_is_bad = match (height.checked_sub(1), parent_hash) {
+            (Some(parent_height), Some(parent_hash)) => self
+                .blocks
+                .get(&(parent_height, parent_hash))
+                .map_or(false, |b| b.bad),
+            _ => false,
+        };
 
-                // Return `None` if parent is in the list of blocks.
-                if self.blocks.contains_key(&(*height - 1, *parent_hash)) {
-                    return None;
+        // Insertion is done "manually" in order to not override the value of `bad` if the block
+        // is already in the collection.
+        match self.blocks.entry((height, hash)) {
+            Entry::Occupied(entry) => {
+                let entry = entry.into_mut();
+
+                match (parent_hash, &mut entry.parent_hash) {
+                    (Some(parent_hash), &mut Some(ph)) => debug_assert_eq!(ph, parent_hash),
+                    (Some(parent_hash), ph @ &mut None) => *ph = Some(parent_hash),
+                    (None, _) => {}
                 }
 
-                Some(PendingVerificationBlock {
-                    block_hash: *hash,
-                    block_number: *height,
-                    parent_block_hash: *parent_hash,
-                })
-            })
+                Some(mem::replace(&mut entry.user_data, user_data))
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Block {
+                    parent_hash,
+                    bad: parent_is_bad,
+                    user_data,
+                });
+
+                None
+            }
+        }
     }
 
-    /// Returns an iterator yielding blocks that are known to exist but which either haven't been
-    /// inserted, or whose parent hash isn't known.
+    /// Removes the block from the collection.
     ///
-    /// The iterator returns:
+    /// # Panic
     ///
-    /// - Blocks that have been inserted in this data structure but whose parent hash is unknown.
-    /// - Parents of blocks that have been inserted in this data structure and whose parent hash
-    /// is known and whose parent is missing.
+    /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
-    /// Blocks in the second category might include blocks that are already known by the user of
-    /// this data structure. To avoid this, you are encouraged to remove from the
-    /// [`DisjointBlocks`] any block that can be verified prior to calling this method.
-    ///
-    /// The blocks yielded by the iterator are always ordered by ascending height.
-    pub fn unknown_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
-        // TODO: bad ordering of items returned
-        self.blocks
-            .iter()
-            .filter(|(_, s)| matches!(s.inner, BlockInner::Unknown))
-            .map(|((n, h), b)| (*n, h))
-            .chain(
-                self.blocks
-                    .iter()
-                    .filter_map(|((n, _), s)| s.inner.parent_hash().map(|h| (n - 1, h)))
-                    .filter(move |(n, h)| !self.blocks.contains_key(&(*n, **h))),
-            )
+    #[track_caller]
+    pub fn remove(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
+        self.blocks.remove(&(height, *hash)).unwrap().user_data
     }
 
     /// Returns the user data associated to the block. This is the value originally passed
@@ -201,148 +164,132 @@ impl<TBl> DisjointBlocks<TBl> {
 
     /// Sets the parent hash of the given block.
     ///
+    /// If the parent is in the collection and known to be bad, the block is marked as bad as
+    /// well.
+    ///
     /// # Panic
     ///
     /// Panics if the block with the given height and hash hasn't been inserted before.
     ///
     #[track_caller]
     pub fn set_parent_hash(&mut self, height: u64, hash: &[u8; 32], parent_hash: [u8; 32]) {
-        let block = self.blocks.get_mut(&(height, *hash)).unwrap();
-        match &block.inner {
-            // Transition from `Unknown` to `UnverifiedHeader`.
-            BlockInner::Unknown => {
-                block.inner = BlockInner::UnverifiedHeader { parent_hash };
-            }
-
-            // Parent hash doesn't interest us anymore.
-            BlockInner::KnownBad { .. } => {}
-
-            // Parent hash already known. Do a basic sanity check.
-            BlockInner::UnverifiedHeader {
-                parent_hash: already_in,
-            } => {
-                debug_assert_eq!(*already_in, parent_hash);
-            }
+        let parent_is_bad = match height.checked_sub(1) {
+            Some(parent_height) => self
+                .blocks
+                .get(&(parent_height, parent_hash))
+                .map_or(false, |b| b.bad),
+            None => false,
         };
-    }
 
-    /// Removes the block from the collection, as it has now been successfully verified.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the block with the given height and hash hasn't been inserted before.
-    ///
-    #[track_caller]
-    pub fn remove_verify_success(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
-        self.blocks.remove(&(height, *hash)).unwrap().user_data
-    }
+        let block = self.blocks.get_mut(&(height, *hash)).unwrap();
 
-    /// Removes the block from the collection, as its verification has failed.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the block with the given height and hash hasn't been inserted before.
-    ///
-    #[track_caller]
-    pub fn remove_verify_failed(&mut self, height: u64, hash: &[u8; 32]) {
-        //self.blocks.remove(&(height, *hash)).unwrap().user_data
-
-        // TODO: remove children of the block as well
-        todo!()
-    }
-
-    /// Removes the block from the collection in order to leave space.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the block with the given height and hash hasn't been inserted before.
-    ///
-    #[track_caller]
-    pub fn remove_uninteresting(&mut self, height: u64, hash: &[u8; 32]) {
-        // TODO: temporary implementation
-        self.remove_verify_failed(height, hash);
-    }
-
-    // TODO: deal with that
-    /*/// Passed a known entry in `blocks`. Removes this entry and any known children of this block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `(number, hash)` isn't an entry in [`DisjointBlocks::blocks`].
-    ///
-    pub fn discard_chain(&mut self, number: u64, hash: [u8; 32]) -> Vec<(u64, [u8; 32])> {
-        // TODO: keep a list of banned blocks for later? this is required by chain specs anyway
-
-        // The implementation consists in iterating over the increasing block number, and removing
-        // all blocks whose parent was removed at the previous iteration.
-
-        // Return value of the function.
-        let mut result = Vec::with_capacity(64);
-
-        // List of blocks to discard at the next iteration.
-        let mut blocks_to_discard = Vec::with_capacity(16);
-        blocks_to_discard.push(hash);
-
-        for number in number.. {
-            // The `for` loop would be infinite unless we put an explicit `break`.
-            if blocks_to_discard.is_empty() {
-                break;
-            }
-
-            // Find in `disjoint_headers` any block whose parent is in `blocks_to_discard`.
-            let blocks_to_discard_next = {
-                let mut blocks_to_discard_next = Vec::with_capacity(16);
-                for ((_, hash), block) in self
-                    .blocks
-                    .range((number + 1, [0; 32])..=(number + 1, [0xff; 32]))
-                {
-                    let decoded = header::decode(&block.scale_encoded_header).unwrap();
-                    if blocks_to_discard.iter().any(|b| b == decoded.parent_hash) {
-                        blocks_to_discard_next.push(*hash);
-                    }
-                }
-                blocks_to_discard_next
-            };
-
-            // Now discard `blocks_to_discard`.
-            for to_discard in mem::replace(&mut blocks_to_discard, blocks_to_discard_next) {
-                let mut discarded_block = self.blocks.remove(&(number, to_discard)).unwrap();
-
-                let requests_ids = self
-                    .blocks_requests
-                    .range(
-                        (number, to_discard, RequestId(usize::min_value()))
-                            ..=(number, to_discard, RequestId(usize::max_value())),
-                    )
-                    .map(|(_, _, id)| *id)
-                    .collect::<Vec<_>>();
-
-                for request_id in requests_ids {
-                    let _was_in = self
-                        .blocks_requests
-                        .remove(&(number, to_discard, request_id));
-                    debug_assert!(_was_in);
-
-                    let request = self.requests.remove(&request_id.0).unwrap();
-                }
-
-                result.push((number, to_discard, discarded_block));
-            }
+        match &mut block.parent_hash {
+            &mut Some(ph) => debug_assert_eq!(ph, parent_hash),
+            ph @ &mut None => *ph = Some(parent_hash),
         }
 
-        result
-    }*/
+        if parent_is_bad {
+            block.bad = true;
+        }
+    }
 
-    /// Returns the list of children of the given block that are in the collection.
-    fn children_mut<'a>(
-        &'a mut self,
-        height: u64,
-        hash: &'a [u8; 32],
-    ) -> impl Iterator<Item = ((u64, [u8; 32]), &mut Block<TBl>)> + 'a {
+    /// Marks the given block and all its known children as "bad".
+    ///
+    /// If a child of this block is later added to the collection, it is also automatically
+    /// marked as bad.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block with the given height and hash hasn't been inserted before.
+    ///
+    #[track_caller]
+    pub fn set_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
+        // The implementation of this method is far from being optimized, but it is by far the
+        // easiest way to implement it, and this operation is expected to happen rarely.
+
+        // Initially contains the concerned block, then will contain the children of the concerned
+        // block, then the grand-children, then the grand-grand-children, and so on.
+        let mut blocks = vec![(height, *hash)];
+
+        while !blocks.is_empty() {
+            let mut children = Vec::new();
+
+            for (height, hash) in blocks {
+                self.blocks.get_mut(&(height, hash)).unwrap().bad = true;
+
+                // Iterate over all blocks whose height is `height + 1` to try find children.
+                for ((_maybe_child_height, maybe_child_hash), maybe_child) in self
+                    .blocks
+                    .range((height + 1, [0; 32])..=(height + 1, [0xff; 32]))
+                {
+                    debug_assert_eq!(*_maybe_child_height, height + 1);
+                    if maybe_child.parent_hash.as_ref() == Some(&hash) {
+                        children.push((height + 1, *maybe_child_hash));
+                    }
+                }
+            }
+
+            blocks = children;
+        }
+    }
+
+    /// Returns the list of blocks whose parent hash is known but the parent itself is absent from
+    /// the list of disjoint blocks. These blocks can potentially be verified.
+    pub fn good_tree_roots(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
         self.blocks
-            .range_mut((height + 1, [0x0; 32])..=(height + 1, [0xff; 32]))
-            .filter(move |(_, block)| block.inner.parent_hash() == Some(hash))
-            .map(|(k, v)| (*k, v))
+            .iter()
+            .filter(|(_, block)| !block.bad)
+            .filter_map(move |((height, hash), block)| {
+                let parent_hash = block.parent_hash.as_ref()?;
+
+                // Return `None` if parent is in the list of blocks.
+                if self.blocks.contains_key(&(*height - 1, *parent_hash)) {
+                    return None;
+                }
+
+                Some(PendingVerificationBlock {
+                    block_hash: *hash,
+                    block_number: *height,
+                    parent_block_hash: *parent_hash,
+                })
+            })
+    }
+
+    /// Returns an iterator yielding blocks that are known to exist but which either haven't been
+    /// inserted, or whose parent hash isn't known.
+    ///
+    /// More precisely, the iterator returns:
+    ///
+    /// - Blocks that have been inserted in this data structure but whose parent hash is unknown.
+    /// - Parents of blocks that have been inserted in this data structure and whose parent hash
+    /// is known and whose parent is missing from the data structure.
+    ///
+    /// > **Note**: Blocks in the second category might include blocks that are already known by
+    /// >           the user of this data structure. To avoid this, you are encouraged to remove
+    /// >           from the [`DisjointBlocks`] any block that can be verified prior to calling
+    /// >           this method.
+    ///
+    /// The blocks yielded by the iterator are always ordered by ascending height.
+    pub fn unknown_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
+        // TODO: bad ordering of items returned
+        self.blocks
+            .iter()
+            .filter(|(_, s)| !s.bad)
+            .filter(|(_, s)| s.parent_hash.is_none())
+            .map(|((n, h), _)| (*n, h))
+            .chain(
+                self.blocks
+                    .iter()
+                    .filter(|(_, s)| !s.bad)
+                    .filter_map(|((n, _), s)| s.parent_hash.as_ref().map(|h| (n - 1, h)))
+                    .filter(move |(n, h)| !self.blocks.contains_key(&(*n, **h))),
+            )
+    }
+}
+
+impl<TBl: fmt::Debug> fmt::Debug for DisjointBlocks<TBl> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.blocks, f)
     }
 }
 
@@ -355,4 +302,80 @@ pub struct PendingVerificationBlock {
     pub block_number: u64,
     /// Hash of the parent of the block.
     pub parent_block_hash: [u8; 32],
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn insert_doesnt_override_bad() {
+        // Calling `insert` with a block that already exists doesn't reset its "bad" state.
+
+        let mut collection = super::DisjointBlocks::new();
+
+        assert!(collection.insert(1, [1; 32], Some([0; 32]), ()).is_none());
+        assert_eq!(collection.unknown_blocks().count(), 1);
+
+        collection.set_block_bad(1, &[1; 32]);
+        assert_eq!(collection.unknown_blocks().count(), 0);
+
+        assert!(collection.insert(1, [1; 32], Some([0; 32]), ()).is_some());
+        assert_eq!(collection.unknown_blocks().count(), 0);
+    }
+
+    #[test]
+    fn insert_doesnt_override_parent() {
+        // Calling `insert` with a block that already exists doesn't reset its parent.
+
+        let mut collection = super::DisjointBlocks::new();
+
+        assert!(collection.insert(1, [1; 32], Some([0; 32]), ()).is_none());
+        assert_eq!(
+            collection.unknown_blocks().collect::<Vec<_>>(),
+            vec![(0, &[0; 32])]
+        );
+
+        assert!(collection.insert(1, [1; 32], None, ()).is_some());
+        assert_eq!(
+            collection.unknown_blocks().collect::<Vec<_>>(),
+            vec![(0, &[0; 32])]
+        );
+    }
+
+    #[test]
+    fn set_parent_hash_updates_bad() {
+        // Calling `set_parent_hash` where the parent is a known a bad block marks the block as
+        // bad as well.
+
+        let mut collection = super::DisjointBlocks::new();
+
+        collection.insert(1, [1; 32], Some([0; 32]), ());
+        assert_eq!(collection.unknown_blocks().count(), 1);
+        collection.set_block_bad(1, &[1; 32]);
+        assert_eq!(collection.unknown_blocks().count(), 0);
+
+        collection.insert(2, [2; 32], None, ());
+        assert_eq!(collection.unknown_blocks().count(), 1);
+
+        collection.set_parent_hash(2, &[2; 32], [1; 32]);
+        assert_eq!(collection.unknown_blocks().count(), 0);
+    }
+
+    #[test]
+    fn insert_updates_bad() {
+        // Calling `insert` where the parent is a known a bad block marks the block as
+        // bad as well.
+
+        let mut collection = super::DisjointBlocks::new();
+
+        collection.insert(1, [1; 32], Some([0; 32]), ());
+        collection.set_block_bad(1, &[1; 32]);
+        assert_eq!(collection.unknown_blocks().count(), 0);
+
+        collection.insert(2, [2; 32], Some([1; 32]), ());
+        assert_eq!(collection.unknown_blocks().count(), 0);
+
+        // Control sample.
+        collection.insert(1, [0x80; 32], Some([0; 32]), ());
+        assert_eq!(collection.unknown_blocks().count(), 1);
+    }
 }
