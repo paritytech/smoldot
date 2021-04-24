@@ -455,6 +455,36 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.blocks.set_parent_hash(height, hash, parent_hash);
     }
 
+    /// Modifies the state of the given block. This is a convenience around
+    /// [`PendingBlocks::set_block_state`].
+    ///
+    /// If the current block's state implies that the body isn't known yet, updates it to a
+    /// state where the body is known.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn set_block_body_known(&mut self, height: u64, hash: &[u8; 32], parent_hash: [u8; 32]) {
+        let curr = &mut self.blocks.user_data_mut(height, hash).unwrap().state;
+
+        match curr {
+            UnverifiedBlockState::HeaderKnown {
+                parent_hash: cur_ph,
+            } if *cur_ph == parent_hash => {}
+            UnverifiedBlockState::BodyKnown {
+                parent_hash: cur_ph,
+            } if *cur_ph == parent_hash => return,
+            UnverifiedBlockState::HeaderKnown { .. } | UnverifiedBlockState::BodyKnown { .. } => {
+                panic!()
+            }
+            UnverifiedBlockState::HeightHashKnown => {}
+        }
+
+        *curr = UnverifiedBlockState::BodyKnown { parent_hash };
+        self.blocks.set_parent_hash(height, hash, parent_hash);
+    }
+
     /// Removes the given block from the collection after it has successfully been verified.
     ///
     /// # Panic
@@ -623,10 +653,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         &'_ self,
         force_source: Option<SourceId>,
     ) -> impl Iterator<Item = DesiredRequest> + '_ {
+        // TODO: request the best block of each source if necessary
+
         self.blocks
             .unknown_blocks()
             .filter(move |(unknown_block_height, unknown_block_hash)| {
-                // Don't request blocks that don't need to be requested.
+                // Don't request blocks whose information is already known.
                 match self
                     .blocks
                     .user_data(*unknown_block_height, unknown_block_hash)
@@ -640,7 +672,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             })
             .filter(move |(unknown_block_height, unknown_block_hash)| {
                 // Cap by `max_requests_per_block`.
-                // TODO: is that correct?
+                // TODO: not correct as a request overlaps multiple blocks
                 let num_existing_requests = self
                     .blocks_requests
                     .range(
@@ -696,7 +728,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                         request_params: RequestParams {
                             first_block_hash: *unknown_block_hash,
                             first_block_height: unknown_block_height,
-                            num_blocks: NonZeroU64::new(1).unwrap(), // TODO: *unknown_block_height - ...
+                            num_blocks: NonZeroU64::new(
+                                unknown_block_height - self.sources.finalized_block_height(),
+                            )
+                            .unwrap(),
                         },
                     }
                 })

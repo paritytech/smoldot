@@ -44,6 +44,7 @@
 use alloc::{
     collections::{btree_map::Entry, BTreeMap},
     vec,
+    vec::Vec,
 };
 use core::{fmt, mem};
 
