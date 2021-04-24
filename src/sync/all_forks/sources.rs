@@ -339,6 +339,11 @@ impl<TSrc> AllForksSources<TSrc> {
         self.known_blocks1.contains(&(source_id, height, *hash))
     }
 
+    /// Returns `true` if the [`SourceId`] is present in the collection.
+    pub fn contains(&self, source_id: SourceId) -> bool {
+        self.sources.contains_key(&source_id)
+    }
+
     /// Returns the user data associated to the source. This is the value originally passed
     /// through [`AllForksSources::add_source`].
     ///

@@ -352,7 +352,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
         // TODO: need to periodically query for justifications of non-finalized blocks that change GrandPa authorities
 
-        self.inner.blocks.desired_requests()
+        // TODO: allow multiple requests?
+
+        self.inner
+            .blocks
+            .desired_requests()
+            .filter(|rq| rq.source_num_existing_requests == 0)
+            .map(|rq| (rq.source_id, rq.request_params))
     }
 
     /// Inserts a new request in the data structure.

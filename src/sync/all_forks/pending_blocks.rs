@@ -60,7 +60,7 @@
 
 use super::{disjoint, sources};
 
-use alloc::{collections::BTreeSet, vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec::Vec};
 use core::{
     convert::TryFrom as _,
     iter,
@@ -162,6 +162,12 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     /// >           [`Block`] struct.
     blocks_requests: BTreeSet<(u64, [u8; 32], RequestId)>,
 
+    /// Set of `(source_id, request_id)`.
+    /// Contains the list of requests, associated to their source.
+    ///
+    /// The `request_id` is an index in [`PendingBlocks::requests`].
+    source_occupations: BTreeSet<(SourceId, RequestId)>,
+
     /// All ongoing requests.
     requests: slab::Slab<Request<TRq>>,
 
@@ -183,11 +189,6 @@ struct Request<TRq> {
 
 #[derive(Debug)]
 struct Source<TSrc> {
-    /// Number of requests that can be started on this source.
-    // TODO: merge with occupation somehow
-    requests_slots: u32,
-    /// What the source is busy doing.
-    occupation: Option<RequestId>,
     /// Opaque object passed by the user.
     user_data: TSrc,
 }
@@ -205,6 +206,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             }),
             verify_bodies: config.verify_bodies,
             blocks_requests: Default::default(),
+            source_occupations: Default::default(),
             requests: slab::Slab::with_capacity(
                 config.blocks_capacity
                     * usize::try_from(config.max_requests_per_block.get())
@@ -227,15 +229,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> SourceId {
-        self.sources.add_source(
-            best_block_number,
-            best_block_hash,
-            Source {
-                requests_slots: 1, // TODO: ?!
-                occupation: None,
-                user_data,
-            },
-        )
+        self.sources
+            .add_source(best_block_number, best_block_hash, Source { user_data })
     }
 
     /// Removes the source from the [`PendingBlocks`].
@@ -255,7 +250,20 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ) -> (TSrc, Vec<(RequestId, RequestParams, TRq)>) {
         let user_data = self.sources.remove(source_id);
 
-        let pending_requests = if let Some(pending_request_id) = user_data.occupation {
+        let source_occupations_entries = self
+            .source_occupations
+            .range(
+                (source_id, RequestId(usize::min_value()))
+                    ..=(source_id, RequestId(usize::max_value())),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut pending_requests = Vec::new();
+
+        for (_source_id, pending_request_id) in source_occupations_entries {
+            debug_assert_eq!(source_id, _source_id);
+
             debug_assert!(self.requests.contains(pending_request_id.0));
             let request = self.requests.remove(pending_request_id.0);
 
@@ -266,10 +274,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             ));
             debug_assert!(_was_in);
 
-            vec![(pending_request_id, request.detail, request.user_data)]
-        } else {
-            Vec::new()
-        };
+            pending_requests.push((pending_request_id, request.detail, request.user_data));
+        }
 
         (user_data.user_data, pending_requests)
     }
@@ -498,14 +504,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         detail: RequestParams,
         user_data: TRq,
     ) -> RequestId {
+        assert!(self.sources.contains(source_id));
+
         let request_entry = self.requests.vacant_entry();
 
         let request_id = RequestId(request_entry.key());
-
-        // TODO: what if source was already busy?
-        let source_occupation = &mut self.sources.user_data_mut(source_id).occupation;
-        debug_assert!(source_occupation.is_none());
-        *source_occupation = Some(request_id);
 
         self.blocks_requests.insert((
             detail.first_block_height,
@@ -513,11 +516,15 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             request_id,
         ));
 
+        self.source_occupations.insert((source_id, request_id));
+
         request_entry.insert(Request {
             detail,
             source_id,
             user_data,
         });
+
+        debug_assert_eq!(self.source_occupations.len(), self.requests.len());
 
         request_id
     }
@@ -546,9 +553,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         ));
         debug_assert!(_was_in);
 
-        let source_occupation = &mut self.sources.user_data_mut(request.source_id).occupation;
-        debug_assert_eq!(*source_occupation, Some(request_id));
-        *source_occupation = None;
+        let _was_in = self
+            .source_occupations
+            .remove(&(request.source_id, request_id));
+        debug_assert!(_was_in);
+
+        debug_assert_eq!(self.source_occupations.len(), self.requests.len());
 
         (request.detail, request.source_id, request.user_data)
     }
@@ -579,7 +589,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`]
     /// must be called in order for the request to actually be marked as started.
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
+    pub fn desired_requests(&'_ self) -> impl Iterator<Item = DesiredRequest> + '_ {
         self.desired_requests_inner(None)
     }
 
@@ -596,11 +606,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         &'_ self,
         source_id: SourceId,
     ) -> impl Iterator<Item = RequestParams> + '_ {
-        self.desired_requests_inner(Some(source_id))
-            .map(move |(_actual_source, request)| {
-                debug_assert_eq!(_actual_source, source_id);
-                request
-            })
+        self.desired_requests_inner(Some(source_id)).map(move |rq| {
+            debug_assert_eq!(rq.source_id, source_id);
+            rq.request_params
+        })
     }
 
     /// Inner implementation of [`PendingBlocks::desired_requests`] and
@@ -615,8 +624,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     fn desired_requests_inner(
         &'_ self,
         force_source: Option<SourceId>,
-    ) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
-        // TODO: this is O(n²); maybe do something more optimized once it's fully working and has unit tests
+    ) -> impl Iterator<Item = DesiredRequest> + '_ {
         self.blocks
             .unknown_blocks()
             .filter(move |(unknown_block_height, unknown_block_hash)| {
@@ -671,32 +679,42 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     )
                 };
 
-                possible_sources.filter_map(move |source_id| {
+                possible_sources.map(move |source_id| {
                     debug_assert!(self.sources.source_knows_non_finalized_block(
                         source_id,
                         unknown_block_height,
                         unknown_block_hash
                     ));
 
-                    // Don't start more than one request at a time.
-                    // TODO: in the future, allow multiple requests
-                    if self.sources.user_data(source_id).occupation.is_some() {
-                        return None;
-                    }
-
-                    // As documented, this only returns an informative object to the user, and
-                    // doesn't actually start the query yet.
-                    Some((
+                    DesiredRequest {
                         source_id,
-                        RequestParams {
+                        source_num_existing_requests: self
+                            .source_occupations
+                            .range(
+                                (source_id, RequestId(usize::min_value()))
+                                    ..=(source_id, RequestId(usize::max_value())),
+                            )
+                            .count(),
+                        request_params: RequestParams {
                             first_block_hash: *unknown_block_hash,
                             first_block_height: unknown_block_height,
                             num_blocks: NonZeroU64::new(1).unwrap(), // TODO: *unknown_block_height - ...
                         },
-                    ))
+                    }
                 })
             })
     }
+}
+
+/// See [`PendingBlocks::desired_requests`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DesiredRequest {
+    /// Source onto which to start this request.
+    pub source_id: SourceId,
+    /// Number of requests that the source is already performing.
+    pub source_num_existing_requests: usize,
+    /// Details of the request.
+    pub request_params: RequestParams,
 }
 
 /// Information about a blocks request to be performed on a source.
