@@ -1169,11 +1169,18 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         HeaderVerifyOutcome::Success {
                             is_new_best,
                             is_new_finalized: justification_verification.is_success(),
-                            sync: Idle {
-                                inner: IdleInner::AllForks(sync),
-                                shared: self.shared,
-                            }
-                            .into(),
+                            sync: match sync.process_one() {
+                                all_forks::ProcessOne::Idle { sync } => AllSync::Idle(Idle {
+                                    inner: IdleInner::AllForks(sync),
+                                    shared: self.shared,
+                                }),
+                                all_forks::ProcessOne::HeaderVerify(verify) => {
+                                    AllSync::HeaderVerify(HeaderVerify {
+                                        inner: HeaderVerifyInner::AllForks(verify),
+                                        shared: self.shared,
+                                    })
+                                }
+                            },
                             next_actions,
                         }
                     }
@@ -1184,11 +1191,18 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                     } => {
                         let next_actions = self.shared.all_forks_next_actions(&mut sync);
                         HeaderVerifyOutcome::Error {
-                            sync: Idle {
-                                inner: IdleInner::AllForks(sync),
-                                shared: self.shared,
-                            }
-                            .into(),
+                            sync: match sync.process_one() {
+                                all_forks::ProcessOne::Idle { sync } => AllSync::Idle(Idle {
+                                    inner: IdleInner::AllForks(sync),
+                                    shared: self.shared,
+                                }),
+                                all_forks::ProcessOne::HeaderVerify(verify) => {
+                                    AllSync::HeaderVerify(HeaderVerify {
+                                        inner: HeaderVerifyInner::AllForks(verify),
+                                        shared: self.shared,
+                                    })
+                                }
+                            },
                             error,
                             user_data,
                             next_actions,
