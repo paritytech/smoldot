@@ -46,7 +46,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{fmt, mem};
+use core::{fmt, iter, mem};
 
 /// Collection of pending blocks.
 pub struct DisjointBlocks<TBl> {
@@ -272,19 +272,34 @@ impl<TBl> DisjointBlocks<TBl> {
     ///
     /// The blocks yielded by the iterator are always ordered by ascending height.
     pub fn unknown_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
-        // TODO: bad ordering of items returned
-        self.blocks
+        // Blocks whose parent hash isn't known.
+        let mut iter1 = self
+            .blocks
             .iter()
             .filter(|(_, s)| !s.bad)
             .filter(|(_, s)| s.parent_hash.is_none())
             .map(|((n, h), _)| (*n, h))
-            .chain(
-                self.blocks
-                    .iter()
-                    .filter(|(_, s)| !s.bad)
-                    .filter_map(|((n, _), s)| s.parent_hash.as_ref().map(|h| (n - 1, h)))
-                    .filter(move |(n, h)| !self.blocks.contains_key(&(*n, **h))),
-            )
+            .peekable();
+
+        // Blocks whose hash is referenced as the parent of a block, but are missing from the
+        // collection.
+        let mut iter2 = self
+            .blocks
+            .iter()
+            .filter(|(_, s)| !s.bad)
+            .filter_map(|((n, _), s)| s.parent_hash.as_ref().map(|h| (n - 1, h)))
+            .filter(move |(n, h)| !self.blocks.contains_key(&(*n, **h)))
+            .peekable();
+
+        // A custom combinator is used in order to order elements between `iter1` and `iter2`
+        // by ascending block height.
+        iter::from_fn(move || match (iter1.peek(), iter2.peek()) {
+            (Some((b1, _)), Some((b2, _))) if b1 > b2 => iter2.next(),
+            (Some(_), Some(_)) => iter1.next(),
+            (Some(_), None) => iter1.next(),
+            (None, Some(_)) => iter2.next(),
+            (None, None) => None,
+        })
     }
 }
 
