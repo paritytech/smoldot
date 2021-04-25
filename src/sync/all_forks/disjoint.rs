@@ -163,6 +163,15 @@ impl<TBl> DisjointBlocks<TBl> {
         Some(&mut self.blocks.get_mut(&(height, *hash))?.user_data)
     }
 
+    /// Returns the parent hash of the given block.
+    ///
+    /// Returns `None` if either the block or its parent isn't known.
+    pub fn parent_hash(&mut self, height: u64, hash: &[u8; 32]) -> Option<&[u8; 32]> {
+        self.blocks
+            .get(&(height, *hash))
+            .and_then(|b| b.parent_hash.as_ref())
+    }
+
     /// Sets the parent hash of the given block.
     ///
     /// If the parent is in the collection and known to be bad, the block is marked as bad as

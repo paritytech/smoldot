@@ -158,6 +158,9 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     /// Set of `(block_height, block_hash, request_id)`.
     /// Contains the list of all requests, associated to their block.
     ///
+    /// Note that this doesn't contain an exhaustive list of all blocks that are targeted by a
+    /// request, for the simple reason that not all blocks might be known.
+    ///
     /// The `request_id` is an index in [`PendingBlocks::requests`].
     ///
     /// > **Note**: This is a more optimized way compared to adding a `Vec<RequestId>` in the
@@ -557,31 +560,27 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ) -> RequestId {
         assert!(self.sources.contains(source_id));
 
-        let request_entry = self.requests.vacant_entry();
-
-        let request_id = RequestId(request_entry.key());
-
-        self.blocks_requests.insert((
-            detail.first_block_height,
-            detail.first_block_hash,
-            request_id,
-        ));
-
-        self.requested_blocks.insert((
-            request_id,
-            detail.first_block_height,
-            detail.first_block_hash,
-        ));
-
-        self.source_occupations.insert((source_id, request_id));
-
-        request_entry.insert(Request {
+        let request_id = RequestId(self.requests.insert(Request {
             detail,
             source_id,
             user_data,
-        });
+        }));
+
+        self.source_occupations.insert((source_id, request_id));
 
         debug_assert_eq!(self.source_occupations.len(), self.requests.len());
+
+        // Add in `blocks_requests` and `requested_blocks` an entry for each known block.
+        let mut iter = (detail.first_block_height, detail.first_block_hash);
+        loop {
+            self.blocks_requests.insert((iter.0, iter.1, request_id));
+            self.requested_blocks.insert((request_id, iter.0, iter.1));
+
+            match self.blocks.parent_hash(iter.0, &iter.1) {
+                Some(p) => iter = (iter.0 - 1, *p),
+                None => break,
+            }
+        }
 
         request_id
     }
@@ -603,19 +602,26 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         assert!(self.requests.contains(request_id.0));
         let request = self.requests.remove(request_id.0);
 
-        let _was_in = self.blocks_requests.remove(&(
-            request.detail.first_block_height,
-            request.detail.first_block_hash,
-            request_id,
-        ));
-        debug_assert!(_was_in);
+        let blocks_to_remove = self
+            .requested_blocks
+            .range(
+                (request_id, u64::min_value(), [0; 32])
+                    ..=(request_id, u64::max_value(), [0xff; 32]),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
 
-        let _was_in = self.requested_blocks.remove(&(
-            request_id,
-            request.detail.first_block_height,
-            request.detail.first_block_hash,
-        ));
-        debug_assert!(_was_in);
+        for (request_id, block_height, block_hash) in blocks_to_remove {
+            let _was_in = self
+                .blocks_requests
+                .remove(&(block_height, block_hash, request_id));
+            debug_assert!(_was_in);
+
+            let _was_in = self
+                .requested_blocks
+                .remove(&(request_id, block_height, block_hash));
+            debug_assert!(_was_in);
+        }
 
         let _was_in = self
             .source_occupations
@@ -623,6 +629,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         debug_assert!(_was_in);
 
         debug_assert_eq!(self.source_occupations.len(), self.requests.len());
+        debug_assert_eq!(self.blocks_requests.len(), self.requested_blocks.len());
 
         (request.detail, request.source_id, request.user_data)
     }
