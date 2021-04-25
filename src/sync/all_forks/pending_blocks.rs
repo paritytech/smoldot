@@ -54,10 +54,14 @@
 //! In addition to a list of blocks, this data structure also stores a list of ongoing requests.
 //! Each block has zero, one, or more requests associated to it.
 //!
-//! Call [`PendingBlocks::desired_requests`] to obtain the next query that should be started.
-//! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request. This has
-//! the effect of changing the outcome of calling [`PendingBlocks::desired_requests`].
-//! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished.
+//! Call [`PendingBlocks::desired_requests`] to obtain the list of requests that should be
+//! started.
+//!
+//! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request.
+//! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished or been
+//! cancelled. Note that this method doesn't require to be passed the response to that request.
+//! The user is encouraged to update the state machine according to the response, but this must
+//! be done manually.
 //!
 
 use super::{disjoint, sources};
@@ -388,7 +392,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Inserts an unverified block in the collection.
     ///
     /// Returns the previous user data associated to this block, if any.
-    // TODO: what if height <= known_finalized?
     pub fn insert_unverified_block(
         &mut self,
         height: u64,
@@ -396,6 +399,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         state: UnverifiedBlockState,
         user_data: TBl,
     ) -> Option<(TBl, UnverifiedBlockState)> {
+        if height <= self.sources.finalized_block_height() {
+            return None;
+        }
+
         let parent_hash = state.parent_hash().map(|h| *h);
         // TODO: is it ok to just override the UnverifiedBlockState?
         self.blocks
