@@ -919,9 +919,17 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 
         let justification_verification = if let Some(justification) = justification {
             match self.parent.chain.verify_justification(&justification) {
-                Ok(success) => JustificationVerification::NewFinalized(
-                    success.apply().map(|b| (b.header, b.user_data)).collect(),
-                ),
+                Ok(success) => {
+                    let finalized = success
+                        .apply()
+                        .map(|b| (b.header, b.user_data))
+                        .collect::<Vec<_>>();
+                    self.parent
+                        .inner
+                        .blocks
+                        .set_finalized_block_height(finalized.last().unwrap().0.number);
+                    JustificationVerification::NewFinalized(finalized)
+                }
                 Err(err) => JustificationVerification::JustificationVerificationError(err),
             }
         } else {
