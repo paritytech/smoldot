@@ -84,6 +84,13 @@ impl<TBl> DisjointBlocks<TBl> {
         self.blocks.len()
     }
 
+    /// Returns the list of blocks in the collection.
+    pub fn iter(&'_ self) -> impl Iterator<Item = (u64, &[u8; 32], &'_ TBl)> + '_ {
+        self.blocks
+            .iter()
+            .map(|((he, ha), bl)| (*he, ha, &bl.user_data))
+    }
+
     /// Returns `true` if the block with the given height and hash is in the collection.
     pub fn contains(&self, height: u64, hash: &[u8; 32]) -> bool {
         self.blocks.contains_key(&(height, *hash))
@@ -166,10 +173,27 @@ impl<TBl> DisjointBlocks<TBl> {
     /// Returns the parent hash of the given block.
     ///
     /// Returns `None` if either the block or its parent isn't known.
-    pub fn parent_hash(&mut self, height: u64, hash: &[u8; 32]) -> Option<&[u8; 32]> {
+    pub fn parent_hash(&self, height: u64, hash: &[u8; 32]) -> Option<&[u8; 32]> {
         self.blocks
             .get(&(height, *hash))
             .and_then(|b| b.parent_hash.as_ref())
+    }
+
+    /// Returns the list of blocks whose height is `height + 1` and whose parent hash is the
+    /// given block.
+    pub fn children(
+        &'_ self,
+        height: u64,
+        hash: &[u8; 32],
+    ) -> impl Iterator<Item = (u64, &[u8; 32], &'_ TBl)> + '_ {
+        let hash = *hash;
+        self.blocks
+            .range((height + 1, [0; 32])..=(height + 1, [0xff; 32]))
+            .filter(move |((_maybe_child_height, _), maybe_child)| {
+                debug_assert_eq!(*_maybe_child_height, height + 1);
+                maybe_child.parent_hash.as_ref() == Some(&hash)
+            })
+            .map(|((he, ha), bl)| (*he, ha, &bl.user_data))
     }
 
     /// Sets the parent hash of the given block.

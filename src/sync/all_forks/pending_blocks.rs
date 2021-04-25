@@ -123,7 +123,7 @@ pub enum UnverifiedBlockState {
         parent_hash: [u8; 32],
     },
     /// The header and body of the block are both known. The block is waiting to be verified.
-    BodyKnown {
+    HeaderBodyKnown {
         /// Hash of the block that is parent of this one.
         parent_hash: [u8; 32],
     },
@@ -135,7 +135,7 @@ impl UnverifiedBlockState {
         match self {
             UnverifiedBlockState::HeightHashKnown => None,
             UnverifiedBlockState::HeaderKnown { parent_hash } => Some(parent_hash),
-            UnverifiedBlockState::BodyKnown { parent_hash } => Some(parent_hash),
+            UnverifiedBlockState::HeaderBodyKnown { parent_hash } => Some(parent_hash),
         }
     }
 }
@@ -461,10 +461,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             UnverifiedBlockState::HeaderKnown {
                 parent_hash: cur_ph,
             }
-            | UnverifiedBlockState::BodyKnown {
+            | UnverifiedBlockState::HeaderBodyKnown {
                 parent_hash: cur_ph,
             } if *cur_ph == parent_hash => return,
-            UnverifiedBlockState::HeaderKnown { .. } | UnverifiedBlockState::BodyKnown { .. } => {
+            UnverifiedBlockState::HeaderKnown { .. }
+            | UnverifiedBlockState::HeaderBodyKnown { .. } => {
                 panic!()
             }
             UnverifiedBlockState::HeightHashKnown => {}
@@ -477,30 +478,36 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Modifies the state of the given block. This is a convenience around
     /// [`PendingBlocks::set_block_state`].
     ///
-    /// If the current block's state implies that the body isn't known yet, updates it to a
-    /// state where the body is known.
+    /// If the current block's state implies that the header or body isn't known yet, updates it
+    /// to a state where the header and body are known.
     ///
     /// # Panic
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn set_block_body_known(&mut self, height: u64, hash: &[u8; 32], parent_hash: [u8; 32]) {
+    pub fn set_block_header_body_known(
+        &mut self,
+        height: u64,
+        hash: &[u8; 32],
+        parent_hash: [u8; 32],
+    ) {
         let curr = &mut self.blocks.user_data_mut(height, hash).unwrap().state;
 
         match curr {
             UnverifiedBlockState::HeaderKnown {
                 parent_hash: cur_ph,
             } if *cur_ph == parent_hash => {}
-            UnverifiedBlockState::BodyKnown {
+            UnverifiedBlockState::HeaderBodyKnown {
                 parent_hash: cur_ph,
             } if *cur_ph == parent_hash => return,
-            UnverifiedBlockState::HeaderKnown { .. } | UnverifiedBlockState::BodyKnown { .. } => {
+            UnverifiedBlockState::HeaderKnown { .. }
+            | UnverifiedBlockState::HeaderBodyKnown { .. } => {
                 panic!()
             }
             UnverifiedBlockState::HeightHashKnown => {}
         }
 
-        *curr = UnverifiedBlockState::BodyKnown { parent_hash };
+        *curr = UnverifiedBlockState::HeaderBodyKnown { parent_hash };
         self.blocks.set_parent_hash(height, hash, parent_hash);
     }
 
@@ -700,28 +707,46 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ) -> impl Iterator<Item = DesiredRequest> + '_ {
         // TODO: request the best block of each source if necessary
 
-        self.blocks
+        // List of blocks whose header is known but not its body.
+        let unknown_body_iter = if self.verify_bodies {
+            either::Left(
+                self.blocks
+                    .iter()
+                    .filter(move |(_, _, block_info)| match &block_info.state {
+                        UnverifiedBlockState::HeaderKnown { .. } => true,
+                        _ => false,
+                    })
+                    .map(|(height, hash, _)| (height, hash)),
+            )
+        } else {
+            either::Right(iter::empty())
+        };
+
+        // List of blocks whose header isn't known.
+        let unknown_blocks_iter = self
+            .blocks
             .unknown_blocks()
             .filter(move |(unknown_block_height, _)| {
                 // Don't request the finalized block or below.
                 *unknown_block_height > self.sources.finalized_block_height()
             })
-            .filter(move |(unknown_block_height, unknown_block_hash)| {
-                // Don't request blocks whose information is already known.
-                match self
+            .inspect(move |(unknown_block_height, unknown_block_hash)| {
+                // Sanity check.
+                debug_assert!(match self
                     .blocks
                     .user_data(*unknown_block_height, unknown_block_hash)
                     .map(|ud| &ud.state)
                 {
                     None | Some(UnverifiedBlockState::HeightHashKnown) => true,
-                    Some(UnverifiedBlockState::HeaderKnown { .. }) if self.verify_bodies => true,
                     Some(UnverifiedBlockState::HeaderKnown { .. })
-                    | Some(UnverifiedBlockState::BodyKnown { .. }) => false,
-                }
-            })
+                    | Some(UnverifiedBlockState::HeaderBodyKnown { .. }) => false,
+                })
+            });
+
+        unknown_body_iter
+            .chain(unknown_blocks_iter)
             .filter(move |(unknown_block_height, unknown_block_hash)| {
                 // Cap by `max_requests_per_block`.
-                // TODO: not correct as a request overlaps multiple blocks
                 let num_existing_requests = self
                     .blocks_requests
                     .range(
@@ -743,6 +768,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             })
             .flat_map(move |(unknown_block_height, unknown_block_hash)| {
                 // Try to find all appropriate sources.
+                // TODO: it is possible that we start multiple requests for the same block from the same source
                 let possible_sources = if let Some(force_source) = force_source {
                     either::Left(iter::once(force_source).filter(move |id| {
                         self.sources.source_knows_non_finalized_block(
@@ -800,7 +826,10 @@ pub struct DesiredRequest {
 }
 
 /// Information about a blocks request to be performed on a source.
-// TODO: needs more documentation
+///
+/// The source should return information about the block indicated with
+/// [`RequestParams::first_block_height`] and [`RequestParams::first_block_hash`] and its
+/// ancestors. In total, [`RequestParams::num_blocks`] should be provided by the source.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestParams {
     /// Height of the first block to request.
