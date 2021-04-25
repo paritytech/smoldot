@@ -904,13 +904,13 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 
         // Remove the verified block from `pending_blocks`.
         let justification = if result.is_ok() {
-            let outcome = self.parent.inner.blocks.remove_verify_success(
+            let outcome = self.parent.inner.blocks.remove(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );
             outcome.justification
         } else {
-            self.parent.inner.blocks.remove_verify_failed(
+            self.parent.inner.blocks.set_block_bad(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );

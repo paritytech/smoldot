@@ -164,6 +164,11 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     /// >           [`Block`] struct.
     blocks_requests: BTreeSet<(u64, [u8; 32], RequestId)>,
 
+    /// Set of `(request_id, block_height, block_hash)`.
+    ///
+    /// Contains the same entries as [`PendingBlocks::blocks_requests`], but ordered differently.
+    requested_blocks: BTreeSet<(RequestId, u64, [u8; 32])>,
+
     /// Set of `(source_id, request_id)`.
     /// Contains the list of requests, associated to their source.
     ///
@@ -206,6 +211,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             blocks: disjoint::DisjointBlocks::with_capacity(config.blocks_capacity),
             verify_bodies: config.verify_bodies,
             blocks_requests: Default::default(),
+            requested_blocks: Default::default(),
             source_occupations: Default::default(),
             requests: slab::Slab::with_capacity(
                 config.blocks_capacity
@@ -271,6 +277,13 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 request.detail.first_block_height,
                 request.detail.first_block_hash,
                 pending_request_id,
+            ));
+            debug_assert!(_was_in);
+
+            let _was_in = self.requested_blocks.remove(&(
+                pending_request_id,
+                request.detail.first_block_height,
+                request.detail.first_block_hash,
             ));
             debug_assert!(_was_in);
 
@@ -488,24 +501,31 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.blocks.set_parent_hash(height, hash, parent_hash);
     }
 
-    /// Removes the given block from the collection after it has successfully been verified.
+    /// Removes the given block from the collection.
+    ///
+    /// > **Note**: Use this method after a block has been successfully verified, or in order to
+    /// >           remove uninteresting blocks if there are too many blocks in the collection.
     ///
     /// # Panic
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn remove_verify_success(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
+    pub fn remove(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
         self.blocks.remove(height, hash).user_data
     }
 
-    /// Removes the given block from the collection after it has been determined to be bad.
+    /// Marks the given block and all its known children as "bad".
+    ///
+    /// If a child of this block is later added to the collection, it is also automatically
+    /// marked as bad.
     ///
     /// # Panic
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn remove_verify_failed(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
-        todo!()
+    #[track_caller]
+    pub fn set_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
+        self.blocks.set_block_bad(height, hash);
     }
 
     /// Returns the number of blocks stored in the data structure.
@@ -547,6 +567,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             request_id,
         ));
 
+        self.requested_blocks.insert((
+            request_id,
+            detail.first_block_height,
+            detail.first_block_hash,
+        ));
+
         self.source_occupations.insert((source_id, request_id));
 
         request_entry.insert(Request {
@@ -581,6 +607,13 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             request.detail.first_block_height,
             request.detail.first_block_hash,
             request_id,
+        ));
+        debug_assert!(_was_in);
+
+        let _was_in = self.requested_blocks.remove(&(
+            request_id,
+            request.detail.first_block_height,
+            request.detail.first_block_hash,
         ));
         debug_assert!(_was_in);
 
