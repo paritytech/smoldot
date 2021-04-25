@@ -261,7 +261,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         let is_in_disjoints_list = self
             .inner
             .blocks
-            .contains(best_block_number, &best_block_hash);
+            .contains_block(best_block_number, &best_block_hash);
         debug_assert!(!(!needs_verification && is_in_disjoints_list));
 
         if needs_verification && !is_in_disjoints_list {
@@ -299,7 +299,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     pub fn remove_source(
         &mut self,
         source_id: SourceId,
-    ) -> (TSrc, Vec<(RequestId, RequestParams, TRq)>) {
+    ) -> (TSrc, impl Iterator<Item = (RequestId, RequestParams, TRq)>) {
         self.inner.blocks.remove_source(source_id)
     }
 
@@ -352,12 +352,17 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
         // TODO: need to periodically query for justifications of non-finalized blocks that change GrandPa authorities
 
-        // TODO: allow multiple requests?
+        // TODO: allow multiple requests towards the same source?
 
         self.inner
             .blocks
             .desired_requests()
             .filter(|rq| rq.source_num_existing_requests == 0)
+            .filter(move |rq| {
+                !self
+                    .chain
+                    .contains_non_finalized_block(&rq.request_params.first_block_hash)
+            })
             .map(|rq| (rq.source_id, rq.request_params))
     }
 
@@ -639,7 +644,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // At this point, we have excluded blocks that are already part of the chain or too old.
         // We insert the block in the list of unverified blocks so as to treat all blocks the
         // same.
-        if !self.inner.blocks.contains(header.number, header_hash) {
+        if !self.inner.blocks.contains_block(header.number, header_hash) {
             self.inner.blocks.insert_unverified_block(
                 header.number,
                 *header_hash,

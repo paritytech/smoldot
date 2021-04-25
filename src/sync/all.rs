@@ -404,7 +404,6 @@ impl<TRq, TSrc, TBl> Idle<TRq, TSrc, TBl> {
             (IdleInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
                 let (user_data, requests) = sync.remove_source(source_id);
                 let requests = requests
-                    .into_iter()
                     .map(|(_inner_request_id, _, request_inner_user_data)| {
                         debug_assert!(self
                             .shared

@@ -15,16 +15,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Collection of "pending" blocks, in other words blocks whose existence is known but which
-//! can't be verified yet. Used for the `all_forks` syncing.
+//! State machine managing the "disjoint" blocks, in other words blocks whose existence is known
+//! but which can't be verified yet.
 //!
-//! Example: the local node knows about block 5. A peer announces block 7. Since the local node
-//! doesn't know block 6, it has to store block 7 for later, then download block 6. The container
-//! in this module is where block 7 is temporarily stored.
+//! > **Example**: The local node knows about block 5. A peer announces block 7. Since the local
+//! >              node doesn't know block 6, it has to store block 7 for later, then download
+//! >              block 6. The container in this module is where block 7 is temporarily stored.
 //!
-//! In addition to a set of blocks, this data structure also stores a set of ongoing requests that
-//! related to these blocks. In the example above, it would store the request that asks for block
-//! 6 from the network.
+//! In addition to a set of blocks, this data structure also stores a set of sources of blocks,
+//! and ongoing requests that related to these blocks.
+//!
+//! > **Note**: In the example above, it would store the request that asks for block 6 from the
+//! >           network.
 //!
 //! # Blocks
 //!
@@ -241,11 +243,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    // TODO: don't return a `Vec` but an iterator
     pub fn remove_source(
         &mut self,
         source_id: SourceId,
-    ) -> (TSrc, Vec<(RequestId, RequestParams, TRq)>) {
+    ) -> (TSrc, impl Iterator<Item = (RequestId, RequestParams, TRq)>) {
         let user_data = self.sources.remove(source_id);
 
         let source_occupations_entries = self
@@ -257,6 +258,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             .cloned()
             .collect::<Vec<_>>();
 
+        // TODO: optimize with a custom iterator?
         let mut pending_requests = Vec::new();
 
         for (_source_id, pending_request_id) in source_occupations_entries {
@@ -275,7 +277,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             pending_requests.push((pending_request_id, request.detail, request.user_data));
         }
 
-        (user_data.user_data, pending_requests)
+        (user_data.user_data, pending_requests.into_iter())
     }
 
     /// Registers a new block that the source is aware of.
@@ -359,7 +361,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     pub fn set_finalized_block_height(&mut self, height: u64) {
         self.sources.set_finalized_block_height(height);
-        // TODO: remove unverified blocks
+        // TODO: remove unverified blocks and return the list of TBl
     }
 
     /// Inserts an unverified block in the collection.
@@ -374,6 +376,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         user_data: TBl,
     ) -> Option<(TBl, UnverifiedBlockState)> {
         let parent_hash = state.parent_hash().map(|h| *h);
+        // TODO: is it ok to just override the UnverifiedBlockState?
         self.blocks
             .insert(
                 height,
@@ -385,7 +388,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Returns `true` if the block with the given height and hash is in the collection.
-    pub fn contains(&self, height: u64, hash: &[u8; 32]) -> bool {
+    pub fn contains_block(&self, height: u64, hash: &[u8; 32]) -> bool {
         self.blocks.contains(height, hash)
     }
 
@@ -617,14 +620,16 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`]
     /// must be called in order for the request to actually be marked as started.
+    ///
+    /// No request concerning the finalized block (as set using
+    /// [`PendingBlocks::set_finalized_block_height`]) or below will ever be returned.
     pub fn desired_requests(&'_ self) -> impl Iterator<Item = DesiredRequest> + '_ {
         self.desired_requests_inner(None)
     }
 
     /// Returns the details of a request to start towards the source.
     ///
-    /// This method doesn't modify the state machine in any way. [`PendingBlocks::add_request`]
-    /// must be called in order for the request to actually be marked as started.
+    /// This method is similar to [`PendingBlocks::desired_requests`].
     ///
     /// # Panic
     ///
@@ -657,6 +662,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
         self.blocks
             .unknown_blocks()
+            .filter(move |(unknown_block_height, _)| {
+                // Don't request the finalized block or below.
+                *unknown_block_height > self.sources.finalized_block_height()
+            })
             .filter(move |(unknown_block_height, unknown_block_hash)| {
                 // Don't request blocks whose information is already known.
                 match self
@@ -763,7 +772,6 @@ pub struct RequestParams {
     /// Number of blocks the request should return.
     ///
     /// Note that this is only an indication, and the source is free to give fewer blocks
-    /// than requested. If that happens, the state machine might later send out further
-    /// ancestry search requests to complete the chain.
+    /// than requested.
     pub num_blocks: NonZeroU64,
 }
