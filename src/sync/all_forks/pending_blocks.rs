@@ -96,9 +96,9 @@ pub struct Config {
 
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
-    /// Should be set according to the failure rate of requests. For example if requests have a
-    /// 10% chance of failing, then setting to value to `2` gives a 1% chance that downloading
-    /// this block will overall fail and has to be attempted again.
+    /// Should be set according to the failure rate of requests. For example if requests have an
+    /// estimated 10% chance of failing, then setting to value to `2` gives a 1% chance that
+    /// downloading this block will overall fail and has to be attempted again.
     ///
     /// Also keep in mind that sources might maliciously take a long time to answer requests. A
     /// higher value makes it possible to reduce the risks of the syncing taking a long time
@@ -557,6 +557,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Returns the list of blocks whose parent hash is known but absent from the list of disjoint
     /// blocks. These blocks can potentially be verified.
+    ///
+    /// All the returned block are guaranteed to be in a "header known" state. If
+    /// [`Config::verify_bodies`] if `true`, they they are also guaranteed to be in a "body known"
+    /// state.
     pub fn unverified_leaves(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
         self.blocks.good_tree_roots().filter(move |pending| {
             match self
@@ -799,7 +803,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             })
             .flat_map(move |(unknown_block_height, unknown_block_hash)| {
                 // Try to find all appropriate sources.
-                // TODO: it is possible that we start multiple requests for the same block from the same source
                 let possible_sources = if let Some(force_source) = force_source {
                     either::Left(iter::once(force_source).filter(move |id| {
                         self.sources.source_knows_non_finalized_block(
@@ -815,32 +818,54 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     )
                 };
 
-                possible_sources.map(move |source_id| {
-                    debug_assert!(self.sources.source_knows_non_finalized_block(
-                        source_id,
-                        unknown_block_height,
-                        unknown_block_hash
-                    ));
-
-                    DesiredRequest {
-                        source_id,
-                        source_num_existing_requests: self
-                            .source_occupations
+                possible_sources
+                    .filter(move |source_id| {
+                        // Don't start any request towards this source if there's another request
+                        // for the same block from the same source.
+                        !self
+                            .blocks_requests
                             .range(
-                                (source_id, RequestId(usize::min_value()))
-                                    ..=(source_id, RequestId(usize::max_value())),
+                                (
+                                    unknown_block_height,
+                                    *unknown_block_hash,
+                                    RequestId(usize::min_value()),
+                                )
+                                    ..=(
+                                        unknown_block_height,
+                                        *unknown_block_hash,
+                                        RequestId(usize::max_value()),
+                                    ),
                             )
-                            .count(),
-                        request_params: RequestParams {
-                            first_block_hash: *unknown_block_hash,
-                            first_block_height: unknown_block_height,
-                            num_blocks: NonZeroU64::new(
-                                unknown_block_height - self.sources.finalized_block_height(),
-                            )
-                            .unwrap(),
-                        },
-                    }
-                })
+                            .any(|(_, _, request_id)| {
+                                self.requests[request_id.0].source_id == *source_id
+                            })
+                    })
+                    .map(move |source_id| {
+                        debug_assert!(self.sources.source_knows_non_finalized_block(
+                            source_id,
+                            unknown_block_height,
+                            unknown_block_hash
+                        ));
+
+                        DesiredRequest {
+                            source_id,
+                            source_num_existing_requests: self
+                                .source_occupations
+                                .range(
+                                    (source_id, RequestId(usize::min_value()))
+                                        ..=(source_id, RequestId(usize::max_value())),
+                                )
+                                .count(),
+                            request_params: RequestParams {
+                                first_block_hash: *unknown_block_hash,
+                                first_block_height: unknown_block_height,
+                                num_blocks: NonZeroU64::new(
+                                    unknown_block_height - self.sources.finalized_block_height(),
+                                )
+                                .unwrap(),
+                            },
+                        }
+                    })
             })
     }
 }

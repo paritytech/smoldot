@@ -1419,7 +1419,7 @@ impl Shared {
             sources_capacity: 1024,
             blocks_capacity: 1024,
             max_disjoint_headers: 1024,
-            max_requests_per_block: NonZeroU32::new(128).unwrap(),
+            max_requests_per_block: NonZeroU32::new(3).unwrap(),
             full: false,
         });
 
@@ -1478,7 +1478,7 @@ impl Shared {
             sources_capacity: 1024,
             blocks_capacity: 1024,
             max_disjoint_headers: 1024,
-            max_requests_per_block: NonZeroU32::new(128).unwrap(),
+            max_requests_per_block: NonZeroU32::new(3).unwrap(),
             full: false,
         });
 
