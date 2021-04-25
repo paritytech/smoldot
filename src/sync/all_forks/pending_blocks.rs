@@ -558,7 +558,18 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Returns the list of blocks whose parent hash is known but absent from the list of disjoint
     /// blocks. These blocks can potentially be verified.
     pub fn unverified_leaves(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
-        self.blocks.good_tree_roots()
+        self.blocks.good_tree_roots().filter(move |pending| {
+            match self
+                .blocks
+                .user_data(pending.block_number, &pending.block_hash)
+                .unwrap()
+                .state
+            {
+                UnverifiedBlockState::HeightHashKnown => false,
+                UnverifiedBlockState::HeaderKnown { .. } => !self.verify_bodies,
+                UnverifiedBlockState::HeaderBodyKnown { .. } => true,
+            }
+        })
     }
 
     /// Inserts a new request in the data structure.
