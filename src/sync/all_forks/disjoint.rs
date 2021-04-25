@@ -154,6 +154,19 @@ impl<TBl> DisjointBlocks<TBl> {
         self.blocks.remove(&(height, *hash)).unwrap().user_data
     }
 
+    /// Removes from the collection the blocks whose height is strictly inferior to the given
+    /// value, and returns them.
+    pub fn remove_below_height(
+        &mut self,
+        threshold: u64,
+    ) -> impl ExactSizeIterator<Item = (u64, [u8; 32], TBl)> {
+        let above_threshold = self.blocks.split_off(&(threshold, [0; 32]));
+        let below_threshold = mem::replace(&mut self.blocks, above_threshold);
+        below_threshold
+            .into_iter()
+            .map(|((he, ha), v)| (he, ha, v.user_data))
+    }
+
     /// Returns the user data associated to the block. This is the value originally passed
     /// through [`DisjointBlocks::insert`].
     ///

@@ -375,9 +375,14 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the new height is inferior to the previous value.
     ///
-    pub fn set_finalized_block_height(&mut self, height: u64) {
+    pub fn set_finalized_block_height(
+        &mut self,
+        height: u64,
+    ) -> impl ExactSizeIterator<Item = TBl> {
         self.sources.set_finalized_block_height(height);
-        // TODO: remove unverified blocks and return the list of TBl
+        self.blocks
+            .remove_below_height(height + 1)
+            .map(|(_, _, bl)| bl.user_data)
     }
 
     /// Inserts an unverified block in the collection.
@@ -659,8 +664,14 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
-        iter::empty() // TODO:
+    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
+        // TODO: more than that?
+        self.requests
+            .iter()
+            .filter(move |(_, rq)| {
+                rq.detail.first_block_height <= self.sources.finalized_block_height()
+            })
+            .map(|(id, _)| RequestId(id))
     }
 
     /// Returns the details of a request to start towards a source.
@@ -723,7 +734,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         };
 
         // List of blocks whose header isn't known.
-        let unknown_blocks_iter = self
+        let unknown_header_iter = self
             .blocks
             .unknown_blocks()
             .filter(move |(unknown_block_height, _)| {
@@ -743,8 +754,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 })
             });
 
+        // Combine the two block iterators and find sources.
+        // There isn't any overlap between the two iterators.
         unknown_body_iter
-            .chain(unknown_blocks_iter)
+            .chain(unknown_header_iter)
             .filter(move |(unknown_block_height, unknown_block_hash)| {
                 // Cap by `max_requests_per_block`.
                 let num_existing_requests = self

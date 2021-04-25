@@ -392,7 +392,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&self) -> impl Iterator<Item = RequestId> {
+    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
         self.inner.blocks.obsolete_requests()
     }
 
