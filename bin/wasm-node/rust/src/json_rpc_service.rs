@@ -273,10 +273,6 @@ struct PerSourceSubscriptions {
 
     /// Same principle as [`PerSourceSubscriptions::all_heads`], but for runtime specs.
     runtime_specs: HashMap<String, oneshot::Sender<String>>,
-
-    /// Whether the source has been disconnected.
-    /// Use to communicate to the subscription tasks should be shut down.
-    source_disconnected: Arc<atomic::AtomicBool>,
 }
 
 pub struct JsonRpcService {
@@ -402,7 +398,7 @@ impl JsonRpcService {
                     .lock()
                     .await
                     .get_mut(&source_id)
-                    .and_then(|subs| subs.transactions.remove(&subscription[..]))
+                    .and_then(|subs| subs.transactions.remove(&subscription))
                 {
                     // `cancel_tx` might have been closed if the channel from the transactions
                     // service has been closed too. This is not an error.
@@ -511,7 +507,7 @@ impl JsonRpcService {
                     .lock()
                     .await
                     .get_mut(&source_id)
-                    .and_then(|subs| subs.finalized_heads.remove(&subscription[..]))
+                    .and_then(|subs| subs.finalized_heads.remove(&subscription))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
@@ -673,11 +669,11 @@ impl JsonRpcService {
                     self.runtime_service.subscribe_runtime_version().await;
 
                 let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-                let mut per_source_subscriptions = self.per_source_subscriptions.lock().await;
-                let subscriptions = per_source_subscriptions
+                self.per_source_subscriptions
+                    .lock()
+                    .await
                     .entry(source_id)
-                    .or_insert_with(PerSourceSubscriptions::default);
-                subscriptions
+                    .or_insert_with(PerSourceSubscriptions::default)
                     .runtime_specs
                     .insert(subscription.clone(), unsubscribe_tx);
 
@@ -713,15 +709,10 @@ impl JsonRpcService {
                 );
 
                 let client = self.clone();
-                let source_disconnected = subscriptions.source_disconnected.clone();
                 (self.tasks_executor.lock().await)(Box::pin(async move {
                     futures::pin_mut!(spec_changes);
 
                     loop {
-                        if source_disconnected.load(atomic::Ordering::Relaxed) {
-                            break;
-                        }
-
                         // Wait for either a new storage update, or for the subscription to be canceled.
                         let next_change = spec_changes.next();
                         futures::pin_mut!(next_change);
@@ -778,7 +769,7 @@ impl JsonRpcService {
                     .lock()
                     .await
                     .get_mut(&source_id)
-                    .and_then(|subs| subs.storage.remove(&subscription[..]))
+                    .and_then(|subs| subs.storage.remove(&subscription))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
@@ -931,17 +922,10 @@ impl JsonRpcService {
     }
 
     async fn handle_unsubscribe_all(self: Arc<JsonRpcService>, source_id: u32) {
-        let subscriptions = self
-            .per_source_subscriptions
+        self.per_source_subscriptions
             .lock()
             .await
             .remove(&source_id);
-
-        if let Some(subscriptions) = subscriptions {
-            subscriptions
-                .source_disconnected
-                .store(true, atomic::Ordering::Relaxed);
-        }
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
@@ -962,11 +946,11 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let mut per_source_subscriptions = self.per_source_subscriptions.lock().await;
-        let subscriptions = per_source_subscriptions
+        self.per_source_subscriptions
+            .lock()
+            .await
             .entry(source_id)
-            .or_insert_with(PerSourceSubscriptions::default);
-        subscriptions
+            .or_insert_with(PerSourceSubscriptions::default)
             .transactions
             .insert(subscription.clone(), unsubscribe_tx);
 
@@ -975,16 +959,11 @@ impl JsonRpcService {
 
         // Spawn a separate task for the transaction updates.
         let client = self.clone();
-        let source_disconnected = subscriptions.source_disconnected.clone();
         (self.tasks_executor.lock().await)(Box::pin(async move {
             // Send back to the user the confirmation of the registration.
             client.send_back(&confirmation, source_id);
 
             loop {
-                if source_disconnected.load(atomic::Ordering::Relaxed) {
-                    break;
-                }
-
                 // Wait for either a status update block, or for the subscription to
                 // be canceled.
                 let next_update = transaction_updates.next();
@@ -1103,11 +1082,11 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let mut per_source_subscriptions = self.per_source_subscriptions.lock().await;
-        let subscriptions = per_source_subscriptions
+        self.per_source_subscriptions
+            .lock()
+            .await
             .entry(source_id)
-            .or_insert_with(PerSourceSubscriptions::default);
-        subscriptions
+            .or_insert_with(PerSourceSubscriptions::default)
             .all_heads
             .insert(subscription.clone(), unsubscribe_tx);
 
@@ -1121,7 +1100,6 @@ impl JsonRpcService {
             methods::Response::chain_subscribeAllHeads(&subscription).to_json_response(request_id);
 
         let client = self.clone();
-        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1129,10 +1107,6 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
-                if source_disconnected.load(atomic::Ordering::Relaxed) {
-                    break;
-                }
-
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
@@ -1168,11 +1142,11 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let mut per_source_subscriptions = self.per_source_subscriptions.lock().await;
-        let subscriptions = per_source_subscriptions
+        self.per_source_subscriptions
+            .lock()
+            .await
             .entry(source_id)
-            .or_insert_with(PerSourceSubscriptions::default);
-        subscriptions
+            .or_insert_with(PerSourceSubscriptions::default)
             .new_heads
             .insert(subscription.clone(), unsubscribe_tx);
 
@@ -1185,7 +1159,6 @@ impl JsonRpcService {
             methods::Response::chain_subscribeNewHeads(&subscription).to_json_response(request_id);
 
         let client = self.clone();
-        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1193,10 +1166,6 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
-                if source_disconnected.load(atomic::Ordering::Relaxed) {
-                    break;
-                }
-
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
@@ -1236,11 +1205,11 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let mut per_source_subscriptions = self.per_source_subscriptions.lock().await;
-        let subscriptions = per_source_subscriptions
+        self.per_source_subscriptions
+            .lock()
+            .await
             .entry(source_id)
-            .or_insert_with(PerSourceSubscriptions::default);
-        subscriptions
+            .or_insert_with(PerSourceSubscriptions::default)
             .finalized_heads
             .insert(subscription.clone(), unsubscribe_tx);
 
@@ -1254,7 +1223,6 @@ impl JsonRpcService {
             .to_json_response(request_id);
 
         let client = self.clone();
-        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1262,10 +1230,6 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
-                if source_disconnected.load(atomic::Ordering::Relaxed) {
-                    break;
-                }
-
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
@@ -1306,11 +1270,11 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let mut per_source_subscriptions = self.per_source_subscriptions.lock().await;
-        let subscriptions = per_source_subscriptions
+        self.per_source_subscriptions
+            .lock()
+            .await
             .entry(source_id)
-            .or_insert_with(PerSourceSubscriptions::default);
-        subscriptions
+            .or_insert_with(PerSourceSubscriptions::default)
             .storage
             .insert(subscription.clone(), unsubscribe_tx);
 
@@ -1387,7 +1351,6 @@ impl JsonRpcService {
             methods::Response::state_subscribeStorage(&subscription).to_json_response(request_id);
 
         let client = self.clone();
-        let source_disconnected = subscriptions.source_disconnected.clone();
 
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
@@ -1397,10 +1360,6 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
-                if source_disconnected.load(atomic::Ordering::Relaxed) {
-                    break;
-                }
-
                 // Wait for either a new storage update, or for the subscription to be canceled.
                 let next_block = storage_updates.next();
                 futures::pin_mut!(next_block);
