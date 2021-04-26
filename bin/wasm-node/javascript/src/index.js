@@ -50,12 +50,13 @@ export async function start(config) {
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
-  // Whenever a `cancelAll` is sent to the worker, the corresponding user data is pushed on
+  // Whenever an `unsubscribeAll` is sent to the worker, the corresponding user data is pushed on
   // this array. The worker needs to send back a confirmation, which pops the first element of
   // this array. JSON-RPC responses whose user data is found in this array are silently discarded.
   // This avoids a race condition where the worker emits a JSON-RPC response while we have already
-  // sent to it an `cancelAll`. It also makes it possible for `cancel_all` to cancel requests that
-  // are not subscriptions, even though smoldot doesn't support this.
+  // sent to it an `unsubscribeAll`. It is also what makes it possible for `cancel_all` to cancel
+  // requests that are not subscription notifications, even while the worker only supports
+  // cancelling subscriptions.
   let pendingCancelConfirmations = [];
 
   // Build a promise that will be resolved or rejected after the initalization (that happens in
@@ -82,10 +83,10 @@ export async function start(config) {
           config.json_rpc_callback(message.data, message.chainIndex, message.userData);
       }
 
-    } else if (message.kind == 'cancelAllConfirmation') {
+    } else if (message.kind == 'unsubscribeAllConfirmation') {
       const expected = pendingCancelConfirmations.pop();
       if (expected != message.userData)
-        throw 'Unexpected cancelAllConfirmation';
+        throw 'Unexpected unsubscribeAllConfirmation';
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
@@ -132,7 +133,7 @@ export async function start(config) {
     userData: 0,
   });
   pendingCancelConfirmations.push(0);
-  worker.postMessage({ ty: 'cancelAll', userData: 0 });
+  worker.postMessage({ ty: 'unsubscribeAll', userData: 0 });
 
   // Now blocking until the worker sends back the response.
   // This will throw if the initialization has failed.
@@ -149,7 +150,7 @@ export async function start(config) {
     cancel_all: (userData) => {
       if (!workerError) {
         pendingCancelConfirmations.push(userData);
-        worker.postMessage({ ty: 'cancelAll', userData });
+        worker.postMessage({ ty: 'unsubscribeAll', userData });
       } else {
         throw workerError;
       }
