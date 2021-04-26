@@ -28,7 +28,7 @@ sp.then(sm => {
   // $ExpectType void
   sm.send_json_rpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}', 0, 0);
   // $ExpectType void
-  sm.unsubscribe_all(0);
+  sm.cancel_all(0);
   // $ExpectType void
   sm.terminate();
 });

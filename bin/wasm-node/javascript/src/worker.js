@@ -92,10 +92,10 @@ const startInstance = async (config) => {
       const ptr = result.instance.exports.alloc(len);
       Buffer.from(result.instance.exports.memory.buffer).write(message.request, ptr);
       result.instance.exports.json_rpc_send(ptr, len, message.chainIndex, message.userData);
-    } else if (message.ty == 'unsubscribeAll') {
+    } else if (message.ty == 'cancelAll') {
       result.instance.exports.json_rpc_unsubscribe_all(message.userData);
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'unsubscribeAllConfirmation', userData: message.userData });
+      compat.postMessage({ kind: 'cancelAllConfirmation', userData: message.userData });
     } else
       throw new Error('unrecognized message type');
   });
@@ -121,10 +121,10 @@ compat.setOnMessage((message) => {
       const ptr = state.exports.alloc(len);
       Buffer.from(state.exports.memory.buffer).write(message.request, ptr);
       state.exports.json_rpc_send(ptr, len, message.chainIndex, message.userData);
-    } else if (message.ty == 'unsubscribeAll') {
+    } else if (message.ty == 'cancelAll') {
       state.exports.json_rpc_unsubscribe_all(message.userData);
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'unsubscribeAllConfirmation', userData: message.userData });
+      compat.postMessage({ kind: 'cancelAllConfirmation', userData: message.userData });
     } else
       throw new Error('unrecognized message type');
   }

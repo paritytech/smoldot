@@ -50,12 +50,13 @@ export async function start(config) {
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
-  // Whenever an `unsubscribeAll` is sent to the worker, the corresponding user data is pushed on
+  // Whenever a `cancelAll` is sent to the worker, the corresponding user data is pushed on
   // this array. The worker needs to send back a confirmation, which pops the first element of
   // this array. JSON-RPC responses whose user data is found in this array are silently discarded.
   // This avoids a race condition where the worker emits a JSON-RPC response while we have already
-  // sent to it an `unsubscribeAll`.
-  let pendingUnsubscribeConfirmations = [];
+  // sent to it an `cancelAll`. It also makes it possible for `cancel_all` to cancel requests that
+  // are not subscriptions, even though smoldot doesn't support this.
+  let pendingCancelConfirmations = [];
 
   // Build a promise that will be resolved or rejected after the initalization (that happens in
   // the worker) has finished.
@@ -77,14 +78,14 @@ export async function start(config) {
         initPromiseReject = null;
         initPromiseResolve = null;
       } else if (config.json_rpc_callback) {
-        if (pendingUnsubscribeConfirmations.findIndex(elem => elem == message.userData) === -1)
+        if (pendingCancelConfirmations.findIndex(elem => elem == message.userData) === -1)
           config.json_rpc_callback(message.data, message.chainIndex, message.userData);
       }
 
-    } else if (message.kind == 'unsubscribeAllConfirmation') {
-      const expected = pendingUnsubscribeConfirmations.pop();
+    } else if (message.kind == 'cancelAllConfirmation') {
+      const expected = pendingCancelConfirmations.pop();
       if (expected != message.userData)
-        throw 'Unexpected unsubscribeAllConfirmation';
+        throw 'Unexpected cancelAllConfirmation';
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
@@ -130,8 +131,8 @@ export async function start(config) {
     chainIndex: 0,
     userData: 0,
   });
-  pendingUnsubscribeConfirmations.push(0);
-  worker.postMessage({ ty: 'unsubscribeAll', userData: 0 });
+  pendingCancelConfirmations.push(0);
+  worker.postMessage({ ty: 'cancelAll', userData: 0 });
 
   // Now blocking until the worker sends back the response.
   // This will throw if the initialization has failed.
@@ -145,10 +146,10 @@ export async function start(config) {
         throw workerError;
       }
     },
-    unsubscribe_all: (userData) => {
+    cancel_all: (userData) => {
       if (!workerError) {
-        pendingUnsubscribeConfirmations.push(userData);
-        worker.postMessage({ ty: 'unsubscribeAll', userData });
+        pendingCancelConfirmations.push(userData);
+        worker.postMessage({ ty: 'cancelAll', userData });
       } else {
         throw workerError;
       }
