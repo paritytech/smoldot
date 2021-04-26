@@ -259,19 +259,19 @@ struct PerUserDataSubscriptions {
     /// subscription.
     all_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
 
-    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for new heads subscriptions.
+    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for new heads subscriptions.
     new_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
 
-    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for finalized heads subscriptions.
+    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for finalized heads subscriptions.
     finalized_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
 
-    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for storage subscriptions.
+    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for storage subscriptions.
     storage: Mutex<HashMap<String, oneshot::Sender<String>>>,
 
-    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for transactions.
+    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for transactions.
     transactions: Mutex<HashMap<String, oneshot::Sender<String>>>,
 
-    /// Same principle as [`PerSourceSubscriptions::all_heads`], but for runtime specs.
+    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for runtime specs.
     runtime_specs: Mutex<HashMap<String, oneshot::Sender<String>>>,
 }
 
