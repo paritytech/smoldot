@@ -774,6 +774,8 @@ impl JsonRpcService {
                                         ),
                                         user_data,
                                     );
+                                } else {
+                                    break;
                                 }
                             }
                             future::Either::Right((Ok(unsub_request_id), _)) => {
@@ -1044,6 +1046,8 @@ impl JsonRpcService {
                                 ),
                                 user_data,
                             );
+                        } else {
+                            break;
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
@@ -1178,6 +1182,8 @@ impl JsonRpcService {
                                 ),
                                 user_data,
                             );
+                        } else {
+                            break;
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
@@ -1251,6 +1257,8 @@ impl JsonRpcService {
                                 ),
                                 user_data,
                             );
+                        } else {
+                            break;
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
@@ -1329,6 +1337,8 @@ impl JsonRpcService {
                                 ),
                                 user_data,
                             );
+                        } else {
+                            break;
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
@@ -1471,6 +1481,8 @@ impl JsonRpcService {
                                 ),
                                 user_data,
                             );
+                        } else {
+                            break;
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
