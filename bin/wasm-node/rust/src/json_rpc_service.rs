@@ -718,15 +718,15 @@ impl JsonRpcService {
                     futures::pin_mut!(spec_changes);
 
                     loop {
+                        if source_disconnected.load(atomic::Ordering::Relaxed) {
+                            break;
+                        }
+
                         // Wait for either a new storage update, or for the subscription to be canceled.
                         let next_change = spec_changes.next();
                         futures::pin_mut!(next_change);
                         match future::select(next_change, &mut unsubscribe_rx).await {
                             future::Either::Left((new_runtime, _)) => {
-                                if source_disconnected.load(atomic::Ordering::Relaxed) {
-                                    break;
-                                }
-
                                 let notification_body =
                                     if let Ok(runtime_spec) = new_runtime.unwrap() {
                                         let runtime_spec = runtime_spec.decode();
@@ -981,16 +981,16 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a status update block, or for the subscription to
                 // be canceled.
                 let next_update = transaction_updates.next();
                 futures::pin_mut!(next_update);
                 match future::select(next_update, &mut unsubscribe_rx).await {
                     future::Either::Left((Some(update), _)) => {
-                        if source_disconnected.load(atomic::Ordering::Relaxed) {
-                            break;
-                        }
-
                         let update = match update {
                             transactions_service::TransactionStatus::Broadcast(peers) => {
                                 methods::TransactionStatus::Broadcast(
@@ -1129,15 +1129,15 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((block, _)) => {
-                        if source_disconnected.load(atomic::Ordering::Relaxed) {
-                            break;
-                        }
-
                         let header = header_conv(header::decode(&block.unwrap()).unwrap());
                         client.send_back(
                             &smoldot::json_rpc::parse::build_subscription_event(
@@ -1193,15 +1193,15 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((block, _)) => {
-                        if source_disconnected.load(atomic::Ordering::Relaxed) {
-                            break;
-                        }
-
                         let header = header_conv(header::decode(&block.unwrap()).unwrap());
                         client.send_back(
                             &smoldot::json_rpc::parse::build_subscription_event(
@@ -1262,15 +1262,15 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new block, or for the subscription to be canceled.
                 let next_block = blocks_list.next();
                 futures::pin_mut!(next_block);
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((block, _)) => {
-                        if source_disconnected.load(atomic::Ordering::Relaxed) {
-                            break;
-                        }
-
                         let header = header_conv(header::decode(&block.unwrap()).unwrap());
                         client.send_back(
                             &smoldot::json_rpc::parse::build_subscription_event(
@@ -1397,15 +1397,15 @@ impl JsonRpcService {
             client.send_back(&confirmation, source_id);
 
             loop {
+                if source_disconnected.load(atomic::Ordering::Relaxed) {
+                    break;
+                }
+
                 // Wait for either a new storage update, or for the subscription to be canceled.
                 let next_block = storage_updates.next();
                 futures::pin_mut!(next_block);
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((changes, _)) => {
-                        if source_disconnected.load(atomic::Ordering::Relaxed) {
-                            break;
-                        }
-
                         client.send_back(
                             &smoldot::json_rpc::parse::build_subscription_event(
                                 "state_storage",
