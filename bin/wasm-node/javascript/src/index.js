@@ -67,6 +67,7 @@ export async function start(config) {
       // reported with the callback.
       if (initPromiseResolve) {
         initPromiseResolve();
+        // TODO: unsubscribe_all with `user_data` 0
         initPromiseReject = null;
         initPromiseResolve = null;
       } else if (config.json_rpc_callback) {
