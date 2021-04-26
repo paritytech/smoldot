@@ -398,7 +398,7 @@ impl JsonRpcService {
                     .lock()
                     .await
                     .get_mut(&source_id)
-                    .and_then(|subs| subs.transactions.remove(&subscription))
+                    .and_then(|subs| subs.transactions.remove(&subscription[..]))
                 {
                     // `cancel_tx` might have been closed if the channel from the transactions
                     // service has been closed too. This is not an error.
@@ -774,7 +774,7 @@ impl JsonRpcService {
                     .lock()
                     .await
                     .get_mut(&source_id)
-                    .and_then(|subs| subs.storage.remove(&subscription))
+                    .and_then(|subs| subs.storage.remove(&subscription[..]))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
