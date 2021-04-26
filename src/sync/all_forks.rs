@@ -160,7 +160,6 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TRq, TSrc> {
-    // TODO: TBl
     blocks: pending_blocks::PendingBlocks<PendingBlock, TRq, TSrc>,
 }
 
@@ -458,10 +457,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 Err(_) => continue,
             };
 
-            match self.header_from_source(
+            match self.block_from_source(
                 source_id,
                 &expected_next_hash,
                 decoded_header.clone(),
+                None,
                 received_block
                     .scale_encoded_justification
                     .as_ref()
@@ -543,10 +543,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         let announced_header_hash = announced_header.hash();
 
-        match self.header_from_source(
+        match self.block_from_source(
             source_id,
             &announced_header_hash,
             announced_header,
+            None,
             None,
             is_best,
         ) {
@@ -585,8 +586,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         }
     }
 
-    /// Called when a source reports a header, either through a block announce, an ancestry
-    /// search result, or a block header query.
+    /// Called when a source reports a header and an optional body, either through a block
+    /// announce, an ancestry search result, or a block request, and so on.
     ///
     /// `known_to_be_source_best` being `true` means that we are sure that this is the best block
     /// of the source. `false` means "it is not", but also "maybe", "unknown", and similar.
@@ -595,11 +596,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// Panics if `source_id` is invalid.
     ///
-    fn header_from_source(
+    fn block_from_source(
         &mut self,
         source_id: SourceId,
         header_hash: &[u8; 32],
         header: header::HeaderRef,
+        body: Option<Vec<Vec<u8>>>,
         justification: Option<&[u8]>,
         known_to_be_source_best: bool,
     ) -> HeaderFromSourceOutcome {
@@ -648,21 +650,35 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             self.inner.blocks.insert_unverified_block(
                 header.number,
                 *header_hash,
-                pending_blocks::UnverifiedBlockState::HeaderKnown {
-                    parent_hash: *header.parent_hash,
+                if body.is_some() {
+                    pending_blocks::UnverifiedBlockState::HeaderBodyKnown {
+                        parent_hash: *header.parent_hash,
+                    }
+                } else {
+                    pending_blocks::UnverifiedBlockState::HeaderKnown {
+                        parent_hash: *header.parent_hash,
+                    }
                 },
                 PendingBlock {
-                    body: None,
+                    body,
                     header: Some(header.clone().into()),
                     justification: justification.map(|j| j.to_vec()),
                 },
             );
         } else {
-            self.inner.blocks.set_block_header_known(
-                header.number,
-                header_hash,
-                *header.parent_hash,
-            );
+            if body.is_some() {
+                self.inner.blocks.set_block_header_body_known(
+                    header.number,
+                    header_hash,
+                    *header.parent_hash,
+                );
+            } else {
+                self.inner.blocks.set_block_header_known(
+                    header.number,
+                    header_hash,
+                    *header.parent_hash,
+                );
+            }
 
             let block_user_data = self
                 .inner
@@ -670,6 +686,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 .block_user_data_mut(header.number, header_hash);
             if block_user_data.header.is_none() {
                 block_user_data.header = Some(header.clone().into()); // TODO: copying bytes :-/
+            }
+            // TODO: what if body was already known, but differs from what is stored?
+            if block_user_data.body.is_none() {
+                if let Some(body) = body {
+                    block_user_data.body = Some(body);
+                }
             }
         }
 
