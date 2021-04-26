@@ -61,7 +61,7 @@ pub async fn request_handling_task(
                 ffi::JsonRpcMessage::Request {
                     json_rpc_request,
                     chain_index,
-                    source_id,
+                    user_data,
                 } => {
                     // Each incoming request gets its own separate task.
                     let json_rpc_services = json_rpc_services.clone();
@@ -92,7 +92,7 @@ pub async fn request_handling_task(
                                     target: "json-rpc",
                                     "Error in JSON-RPC method call: {}", error
                                 );
-                                send_back(&error.to_json_error(request_id), chain_index, source_id);
+                                send_back(&error.to_json_error(request_id), chain_index, user_data);
                                 return;
                             }
                             Err(error) => {
@@ -105,7 +105,7 @@ pub async fn request_handling_task(
                         };
 
                         match json_rpc_services.get(&chain_index).cloned() {
-                            Some(service) => service.handle_rpc(source_id, request_id, call).await,
+                            Some(service) => service.handle_rpc(user_data, request_id, call).await,
                             None => {
                                 send_back(
                                     &json_rpc::parse::build_error_response(
@@ -120,15 +120,15 @@ pub async fn request_handling_task(
                                         None,
                                     ),
                                     chain_index,
-                                    source_id
+                                    user_data
                                 );
                             }
                         }
                     }));
                 }
-                ffi::JsonRpcMessage::UnsubscribeAll { source_id } => {
+                ffi::JsonRpcMessage::UnsubscribeAll { user_data } => {
                     for service in json_rpc_services.values().cloned() {
-                        service.handle_unsubscribe_all(source_id).await;
+                        service.handle_unsubscribe_all(user_data).await;
                     }
                 }
             }
@@ -325,7 +325,7 @@ struct Blocks {
 ///
 /// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
 /// >           in order to print a log message.
-fn send_back(message: &str, chain_index: usize, source_id: u32) {
+fn send_back(message: &str, chain_index: usize, user_data: u32) {
     log::debug!(
         target: "json-rpc",
         "JSON-RPC <= {}{}",
@@ -333,13 +333,13 @@ fn send_back(message: &str, chain_index: usize, source_id: u32) {
         if message.len() > 100 { "…" } else { "" }
     );
 
-    ffi::emit_json_rpc_response(message, chain_index, source_id);
+    ffi::emit_json_rpc_response(message, chain_index, user_data);
 }
 
 impl JsonRpcService {
     /// Send back a response or a notification to the JSON-RPC client.
-    fn send_back(&self, message: &str, source_id: u32) {
-        send_back(message, self.chain_index, source_id)
+    fn send_back(&self, message: &str, user_data: u32) {
+        send_back(message, self.chain_index, user_data)
     }
 
     /// Analyzes the given JSON-RPC call and processes it.
@@ -348,7 +348,7 @@ impl JsonRpcService {
     /// spawns a background task for further processing.
     pub async fn handle_rpc<'a>(
         self: Arc<JsonRpcService>,
-        source_id: u32,
+        user_data: u32,
         request_id: &'a str,
         call: MethodCall<'a>,
     ) {
@@ -360,7 +360,7 @@ impl JsonRpcService {
                 self.send_back(
                     &methods::Response::author_pendingExtrinsics(Vec::new())
                         .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
@@ -385,11 +385,11 @@ impl JsonRpcService {
                         transaction_hash,
                     ))
                     .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
-                self.submit_and_watch_extrinsic(source_id, request_id, transaction)
+                self.submit_and_watch_extrinsic(user_data, request_id, transaction)
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
@@ -397,7 +397,7 @@ impl JsonRpcService {
                     .per_source_subscriptions
                     .lock()
                     .await
-                    .get_mut(&source_id)
+                    .get_mut(&user_data)
                     .and_then(|subs| subs.transactions.remove(&subscription[..]))
                 {
                     // `cancel_tx` might have been closed if the channel from the transactions
@@ -412,7 +412,7 @@ impl JsonRpcService {
                     self.send_back(
                         &methods::Response::author_unwatchExtrinsic(false)
                             .to_json_response(request_id),
-                        source_id,
+                        user_data,
                     );
                 } else {
                 }
@@ -458,11 +458,11 @@ impl JsonRpcService {
                     } else {
                         json_rpc::parse::build_success_response(request_id, "null")
                     },
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::chain_getBlockHash { height } => {
-                self.get_block_hash(source_id, request_id, height).await;
+                self.get_block_hash(user_data, request_id, height).await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
                 self.send_back(
@@ -470,7 +470,7 @@ impl JsonRpcService {
                         self.blocks.lock().await.finalized_block,
                     ))
                     .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::chain_getHeader { hash } => {
@@ -489,24 +489,24 @@ impl JsonRpcService {
                         // TODO: error or null?
                         Err(()) => json_rpc::parse::build_success_response(request_id, "null"),
                     },
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.subscribe_all_heads(source_id, request_id).await;
+                self.subscribe_all_heads(user_data, request_id).await;
             }
             methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.subscribe_new_heads(source_id, request_id).await;
+                self.subscribe_new_heads(user_data, request_id).await;
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(source_id, request_id).await;
+                self.subscribe_finalized_heads(user_data, request_id).await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .per_source_subscriptions
                     .lock()
                     .await
-                    .get_mut(&source_id)
+                    .get_mut(&user_data)
                     .and_then(|subs| subs.finalized_heads.remove(&subscription))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -518,7 +518,7 @@ impl JsonRpcService {
                     self.send_back(
                         &methods::Response::chain_unsubscribeFinalizedHeads(false)
                             .to_json_response(request_id),
-                        source_id,
+                        user_data,
                     );
                 } else {
                 }
@@ -533,7 +533,7 @@ impl JsonRpcService {
                         partial_fee: 15600000001,              // TODO: no
                     })
                     .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::rpc_methods {} => {
@@ -545,7 +545,7 @@ impl JsonRpcService {
                             .collect(),
                     })
                     .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::state_getKeysPaged {
@@ -591,7 +591,7 @@ impl JsonRpcService {
                             None,
                         ),
                     },
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
@@ -617,7 +617,7 @@ impl JsonRpcService {
                 self.send_back(
                     &methods::Response::state_queryStorageAt(vec![out])
                         .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::state_getMetadata {} => {
@@ -633,7 +633,7 @@ impl JsonRpcService {
                     ),
                 };
 
-                self.send_back(&response, source_id);
+                self.send_back(&response, user_data);
             }
             methods::MethodCall::state_getStorage { key, hash } => {
                 let hash = hash
@@ -656,7 +656,7 @@ impl JsonRpcService {
                             None,
                         ),
                     },
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
@@ -672,7 +672,7 @@ impl JsonRpcService {
                 self.per_source_subscriptions
                     .lock()
                     .await
-                    .entry(source_id)
+                    .entry(user_data)
                     .or_insert_with(PerSourceSubscriptions::default)
                     .runtime_specs
                     .insert(subscription.clone(), unsubscribe_tx);
@@ -680,7 +680,7 @@ impl JsonRpcService {
                 self.send_back(
                     &methods::Response::state_subscribeRuntimeVersion(&subscription)
                         .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
 
                 let notification = if let Ok(runtime_spec) = current_specs {
@@ -705,7 +705,7 @@ impl JsonRpcService {
                         &subscription,
                         &notification,
                     ),
-                    source_id,
+                    user_data,
                 );
 
                 let client = self.clone();
@@ -742,14 +742,14 @@ impl JsonRpcService {
                                 let per_source_subscriptions =
                                     client.per_source_subscriptions.lock().await;
 
-                                if per_source_subscriptions.contains_key(&source_id) {
+                                if per_source_subscriptions.contains_key(&user_data) {
                                     client.send_back(
                                         &smoldot::json_rpc::parse::build_subscription_event(
                                             "state_runtimeVersion",
                                             &subscription,
                                             &notification_body,
                                         ),
-                                        source_id,
+                                        user_data,
                                     );
                                 }
                             }
@@ -757,7 +757,7 @@ impl JsonRpcService {
                                 let response =
                                     methods::Response::state_unsubscribeRuntimeVersion(true)
                                         .to_json_response(&unsub_request_id);
-                                client.send_back(&response, source_id);
+                                client.send_back(&response, user_data);
                                 break;
                             }
                             future::Either::Right((Err(_), _)) => break,
@@ -766,14 +766,14 @@ impl JsonRpcService {
                 }));
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                self.subscribe_storage(source_id, request_id, list).await;
+                self.subscribe_storage(user_data, request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .per_source_subscriptions
                     .lock()
                     .await
-                    .get_mut(&source_id)
+                    .get_mut(&user_data)
                     .and_then(|subs| subs.storage.remove(&subscription[..]))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -785,7 +785,7 @@ impl JsonRpcService {
                     self.send_back(
                         &methods::Response::state_unsubscribeStorage(false)
                             .to_json_response(request_id),
-                        source_id,
+                        user_data,
                     );
                 }
             }
@@ -811,7 +811,7 @@ impl JsonRpcService {
                             None,
                         )
                     },
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_accountNextIndex { account } => {
@@ -838,21 +838,21 @@ impl JsonRpcService {
                             None,
                         ),
                     },
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_chain {} => {
                 self.send_back(
                     &methods::Response::system_chain(self.chain_spec.name())
                         .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_chainType {} => {
                 self.send_back(
                     &methods::Response::system_chainType(self.chain_spec.chain_type())
                         .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_health {} => {
@@ -864,14 +864,14 @@ impl JsonRpcService {
                         should_have_peers: self.chain_spec.has_live_network(),
                     })
                     .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_name {} => {
                 self.send_back(
                     &methods::Response::system_name(env!("CARGO_PKG_NAME"))
                         .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_peers {} => {
@@ -890,7 +890,7 @@ impl JsonRpcService {
                             .collect(),
                     )
                     .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_properties {} => {
@@ -899,14 +899,14 @@ impl JsonRpcService {
                         serde_json::from_str(self.chain_spec.properties()).unwrap(),
                     )
                     .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             methods::MethodCall::system_version {} => {
                 self.send_back(
                     &methods::Response::system_version(env!("CARGO_PKG_VERSION"))
                         .to_json_response(request_id),
-                    source_id,
+                    user_data,
                 );
             }
             _method => {
@@ -920,23 +920,23 @@ impl JsonRpcService {
                         ),
                         None,
                     ),
-                    source_id,
+                    user_data,
                 );
             }
         }
     }
 
-    async fn handle_unsubscribe_all(self: Arc<JsonRpcService>, source_id: u32) {
+    async fn handle_unsubscribe_all(self: Arc<JsonRpcService>, user_data: u32) {
         self.per_source_subscriptions
             .lock()
             .await
-            .remove(&source_id);
+            .remove(&user_data);
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
     async fn submit_and_watch_extrinsic(
         self: Arc<JsonRpcService>,
-        source_id: u32,
+        user_data: u32,
         request_id: &str,
         transaction: methods::HexString,
     ) {
@@ -954,7 +954,7 @@ impl JsonRpcService {
         self.per_source_subscriptions
             .lock()
             .await
-            .entry(source_id)
+            .entry(user_data)
             .or_insert_with(PerSourceSubscriptions::default)
             .transactions
             .insert(subscription.clone(), unsubscribe_tx);
@@ -966,7 +966,7 @@ impl JsonRpcService {
         let client = self.clone();
         (self.tasks_executor.lock().await)(Box::pin(async move {
             // Send back to the user the confirmation of the registration.
-            client.send_back(&confirmation, source_id);
+            client.send_back(&confirmation, user_data);
 
             loop {
                 // Wait for either a status update block, or for the subscription to
@@ -1000,21 +1000,21 @@ impl JsonRpcService {
 
                         let per_source_subscriptions = client.per_source_subscriptions.lock().await;
 
-                        if per_source_subscriptions.contains_key(&source_id) {
+                        if per_source_subscriptions.contains_key(&user_data) {
                             client.send_back(
                                 &smoldot::json_rpc::parse::build_subscription_event(
                                     "author_extrinsicUpdate",
                                     &subscription,
                                     &serde_json::to_string(&update).unwrap(),
                                 ),
-                                source_id,
+                                user_data,
                             );
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeNewHeads(true)
                             .to_json_response(&unsub_request_id);
-                        client.send_back(&response, source_id);
+                        client.send_back(&response, user_data);
                         break;
                     }
                     future::Either::Left((None, _)) => {
@@ -1034,7 +1034,7 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
     async fn get_block_hash(
         self: Arc<JsonRpcService>,
-        source_id: u32,
+        user_data: u32,
         request_id: &str,
         height: Option<u64>,
     ) {
@@ -1079,12 +1079,12 @@ impl JsonRpcService {
                     json_rpc::parse::build_success_response(request_id, "null")
                 }
             },
-            source_id,
+            user_data,
         );
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(self: Arc<JsonRpcService>, source_id: u32, request_id: &str) {
+    async fn subscribe_all_heads(self: Arc<JsonRpcService>, user_data: u32, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1094,7 +1094,7 @@ impl JsonRpcService {
         self.per_source_subscriptions
             .lock()
             .await
-            .entry(source_id)
+            .entry(user_data)
             .or_insert_with(PerSourceSubscriptions::default)
             .all_heads
             .insert(subscription.clone(), unsubscribe_tx);
@@ -1113,7 +1113,7 @@ impl JsonRpcService {
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
             // Send back to the user the confirmation of the registration.
-            client.send_back(&confirmation, source_id);
+            client.send_back(&confirmation, user_data);
 
             loop {
                 // Wait for either a new block, or for the subscription to be canceled.
@@ -1125,21 +1125,21 @@ impl JsonRpcService {
 
                         let per_source_subscriptions = client.per_source_subscriptions.lock().await;
 
-                        if per_source_subscriptions.contains_key(&source_id) {
+                        if per_source_subscriptions.contains_key(&user_data) {
                             client.send_back(
                                 &smoldot::json_rpc::parse::build_subscription_event(
                                     "chain_newHead",
                                     &subscription,
                                     &serde_json::to_string(&header).unwrap(),
                                 ),
-                                source_id,
+                                user_data,
                             );
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeAllHeads(true)
                             .to_json_response(&unsub_request_id);
-                        client.send_back(&response, source_id);
+                        client.send_back(&response, user_data);
                         break;
                     }
                     future::Either::Right((Err(_), _)) => break,
@@ -1149,7 +1149,7 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(self: Arc<JsonRpcService>, source_id: u32, request_id: &str) {
+    async fn subscribe_new_heads(self: Arc<JsonRpcService>, user_data: u32, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1159,7 +1159,7 @@ impl JsonRpcService {
         self.per_source_subscriptions
             .lock()
             .await
-            .entry(source_id)
+            .entry(user_data)
             .or_insert_with(PerSourceSubscriptions::default)
             .new_heads
             .insert(subscription.clone(), unsubscribe_tx);
@@ -1177,7 +1177,7 @@ impl JsonRpcService {
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
             // Send back to the user the confirmation of the registration.
-            client.send_back(&confirmation, source_id);
+            client.send_back(&confirmation, user_data);
 
             loop {
                 // Wait for either a new block, or for the subscription to be canceled.
@@ -1189,21 +1189,21 @@ impl JsonRpcService {
 
                         let per_source_subscriptions = client.per_source_subscriptions.lock().await;
 
-                        if per_source_subscriptions.contains_key(&source_id) {
+                        if per_source_subscriptions.contains_key(&user_data) {
                             client.send_back(
                                 &smoldot::json_rpc::parse::build_subscription_event(
                                     "chain_newHead",
                                     &subscription,
                                     &serde_json::to_string(&header).unwrap(),
                                 ),
-                                source_id,
+                                user_data,
                             );
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeNewHeads(true)
                             .to_json_response(&unsub_request_id);
-                        client.send_back(&response, source_id);
+                        client.send_back(&response, user_data);
                         break;
                     }
                     future::Either::Right((Err(_), _)) => break,
@@ -1215,7 +1215,7 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
     async fn subscribe_finalized_heads(
         self: Arc<JsonRpcService>,
-        source_id: u32,
+        user_data: u32,
         request_id: &str,
     ) {
         let subscription = self
@@ -1227,7 +1227,7 @@ impl JsonRpcService {
         self.per_source_subscriptions
             .lock()
             .await
-            .entry(source_id)
+            .entry(user_data)
             .or_insert_with(PerSourceSubscriptions::default)
             .finalized_heads
             .insert(subscription.clone(), unsubscribe_tx);
@@ -1246,7 +1246,7 @@ impl JsonRpcService {
         // Spawn a separate task for the subscription.
         (self.tasks_executor.lock().await)(Box::pin(async move {
             // Send back to the user the confirmation of the registration.
-            client.send_back(&confirmation, source_id);
+            client.send_back(&confirmation, user_data);
 
             loop {
                 // Wait for either a new block, or for the subscription to be canceled.
@@ -1258,21 +1258,21 @@ impl JsonRpcService {
 
                         let per_source_subscriptions = client.per_source_subscriptions.lock().await;
 
-                        if per_source_subscriptions.contains_key(&source_id) {
+                        if per_source_subscriptions.contains_key(&user_data) {
                             client.send_back(
                                 &smoldot::json_rpc::parse::build_subscription_event(
                                     "chain_finalizedHead",
                                     &subscription,
                                     &serde_json::to_string(&header).unwrap(),
                                 ),
-                                source_id,
+                                user_data,
                             );
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
                             .to_json_response(&unsub_request_id);
-                        client.send_back(&response, source_id);
+                        client.send_back(&response, user_data);
                         break;
                     }
                     future::Either::Right((Err(_), _)) => break,
@@ -1284,7 +1284,7 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
     async fn subscribe_storage(
         self: Arc<JsonRpcService>,
-        source_id: u32,
+        user_data: u32,
         request_id: &str,
         list: Vec<methods::HexString>,
     ) {
@@ -1297,7 +1297,7 @@ impl JsonRpcService {
         self.per_source_subscriptions
             .lock()
             .await
-            .entry(source_id)
+            .entry(user_data)
             .or_insert_with(PerSourceSubscriptions::default)
             .storage
             .insert(subscription.clone(), unsubscribe_tx);
@@ -1381,7 +1381,7 @@ impl JsonRpcService {
             futures::pin_mut!(storage_updates);
 
             // Send back to the user the confirmation of the registration.
-            client.send_back(&confirmation, source_id);
+            client.send_back(&confirmation, user_data);
 
             loop {
                 // Wait for either a new storage update, or for the subscription to be canceled.
@@ -1391,21 +1391,21 @@ impl JsonRpcService {
                     future::Either::Left((changes, _)) => {
                         let per_source_subscriptions = client.per_source_subscriptions.lock().await;
 
-                        if per_source_subscriptions.contains_key(&source_id) {
+                        if per_source_subscriptions.contains_key(&user_data) {
                             client.send_back(
                                 &smoldot::json_rpc::parse::build_subscription_event(
                                     "state_storage",
                                     &subscription,
                                     &serde_json::to_string(&changes).unwrap(),
                                 ),
-                                source_id,
+                                user_data,
                             );
                         }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::state_unsubscribeStorage(true)
                             .to_json_response(&unsub_request_id);
-                        client.send_back(&response, source_id);
+                        client.send_back(&response, user_data);
                         break;
                     }
                     future::Either::Right((Err(_), _)) => break,

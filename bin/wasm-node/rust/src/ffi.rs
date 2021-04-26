@@ -490,10 +490,10 @@ pub(crate) enum JsonRpcMessage {
     Request {
         json_rpc_request: Box<[u8]>,
         chain_index: usize,
-        source_id: u32,
+        user_data: u32,
     },
     UnsubscribeAll {
-        source_id: u32,
+        user_data: u32,
     },
 }
 
@@ -504,7 +504,7 @@ lazy_static::lazy_static! {
     };
 }
 
-fn json_rpc_send(ptr: u32, len: u32, chain_index: u32, source_id: u32) {
+fn json_rpc_send(ptr: u32, len: u32, chain_index: u32, user_data: u32) {
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
     let chain_index = usize::try_from(chain_index).unwrap();
@@ -514,15 +514,15 @@ fn json_rpc_send(ptr: u32, len: u32, chain_index: u32, source_id: u32) {
     let message = JsonRpcMessage::Request {
         json_rpc_request,
         chain_index,
-        source_id,
+        user_data,
     };
     JSON_RPC_CHANNEL.0.unbounded_send(message).unwrap();
 }
 
-fn json_rpc_unsubscribe_all(source_id: u32) {
+fn json_rpc_unsubscribe_all(user_data: u32) {
     JSON_RPC_CHANNEL
         .0
-        .unbounded_send(JsonRpcMessage::UnsubscribeAll { source_id })
+        .unbounded_send(JsonRpcMessage::UnsubscribeAll { user_data })
         .unwrap();
 }
 
@@ -535,13 +535,13 @@ pub(crate) async fn next_json_rpc() -> JsonRpcMessage {
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) fn emit_json_rpc_response(rpc: &str, chain_index: usize, source_id: u32) {
+pub(crate) fn emit_json_rpc_response(rpc: &str, chain_index: usize, user_data: u32) {
     unsafe {
         bindings::json_rpc_respond(
             u32::try_from(rpc.as_bytes().as_ptr() as usize).unwrap(),
             u32::try_from(rpc.as_bytes().len()).unwrap(),
             u32::try_from(chain_index).unwrap(),
-            source_id,
+            user_data,
         );
     }
 }
