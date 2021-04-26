@@ -28,6 +28,20 @@
 //! > **Note**: In the example above, it would store the request that asks for block 6 from the
 //! >           network.
 //!
+//! # Sources
+//!
+//! The [`PendingBlocks`] collection stores a list of sources of blocks.
+//!
+//! Sources can be added by calling [`PendingBlocks::add_source`] and removed by calling
+//! [`PendingBlocks::remove_source`].
+//!
+//! Each source has the following properties:
+//!
+//! - A [`SourceId`].
+//! - A best block.
+//! - A list of non-finalized blocks known by this source.
+//! - An opaque user data, of type `TSrc`.
+//!
 //! # Blocks
 //!
 //! The [`PendingBlocks`] collection stores a list of pending blocks.
@@ -36,26 +50,31 @@
 //! of blocks (such as a peer) and that it is not possible to verify them immediately (because
 //! their parent isn't known).
 //!
-//! Each block has zero, one, or more *requests* associated to it. When a request is associated
-//! to a block, it means that we expect the response of the request to contain needed information
-//! about the block in question.
+//! Blocks can be added by calling [`PendingBlocks::insert_unverified_block`] and remove by
+//! calling [`PendingBlocks::remove`].
 //!
-//! Blocks can only be removed in three different ways:
+//! Each block stored in this collection has the following properties associated to it:
 //!
-//! - Calling [`OccupiedBlockEntry::remove_verify_success`] marks a block as valid and removes
-//! it, as it is not pending anymore.
-//! - Calling [`OccupiedBlockEntry::remove_verify_failed`] marks a block and all its descendants
-//! as invalid. This may or may not remove the block itself and all its descendants.
-//! - Calling [`OccupiedBlockEntry::remove_uninteresting`] removes a block in order to reduce
-//! the memory usage of the data structure.
+//! - A height.
+//! - A hash.
+//! - An optional parent block hash.
+//! - Whether the block is known to be bad.
+//! - A opaque user data decided by the user of type `TBl`.
+//!
+//! This data structure is only able to link parent and children together if the heights are
+//! linearly increasing. For example, if block A is the parent of block B, then the height of
+//! block B must be equal to the height of block A plus one. Otherwise, this data structure will
+//! not be able to detect the parent-child relationship.
+//!
+//! If a block is marked as bad, all its children (i.e. other blocks in the collection whose
+//! parent hash is the bad block) are automatically marked as bad as well. This process is
+//! recursive, such that not only direct children but all descendants of a bad block are
+//! automatically marked as bad.
 //!
 //! # Requests
 //!
-//! In addition to a list of blocks, this data structure also stores a list of ongoing requests.
-//! Each block has zero, one, or more requests associated to it.
-//!
-//! Call [`PendingBlocks::desired_requests`] to obtain the list of requests that should be
-//! started.
+//! Call [`PendingBlocks::desired_requests`] or [`PendingBlocks::source_desired_requests`] to
+//! obtain the list of requests that should be started.
 //!
 //! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request.
 //! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished or been
