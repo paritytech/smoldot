@@ -739,14 +739,19 @@ impl JsonRpcService {
                                         "null".to_string()
                                     };
 
-                                client.send_back(
-                                    &smoldot::json_rpc::parse::build_subscription_event(
-                                        "state_runtimeVersion",
-                                        &subscription,
-                                        &notification_body,
-                                    ),
-                                    source_id,
-                                );
+                                let per_source_subscriptions =
+                                    client.per_source_subscriptions.lock().await;
+
+                                if per_source_subscriptions.contains_key(&source_id) {
+                                    client.send_back(
+                                        &smoldot::json_rpc::parse::build_subscription_event(
+                                            "state_runtimeVersion",
+                                            &subscription,
+                                            &notification_body,
+                                        ),
+                                        source_id,
+                                    );
+                                }
                             }
                             future::Either::Right((Ok(unsub_request_id), _)) => {
                                 let response =
@@ -993,14 +998,18 @@ impl JsonRpcService {
                             }
                         };
 
-                        client.send_back(
-                            &smoldot::json_rpc::parse::build_subscription_event(
-                                "author_extrinsicUpdate",
-                                &subscription,
-                                &serde_json::to_string(&update).unwrap(),
-                            ),
-                            source_id,
-                        );
+                        let per_source_subscriptions = client.per_source_subscriptions.lock().await;
+
+                        if per_source_subscriptions.contains_key(&source_id) {
+                            client.send_back(
+                                &smoldot::json_rpc::parse::build_subscription_event(
+                                    "author_extrinsicUpdate",
+                                    &subscription,
+                                    &serde_json::to_string(&update).unwrap(),
+                                ),
+                                source_id,
+                            );
+                        }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeNewHeads(true)
@@ -1113,14 +1122,19 @@ impl JsonRpcService {
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((block, _)) => {
                         let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                        client.send_back(
-                            &smoldot::json_rpc::parse::build_subscription_event(
-                                "chain_newHead",
-                                &subscription,
-                                &serde_json::to_string(&header).unwrap(),
-                            ),
-                            source_id,
-                        );
+
+                        let per_source_subscriptions = client.per_source_subscriptions.lock().await;
+
+                        if per_source_subscriptions.contains_key(&source_id) {
+                            client.send_back(
+                                &smoldot::json_rpc::parse::build_subscription_event(
+                                    "chain_newHead",
+                                    &subscription,
+                                    &serde_json::to_string(&header).unwrap(),
+                                ),
+                                source_id,
+                            );
+                        }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeAllHeads(true)
@@ -1172,14 +1186,19 @@ impl JsonRpcService {
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((block, _)) => {
                         let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                        client.send_back(
-                            &smoldot::json_rpc::parse::build_subscription_event(
-                                "chain_newHead",
-                                &subscription,
-                                &serde_json::to_string(&header).unwrap(),
-                            ),
-                            source_id,
-                        );
+
+                        let per_source_subscriptions = client.per_source_subscriptions.lock().await;
+
+                        if per_source_subscriptions.contains_key(&source_id) {
+                            client.send_back(
+                                &smoldot::json_rpc::parse::build_subscription_event(
+                                    "chain_newHead",
+                                    &subscription,
+                                    &serde_json::to_string(&header).unwrap(),
+                                ),
+                                source_id,
+                            );
+                        }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeNewHeads(true)
@@ -1236,14 +1255,19 @@ impl JsonRpcService {
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((block, _)) => {
                         let header = header_conv(header::decode(&block.unwrap()).unwrap());
-                        client.send_back(
-                            &smoldot::json_rpc::parse::build_subscription_event(
-                                "chain_finalizedHead",
-                                &subscription,
-                                &serde_json::to_string(&header).unwrap(),
-                            ),
-                            source_id,
-                        );
+
+                        let per_source_subscriptions = client.per_source_subscriptions.lock().await;
+
+                        if per_source_subscriptions.contains_key(&source_id) {
+                            client.send_back(
+                                &smoldot::json_rpc::parse::build_subscription_event(
+                                    "chain_finalizedHead",
+                                    &subscription,
+                                    &serde_json::to_string(&header).unwrap(),
+                                ),
+                                source_id,
+                            );
+                        }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
@@ -1365,14 +1389,18 @@ impl JsonRpcService {
                 futures::pin_mut!(next_block);
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((changes, _)) => {
-                        client.send_back(
-                            &smoldot::json_rpc::parse::build_subscription_event(
-                                "state_storage",
-                                &subscription,
-                                &serde_json::to_string(&changes).unwrap(),
-                            ),
-                            source_id,
-                        );
+                        let per_source_subscriptions = client.per_source_subscriptions.lock().await;
+
+                        if per_source_subscriptions.contains_key(&source_id) {
+                            client.send_back(
+                                &smoldot::json_rpc::parse::build_subscription_event(
+                                    "state_storage",
+                                    &subscription,
+                                    &serde_json::to_string(&changes).unwrap(),
+                                ),
+                                source_id,
+                            );
+                        }
                     }
                     future::Either::Right((Ok(unsub_request_id), _)) => {
                         let response = methods::Response::state_unsubscribeStorage(true)
