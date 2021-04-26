@@ -282,7 +282,7 @@ impl<TBl> DisjointBlocks<TBl> {
 
     /// Returns the list of blocks whose parent hash is known but the parent itself is absent from
     /// the list of disjoint blocks. These blocks can potentially be verified.
-    pub fn good_tree_roots(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
+    pub fn good_tree_roots(&'_ self) -> impl Iterator<Item = TreeRoot> + '_ {
         self.blocks
             .iter()
             .filter(|(_, block)| !block.bad)
@@ -294,7 +294,7 @@ impl<TBl> DisjointBlocks<TBl> {
                     return None;
                 }
 
-                Some(PendingVerificationBlock {
+                Some(TreeRoot {
                     block_hash: *hash,
                     block_number: *height,
                     parent_block_hash: *parent_hash,
@@ -355,12 +355,12 @@ impl<TBl: fmt::Debug> fmt::Debug for DisjointBlocks<TBl> {
     }
 }
 
-/// See [`DisjointBlocks::pending_verification_blocks`].
+/// See [`DisjointBlocks::good_tree_roots`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct PendingVerificationBlock {
-    /// Hash of the block that can potentially be verified.
+pub struct TreeRoot {
+    /// Hash of the block that is a tree root.
     pub block_hash: [u8; 32],
-    /// Height of the block that can potentially be verified.
+    /// Height of the block that is a tree root.
     pub block_number: u64,
     /// Hash of the parent of the block.
     pub parent_block_hash: [u8; 32],

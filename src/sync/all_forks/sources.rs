@@ -120,7 +120,7 @@ impl<TSrc> AllForksSources<TSrc> {
     /// Add a new source to the container.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`SourceMutAccess::user_data`].
+    /// retrieved using [`AllForksSources::user_data`].
     ///
     /// Returns the newly-created source entry.
     pub fn add_source(
@@ -294,7 +294,7 @@ impl<TSrc> AllForksSources<TSrc> {
         source.best_block_hash = hash;
     }
 
-    /// Returns the list of sources for which [`SourceMutAccess::knows_non_finalized_block`]
+    /// Returns the list of sources for which [`AllForksSources::knows_non_finalized_block`]
     /// would return `true`.
     ///
     /// # Panic
@@ -317,7 +317,7 @@ impl<TSrc> AllForksSources<TSrc> {
             .map(|(_, _, id)| *id)
     }
 
-    /// Returns true if [`SourceMutAccess::add_known_block`] or [`SourceMutAccess::set_best_block`]
+    /// Returns true if [`AllForksSources::add_known_block`] or [`AllForksSources::set_best_block`]
     /// has earlier been called on this source with this height and hash, or if the source was
     /// originally created (using [`AllForksSources::add_source`]) with this height and hash.
     ///

@@ -151,7 +151,7 @@ pub struct Config {
 pub struct AllForksSync<TBl, TRq, TSrc> {
     /// Data structure containing the non-finalized blocks.
     ///
-    /// If [`Inner::full`], this only contains blocks whose header *and* body have been verified.
+    /// If [`Config::full`], this only contains blocks whose header *and* body have been verified.
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 
     /// Extra fields. In a separate structure in order to be moved around.
@@ -785,7 +785,7 @@ pub struct RequestSuccessBlock<THdr, TJs> {
     pub scale_encoded_justification: Option<TJs>,
 }
 
-/// Outcome of calling [`AllForksSync::header_from_source`].
+/// Outcome of calling [`AllForksSync::block_from_source`].
 ///
 /// Not public.
 enum HeaderFromSourceOutcome {
@@ -865,7 +865,7 @@ pub enum AncestrySearchResponseOutcome {
 pub struct HeaderVerify<TBl, TRq, TSrc> {
     parent: AllForksSync<TBl, TRq, TSrc>,
     /// Block that can be verified.
-    block_to_verify: pending_blocks::PendingVerificationBlock,
+    block_to_verify: pending_blocks::TreeRoot,
 }
 
 impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {

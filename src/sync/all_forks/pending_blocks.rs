@@ -92,7 +92,7 @@ use core::{
     num::{NonZeroU32, NonZeroU64},
 };
 
-pub use disjoint::PendingVerificationBlock;
+pub use disjoint::TreeRoot;
 pub use sources::SourceId;
 
 /// Configuration for the [`PendingBlocks`].
@@ -187,7 +187,7 @@ pub struct PendingBlocks<TBl, TRq, TSrc> {
     /// The `request_id` is an index in [`PendingBlocks::requests`].
     ///
     /// > **Note**: This is a more optimized way compared to adding a `Vec<RequestId>` in the
-    /// >           [`Block`] struct.
+    /// >           [`UnverifiedBlock`] struct.
     blocks_requests: BTreeSet<(u64, [u8; 32], RequestId)>,
 
     /// Set of `(request_id, block_height, block_hash)`.
@@ -252,7 +252,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Add a new source to the container.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`source_user_data`].
+    /// retrieved using [`PendingBlocks::source_user_data`].
     ///
     /// Returns the newly-created source entry.
     pub fn add_source(
@@ -345,7 +345,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.set_best_block(source_id, height, hash);
     }
 
-    /// Returns true if [`SourceMutAccess::add_known_block`] or [`SourceMutAccess::set_best_block`]
+    /// Returns true if [`PendingBlocks::add_known_block`] or [`PendingBlocks::set_best_block`]
     /// has earlier been called on this source with this height and hash, or if the source was
     /// originally created (using [`PendingBlocks::add_source`]) with this height and hash.
     ///
@@ -580,7 +580,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// All the returned block are guaranteed to be in a "header known" state. If
     /// [`Config::verify_bodies`] if `true`, they they are also guaranteed to be in a "body known"
     /// state.
-    pub fn unverified_leaves(&'_ self) -> impl Iterator<Item = PendingVerificationBlock> + '_ {
+    pub fn unverified_leaves(&'_ self) -> impl Iterator<Item = TreeRoot> + '_ {
         self.blocks.good_tree_roots().filter(move |pending| {
             match self
                 .blocks
