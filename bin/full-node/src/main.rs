@@ -453,7 +453,9 @@ async fn open_database(
                 Some(base.data_dir().join(chain_spec.id()).join("database"))
             } else {
                 tracing::warn!(
-                    "Failed to fetch $HOME directory. Falling back to a temporary database."
+                    "Failed to fetch $HOME directory. Falling back to a temporary database. \
+                    If this is intended, please make this explicit by passing the `--tmp` flag \
+                    instead."
                 );
                 None
             }
