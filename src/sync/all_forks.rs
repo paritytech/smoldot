@@ -384,7 +384,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     }
 
     /// Returns a list of requests that are considered obsolete and can be removed using
-    /// [`AllForksSync::finish_request`].
+    /// [`AllForksSync::finish_ancestry_search`] or similar.
     ///
     /// A request becomes obsolete if the state of the request blocks changes in such a way that
     /// they don't need to be requested anymore. The response to the request will be useless.
@@ -395,15 +395,15 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.obsolete_requests()
     }
 
-    /// Call in response to a [`Request::AncestrySearch`].
+    /// Call in response to a response being finished.
     ///
     /// The headers are expected to be sorted in decreasing order. The first element of the
-    /// iterator should be the block with the hash passed through
-    /// [`Request::AncestrySearch::first_block_hash`]. Each subsequent element is then expected to
+    /// iterator should be the block with the hash that was referred by
+    /// [`RequestParams::first_block_hash`]. Each subsequent element is then expected to
     /// be the parent of the previous one.
     ///
     /// It is legal for the iterator to be shorter than the number of blocks that were requested
-    /// through [`Request::AncestrySearch::num_blocks`].
+    /// through [`RequestParams::num_blocks`].
     ///
     /// # Panic
     ///
@@ -831,7 +831,7 @@ pub enum BlockAnnounceOutcome {
     InvalidHeader(header::Error),
 }
 
-/// Outcome of calling [`AllForksSync::ancestry_search_response`].
+/// Outcome of calling [`AllForksSync::finish_ancestry_search`].
 pub enum AncestrySearchResponseOutcome {
     /// Ready to start verifying one or more headers returned in the ancestry search.
     // TODO: might not actually mean that ProcessOne isn't Idle; confusing
