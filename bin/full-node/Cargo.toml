@@ -14,7 +14,7 @@ name = "full-node"
 path = "src/main.rs"
 
 [dependencies]
-app_dirs = "1.2.1"
+app_dirs = "2.0.1"
 async-std = "1.9.0"
 atty = "0.2.14"
 ctrlc = "3.1.9"
