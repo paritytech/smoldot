@@ -185,7 +185,7 @@ async fn start_relay_chain(
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
     // TODO: implicit generics
-    let mut sync = all::Idle::<(), libp2p::PeerId, ()>::new(all::Config {
+    let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
         source_selection_randomness_seed: rand::random(),
@@ -384,7 +384,7 @@ async fn start_relay_chain(
             // loop again until the sync is in an idle state.
             loop {
                 match sync.process_one() {
-                    all::ProcessOne::Idle(idle) => {
+                    all::ProcessOne::AllSync(idle) => {
                         sync = idle;
                         break;
                     }
@@ -496,11 +496,7 @@ async fn start_relay_chain(
                 crate::yield_once().await;
             }
 
-            // `sync_idle` is now an `Idle` that has been extracted from `sync`.
-            // All the code paths below will need to put back `sync_idle` into `sync` before
-            // looping again.
-
-            // The sync state machine is idle, and all requests have been started.
+            // All requests have been started.
             // Now waiting for some event to happen: a network event, a request from the frontend
             // of the sync service, or a request being finished.
             let response_outcome = futures::select! {
