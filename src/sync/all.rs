@@ -163,7 +163,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match &self.inner {
             AllSyncInner::Optimistic(sync) => sync.finalized_block_header(),
             AllSyncInner::AllForks(sync) => sync.finalized_block_header(),
-            AllSyncInner::GrandpaWarpSync(sync) => sync.as_chain_information().finalized_block_header,
+            AllSyncInner::GrandpaWarpSync(sync) => {
+                sync.as_chain_information().finalized_block_header
+            }
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
