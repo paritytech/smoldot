@@ -925,7 +925,7 @@ pub enum BlockAnnounceOutcome {
     InvalidHeader(header::Error),
 }
 
-/// Outcome of calling [`AllSync::ProcessOne`].
+/// Outcome of calling [`AllSync::process_one`].
 pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No block ready to be processed.
     AllSync(AllSync<TRq, TSrc, TBl>),
