@@ -22,11 +22,11 @@ use core::iter;
 
 /// Accepts as parameter a container of blocks and indices within this container.
 ///
-/// `maybe_new_best_parent` is to be `None` if the parent is the finalized block that is the
-/// parent of all the leaves of the tree.
-///
 /// Returns true if `maybe_new_best` on top of `maybe_new_best_parent` is a better block compared
 /// to `old_best`.
+///
+/// `maybe_new_best_parent` is to be `None` if the parent is the finalized block that is the
+/// parent of all the leaves of the tree.
 pub(super) fn is_better_block<T>(
     blocks: &fork_tree::ForkTree<Block<T>>,
     old_best: fork_tree::NodeIndex,
