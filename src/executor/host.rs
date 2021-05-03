@@ -1457,7 +1457,7 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_logging_max_level_version_1 => {
-                    // TODO: always returns `0`, which means "Off"
+                    // TODO: always returns `0` at the moment (which means "Off"); make this configurable?
                     // see https://github.com/paritytech/substrate/blob/bb22414e9729fa6ffc3b3126c57d3a9f2b85a2ff/primitives/core/src/lib.rs#L341
                     self = ReadyToRun {
                         resume_value: Some(vm::WasmValue::I32(0)),
