@@ -401,8 +401,9 @@ async fn start_relay_chain(
                             } => {
                                 log::debug!(
                                     target: "sync-verify",
-                                    "Successfully verified header {}",
-                                    HashDisplay(&verified_hash)
+                                    "Successfully verified header {} (new best: {})",
+                                    HashDisplay(&verified_hash),
+                                    if is_new_best { "yes" } else { "no" }
                                 );
 
                                 requests_to_start.extend(next_actions);
