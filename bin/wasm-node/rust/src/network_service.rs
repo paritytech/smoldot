@@ -38,7 +38,7 @@
 
 use crate::ffi;
 
-use core::{num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{cmp, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     informant::HashDisplay,
@@ -355,6 +355,44 @@ impl NetworkService {
                                 is_important_peer,
                             )
                         }));
+                    }
+                }
+            }));
+        }
+
+        // Spawn tasks dedicated to the Kademlia discovery.
+        for chain_index in 0..num_chains {
+            (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+                // TODO: keeping a Weak here doesn't really work to shut down tasks
+                let network_service = Arc::downgrade(&network_service);
+                async move {
+                    let mut next_discovery = Duration::from_secs(5);
+
+                    loop {
+                        ffi::Delay::new(next_discovery).await;
+                        next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
+
+                        let network_service = match network_service.upgrade() {
+                            Some(ns) => ns,
+                            None => return,
+                        };
+
+                        match network_service
+                            .network
+                            .kademlia_discovery_round(ffi::Instant::now(), chain_index)
+                            .await
+                        {
+                            Ok(insert) => {
+                                for peer_id in insert.peer_ids() {
+                                    log::trace!(target: "connections", "Discovered {}", peer_id);
+                                }
+
+                                insert.insert(|_| ()).await;
+                            }
+                            Err(error) => {
+                                log::warn!(target: "connections", "Problem during discovery: {}", error);
+                            }
+                        }
                     }
                 }
             }));
