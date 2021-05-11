@@ -417,7 +417,23 @@ where
                             todo!()
                         }
                         Substream::PingIn(_) => {}
-                        _ => todo!("other substream kind"),
+                        Substream::NotificationsOutClosed => {}
+                        Substream::NotificationsOut { user_data, .. }
+                        | Substream::NotificationsOutHandshakeRecv { user_data, .. }
+                        | Substream::NotificationsOutNegotiating { user_data, .. } => {
+                            let wake_up_after = self.inner.next_timeout.clone();
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                write_close: false,
+                                wake_up_after,
+                                event: Some(Event::NotificationsOutReject {
+                                    id: SubstreamId(substream_id),
+                                    user_data,
+                                }),
+                            });
+                        }
                     }
                 }
 
@@ -681,6 +697,7 @@ where
                 user_data,
             });
 
+        substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
         substream.write(out_buffer);
 
         SubstreamId(substream.id())
@@ -1548,8 +1565,8 @@ pub struct Config {
     pub notifications_protocols: Vec<ConfigNotifications>,
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
-    /// Seed used for the randomness specific to this connection.
-    pub randomness_seed: (u64, u64, u64, u64),
+    /// Entropy used for the randomness specific to this connection.
+    pub randomness_seed: [u8; 32],
 }
 
 /// Configuration for a request-response protocol.
