@@ -319,6 +319,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         (user_data.user_data, pending_requests.into_iter())
     }
 
+    /// Returns the list of sources in this state machine.
+    pub fn sources(&'_ self) -> impl ExactSizeIterator<Item = SourceId> + '_ {
+        self.sources.keys()
+    }
+
     /// Registers a new block that the source is aware of.
     ///
     /// Has no effect if `height` is inferior or equal to the finalized block height.
@@ -345,40 +350,56 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.set_best_block(source_id, height, hash);
     }
 
+    /// Returns the current best block of the given source.
+    ///
+    /// This corresponds either the latest call to [`PendingBlocks::set_best_block`],
+    /// or to the parameter passed to [`PendingBlocks::add_source`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_best_block(&self, source_id: SourceId) -> (u64, &[u8; 32]) {
+        self.sources.best_block(source_id)
+    }
+
+    /// Returns the list of sources for which [`PendingBlocks::source_knows_non_finalized_block`]
+    /// would return `true`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `height` is inferior or equal to the finalized block height. Finalized blocks
+    /// are intentionally not tracked by this data structure, and panicking when asking for a
+    /// potentially-finalized block prevents potentially confusing or erroneous situations.
+    ///
+    pub fn knows_non_finalized_block<'a>(
+        &'a self,
+        height: u64,
+        hash: &[u8; 32],
+    ) -> impl Iterator<Item = SourceId> + 'a {
+        self.sources.knows_non_finalized_block(height, hash)
+    }
+
     /// Returns true if [`PendingBlocks::add_known_block`] or [`PendingBlocks::set_best_block`]
     /// has earlier been called on this source with this height and hash, or if the source was
     /// originally created (using [`PendingBlocks::add_source`]) with this height and hash.
-    ///
-    /// If the requested block is inferior or equal to the finalized block height, the check is
-    /// simply whether the best block reported by the source is superior or equal to the requested
-    /// block.
     ///
     /// # Panic
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn source_knows_block(
+    /// Panics if `height` is inferior or equal to the finalized block height. Finalized blocks
+    /// are intentionally not tracked by this data structure, and panicking when asking for a
+    /// potentially-finalized block prevents potentially confusing or erroneous situations.
+    ///
+    pub fn source_knows_non_finalized_block(
         &self,
         source_id: SourceId,
         height: u64,
         hash: &[u8; 32],
     ) -> bool {
         self.sources
-            .source_knows_block(source_id, height, hash)
-    }
-
-    /// Returns the list of sources for which [`AllForksSources::knows_block`]
-    /// would return `true`.
-    ///
-    /// If the requested block is inferior or equal to the finalized block height, the check is
-    /// simply whether the best block reported by the source is superior or equal to the requested
-    /// block.
-    pub fn knows_block<'a>(
-        &'a self,
-        height: u64,
-        hash: &[u8; 32],
-    ) -> impl Iterator<Item = SourceId> + 'a {
-        self.sources.knows_block(height, hash)
+            .source_knows_non_finalized_block(source_id, height, hash)
     }
 
     /// Returns the user data associated to the source. This is the value originally passed
@@ -838,7 +859,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 // Try to find all appropriate sources.
                 let possible_sources = if let Some(force_source) = force_source {
                     either::Left(iter::once(force_source).filter(move |id| {
-                        self.sources.source_knows_block(
+                        self.sources.source_knows_non_finalized_block(
                             *id,
                             unknown_block_height,
                             unknown_block_hash,
@@ -847,7 +868,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 } else {
                     either::Right(
                         self.sources
-                            .knows_block(unknown_block_height, unknown_block_hash),
+                            .knows_non_finalized_block(unknown_block_height, unknown_block_hash),
                     )
                 };
 
@@ -874,7 +895,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                             })
                     })
                     .map(move |source_id| {
-                        debug_assert!(self.sources.source_knows_block(
+                        debug_assert!(self.sources.source_knows_non_finalized_block(
                             source_id,
                             unknown_block_height,
                             unknown_block_hash

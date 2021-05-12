@@ -184,9 +184,14 @@ impl SyncService {
         rx.await.unwrap()
     }
 
-    /// Returns the list of peers from the [`network_service::NetworkService`] that are known to
+    /// Returns the list of peers from the [`network_service::NetworkService`] that are expected to
     /// be aware of the given block.
-    pub async fn peers_know_blocks(
+    ///
+    /// A peer is returned by this method either if it has directly sent a block announce in the
+    /// past, or if the requested block height is below the finalized block height and the best
+    /// block of the peer is above the requested block. In other words, it is assumed that all
+    /// peers are always on the same finalized chain as the local node.
+    pub async fn peers_assumed_know_blocks(
         &self,
         block_number: u64,
         block_hash: &[u8; 32],
@@ -196,7 +201,7 @@ impl SyncService {
         self.to_background
             .lock()
             .await
-            .send(ToBackground::PeersKnowBlock {
+            .send(ToBackground::PeersAssumedKnowBlock {
                 send_back,
                 block_number,
                 block_hash: *block_hash,
@@ -367,7 +372,7 @@ impl SyncService {
 
             // TODO: better peers selection ; don't just take the first 3
             for target in self
-                .peers_know_blocks(block_number, block_hash)
+                .peers_assumed_know_blocks(block_number, block_hash)
                 .await
                 .take(NUM_ATTEMPTS)
             {
@@ -432,7 +437,7 @@ impl SyncService {
 
         // TODO: better peers selection ; don't just take the first 3
         for target in self
-            .peers_know_blocks(block_number, &config.block_hash)
+            .peers_assumed_know_blocks(block_number, &config.block_hash)
             .await
             .take(NUM_ATTEMPTS)
         {
@@ -947,12 +952,25 @@ async fn start_relay_chain(
                             let current = sync.best_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
-                        ToBackground::PeersKnowBlock { send_back, block_number, block_hash } => {
-                            let _ = send_back.send(
-                                sync.knows_block(block_number, &block_hash)
+                        ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
+                            let finalized_num = sync.finalized_block_header().number;
+                            let outcome = if block_number <= finalized_num {
+                                sync.sources()
+                                    .filter(|source_id| {
+                                        let source_best = sync.source_best_block(*source_id);
+                                        source_best.0 > block_number ||
+                                            (source_best.0 == block_number && *source_best.1 == block_hash)
+                                    })
                                     .map(|id| sync.source_user_data(id).clone())
                                     .collect()
-                            );
+                            } else {
+                                // As documented, `knows_non_finalized_block` would panic if the
+                                // block height was below the one of the known finalized block.
+                                sync.knows_non_finalized_block(block_number, &block_hash)
+                                    .map(|id| sync.source_user_data(id).clone())
+                                    .collect()
+                            };
+                            let _ = send_back.send(outcome);
                         }
                     };
 
@@ -1102,7 +1120,7 @@ async fn start_parachain(
                         best_subscriptions.push(tx);
                         let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
                     }
-                    ToBackground::PeersKnowBlock { send_back, block_number, block_hash } => {
+                    ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
                         let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
                     }
                 }
@@ -1199,8 +1217,8 @@ enum ToBackground {
     SubscribeBest {
         send_back: oneshot::Sender<(Vec<u8>, lossy_channel::Receiver<Vec<u8>>)>,
     },
-    /// See [`SyncService::peers_know_blocks`].
-    PeersKnowBlock {
+    /// See [`SyncService::peers_assumed_know_blocks`].
+    PeersAssumedKnowBlock {
         send_back: oneshot::Sender<Vec<PeerId>>,
         block_number: u64,
         block_hash: [u8; 32],
