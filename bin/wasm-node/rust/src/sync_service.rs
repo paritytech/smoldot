@@ -186,7 +186,6 @@ impl SyncService {
 
     /// Returns the list of peers from the [`network_service::NetworkService`] that are known to
     /// be aware of the given block.
-    // TODO: remove block_number
     pub async fn peers_know_blocks(
         &self,
         block_number: u64,
@@ -351,6 +350,7 @@ impl SyncService {
 
     pub async fn storage_prefix_keys_query(
         self: Arc<Self>,
+        block_number: u64,
         block_hash: &[u8; 32],
         prefix: &[u8],
         storage_trie_root: &[u8; 32],
@@ -366,8 +366,11 @@ impl SyncService {
             let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
 
             // TODO: better peers selection ; don't just take the first 3
-            // TODO: must only ask the peers that know about this block
-            for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
+            for target in self
+                .peers_know_blocks(block_number, block_hash)
+                .await
+                .take(NUM_ATTEMPTS)
+            {
                 let result = self
                     .network_service
                     .clone()
@@ -417,6 +420,7 @@ impl SyncService {
     // TODO: documentation
     pub async fn call_proof_query<'a>(
         self: Arc<Self>,
+        block_number: u64,
         config: protocol::CallProofRequestConfig<
             'a,
             impl Iterator<Item = impl AsRef<[u8]>> + Clone,
@@ -427,8 +431,11 @@ impl SyncService {
         let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
 
         // TODO: better peers selection ; don't just take the first 3
-        // TODO: must only ask the peers that know about this block
-        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
+        for target in self
+            .peers_know_blocks(block_number, &config.block_hash)
+            .await
+            .take(NUM_ATTEMPTS)
+        {
             let result = self
                 .network_service
                 .clone()

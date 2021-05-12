@@ -573,13 +573,17 @@ impl JsonRpcService {
                 let mut lock = self.blocks.lock().await;
 
                 let block_hash = lock.best_block;
-                let state_root = lock.known_blocks.get(&block_hash).unwrap().state_root;
+                let (state_root, block_number) = {
+                    let block = lock.known_blocks.get(&block_hash).unwrap();
+                    (block.state_root, block.number)
+                };
                 drop(lock);
 
                 let outcome = self
                     .sync_service
                     .clone()
                     .storage_prefix_keys_query(
+                        block_number,
                         &block_hash,
                         &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
                         &state_root,
