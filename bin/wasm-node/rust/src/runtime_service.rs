@@ -261,10 +261,9 @@ impl RuntimeService {
             // If the call proof fail, do as if the proof was empty. This will enable the
             // fallback consisting in performing individual storage proof requests.
             let call_proof = self
-                .network_service
+                .sync_service
                 .clone()
                 .call_proof_query(
-                    self.network_chain_index,
                     protocol::CallProofRequestConfig {
                         block_hash: runtime_block_hash,
                         method,
@@ -604,10 +603,9 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 let new_best_block_decoded = header::decode(&new_best_block).unwrap();
                 let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
                 let code_query_result = runtime_service
-                    .network_service
+                    .sync_service
                     .clone()
                     .storage_query(
-                        runtime_service.network_chain_index,
                         &new_best_block_hash,
                         new_best_block_decoded.state_root,
                         iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
