@@ -459,6 +459,34 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`SourceId`] is invalid.
     ///
+    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
+        debug_assert!(self.shared.sources.contains(source_id.0));
+        match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
+            (AllSyncInner::Optimistic(sync), SourceMapping::Optimistic(src)) => {
+                &sync.source_user_data(*src).user_data
+            }
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
+                &sync.source_user_data(*src).user_data
+            }
+            (AllSyncInner::GrandpaWarpSync(sync), SourceMapping::GrandpaWarpSync(src)) => {
+                &sync.source_user_data(*src).user_data
+            }
+            (AllSyncInner::Poisoned, _) => unreachable!(),
+            (AllSyncInner::Optimistic(_), SourceMapping::AllForks(_))
+            | (AllSyncInner::Optimistic(_), SourceMapping::GrandpaWarpSync(_))
+            | (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_))
+            | (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_))
+            | (AllSyncInner::GrandpaWarpSync(_), SourceMapping::AllForks(_))
+            | (AllSyncInner::GrandpaWarpSync(_), SourceMapping::Optimistic(_)) => unreachable!(),
+        }
+    }
+
+    /// Returns the user data (`TSrc`) corresponding to the given source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
     pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         debug_assert!(self.shared.sources.contains(source_id.0));
         match (
@@ -481,6 +509,80 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             | (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_))
             | (AllSyncInner::GrandpaWarpSync(_), SourceMapping::AllForks(_))
             | (AllSyncInner::GrandpaWarpSync(_), SourceMapping::Optimistic(_)) => unreachable!(),
+        }
+    }
+
+    /// Returns true if the source has earlier announced the block passed as parameter or one of
+    /// its descendants.
+    ///
+    /// Also returns true if the requested block is inferior or equal to the known finalized block
+    /// and the source has announced a block higher or equal to the known finalized block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn source_knows_block(&self, source_id: SourceId, height: u64, hash: &[u8; 32]) -> bool {
+        debug_assert!(self.shared.sources.contains(source_id.0));
+        match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
+            (AllSyncInner::Optimistic(_), SourceMapping::Optimistic(_)) => {
+                todo!()
+            }
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
+                sync.source_knows_block(*src, height, hash)
+            }
+            (AllSyncInner::GrandpaWarpSync(sync), SourceMapping::GrandpaWarpSync(src)) => {
+                let finalized_num = sync.as_chain_information().finalized_block_header.number;
+                let user_data = sync.source_user_data(*src);
+                if height < finalized_num {
+                    user_data.best_block_number > height
+                } else {
+                    user_data.best_block_hash == *hash && user_data.best_block_number == height
+                }
+            }
+            (AllSyncInner::Poisoned, _) => unreachable!(),
+            (AllSyncInner::Optimistic(_), SourceMapping::AllForks(_))
+            | (AllSyncInner::Optimistic(_), SourceMapping::GrandpaWarpSync(_))
+            | (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_))
+            | (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_))
+            | (AllSyncInner::GrandpaWarpSync(_), SourceMapping::AllForks(_))
+            | (AllSyncInner::GrandpaWarpSync(_), SourceMapping::Optimistic(_)) => unreachable!(),
+        }
+    }
+
+    /// Returns the list of sources for which [`AllSync::source_knows_block`] would return `true`.
+    pub fn knows_block(
+        &'_ self,
+        height: u64,
+        hash: &[u8; 32],
+    ) -> impl Iterator<Item = SourceId> + '_ {
+        match &self.inner {
+            AllSyncInner::GrandpaWarpSync(sync) => {
+                let finalized_num = sync.as_chain_information().finalized_block_header.number;
+                let hash = *hash;
+                let iter = sync
+                    .sources()
+                    .filter(move |source_id| {
+                        let user_data = sync.source_user_data(*source_id);
+                        if height < finalized_num {
+                            user_data.best_block_number > height
+                        } else {
+                            user_data.best_block_hash == hash
+                                && user_data.best_block_number == height
+                        }
+                    })
+                    .map(move |id| sync.source_user_data(id).outer_source_id);
+
+                either::Left(iter)
+            }
+            AllSyncInner::Optimistic(_) => todo!(),
+            AllSyncInner::AllForks(sync) => {
+                let iter = sync
+                    .knows_block(height, hash)
+                    .map(move |id| sync.source_user_data(id).outer_source_id);
+                either::Right(iter)
+            }
+            AllSyncInner::Poisoned => unreachable!(),
         }
     }
 

@@ -413,6 +413,10 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         (src_user_data, drain)
     }
 
+    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
+        &self.inner.sources.get(&source_id).unwrap().user_data
+    }
+
     pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         &mut self.inner.sources.get_mut(&source_id).unwrap().user_data
     }

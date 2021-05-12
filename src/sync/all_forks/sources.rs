@@ -294,49 +294,60 @@ impl<TSrc> AllForksSources<TSrc> {
         source.best_block_hash = hash;
     }
 
-    /// Returns the list of sources for which [`AllForksSources::knows_non_finalized_block`]
+    /// Returns the list of sources for which [`AllForksSources::knows_block`]
     /// would return `true`.
     ///
-    /// # Panic
-    ///
-    /// Panics if `height` is inferior or equal to the finalized block height. Finalized blocks
-    /// are intentionally not tracked by this data structure, and panicking when asking for a
-    /// potentially-finalized block prevents potentially confusing or erroneous situations.
-    ///
-    pub fn knows_non_finalized_block<'a>(
+    /// If the requested block is inferior or equal to the finalized block height, the check is
+    /// simply whether the best block reported by the source is superior or equal to the requested
+    /// block.
+    pub fn knows_block<'a>(
         &'a self,
         height: u64,
         hash: &[u8; 32],
     ) -> impl Iterator<Item = SourceId> + 'a {
-        assert!(height > self.finalized_block_height);
-        self.known_blocks2
-            .range(
-                (height, *hash, SourceId(u64::min_value()))
-                    ..=(height, *hash, SourceId(u64::max_value())),
+        if height <= self.finalized_block_height {
+            let hash = *hash;
+            either::Left(
+                self.sources
+                    .iter()
+                    .filter(move |(_, s)| {
+                        s.best_block_number > height
+                            || (s.best_block_number == height && s.best_block_hash == hash)
+                    })
+                    .map(|(s, _)| *s),
             )
-            .map(|(_, _, id)| *id)
+        } else {
+            either::Right(
+                self.known_blocks2
+                    .range(
+                        (height, *hash, SourceId(u64::min_value()))
+                            ..=(height, *hash, SourceId(u64::max_value())),
+                    )
+                    .map(|(_, _, id)| *id),
+            )
+        }
     }
 
     /// Returns true if [`AllForksSources::add_known_block`] or [`AllForksSources::set_best_block`]
     /// has earlier been called on this source with this height and hash, or if the source was
     /// originally created (using [`AllForksSources::add_source`]) with this height and hash.
     ///
+    /// If the requested block is inferior or equal to the finalized block height, the check is
+    /// simply whether the best block reported by the source is superior or equal to the requested
+    /// block.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    /// Panics if `height` is inferior or equal to the finalized block height. Finalized blocks
-    /// are intentionally not tracked by this data structure, and panicking when asking for a
-    /// potentially-finalized block prevents potentially confusing or erroneous situations.
-    ///
-    pub fn source_knows_non_finalized_block(
-        &self,
-        source_id: SourceId,
-        height: u64,
-        hash: &[u8; 32],
-    ) -> bool {
-        assert!(height > self.finalized_block_height);
-        self.known_blocks1.contains(&(source_id, height, *hash))
+    pub fn source_knows_block(&self, source_id: SourceId, height: u64, hash: &[u8; 32]) -> bool {
+        if height <= self.finalized_block_height {
+            let source = self.sources.get(&source_id).unwrap();
+            source.best_block_number > height
+                || (source.best_block_number == height && source.best_block_hash == *hash)
+        } else {
+            self.known_blocks1.contains(&(source_id, height, *hash))
+        }
     }
 
     /// Returns `true` if the [`SourceId`] is present in the collection.
@@ -392,17 +403,17 @@ mod tests {
         assert!(!sources.is_empty());
         assert_eq!(sources.len(), 1);
         assert_eq!(sources.num_blocks(), 1);
-        assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
+        assert!(sources.source_knows_block(source1, 12, &[1; 32]));
 
         sources.set_best_block(source1, 13, [2; 32]);
         assert_eq!(sources.num_blocks(), 2);
-        assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
-        assert!(sources.source_knows_non_finalized_block(source1, 13, &[2; 32]));
+        assert!(sources.source_knows_block(source1, 12, &[1; 32]));
+        assert!(sources.source_knows_block(source1, 13, &[2; 32]));
 
         sources.remove_known_block(13, &[2; 32]);
         assert_eq!(sources.num_blocks(), 1);
-        assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
-        assert!(!sources.source_knows_non_finalized_block(source1, 13, &[2; 32]));
+        assert!(sources.source_knows_block(source1, 12, &[1; 32]));
+        assert!(!sources.source_knows_block(source1, 13, &[2; 32]));
 
         sources.set_finalized_block_height(12);
         assert_eq!(sources.num_blocks(), 0);

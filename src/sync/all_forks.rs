@@ -305,21 +305,27 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Returns true if the source has earlier announced the block passed as parameter or one of
     /// its descendants.
     ///
+    /// Also returns true if the requested block is inferior or equal to the known finalized block
+    /// and the source has announced a block higher or equal to the known finalized block.
+    ///
     /// # Panic
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    // TODO: document precisely what it means
-    // TODO: shouldn't take &mut self but just &self
-    pub fn source_knows_block(
-        &mut self,
-        source_id: SourceId,
-        height: u64,
-        hash: &[u8; 32],
-    ) -> bool {
+    pub fn source_knows_block(&self, source_id: SourceId, height: u64, hash: &[u8; 32]) -> bool {
         self.inner
             .blocks
-            .source_knows_non_finalized_block(source_id, height, hash) // TODO: doesn't match the outer API
+            .source_knows_block(source_id, height, hash)
+    }
+
+    /// Returns the list of sources for which [`AllForksSync::source_knows_block`] would return
+    /// `true`.
+    pub fn knows_block<'a>(
+        &'a self,
+        height: u64,
+        hash: &[u8; 32],
+    ) -> impl Iterator<Item = SourceId> + 'a {
+        self.inner.blocks.knows_block(height, hash)
     }
 
     /// Returns the user data associated to the source. This is the value originally passed

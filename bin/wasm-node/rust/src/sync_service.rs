@@ -38,7 +38,8 @@ use futures::{
 use smoldot::{
     chain, header,
     informant::HashDisplay,
-    libp2p, network,
+    libp2p::{self, PeerId},
+    network,
     sync::{all, para},
     trie::proof_verify,
 };
@@ -174,6 +175,29 @@ impl SyncService {
             .unwrap();
 
         rx.await.unwrap()
+    }
+
+    /// Returns the list of peers from the [`network_service::NetworkService`] that are known to
+    /// be aware of the given block.
+    pub async fn peers_know_blocks(
+        &self,
+        block_number: u64,
+        block_hash: &[u8; 32],
+    ) -> impl Iterator<Item = PeerId> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .lock()
+            .await
+            .send(ToBackground::PeersKnowBlock {
+                send_back,
+                block_number,
+                block_hash: *block_hash,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap().into_iter()
     }
 }
 
@@ -597,6 +621,13 @@ async fn start_relay_chain(
                             let current = sync.best_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
+                        ToBackground::PeersKnowBlock { send_back, block_number, block_hash } => {
+                            let _ = send_back.send(
+                                sync.knows_block(block_number, &block_hash)
+                                    .map(|id| sync.source_user_data(id).clone())
+                                    .collect()
+                            );
+                        }
                     };
 
                     continue;
@@ -745,6 +776,9 @@ async fn start_parachain(
                         best_subscriptions.push(tx);
                         let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
                     }
+                    ToBackground::PeersKnowBlock { send_back, block_number, block_hash } => {
+                        let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
+                    }
                 }
             },
 
@@ -838,5 +872,11 @@ enum ToBackground {
     /// See [`SyncService::subscribe_best`].
     SubscribeBest {
         send_back: oneshot::Sender<(Vec<u8>, lossy_channel::Receiver<Vec<u8>>)>,
+    },
+    /// See [`SyncService::peers_know_blocks`].
+    PeersKnowBlock {
+        send_back: oneshot::Sender<Vec<PeerId>>,
+        block_number: u64,
+        block_hash: [u8; 32],
     },
 }
