@@ -294,9 +294,10 @@ impl SyncService {
     /// it couldn't be determined. If `Ok`, the `Vec` is guaranteed to have the same number of
     /// elements as `requested_keys`.
     ///
-    /// This function is equivalent to calling [`NetworkService::storage_proof_request`] and
-    /// verifying the proof, potentially multiple times until it succeeds. The number of attempts
-    /// and the selection of peers is done through reasonable heuristics.
+    /// This function is equivalent to calling
+    /// [`network_service::NetworkService::storage_proof_request`] and verifying the proof,
+    /// potentially multiple times until it succeeds. The number of attempts and the selection of
+    /// peers is done through reasonable heuristics.
     pub async fn storage_query(
         self: Arc<Self>,
         block_hash: &[u8; 32],
@@ -461,7 +462,7 @@ impl SyncService {
     }
 }
 
-/// Error that can happen when calling [`NetworkService::storage_query`].
+/// Error that can happen when calling [`SyncService::storage_query`].
 #[derive(Debug)]
 pub struct StorageQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
@@ -510,7 +511,7 @@ pub enum StorageQueryErrorDetail {
     ProofVerification(proof_verify::Error),
 }
 
-/// Error that can happen when calling [`NetworkService::call_proof_query`].
+/// Error that can happen when calling [`SyncService::call_proof_query`].
 #[derive(Debug)]
 pub struct CallProofQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we

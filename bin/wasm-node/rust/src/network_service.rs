@@ -469,8 +469,6 @@ impl NetworkService {
     }
 
     /// Sends a storage proof request to the given peer.
-    ///
-    /// See also [`NetworkService::storage_query`].
     // TODO: more docs
     pub async fn storage_proof_request(
         self: Arc<Self>,
