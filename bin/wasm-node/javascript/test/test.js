@@ -31,7 +31,7 @@ const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
   // Test that invalid chain specs errors are properly caught.
   await client
     .start({
-      chainSpec: "invalid chain spec",
+      chainSpecs: ["invalid chain spec"],
     })
     .then(() => {
       console.error("Client loaded successfully despite invalid chain spec");
