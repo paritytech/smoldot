@@ -10,7 +10,6 @@ import smoldot, { Smoldot, SmoldotClient } from 'smoldot';
 let sp = smoldot.start({
   maxLogLevel: 3,
   chainSpecs: [''],
-  parachainSpec: '',
   jsonRpcCallback: (resp, chainIndex, userData) => { },
   logCallback: (level, target, message) => { },
 });
@@ -20,7 +19,6 @@ let sp = smoldot.start({
 // $ExpectType Promise<SmoldotClient>
 sp = smoldot.start({
   chainSpecs: [''],
-  parachainSpec: '',
   jsonRpcCallback: (resp) => { },
 });
 

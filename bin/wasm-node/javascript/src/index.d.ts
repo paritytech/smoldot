@@ -33,7 +33,6 @@ export interface SmoldotOptions {
   chainSpecs: Array<string>;
   jsonRpcCallback?: SmoldotJsonRpcCallback;
   logCallback?: SmoldotLogCallback;
-  parachainSpec?: string;
 }
 
 export interface Smoldot {
