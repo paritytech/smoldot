@@ -20,12 +20,12 @@ declare class SmoldotError extends Error {
 }
 
 export interface SmoldotClient {
-  sendJsonRpc(rpc: string, chainIndex?: number, userData?: number): void;
+  sendJsonRpc(rpc: string, chainIndex: number, userData?: number): void;
   cancelAll(userData: number): void;
   terminate(): void;
 }
 
-export type SmoldotJsonRpcCallback = (response: string, chainIndex?: number, userData?: number) => void;
+export type SmoldotJsonRpcCallback = (response: string, chainIndex: number, userData?: number) => void;
 export type SmoldotLogCallback = (level: number, target: string, message: string) => void;
 
 export interface SmoldotOptions {
