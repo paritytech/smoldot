@@ -8,27 +8,27 @@ import smoldot, { Smoldot, SmoldotClient } from 'smoldot';
 
 // $ExpectType Promise<SmoldotClient>
 let sp = smoldot.start({
-  max_log_level: 3,
-  chain_spec: '',
-  parachain_spec: '',
-  json_rpc_callback: (resp, chain_index, user_data) => { },
-  log_callback: (level, target, message) => { },
+  maxLogLevel: 3,
+  chainSpec: '',
+  parachainSpec: '',
+  jsonRpcCallback: (resp, chainIndex, userData) => { },
+  logCallback: (level, target, message) => { },
 });
 
 // Test when not supplying optional options and optional params
 
 // $ExpectType Promise<SmoldotClient>
 sp = smoldot.start({
-  chain_spec: '',
-  parachain_spec: '',
-  json_rpc_callback: (resp) => { },
+  chainSpec: '',
+  parachainSpec: '',
+  jsonRpcCallback: (resp) => { },
 });
 
 sp.then(sm => {
   // $ExpectType void
-  sm.send_json_rpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}', 0, 0);
+  sm.sendJsonRpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}', 0, 0);
   // $ExpectType void
-  sm.cancel_all(0);
+  sm.cancelAll(0);
   // $ExpectType void
   sm.terminate();
 });
