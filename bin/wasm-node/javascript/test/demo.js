@@ -29,7 +29,7 @@ let wsConnections = {};
 let nextWsConnectionId = 0xaaa;
 
 smoldot.start({
-    chainSpec: fs.readFileSync('../../westend.json', 'utf8'),
+    chainSpecs: [fs.readFileSync('../../westend.json', 'utf8')],
     maxLogLevel: 3,  // Can be increased for more verbosity
     jsonRpcCallback: (resp, chainIndex, connectionId) => {
         wsConnections[connectionId].sendUTF(resp);

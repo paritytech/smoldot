@@ -24,8 +24,8 @@ export class SmoldotError extends Error {
 }
 
 export async function start(config) {
-  if (Object.prototype.toString.call(config.chainSpec) !== '[object String]')
-    throw new SmoldotError('config must include a string chainSpec');
+  if (!Array.isArray(config.chainSpecs))
+    throw new SmoldotError('config must include a field `chainSpecs` of type Array');
 
   const logCallback = config.logCallback || ((level, target, message) => {
     if (level <= 1) {
@@ -114,8 +114,7 @@ export async function start(config) {
 
   // The first message expected by the worker contains the configuration.
   worker.postMessage({
-    chainSpec: config.chainSpec,
-    parachainSpec: config.parachainSpec,
+    chainSpecs: config.chainSpecs,
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: config.maxLogLevel || 5
@@ -126,6 +125,9 @@ export async function start(config) {
   // JSON-RPC request and wait for the response. While this might seem like an unnecessary
   // overhead, it is the most straight-forward solution. Any alternative with a lower overhead
   // would have a higher complexity.
+  //
+  // Note that using `0` for `chainIndex` means that an error will be returned if the list of
+  // chain specs is empty. This is fine.
   worker.postMessage({
     ty: 'request',
     request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',

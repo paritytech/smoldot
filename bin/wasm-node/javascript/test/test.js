@@ -25,7 +25,7 @@ process.exitCode = 1;
 // Note that the flow control below is a bit complicated and would need to be refactored if we
 // add more tests.
 
-const westendSpecs = fs.readFileSync('../../westend.json', 'utf8');
+const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
 
 (async () => {
   // Test that invalid chain specs errors are properly caught.
@@ -42,7 +42,7 @@ const westendSpecs = fs.readFileSync('../../westend.json', 'utf8');
   // Basic `system_name` test.
   client
     .start({
-      chainSpec: westendSpecs,
+      chainSpecs: [westendSpec],
       jsonRpcCallback: (resp, chainIndex, userData) => {
         if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-js"}') {
           // Test successful
