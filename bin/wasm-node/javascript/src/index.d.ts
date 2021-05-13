@@ -30,7 +30,7 @@ export type SmoldotLogCallback = (level: number, target: string, message: string
 
 export interface SmoldotOptions {
   maxLogLevel?: number;
-  chainSpec: string;
+  chainSpecs: Array<string>;
   jsonRpcCallback?: SmoldotJsonRpcCallback;
   logCallback?: SmoldotLogCallback;
   parachainSpec?: string;
