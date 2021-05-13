@@ -25,8 +25,7 @@ use core::{
     iter, marker,
     ops::{Add, Sub},
     pin::Pin,
-    ptr,
-    slice,
+    ptr, slice,
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -428,11 +427,7 @@ fn alloc(len: u32) -> u32 {
     u32::try_from(ptr as *mut u8 as usize).unwrap()
 }
 
-fn init(
-    chain_specs_pointers_ptr: u32,
-    chain_specs_pointers_len: u32,
-    max_log_level: u32,
-) {
+fn init(chain_specs_pointers_ptr: u32, chain_specs_pointers_len: u32, max_log_level: u32) {
     let chain_specs_pointers_ptr = usize::try_from(chain_specs_pointers_ptr).unwrap();
     let chain_specs_pointers_len = usize::try_from(chain_specs_pointers_len).unwrap();
 
@@ -448,21 +443,23 @@ fn init(
 
     for chain_spec_index in 0..(chain_specs.capacity()) {
         let spec_pointer = {
-            let val = <[u8; 4]>::try_from(&chain_specs_pointers[(chain_spec_index * 8)..(chain_spec_index * 8 + 4)]).unwrap();
+            let val = <[u8; 4]>::try_from(
+                &chain_specs_pointers[(chain_spec_index * 8)..(chain_spec_index * 8 + 4)],
+            )
+            .unwrap();
             usize::try_from(u32::from_le_bytes(val)).unwrap()
         };
 
         let spec_len = {
-            let val = <[u8; 4]>::try_from(&chain_specs_pointers[(chain_spec_index * 8 + 4)..(chain_spec_index * 8 + 8)]).unwrap();
+            let val = <[u8; 4]>::try_from(
+                &chain_specs_pointers[(chain_spec_index * 8 + 4)..(chain_spec_index * 8 + 8)],
+            )
+            .unwrap();
             usize::try_from(u32::from_le_bytes(val)).unwrap()
         };
 
-        let chain_spec: Box<[u8]> = unsafe {
-            Box::from_raw(slice::from_raw_parts_mut(
-                spec_pointer as *mut u8,
-                spec_len,
-            ))
-        };
+        let chain_spec: Box<[u8]> =
+            unsafe { Box::from_raw(slice::from_raw_parts_mut(spec_pointer as *mut u8, spec_len)) };
 
         let chain_spec = String::from_utf8(Vec::from(chain_spec)).expect("non-utf8 chain specs");
 
@@ -483,10 +480,7 @@ fn init(
         _ => log::LevelFilter::Trace,
     };
 
-    spawn_task(super::start_client(
-        chain_specs.into_iter(),
-        max_log_level,
-    ));
+    spawn_task(super::start_client(chain_specs.into_iter(), max_log_level));
 }
 
 pub(crate) enum JsonRpcMessage {
