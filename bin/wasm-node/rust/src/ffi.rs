@@ -461,7 +461,7 @@ fn init(chain_specs_pointers_ptr: u32, chain_specs_pointers_len: u32, max_log_le
         let chain_spec: Box<[u8]> =
             unsafe { Box::from_raw(slice::from_raw_parts_mut(spec_pointer as *mut u8, spec_len)) };
 
-        let chain_spec = String::from_utf8(Vec::from(chain_spec)).expect("non-utf8 chain specs");
+        let chain_spec = String::from_utf8(Vec::from(chain_spec)).expect("non-utf8 chain spec");
 
         chain_specs.push(super::ChainConfig {
             specification: chain_spec,
