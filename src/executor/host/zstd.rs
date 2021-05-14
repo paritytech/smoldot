@@ -17,6 +17,8 @@
 
 use alloc::{borrow::Cow, vec::Vec};
 
+mod tests;
+
 /// A runtime blob beginning with this prefix should first be decompressed with zstandard
 /// compression.
 ///
