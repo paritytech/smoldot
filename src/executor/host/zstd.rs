@@ -15,9 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::borrow::Cow;
-use core::convert::TryFrom as _;
-use std::io::Read as _;
+use alloc::{borrow::Cow, vec::Vec};
 
 /// A runtime blob beginning with this prefix should first be decompressed with zstandard
 /// compression.
@@ -48,20 +46,23 @@ pub(super) fn zstd_decode_if_necessary(
 ///
 /// The output data shall not be larger than `max_allowed`, to avoid potential zip bombs.
 fn zstd_decode(mut data: &[u8], max_allowed: usize) -> Result<Vec<u8>, Error> {
-    // Guess that the output is going to be around 3 times larger than the input.
-    let mut out_buf = Vec::with_capacity(data.len() * 3);
+    let mut decoder = ruzstd::frame_decoder::FrameDecoder::new();
+    decoder.init(&mut data).map_err(|_| Error::InvalidZstd)?;
 
-    ruzstd::streaming_decoder::StreamingDecoder::new(&mut data)
-        .map_err(|_| Error::InvalidZstd)?
-        .take(u64::try_from(max_allowed).unwrap().saturating_add(1))
-        .read_to_end(&mut out_buf)
-        .map_err(|_| Error::InvalidZstd)?;
-
-    if out_buf.len() <= max_allowed {
-        Ok(out_buf)
-    } else {
-        Err(Error::TooLarge)
+    match decoder.decode_blocks(
+        &mut data,
+        ruzstd::frame_decoder::BlockDecodingStrategy::UptoBytes(max_allowed),
+    ) {
+        Ok(true) => {}
+        Ok(false) => return Err(Error::TooLarge),
+        Err(_) => return Err(Error::InvalidZstd),
     }
+    debug_assert!(decoder.is_finished());
+
+    // When the decoding is finished, `Some` is always guaranteed to be returned.
+    let out_buf = decoder.collect().unwrap();
+    debug_assert!(out_buf.len() <= max_allowed);
+    Ok(out_buf)
 }
 
 /// Error possibly returned when decoding a zstd-compressed Wasm blob.
