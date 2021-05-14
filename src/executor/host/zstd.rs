@@ -32,7 +32,6 @@ pub(super) fn zstd_decode_if_necessary(
     data: &[u8],
     max_allowed: usize,
 ) -> Result<Cow<[u8]>, Error> {
-    println!("{:?}", &data[..9]);
     if data.starts_with(&ZSTD_PREFIX) {
         Ok(Cow::Owned(zstd_decode(
             &data[ZSTD_PREFIX.len()..],
