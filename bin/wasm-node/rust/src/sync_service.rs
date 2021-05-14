@@ -38,11 +38,12 @@ use futures::{
 use smoldot::{
     chain, header,
     informant::HashDisplay,
-    libp2p, network,
+    libp2p::{self, PeerId},
+    network::{self, protocol, service},
     sync::{all, para},
-    trie::proof_verify,
+    trie::{self, prefix_proof, proof_verify},
 };
-use std::{collections::HashMap, convert::TryFrom as _, num::NonZeroU32, pin::Pin, sync::Arc};
+use std::{collections::HashMap, convert::TryFrom as _, fmt, num::NonZeroU32, pin::Pin, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
@@ -93,6 +94,11 @@ pub struct BlocksRequestId(usize);
 pub struct SyncService {
     /// Sender of messages towards the background task.
     to_background: Mutex<mpsc::Sender<ToBackground>>,
+
+    /// See [`Config::network_service`].
+    network_service: Arc<network_service::NetworkService>,
+    /// See [`Config::network_service`].
+    network_chain_index: usize,
 }
 
 impl SyncService {
@@ -110,7 +116,7 @@ impl SyncService {
                 start_relay_chain(
                     config.chain_information,
                     from_foreground,
-                    config.network_service.0,
+                    config.network_service.0.clone(),
                     config.network_service.1,
                     config.network_events_receiver,
                 )
@@ -120,6 +126,8 @@ impl SyncService {
 
         SyncService {
             to_background: Mutex::new(to_background),
+            network_service: config.network_service.0,
+            network_chain_index: config.network_service.1,
         }
     }
 
@@ -174,6 +182,354 @@ impl SyncService {
             .unwrap();
 
         rx.await.unwrap()
+    }
+
+    /// Returns the list of peers from the [`network_service::NetworkService`] that are expected to
+    /// be aware of the given block.
+    ///
+    /// A peer is returned by this method either if it has directly sent a block announce in the
+    /// past, or if the requested block height is below the finalized block height and the best
+    /// block of the peer is above the requested block. In other words, it is assumed that all
+    /// peers are always on the same finalized chain as the local node.
+    pub async fn peers_assumed_know_blocks(
+        &self,
+        block_number: u64,
+        block_hash: &[u8; 32],
+    ) -> impl Iterator<Item = PeerId> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .lock()
+            .await
+            .send(ToBackground::PeersAssumedKnowBlock {
+                send_back,
+                block_number,
+                block_hash: *block_hash,
+            })
+            .await
+            .unwrap();
+
+        rx.await.unwrap().into_iter()
+    }
+
+    // TODO: doc; explain the guarantees
+    pub async fn block_query(
+        self: Arc<Self>,
+        hash: [u8; 32],
+        fields: protocol::BlocksRequestFields,
+    ) -> Result<protocol::BlockData, ()> {
+        // TODO: better error?
+        const NUM_ATTEMPTS: usize = 3;
+
+        let request_config = protocol::BlocksRequestConfig {
+            start: protocol::BlocksRequestConfigStart::Hash(hash),
+            desired_count: NonZeroU32::new(1).unwrap(),
+            direction: protocol::BlocksRequestDirection::Ascending,
+            fields: fields.clone(),
+        };
+
+        // TODO: better peers selection ; don't just take the first 3
+        // TODO: must only ask the peers that know about this block
+        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
+            let mut result = match self
+                .network_service
+                .clone()
+                .blocks_request(target, self.network_chain_index, request_config.clone())
+                .await
+            {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            if result.len() != 1 {
+                continue;
+            }
+
+            let result = result.remove(0);
+
+            if result.header.is_none() && fields.header {
+                continue;
+            }
+            if result
+                .header
+                .as_ref()
+                .map_or(false, |h| header::decode(h).is_err())
+            {
+                continue;
+            }
+            if result.body.is_none() && fields.body {
+                continue;
+            }
+            // Note: the presence of a justification isn't checked and can't be checked, as not
+            // all blocks have a justification in the first place.
+            if result.hash != hash {
+                continue;
+            }
+            if result.header.as_ref().map_or(false, |h| {
+                header::hash_from_scale_encoded_header(&h) != result.hash
+            }) {
+                continue;
+            }
+            match (&result.header, &result.body) {
+                (Some(_), Some(_)) => {
+                    // TODO: verify correctness of body
+                }
+                _ => {}
+            }
+
+            return Ok(result);
+        }
+
+        Err(())
+    }
+
+    /// Performs one or more storage proof requests in order to find the value of the given
+    /// `requested_keys`.
+    ///
+    /// Must be passed a block hash and the Merkle value of the root node of the storage trie of
+    /// this same block. The value of `storage_trie_root` corresponds to the value in the
+    /// [`smoldot::header::HeaderRef::state_root`] field.
+    ///
+    /// Returns the storage values of `requested_keys` in the storage of the block, or an error if
+    /// it couldn't be determined. If `Ok`, the `Vec` is guaranteed to have the same number of
+    /// elements as `requested_keys`.
+    ///
+    /// This function is equivalent to calling
+    /// [`network_service::NetworkService::storage_proof_request`] and verifying the proof,
+    /// potentially multiple times until it succeeds. The number of attempts and the selection of
+    /// peers is done through reasonable heuristics.
+    pub async fn storage_query(
+        self: Arc<Self>,
+        block_hash: &[u8; 32],
+        storage_trie_root: &[u8; 32],
+        requested_keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+    ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
+        const NUM_ATTEMPTS: usize = 3;
+
+        let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
+
+        // TODO: better peers selection ; don't just take the first 3
+        // TODO: must only ask the peers that know about this block
+        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
+            let result = self
+                .network_service
+                .clone()
+                .storage_proof_request(
+                    self.network_chain_index,
+                    target,
+                    protocol::StorageProofRequestConfig {
+                        block_hash: *block_hash,
+                        keys: requested_keys.clone(),
+                    },
+                )
+                .await
+                .map_err(StorageQueryErrorDetail::Network)
+                .and_then(|outcome| {
+                    let mut result = Vec::with_capacity(requested_keys.clone().count());
+                    for key in requested_keys.clone() {
+                        result.push(
+                            proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                proof: outcome.iter().map(|nv| &nv[..]),
+                                requested_key: key.as_ref(),
+                                trie_root_hash: &storage_trie_root,
+                            })
+                            .map_err(StorageQueryErrorDetail::ProofVerification)?
+                            .map(|v| v.to_owned()),
+                        );
+                    }
+                    debug_assert_eq!(result.len(), result.capacity());
+                    Ok(result)
+                });
+
+            match result {
+                Ok(values) => return Ok(values),
+                Err(err) => {
+                    outcome_errors.push(err);
+                }
+            }
+        }
+
+        Err(StorageQueryError {
+            errors: outcome_errors,
+        })
+    }
+
+    pub async fn storage_prefix_keys_query(
+        self: Arc<Self>,
+        block_number: u64,
+        block_hash: &[u8; 32],
+        prefix: &[u8],
+        storage_trie_root: &[u8; 32],
+    ) -> Result<Vec<Vec<u8>>, StorageQueryError> {
+        let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
+            prefix,
+            trie_root_hash: *storage_trie_root,
+        });
+
+        'main_scan: loop {
+            const NUM_ATTEMPTS: usize = 3;
+
+            let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
+
+            // TODO: better peers selection ; don't just take the first 3
+            for target in self
+                .peers_assumed_know_blocks(block_number, block_hash)
+                .await
+                .take(NUM_ATTEMPTS)
+            {
+                let result = self
+                    .network_service
+                    .clone()
+                    .storage_proof_request(
+                        self.network_chain_index,
+                        target,
+                        protocol::StorageProofRequestConfig {
+                            block_hash: *block_hash,
+                            keys: prefix_scan.requested_keys().map(|nibbles| {
+                                trie::nibbles_to_bytes_extend(nibbles).collect::<Vec<_>>()
+                            }),
+                        },
+                    )
+                    .await
+                    .map_err(StorageQueryErrorDetail::Network);
+
+                match result {
+                    Ok(proof) => {
+                        match prefix_scan.resume(proof.iter().map(|v| &v[..])) {
+                            Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
+                                // Continue next step of the proof.
+                                prefix_scan = scan;
+                                continue 'main_scan;
+                            }
+                            Ok(prefix_proof::ResumeOutcome::Success { keys }) => {
+                                return Ok(keys);
+                            }
+                            Err((scan, err)) => {
+                                prefix_scan = scan;
+                                outcome_errors
+                                    .push(StorageQueryErrorDetail::ProofVerification(err));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        outcome_errors.push(err);
+                    }
+                }
+            }
+
+            return Err(StorageQueryError {
+                errors: outcome_errors,
+            });
+        }
+    }
+
+    // TODO: documentation
+    pub async fn call_proof_query<'a>(
+        self: Arc<Self>,
+        block_number: u64,
+        config: protocol::CallProofRequestConfig<
+            'a,
+            impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        >,
+    ) -> Result<Vec<Vec<u8>>, CallProofQueryError> {
+        const NUM_ATTEMPTS: usize = 3;
+
+        let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
+
+        // TODO: better peers selection ; don't just take the first 3
+        for target in self
+            .peers_assumed_know_blocks(block_number, &config.block_hash)
+            .await
+            .take(NUM_ATTEMPTS)
+        {
+            let result = self
+                .network_service
+                .clone()
+                .call_proof_request(self.network_chain_index, target, config.clone())
+                .await;
+
+            match result {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    outcome_errors.push(err);
+                }
+            }
+        }
+
+        Err(CallProofQueryError {
+            errors: outcome_errors,
+        })
+    }
+}
+
+/// Error that can happen when calling [`SyncService::storage_query`].
+#[derive(Debug)]
+pub struct StorageQueryError {
+    /// Contains one error per peer that has been contacted. If this list is empty, then we
+    /// aren't connected to any node.
+    pub errors: Vec<StorageQueryErrorDetail>,
+}
+
+impl StorageQueryError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        self.errors.iter().all(|err| match err {
+            StorageQueryErrorDetail::Network(service::StorageProofRequestError::Request(_)) => true,
+            StorageQueryErrorDetail::Network(service::StorageProofRequestError::Decode(_)) => false,
+            // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
+            StorageQueryErrorDetail::ProofVerification(proof_verify::Error::TrieRootNotFound) => {
+                true
+            }
+            StorageQueryErrorDetail::ProofVerification(_) => false,
+        })
+    }
+}
+
+impl fmt::Display for StorageQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.errors.is_empty() {
+            write!(f, "No node available for storage query")
+        } else {
+            write!(f, "Storage query errors:")?;
+            for err in &self.errors {
+                write!(f, "\n- {}", err)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// See [`StorageQueryError`].
+#[derive(Debug, derive_more::Display)]
+pub enum StorageQueryErrorDetail {
+    /// Error during the network request.
+    #[display(fmt = "{}", _0)]
+    Network(service::StorageProofRequestError),
+    /// Error verifying the proof.
+    #[display(fmt = "{}", _0)]
+    ProofVerification(proof_verify::Error),
+}
+
+/// Error that can happen when calling [`SyncService::call_proof_query`].
+#[derive(Debug)]
+pub struct CallProofQueryError {
+    /// Contains one error per peer that has been contacted. If this list is empty, then we
+    /// aren't connected to any node.
+    pub errors: Vec<service::CallProofRequestError>,
+}
+
+impl fmt::Display for CallProofQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.errors.is_empty() {
+            write!(f, "No node available for call proof query")
+        } else {
+            write!(f, "Call proof query errors:")?;
+            for err in &self.errors {
+                write!(f, "\n- {}", err)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -248,137 +604,131 @@ async fn start_relay_chain(
             // still exist. This is only guaranteed to be case because we process
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
-            if let all::AllSync::Idle(ref mut sync_idle) = &mut sync {
-                for request in requests_to_start.drain(..) {
-                    match request {
-                        all::Action::Start {
-                            source_id,
-                            request_id,
-                            detail:
-                                all::RequestDetail::BlocksRequest {
-                                    first_block,
-                                    ascending,
-                                    num_blocks,
-                                    request_headers,
-                                    request_bodies,
-                                    request_justification,
+            for request in requests_to_start.drain(..) {
+                match request {
+                    all::Action::Start {
+                        source_id,
+                        request_id,
+                        detail:
+                            all::RequestDetail::BlocksRequest {
+                                first_block,
+                                ascending,
+                                num_blocks,
+                                request_headers,
+                                request_bodies,
+                                request_justification,
+                            },
+                    } => {
+                        let peer_id = sync.source_user_data_mut(source_id).clone();
+
+                        let block_request = network_service.clone().blocks_request(
+                            peer_id.clone(),
+                            network_chain_index,
+                            network::protocol::BlocksRequestConfig {
+                                start: match first_block {
+                                    all::BlocksRequestFirstBlock::Hash(h) => {
+                                        network::protocol::BlocksRequestConfigStart::Hash(h)
+                                    }
+                                    all::BlocksRequestFirstBlock::Number(n) => {
+                                        network::protocol::BlocksRequestConfigStart::Number(n)
+                                    }
                                 },
-                        } => {
-                            let peer_id = sync_idle.source_user_data_mut(source_id).clone();
-
-                            let block_request = network_service.clone().blocks_request(
-                                peer_id.clone(),
-                                network_chain_index,
-                                network::protocol::BlocksRequestConfig {
-                                    start: match first_block {
-                                        all::BlocksRequestFirstBlock::Hash(h) => {
-                                            network::protocol::BlocksRequestConfigStart::Hash(h)
-                                        }
-                                        all::BlocksRequestFirstBlock::Number(n) => {
-                                            network::protocol::BlocksRequestConfigStart::Number(n)
-                                        }
-                                    },
-                                    desired_count: NonZeroU32::new(
-                                        u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                                    )
-                                    .unwrap(),
-                                    direction: if ascending {
-                                        network::protocol::BlocksRequestDirection::Ascending
-                                    } else {
-                                        network::protocol::BlocksRequestDirection::Descending
-                                    },
-                                    fields: network::protocol::BlocksRequestFields {
-                                        header: request_headers,
-                                        body: request_bodies,
-                                        justification: request_justification,
-                                    },
-                                },
-                            );
-
-                            let (block_request, abort) = future::abortable(block_request);
-                            pending_requests.insert(request_id, abort);
-
-                            pending_block_requests
-                                .push(async move { (request_id, block_request.await) });
-                        }
-                        all::Action::Start {
-                            source_id,
-                            request_id,
-                            detail:
-                                all::RequestDetail::GrandpaWarpSync {
-                                    sync_start_block_hash,
-                                },
-                        } => {
-                            let peer_id = sync_idle.source_user_data_mut(source_id).clone();
-
-                            let grandpa_request =
-                                network_service.clone().grandpa_warp_sync_request(
-                                    peer_id.clone(),
-                                    network_chain_index,
-                                    sync_start_block_hash,
-                                );
-
-                            let (grandpa_request, abort) = future::abortable(grandpa_request);
-                            pending_requests.insert(request_id, abort);
-
-                            pending_grandpa_requests
-                                .push(async move { (request_id, grandpa_request.await) });
-                        }
-                        all::Action::Start {
-                            source_id,
-                            request_id,
-                            detail:
-                                all::RequestDetail::StorageGet {
-                                    block_hash,
-                                    state_trie_root,
-                                    keys,
-                                },
-                        } => {
-                            let peer_id = sync_idle.source_user_data_mut(source_id).clone();
-
-                            let storage_request = network_service.clone().storage_proof_request(
-                                network_chain_index,
-                                peer_id.clone(),
-                                network::protocol::StorageProofRequestConfig {
-                                    block_hash,
-                                    keys: keys.clone().into_iter(),
-                                },
-                            );
-
-                            let storage_request = async move {
-                                if let Ok(outcome) = storage_request.await {
-                                    // TODO: lots of copying around
-                                    // TODO: log what happens
-                                    keys.into_iter()
-                                        .map(|key| {
-                                            proof_verify::verify_proof(
-                                                proof_verify::VerifyProofConfig {
-                                                    proof: outcome.iter().map(|nv| &nv[..]),
-                                                    requested_key: key.as_ref(),
-                                                    trie_root_hash: &state_trie_root,
-                                                },
-                                            )
-                                            .map_err(|_err| {
-                                                panic!("{:?}", _err); // TODO: remove panic, it's just for debugging
-                                                ()
-                                            })
-                                            .map(|v| v.map(|v| v.to_vec()))
-                                        })
-                                        .collect::<Result<Vec<_>, ()>>()
+                                desired_count: NonZeroU32::new(
+                                    u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
+                                )
+                                .unwrap(),
+                                direction: if ascending {
+                                    network::protocol::BlocksRequestDirection::Ascending
                                 } else {
-                                    Err(())
-                                }
-                            };
+                                    network::protocol::BlocksRequestDirection::Descending
+                                },
+                                fields: network::protocol::BlocksRequestFields {
+                                    header: request_headers,
+                                    body: request_bodies,
+                                    justification: request_justification,
+                                },
+                            },
+                        );
 
-                            let (storage_request, abort) = future::abortable(storage_request);
-                            pending_requests.insert(request_id, abort);
+                        let (block_request, abort) = future::abortable(block_request);
+                        pending_requests.insert(request_id, abort);
 
-                            pending_storage_requests
-                                .push(async move { (request_id, storage_request.await) });
-                        }
-                        all::Action::Cancel(request_id) => {
-                            pending_requests.remove(&request_id).unwrap().abort();
-                        }
+                        pending_block_requests
+                            .push(async move { (request_id, block_request.await) });
+                    }
+                    all::Action::Start {
+                        source_id,
+                        request_id,
+                        detail:
+                            all::RequestDetail::GrandpaWarpSync {
+                                sync_start_block_hash,
+                            },
+                    } => {
+                        let peer_id = sync.source_user_data_mut(source_id).clone();
+
+                        let grandpa_request = network_service.clone().grandpa_warp_sync_request(
+                            peer_id.clone(),
+                            network_chain_index,
+                            sync_start_block_hash,
+                        );
+
+                        let (grandpa_request, abort) = future::abortable(grandpa_request);
+                        pending_requests.insert(request_id, abort);
+
+                        pending_grandpa_requests
+                            .push(async move { (request_id, grandpa_request.await) });
+                    }
+                    all::Action::Start {
+                        source_id,
+                        request_id,
+                        detail:
+                            all::RequestDetail::StorageGet {
+                                block_hash,
+                                state_trie_root,
+                                keys,
+                            },
+                    } => {
+                        let peer_id = sync.source_user_data_mut(source_id).clone();
+
+                        let storage_request = network_service.clone().storage_proof_request(
+                            network_chain_index,
+                            peer_id.clone(),
+                            network::protocol::StorageProofRequestConfig {
+                                block_hash,
+                                keys: keys.clone().into_iter(),
+                            },
+                        );
+
+                        let storage_request = async move {
+                            if let Ok(outcome) = storage_request.await {
+                                // TODO: lots of copying around
+                                // TODO: log what happens
+                                keys.into_iter()
+                                    .map(|key| {
+                                        proof_verify::verify_proof(
+                                            proof_verify::VerifyProofConfig {
+                                                proof: outcome.iter().map(|nv| &nv[..]),
+                                                requested_key: key.as_ref(),
+                                                trie_root_hash: &state_trie_root,
+                                            },
+                                        )
+                                        .map_err(|_| ())
+                                        .map(|v| v.map(|v| v.to_vec()))
+                                    })
+                                    .collect::<Result<Vec<_>, ()>>()
+                            } else {
+                                Err(())
+                            }
+                        };
+
+                        let (storage_request, abort) = future::abortable(storage_request);
+                        pending_requests.insert(request_id, abort);
+
+                        pending_storage_requests
+                            .push(async move { (request_id, storage_request.await) });
+                    }
+                    all::Action::Cancel(request_id) => {
+                        pending_requests.remove(&request_id).unwrap().abort();
                     }
                 }
             }
@@ -388,51 +738,82 @@ async fn start_relay_chain(
             // verifying storage proof.
             // If the state is one of the "verifying" states, perform the actual verification and
             // loop again until the sync is in an idle state.
-            let mut sync_idle: all::Idle<_, _, _> = match sync {
-                all::AllSync::Idle(idle) => idle,
-                all::AllSync::HeaderVerify(verify) => match verify.perform(ffi::unix_time(), ()) {
-                    all::HeaderVerifyOutcome::Success {
-                        sync: sync_idle,
-                        next_actions,
-                        is_new_best,
-                        is_new_finalized,
-                        ..
-                    } => {
+            loop {
+                match sync.process_one() {
+                    all::ProcessOne::AllSync(idle) => {
+                        sync = idle;
+                        break;
+                    }
+                    all::ProcessOne::VerifyWarpSyncFragment(verify) => {
+                        let (sync_out, next_actions, result) = verify.perform();
+                        sync = sync_out;
                         requests_to_start.extend(next_actions);
 
-                        if is_new_best {
-                            has_new_best = true;
+                        if let Err(err) = result {
+                            // TODO: indicate peer who sent it?
+                            log::warn!(
+                                target: "sync-verify",
+                                "Failed to verify warp sync fragment: {}", err
+                            );
                         }
-                        if is_new_finalized {
-                            has_new_finalized = true;
-                        }
+                    }
+                    all::ProcessOne::VerifyHeader(verify) => {
+                        let verified_hash = verify.hash();
 
-                        sync = sync_idle.into();
-                        continue;
+                        match verify.perform(ffi::unix_time(), ()) {
+                            all::HeaderVerifyOutcome::Success {
+                                sync: sync_out,
+                                next_actions,
+                                is_new_best,
+                                is_new_finalized,
+                                ..
+                            } => {
+                                log::debug!(
+                                    target: "sync-verify",
+                                    "Successfully verified header {} (new best: {})",
+                                    HashDisplay(&verified_hash),
+                                    if is_new_best { "yes" } else { "no" }
+                                );
+
+                                requests_to_start.extend(next_actions);
+
+                                if is_new_best {
+                                    has_new_best = true;
+                                }
+                                if is_new_finalized {
+                                    has_new_finalized = true;
+                                }
+
+                                sync = sync_out;
+                                continue;
+                            }
+                            all::HeaderVerifyOutcome::Error {
+                                sync: sync_out,
+                                next_actions,
+                                error,
+                                ..
+                            } => {
+                                log::warn!(
+                                    target: "sync-verify",
+                                    "Error while verifying header {}: {}",
+                                    HashDisplay(&verified_hash),
+                                    error
+                                );
+
+                                requests_to_start.extend(next_actions);
+                                sync = sync_out;
+                                continue;
+                            }
+                        }
                     }
-                    all::HeaderVerifyOutcome::Error {
-                        sync: sync_idle,
-                        next_actions,
-                        error,
-                        ..
-                    } => {
-                        log::warn!(
-                            target: "sync-verify",
-                            "Error while verifying header: {}",
-                            error
-                        );
-                        requests_to_start.extend(next_actions);
-                        sync = sync_idle.into();
-                        continue;
-                    }
-                },
-            };
+                }
+            }
 
             // TODO: handle this differently
             if has_new_best {
                 has_new_best = false;
 
-                let scale_encoded_header = sync_idle.best_block_header().scale_encoding_vec();
+                let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
                 // TODO: remove expired senders
                 for notif in &mut best_notifications {
                     let _ = notif.send(scale_encoded_header.clone());
@@ -459,7 +840,7 @@ async fn start_relay_chain(
                     if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
                         after_finalized_block_authorities_set_id,
                         ..
-                    } = sync_idle.as_chain_information().finality
+                    } = sync.as_chain_information().finality
                     {
                         Some(after_finalized_block_authorities_set_id)
                     } else {
@@ -467,7 +848,7 @@ async fn start_relay_chain(
                     };
                 if let Some(set_id) = grandpa_set_id {
                     let commit_finalized_height =
-                        u32::try_from(sync_idle.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
+                        u32::try_from(sync.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
                     network_service
                         .set_local_grandpa_state(
                             network_chain_index,
@@ -480,7 +861,7 @@ async fn start_relay_chain(
                         .await;
                 }
 
-                let scale_encoded_header = sync_idle.finalized_block_header().scale_encoding_vec();
+                let scale_encoded_header = sync.finalized_block_header().scale_encoding_vec();
                 // TODO: remove expired senders
                 for notif in &mut finalized_notifications {
                     let _ = notif.send(scale_encoded_header.clone());
@@ -495,14 +876,10 @@ async fn start_relay_chain(
                 crate::yield_once().await;
             }
 
-            // `sync_idle` is now an `Idle` that has been extracted from `sync`.
-            // All the code paths below will need to put back `sync_idle` into `sync` before
-            // looping again.
-
-            // The sync state machine is idle, and all requests have been started.
+            // All requests have been started.
             // Now waiting for some event to happen: a network event, a request from the frontend
             // of the sync service, or a request being finished.
-            futures::select! {
+            let response_outcome = futures::select! {
                 network_event = from_network_service.next() => {
                     // Something happened on the network.
 
@@ -519,46 +896,32 @@ async fn start_relay_chain(
                         network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
-                            let (id, requests) = sync_idle.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let (id, requests) = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
                             requests_to_start.extend(requests);
-                            sync = sync_idle.into();
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
                             if chain_index == network_chain_index =>
                         {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (rq_list, _) = sync_idle.remove_source(id);
-                            for (rq_id, _) in rq_list {
-                                pending_requests.remove(&rq_id).unwrap().abort();
-                            }
-                            sync = sync_idle.into();
+                            let (requests, _) = sync.remove_source(id);
+                            requests_to_start.extend(requests);
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
                             if chain_index == network_chain_index =>
                         {
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
-                            // TODO: stupid to re-encode
-                            match sync_idle.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify(verify) => {
-                                    sync = verify.into();
-                                },
-                                all::BlockAnnounceOutcome::TooOld(idle) => {
-                                    sync = idle.into();
-                                },
-                                all::BlockAnnounceOutcome::AlreadyInChain(idle) => {
-                                    sync = idle.into();
-                                },
-                                all::BlockAnnounceOutcome::NotFinalizedChain(idle) => {
-                                    sync = idle.into();
-                                },
-                                all::BlockAnnounceOutcome::Disjoint { sync: sync_idle, next_actions, .. } => {
+                            // TODO: stupid to re-encode header
+                            // TODO: log the outcome
+                            match sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                                all::BlockAnnounceOutcome::HeaderVerify => {},
+                                all::BlockAnnounceOutcome::TooOld => {},
+                                all::BlockAnnounceOutcome::AlreadyInChain => {},
+                                all::BlockAnnounceOutcome::NotFinalizedChain => {},
+                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
+                                all::BlockAnnounceOutcome::Disjoint { next_actions } => {
                                     requests_to_start.extend(next_actions);
-                                    sync = sync_idle.into();
-                                },
-                                all::BlockAnnounceOutcome::InvalidHeader { sync: sync_idle, .. } => {
-                                    sync = sync_idle.into();
                                 },
                             }
                         },
@@ -567,13 +930,13 @@ async fn start_relay_chain(
                         {
                             // TODO: verify the message and call `sync.set_finalized` or something
                             // TODO: has_new_finalized = true;
-                            sync = sync_idle.into();
                         },
                         _ => {
                             // Different chain index.
-                            sync = sync_idle.into();
                         }
                     }
+
+                    continue;
                 }
 
                 message = from_foreground.next() => {
@@ -589,23 +952,43 @@ async fn start_relay_chain(
 
                     match message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            let _ = send_back.send(sync_idle.is_near_head_of_chain_heuristic());
+                            let _ = send_back.send(sync.is_near_head_of_chain_heuristic());
                         }
                         ToBackground::SubscribeFinalized { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             finalized_notifications.push(tx);
-                            let current = sync_idle.finalized_block_header().scale_encoding_vec();
+                            let current = sync.finalized_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
                         }
                         ToBackground::SubscribeBest { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
                             best_notifications.push(tx);
-                            let current = sync_idle.best_block_header().scale_encoding_vec();
+                            let current = sync.best_block_header().scale_encoding_vec();
                             let _ = send_back.send((current, rx));
+                        }
+                        ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
+                            let finalized_num = sync.finalized_block_header().number;
+                            let outcome = if block_number <= finalized_num {
+                                sync.sources()
+                                    .filter(|source_id| {
+                                        let source_best = sync.source_best_block(*source_id);
+                                        source_best.0 > block_number ||
+                                            (source_best.0 == block_number && *source_best.1 == block_hash)
+                                    })
+                                    .map(|id| sync.source_user_data(id).clone())
+                                    .collect()
+                            } else {
+                                // As documented, `knows_non_finalized_block` would panic if the
+                                // block height was below the one of the known finalized block.
+                                sync.knows_non_finalized_block(block_number, &block_hash)
+                                    .map(|id| sync.source_user_data(id).clone())
+                                    .collect()
+                            };
+                            let _ = send_back.send(outcome);
                         }
                     };
 
-                    sync = sync_idle.into();
+                    continue;
                 },
 
                 (request_id, result) = pending_block_requests.select_next_some() => {
@@ -616,7 +999,7 @@ async fn start_relay_chain(
                     // machine.
                     if let Ok(result) = result {
                         // Inject the result of the request into the sync state machine.
-                        let outcome = sync_idle.blocks_request_response(
+                        sync.blocks_request_response(
                             request_id,
                             result.map_err(|_| ()).map(|v| {
                                 v.into_iter().filter_map(|block| {
@@ -627,35 +1010,13 @@ async fn start_relay_chain(
                                         user_data: (),
                                     })
                                 })
-                            }),
-                            ffi::unix_time(),
-                        );
+                            })
+                        )
 
-                        match outcome {
-                            all::BlocksRequestResponseOutcome::VerifyHeader(verify) => {
-                                sync = verify.into();
-                            },
-                            all::BlocksRequestResponseOutcome::Queued { sync: sync_idle, next_actions } => {
-                                requests_to_start.extend(next_actions);
-                                sync = sync_idle.into();
-                            },
-                            all::BlocksRequestResponseOutcome::NotFinalizedChain { sync: sync_idle, next_actions, .. } => {
-                                requests_to_start.extend(next_actions);
-                                sync = sync_idle.into();
-                            },
-                            all::BlocksRequestResponseOutcome::Inconclusive { sync: sync_idle, next_actions, .. } => {
-                                requests_to_start.extend(next_actions);
-                                sync = sync_idle.into();
-                            },
-                            all::BlocksRequestResponseOutcome::AllAlreadyInChain { sync: sync_idle, next_actions, .. } => {
-                                requests_to_start.extend(next_actions);
-                                sync = sync_idle.into();
-                            },
-                        }
                     } else {
                         // The sync state machine has emitted a `Action::Cancel` earlier, and is
                         // thus no longer interested in the response.
-                        sync = sync_idle.into();
+                        continue;
                     }
                 },
 
@@ -667,33 +1028,15 @@ async fn start_relay_chain(
                     // machine.
                     if let Ok(result) = result {
                         // Inject the result of the request into the sync state machine.
-                        let outcome = sync_idle.grandpa_warp_sync_response(
+                        sync.grandpa_warp_sync_response(
                             request_id,
                             result.ok(),
-                        );
-
-                        match outcome {
-                            all::GrandpaWarpSyncResponseOutcome::WarpSyncFinished {
-                                sync: sync_idle, next_actions
-                            } => {
-                                let finalized_num = sync_idle.finalized_block_header().number;
-                                log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
-                                has_new_finalized = true;
-                                sync = sync_idle.into();
-                                requests_to_start.extend(next_actions);
-                            }
-                            all::GrandpaWarpSyncResponseOutcome::Queued {
-                                sync: sync_idle, next_actions
-                            } => {
-                                sync = sync_idle.into();
-                                requests_to_start.extend(next_actions);
-                            }
-                        }
+                        )
 
                     } else {
                         // The sync state machine has emitted a `Action::Cancel` earlier, and is
                         // thus no longer interested in the response.
-                        sync = sync_idle.into();
+                        continue;
                     }
                 },
 
@@ -705,35 +1048,34 @@ async fn start_relay_chain(
                     // machine.
                     if let Ok(result) = result {
                         // Inject the result of the request into the sync state machine.
-                        let outcome = sync_idle.storage_get_response(
+                        sync.storage_get_response(
                             request_id,
                             result.map(|list| list.into_iter()),
-                        );
-
-                        match outcome {
-                            all::StorageGetResponseOutcome::WarpSyncFinished {
-                                sync: sync_idle, next_actions
-                            } => {
-                                let finalized_num = sync_idle.finalized_block_header().number;
-                                log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
-                                has_new_finalized = true;
-                                sync = sync_idle.into();
-                                requests_to_start.extend(next_actions);
-                            }
-                            all::StorageGetResponseOutcome::Queued {
-                                sync: sync_idle, next_actions
-                            } => {
-                                sync = sync_idle.into();
-                                requests_to_start.extend(next_actions);
-                            }
-                        }
+                        )
 
                     } else {
                         // The sync state machine has emitted a `Action::Cancel` earlier, and is
                         // thus no longer interested in the response.
-                        sync = sync_idle.into();
+                        continue;
                     }
                 },
+            };
+
+            // `response_outcome` represents the way the state machine has changed as a
+            // consequence of the response to a request.
+            match response_outcome {
+                all::ResponseOutcome::Queued { next_actions }
+                | all::ResponseOutcome::NotFinalizedChain { next_actions, .. }
+                | all::ResponseOutcome::AllAlreadyInChain { next_actions, .. } => {
+                    requests_to_start.extend(next_actions);
+                }
+                all::ResponseOutcome::WarpSyncFinished { next_actions } => {
+                    let finalized_num = sync.finalized_block_header().number;
+                    log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
+                    has_new_finalized = true;
+                    has_new_best = true;
+                    requests_to_start.extend(next_actions);
+                }
             }
         }
     }
@@ -791,6 +1133,9 @@ async fn start_parachain(
                         let (tx, rx) = lossy_channel::channel();
                         best_subscriptions.push(tx);
                         let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
+                    }
+                    ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
+                        let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
                     }
                 }
             },
@@ -885,5 +1230,11 @@ enum ToBackground {
     /// See [`SyncService::subscribe_best`].
     SubscribeBest {
         send_back: oneshot::Sender<(Vec<u8>, lossy_channel::Receiver<Vec<u8>>)>,
+    },
+    /// See [`SyncService::peers_assumed_know_blocks`].
+    PeersAssumedKnowBlock {
+        send_back: oneshot::Sender<Vec<PeerId>>,
+        block_number: u64,
+        block_hash: [u8; 32],
     },
 }

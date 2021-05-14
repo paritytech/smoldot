@@ -417,7 +417,23 @@ where
                             todo!()
                         }
                         Substream::PingIn(_) => {}
-                        _ => todo!("other substream kind"),
+                        Substream::NotificationsOutClosed => {}
+                        Substream::NotificationsOut { user_data, .. }
+                        | Substream::NotificationsOutHandshakeRecv { user_data, .. }
+                        | Substream::NotificationsOutNegotiating { user_data, .. } => {
+                            let wake_up_after = self.inner.next_timeout.clone();
+                            return Ok(ReadWrite {
+                                connection: self,
+                                read_bytes: total_read,
+                                written_bytes: total_written,
+                                write_close: false,
+                                wake_up_after,
+                                event: Some(Event::NotificationsOutReject {
+                                    id: SubstreamId(substream_id),
+                                    user_data,
+                                }),
+                            });
+                        }
                     }
                 }
 
@@ -681,6 +697,7 @@ where
                 user_data,
             });
 
+        substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
         substream.write(out_buffer);
 
         SubstreamId(substream.id())
@@ -938,43 +955,40 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                         data = &data[num_read..];
                         if protocol == self.ping_protocol {
                             *substream.user_data() = Substream::PingIn(Default::default());
-                        } else {
-                            if let Some(protocol_index) = self
-                                .request_protocols
-                                .iter()
-                                .position(|p| p.name == protocol)
+                        } else if let Some(protocol_index) = self
+                            .request_protocols
+                            .iter()
+                            .position(|p| p.name == protocol)
+                        {
+                            if let ConfigRequestResponseIn::Payload { max_size } =
+                                self.request_protocols[protocol_index].inbound_config
                             {
-                                if let ConfigRequestResponseIn::Payload { max_size } =
-                                    self.request_protocols[protocol_index].inbound_config
-                                {
-                                    *substream.user_data() = Substream::RequestInRecv {
-                                        protocol_index,
-                                        request: leb128::FramedInProgress::new(max_size),
-                                    };
-                                } else {
-                                    // TODO: make sure that data is empty?
-                                    *substream.user_data() = Substream::RequestInSend;
-                                    return Some(Event::RequestIn {
-                                        id: substream_id,
-                                        protocol_index,
-                                        request: Vec::new(),
-                                    });
-                                }
-                            } else if let Some(protocol_index) = self
-                                .notifications_protocols
-                                .iter()
-                                .position(|p| p.name == protocol)
-                            {
-                                *substream.user_data() = Substream::NotificationsInHandshake {
+                                *substream.user_data() = Substream::RequestInRecv {
                                     protocol_index,
-                                    handshake: leb128::FramedInProgress::new(
-                                        self.notifications_protocols[protocol_index]
-                                            .max_handshake_size,
-                                    ),
+                                    request: leb128::FramedInProgress::new(max_size),
                                 };
                             } else {
-                                unreachable!()
+                                // TODO: make sure that data is empty?
+                                *substream.user_data() = Substream::RequestInSend;
+                                return Some(Event::RequestIn {
+                                    id: substream_id,
+                                    protocol_index,
+                                    request: Vec::new(),
+                                });
                             }
+                        } else if let Some(protocol_index) = self
+                            .notifications_protocols
+                            .iter()
+                            .position(|p| p.name == protocol)
+                        {
+                            *substream.user_data() = Substream::NotificationsInHandshake {
+                                protocol_index,
+                                handshake: leb128::FramedInProgress::new(
+                                    self.notifications_protocols[protocol_index].max_handshake_size,
+                                ),
+                            };
+                        } else {
+                            unreachable!()
                         }
                     }
                     Ok((multistream_select::Negotiation::NotAvailable, num_read, out_buffer)) => {
@@ -1099,7 +1113,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                             *substream.user_data() = Substream::RequestOut {
                                 timeout,
                                 user_data,
-                                response: leb128::FramedInProgress::new(10 * 1024 * 1024), // TODO: proper max size
+                                response: leb128::FramedInProgress::new(128 * 1024 * 1024), // TODO: proper max size
                             };
                             let substream_id = substream.id();
                             let _already_closed = substream.close();
@@ -1551,8 +1565,8 @@ pub struct Config {
     pub notifications_protocols: Vec<ConfigNotifications>,
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
-    /// Seed used for the randomness specific to this connection.
-    pub randomness_seed: (u64, u64, u64, u64),
+    /// Entropy used for the randomness specific to this connection.
+    pub randomness_seed: [u8; 32],
 }
 
 /// Configuration for a request-response protocol.

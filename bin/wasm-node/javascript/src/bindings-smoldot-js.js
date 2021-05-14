@@ -34,15 +34,15 @@ export default (config) => {
         // Must throw an error. A human-readable message can be found in the WebAssembly memory in
         // the given buffer.
         throw: (ptr, len) => {
-            let message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            const message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
             throw new Error(message);
         },
 
         // Used by the Rust side to emit a JSON-RPC response or subscription notification.
-        json_rpc_respond: (ptr, len, chain_index) => {
+        json_rpc_respond: (ptr, len, chainIndex, userData) => {
             let message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
             if (config.jsonRpcCallback) {
-                config.jsonRpcCallback(message, chain_index);
+                config.jsonRpcCallback(message, chainIndex, userData);
             }
         },
 

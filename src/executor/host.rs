@@ -133,7 +133,7 @@
 //! ## Example
 //!
 //! ```
-//! use smoldot::executor::{host::{HostVm, HostVmPrototype}, vm::HeapPages};
+//! use smoldot::executor::host::{HeapPages, HostVm, HostVmPrototype};
 //!
 //! # let wasm_binary_code: &[u8] = return;
 //!
@@ -189,6 +189,7 @@ use parity_scale_codec::DecodeAll as _;
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
+pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
 mod zstd;
@@ -219,7 +220,7 @@ pub struct HostVmPrototype {
     registered_functions: Vec<HostFunction>,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
-    heap_pages: vm::HeapPages,
+    heap_pages: HeapPages,
 }
 
 impl HostVmPrototype {
@@ -229,7 +230,7 @@ impl HostVmPrototype {
     // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
     pub fn new(
         module: impl AsRef<[u8]>,
-        heap_pages: vm::HeapPages,
+        heap_pages: HeapPages,
         exec_hint: vm::ExecHint,
     ) -> Result<Self, NewErr> {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
@@ -239,7 +240,7 @@ impl HostVmPrototype {
         Self::from_module(module, heap_pages)
     }
 
-    fn from_module(module: vm::Module, heap_pages: vm::HeapPages) -> Result<Self, NewErr> {
+    fn from_module(module: vm::Module, heap_pages: HeapPages) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
         // when a function is invoked, the Wasm virtual machine will pass indices within that
@@ -283,7 +284,7 @@ impl HostVmPrototype {
     }
 
     /// Returns the number of heap pages that were passed to [`HostVmPrototype::new`].
-    pub fn heap_pages(&self) -> vm::HeapPages {
+    pub fn heap_pages(&self) -> HeapPages {
         self.heap_pages
     }
 
@@ -615,6 +616,7 @@ impl ReadyToRun {
                 HostFunction::ext_crypto_sr25519_sign_version_1 => todo!(),
                 HostFunction::ext_crypto_sr25519_verify_version_1 => 3,
                 HostFunction::ext_crypto_sr25519_verify_version_2 => 3,
+                HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
                 HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => 2,
                 HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => 2,
                 HostFunction::ext_crypto_start_batch_verify_version_1 => 0,
@@ -637,6 +639,7 @@ impl ReadyToRun {
                 HostFunction::ext_offchain_local_storage_set_version_1 => todo!(),
                 HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => todo!(),
                 HostFunction::ext_offchain_local_storage_get_version_1 => todo!(),
+                HostFunction::ext_offchain_local_storage_clear_version_1 => todo!(),
                 HostFunction::ext_offchain_http_request_start_version_1 => todo!(),
                 HostFunction::ext_offchain_http_request_add_header_version_1 => todo!(),
                 HostFunction::ext_offchain_http_request_write_body_version_1 => todo!(),
@@ -653,6 +656,7 @@ impl ReadyToRun {
                 HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
                 HostFunction::ext_trie_blake2_256_root_version_1 => 1,
                 HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
+                HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
                 HostFunction::ext_misc_chain_id_version_1 => 0,
                 HostFunction::ext_misc_print_num_version_1 => 1,
                 HostFunction::ext_misc_print_utf8_version_1 => 1,
@@ -661,6 +665,7 @@ impl ReadyToRun {
                 HostFunction::ext_allocator_malloc_version_1 => 1,
                 HostFunction::ext_allocator_free_version_1 => 1,
                 HostFunction::ext_logging_log_version_1 => 3,
+                HostFunction::ext_logging_max_level_version_1 => 0,
             };
             if params.len() != expected_params_num {
                 return HostVm::Error {
@@ -1024,6 +1029,7 @@ impl ReadyToRun {
                         inner: self.inner,
                     };
                 }
+                HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
                 HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
                     // TODO: clean up
                     #[derive(parity_scale_codec::Encode)]
@@ -1260,6 +1266,7 @@ impl ReadyToRun {
                 HostFunction::ext_offchain_local_storage_set_version_1 => todo!(),
                 HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => todo!(),
                 HostFunction::ext_offchain_local_storage_get_version_1 => todo!(),
+                HostFunction::ext_offchain_local_storage_clear_version_1 => todo!(),
                 HostFunction::ext_offchain_http_request_start_version_1 => todo!(),
                 HostFunction::ext_offchain_http_request_add_header_version_1 => todo!(),
                 HostFunction::ext_offchain_http_request_write_body_version_1 => todo!(),
@@ -1331,6 +1338,7 @@ impl ReadyToRun {
                         other => return other,
                     }
                 }
+                HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
                 HostFunction::ext_misc_chain_id_version_1 => {
                     // TODO: this parachain-related function always returns 42 at the moment
                     self = ReadyToRun {
@@ -1466,6 +1474,14 @@ impl ReadyToRun {
                         inner: self.inner,
                         log_entry,
                     });
+                }
+                HostFunction::ext_logging_max_level_version_1 => {
+                    // TODO: always returns `0` at the moment (which means "Off"); make this configurable?
+                    // see https://github.com/paritytech/substrate/blob/bb22414e9729fa6ffc3b3126c57d3a9f2b85a2ff/primitives/core/src/lib.rs#L341
+                    self = ReadyToRun {
+                        resume_value: Some(vm::WasmValue::I32(0)),
+                        inner: self.inner,
+                    };
                 }
             }
         }
@@ -2091,7 +2107,7 @@ struct Inner {
     heap_base: u32,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
-    heap_pages: vm::HeapPages,
+    heap_pages: HeapPages,
 
     /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
     /// No further transaction start is allowed before the current one ends.
@@ -2457,6 +2473,7 @@ externalities! {
     ext_crypto_sr25519_sign_version_1,
     ext_crypto_sr25519_verify_version_1,
     ext_crypto_sr25519_verify_version_2,
+    ext_crypto_ecdsa_generate_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_1,
     ext_crypto_secp256k1_ecdsa_recover_compressed_version_1,
     ext_crypto_start_batch_verify_version_1,
@@ -2479,6 +2496,7 @@ externalities! {
     ext_offchain_local_storage_set_version_1,
     ext_offchain_local_storage_compare_and_set_version_1,
     ext_offchain_local_storage_get_version_1,
+    ext_offchain_local_storage_clear_version_1,
     ext_offchain_http_request_start_version_1,
     ext_offchain_http_request_add_header_version_1,
     ext_offchain_http_request_write_body_version_1,
@@ -2495,6 +2513,7 @@ externalities! {
     ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
     ext_trie_blake2_256_ordered_root_version_1,
+    ext_trie_keccak_256_ordered_root_version_1,
     ext_misc_chain_id_version_1,
     ext_misc_print_num_version_1,
     ext_misc_print_utf8_version_1,
@@ -2503,6 +2522,7 @@ externalities! {
     ext_allocator_malloc_version_1,
     ext_allocator_free_version_1,
     ext_logging_log_version_1,
+    ext_logging_max_level_version_1,
 }
 
 // Glue between the `allocator` module and the `vm` module.
