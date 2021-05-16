@@ -396,6 +396,8 @@ async fn start_services(
                 }),
                 network_service: (network_service.clone(), 0),
                 sync_service: sync_service.clone(),
+                max_pending_transactions: 64,
+                max_concurrent_downloads: 3,
             })
             .await,
         );

@@ -27,9 +27,9 @@
 
 use crate::{network_service, sync_service};
 
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
-use smoldot::libp2p::peer_id::PeerId;
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
+use smoldot::{chain::fork_tree, header, libp2p::peer_id::PeerId, network::protocol};
+use std::{collections::BTreeMap, convert::TryFrom as _, iter, pin::Pin, sync::Arc};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
@@ -42,6 +42,17 @@ pub struct Config {
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
+
+    /// Maximum number of pending transactions allowed in the service.
+    ///
+    /// Any extra transaction will lead to [`TransactionStatus::Dropped`].
+    pub max_pending_transactions: u32,
+
+    /// Maximum number of block body downloads that can be performed in parallel.
+    ///
+    /// > **Note**: This is the maximum number of *blocks* whose body is being download, not the
+    /// >           number of block requests emitted on the network.
+    pub max_concurrent_downloads: u32,
 }
 
 /// See [the module-level documentation](..).
@@ -60,6 +71,8 @@ impl TransactionsService {
             config.network_service.1,
             config.sync_service,
             from_foreground,
+            usize::try_from(config.max_concurrent_downloads).unwrap_or(usize::max_value()),
+            usize::try_from(config.max_pending_transactions).unwrap_or(usize::max_value()),
         )));
 
         TransactionsService {
@@ -103,14 +116,15 @@ impl TransactionsService {
 pub enum TransactionStatus {
     /// Transaction has been broadcasted to the given peers.
     Broadcast(Vec<PeerId>),
-    /// Detected a best block that contains this transaction.
+    /// Detected a block that is part of the best chain and that contains this transaction.
+    // Contains the hash of the block that contains the transaction.
     InBlock([u8; 32]),
     /// Can be sent after [`TransactionStatus::InBlock`] to notify that a re-org happened and the
     /// current best tree of blocks no longer contains the transaction.
     ///
     /// Contains the same block as was previously passed in [`TransactionStatus::InBlock`].
     Retracted([u8; 32]),
-    /// Transaction has been dropped because the service was full.
+    /// Transaction has been dropped because the service was full or too slow.
     Dropped,
     /// Transaction has been included in a finalized block.
     Finalized([u8; 32]),
@@ -134,33 +148,362 @@ async fn background_task(
     network_chain_index: usize,
     sync_service: Arc<sync_service::SyncService>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
+    max_concurrent_downloads: usize,
+    max_pending_transactions: usize,
 ) {
-    let mut pending_transactions =
-        HashMap::<_, _, fnv::FnvBuildHasher>::with_capacity_and_hasher(16, Default::default());
+    // Note that the new blocks subscription must be aquired first, in order to guarantee
+    // that all best and finalized blocks updated have earlier been notified on the new blocks
+    // subscription.
+    // TODO: must subscribe to all new blocks, not just new bests; this isn't done so because subscribing to all new blocks isn't supported by the sync service yet
+    let (_, mut new_blocks_receiver) = sync_service.subscribe_best().await;
+    let (_, mut best_blocks_receiver) = sync_service.subscribe_best().await;
+    let (current_finalized_block_header, mut finalized_block_receiver) =
+        sync_service.subscribe_finalized().await;
+
+    let mut worker = Worker {
+        sync_service,
+        pending_transactions: BTreeMap::new(),
+        next_transaction_id: 0,
+        blocks_tree: fork_tree::ForkTree::with_capacity(32),
+        best_block_index: None,
+        latest_finalized_block: (
+            header::decode(&current_finalized_block_header)
+                .unwrap()
+                .number,
+            header::hash_from_scale_encoded_header(&current_finalized_block_header),
+        ),
+        finalized_downloading_blocks: Vec::new(),
+        block_downloads: FuturesUnordered::new(),
+        max_concurrent_downloads,
+        max_pending_transactions,
+    };
 
     // TODO: must periodically re-send transactions that aren't included in block yet
-    // TODO: must download the bodies of blocks as long as we have transactions in flight
 
     loop {
-        match from_foreground.next().await {
-            None => return,
-            Some(ToBackground::SubmitTransaction {
-                transaction_bytes,
-                mut updates_report,
-            }) => {
-                let peers_sent = network_service
-                    .clone()
-                    .announce_transaction(network_chain_index, &transaction_bytes)
-                    .await;
+        futures::select! {
+            new_block_header = new_blocks_receiver.next().fuse() => {
+                worker.new_block(new_block_header.unwrap());
+            },
 
-                if !peers_sent.is_empty() {
-                    let _ = updates_report
-                        .send(TransactionStatus::Broadcast(peers_sent))
-                        .await;
+            new_best_block_header = best_blocks_receiver.next().fuse() => {
+                // It is possible that a block has been pushed to both the new blocks channel
+                // and the finalized block channel at the same time, but the finalized block
+                // channel is notified first. In order to fulfill the guarantee that all finalized
+                // blocks must have earlier been reported as new blocks, we first empty the new
+                // blocks receiver.
+                while let Some(new_block_header) = new_blocks_receiver.next().now_or_never() {
+                    worker.new_block(new_block_header.unwrap());
                 }
 
-                pending_transactions.insert(transaction_bytes, updates_report);
+                worker.set_best_block(header::hash_from_scale_encoded_header(&new_best_block_header.unwrap())).await;
+            },
+
+            finalized_block_header = finalized_block_receiver.next().fuse() => {
+                // It is possible that a block has been pushed to both the new blocks channel
+                // and the finalized block channel at the same time, but the finalized block
+                // channel is notified first. In order to fulfill the guarantee that all finalized
+                // blocks must have earlier been reported as new blocks, we first empty the new
+                // blocks receiver.
+                while let Some(new_block_header) = new_blocks_receiver.next().now_or_never() {
+                    worker.new_block(new_block_header.unwrap());
+                }
+
+                // Same principle but for the best block update.
+                while let Some(new_best_header) = best_blocks_receiver.next().now_or_never() {
+                    worker.set_best_block(header::hash_from_scale_encoded_header(&new_best_header.unwrap())).await;
+                }
+
+                worker.new_finalized_block(finalized_block_header.unwrap()).await;
+            },
+
+            download = worker.block_downloads.select_next_some() => {
+                let (block_hash, block_body) = download;
+                worker.download_result(block_hash, block_body);
+            },
+
+            message = from_foreground.next().fuse() => {
+                let message = match message {
+                    Some(msg) => msg,
+                    None => return,
+                };
+
+                match message {
+                    ToBackground::SubmitTransaction {
+                        transaction_bytes,
+                        mut updates_report,
+                    } => {
+                        if worker.pending_transactions.len() >= worker.max_pending_transactions {
+                            let _ = updates_report
+                                .send(TransactionStatus::Dropped)
+                                .await;
+                            continue;
+                        }
+
+                        let peers_sent = network_service
+                            .clone()
+                            .announce_transaction(network_chain_index, &transaction_bytes)
+                            .await;
+
+                        if !peers_sent.is_empty() {
+                            let _ = updates_report
+                                .send(TransactionStatus::Broadcast(peers_sent))
+                                .await;
+                        }
+
+                        let transaction_id = worker.next_transaction_id;
+                        worker.next_transaction_id = worker.next_transaction_id.checked_add(1).unwrap();
+                        worker
+                            .pending_transactions
+                            .insert(transaction_id, (transaction_bytes, updates_report));
+                    }
+                }
             }
         }
+    }
+}
+
+/// Background worker running in parallel of the front service.
+struct Worker {
+    // How to download the bodies of blocks.
+    sync_service: Arc<sync_service::SyncService>,
+
+    /// All transactions that were submitted with [`TransactionsService::submit_extrinsic`] and
+    /// their channel to send back their status.
+    ///
+    /// Each transaction gets assigned a `u64` identifier that is used elsewhere to refer to this
+    /// transaction.
+    pending_transactions: BTreeMap<u64, (Vec<u8>, mpsc::Sender<TransactionStatus>)>,
+
+    /// See [`Config::max_pending_transactions`].
+    max_pending_transactions: usize,
+
+    /// Identifier to assign to the next emitted transaction.
+    next_transaction_id: u64,
+
+    /// The transactions service maintains, in parallel of the sync service, a tree of all the
+    /// non-finalized blocks. This is necessary in case of a re-org (i.e. the new best block is
+    /// a nephew of the previous best block) in order to know which transactions that were present
+    /// in the previous best chain are still present in the new best chain.
+    // TODO: add a maximum size?
+    blocks_tree: fork_tree::ForkTree<Block>,
+
+    /// Index of the best block in [`Worker::blocks_tree`].
+    /// `None` if the tree is empty or if the best block is also the latest finalized block.
+    best_block_index: Option<fork_tree::NodeIndex>,
+
+    /// Height and hash of the latest finalized block. Root of all the blocks in
+    /// [`Worker::blocks_tree`].
+    latest_finalized_block: (u64, [u8; 32]),
+
+    /// List of blocks that have been finalized but whose body is still downloading.
+    finalized_downloading_blocks: Vec<Block>,
+
+    /// List of ongoing block body downloads.
+    /// The output of the future is a block hash and a block body.
+    block_downloads:
+        FuturesUnordered<future::BoxFuture<'static, ([u8; 32], Result<Vec<Vec<u8>>, ()>)>>,
+
+    /// See [`Config::max_concurrent_downloads`]. Maximum number of elements in
+    /// [`Worker::block_downloads`].
+    max_concurrent_downloads: usize,
+}
+
+struct Block {
+    hash: [u8; 32],
+    download_status: DownloadStatus,
+}
+
+enum DownloadStatus {
+    /// Download hasn't been started yet.
+    NotStarted,
+    /// One of the futures in [`Worker::block_downloads`] is current downloading the body of this
+    /// block.
+    Downloading,
+    /// Failed to download block body.
+    /// This can legitimately happen if all the other nodes we are connected to have discarded
+    /// this block.
+    Failed,
+    /// Successfully downloaded block body. Contains the list of extrinsics that we have sent
+    /// out.
+    Success(Vec<u64>),
+}
+
+impl Worker {
+    /// Insert a new block in the worker when the sync service hears about it.
+    fn new_block(&mut self, new_block_header: Vec<u8>) {
+        let decoded_header = header::decode(&new_block_header).unwrap();
+
+        let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
+        debug_assert!(self
+            .blocks_tree
+            .find(|b| b.hash == new_block_hash)
+            .is_none());
+
+        let parent_index_in_tree = if *decoded_header.parent_hash == self.latest_finalized_block.1 {
+            None
+        } else {
+            // The parent of each new best block must already be in the tree, otherwise there is
+            // a bug somewhere.
+            Some(
+                self.blocks_tree
+                    .find(|b| b.hash == *decoded_header.parent_hash)
+                    .unwrap(),
+            )
+        };
+
+        let download_status = if self.block_downloads.len() < self.max_concurrent_downloads {
+            self.push_block_download(new_block_hash);
+            DownloadStatus::Downloading
+        } else {
+            DownloadStatus::NotStarted
+        };
+
+        self.blocks_tree.insert(
+            parent_index_in_tree,
+            Block {
+                hash: new_block_hash,
+                download_status,
+            },
+        );
+    }
+
+    /// Update the best block. Must have been inserted with [`Worker::new_block`].
+    async fn set_best_block(&mut self, new_best_block_hash: [u8; 32]) {
+        let new_best_block_index = self
+            .blocks_tree
+            .find(|b| b.hash == new_best_block_hash)
+            .unwrap();
+
+        // Iterate over all blocks on the tree and report the transaction status updates.
+        let (old_best_to_common_ancestor, common_ancestor_to_new_best) =
+            if let Some(old_best_index) = self.best_block_index {
+                let (ascend, descend) = self
+                    .blocks_tree
+                    .ascend_and_descend(old_best_index, new_best_block_index);
+                (either::Left(ascend), either::Left(descend))
+            } else {
+                let ascend = self.blocks_tree.node_to_root_path(new_best_block_index);
+                let descend = iter::empty::<fork_tree::NodeIndex>();
+                (either::Right(ascend), either::Right(descend))
+            };
+
+        // Iterate over the nodes that used to be part of the best chain but no longer are.
+        for node_index in old_best_to_common_ancestor {
+            let block_info = self.blocks_tree.get(node_index).unwrap();
+            if let DownloadStatus::Success(transaction_ids) = &block_info.download_status {
+                for transaction_id in transaction_ids {
+                    let _ = self
+                        .pending_transactions
+                        .get_mut(transaction_id)
+                        .unwrap()
+                        .1
+                        .send(TransactionStatus::Retracted(block_info.hash))
+                        .await;
+                }
+            }
+        }
+
+        // Iterate over the nodes that weren't part of the best chain but now are.
+        for node_index in common_ancestor_to_new_best {
+            let block_info = self.blocks_tree.get(node_index).unwrap();
+            if let DownloadStatus::Success(transaction_ids) = &block_info.download_status {
+                for transaction_id in transaction_ids {
+                    let _ = self
+                        .pending_transactions
+                        .get_mut(transaction_id)
+                        .unwrap()
+                        .1
+                        .send(TransactionStatus::InBlock(block_info.hash))
+                        .await;
+                }
+            }
+        }
+
+        self.best_block_index = Some(new_best_block_index);
+    }
+
+    async fn new_finalized_block(&mut self, finalized_block_header: Vec<u8>) {
+        let finalized_block_hash = header::hash_from_scale_encoded_header(&finalized_block_header);
+
+        // The finalized block must have been inserted in the tree earlier.
+        let new_finalized_index = self
+            .blocks_tree
+            .find(|b| b.hash == finalized_block_hash)
+            .unwrap();
+        debug_assert!(self
+            .blocks_tree
+            .is_ancestor(new_finalized_index, self.best_block_index.unwrap()));
+
+        // Remove all nodes from the tree, either because they're not finalized or discarded.
+        for pruned_node in self.blocks_tree.prune_ancestors(new_finalized_index) {
+            if pruned_node.is_prune_target_ancestor {
+                // Block has been removed from tree because it's finalized.
+                match pruned_node.user_data.download_status {
+                    DownloadStatus::NotStarted | DownloadStatus::Failed => {
+                        // TODO: self.push_block_download(pruned_node.user_data.hash);
+                    }
+                    DownloadStatus::Downloading => {}
+                    DownloadStatus::Success(transactions) => {
+                        for transaction in transactions {
+                            let _ = self
+                                .pending_transactions
+                                .remove(&transaction)
+                                .unwrap()
+                                .1
+                                .send(TransactionStatus::Finalized(pruned_node.user_data.hash))
+                                .await;
+                        }
+                    }
+                }
+
+                // TODO: insert into finalized_downloading
+            } else {
+                // Block has been removed from tree because it's a sibling of a finalized block
+                // and not itself finalized.
+                // TODO: ?!
+            }
+        }
+    }
+
+    /// Inject the result of a download in the state machine.
+    fn download_result(&mut self, block_hash: [u8; 32], block_body: Result<Vec<Vec<u8>>, ()>) {
+        // TODO: what if finalized_downloading
+        let index_in_tree = self.blocks_tree.find(|b| b.hash == block_hash).unwrap();
+
+        debug_assert!(matches!(
+            self.blocks_tree
+                .get_mut(index_in_tree)
+                .unwrap()
+                .download_status,
+            DownloadStatus::Downloading
+        ));
+
+        self.blocks_tree
+            .get_mut(index_in_tree)
+            .unwrap()
+            .download_status = match block_body {
+            Ok(body) => {
+                todo!()
+            }
+            Err(()) => DownloadStatus::Failed,
+        };
+    }
+
+    /// Inserts into `block_downloads` a future that downloads the body of the block with the
+    /// given hash.
+    fn push_block_download(&mut self, block_hash: [u8; 32]) {
+        self.block_downloads.push({
+            let download_future = self.sync_service.clone().block_query(
+                block_hash,
+                protocol::BlocksRequestFields {
+                    body: true,
+                    header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
+                    justification: false,
+                },
+            );
+
+            async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) }.boxed()
+        });
     }
 }
