@@ -18,6 +18,7 @@
 //! Extension module containing the API and implementation of everything related to finality.
 
 use super::*;
+use crate::network::protocol; // TODO: shouldn't be depending on networking
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given justification.
@@ -25,17 +26,36 @@ impl<T> NonFinalizedTree<T> {
     /// The verification is performed in the context of the chain. In particular, the
     /// verification will fail if the target block isn't already in the chain.
     ///
-    /// If the verification succeeds, a [`JustificationApply`] object will be returned which can
+    /// If the verification succeeds, a [`FinalityApply`] object will be returned which can
     /// be used to apply the finalization.
     // TODO: expand the documentation about how blocks with authorities changes have to be finalized before any further block can be finalized
     pub fn verify_justification(
         &mut self,
         scale_encoded_justification: &[u8],
-    ) -> Result<JustificationApply<T>, JustificationVerifyError> {
+    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
             .verify_justification(scale_encoded_justification)
+    }
+
+    /// Verifies the given Grandpa commit message.
+    ///
+    /// The verification is performed in the context of the chain. In particular, the
+    /// verification will fail if the target block isn't already in the chain or if one of the
+    /// voted blocks is unknown locally.
+    ///
+    /// If the verification succeeds, a [`FinalityApply`] object will be returned which can
+    /// be used to apply the finalization.
+    // TODO: change error type
+    pub fn verify_grandpa_commit_message(
+        &mut self,
+        scale_encoded_message: &[u8],
+    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+        self.inner
+            .as_mut()
+            .unwrap()
+            .verify_grandpa_commit_message(scale_encoded_message)
     }
 
     /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
@@ -73,7 +93,7 @@ impl<T> NonFinalizedTreeInner<T> {
     fn verify_justification(
         &mut self,
         scale_encoded_justification: &[u8],
-    ) -> Result<JustificationApply<T>, JustificationVerifyError> {
+    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
         match &self.finality {
             Finality::Outsourced => Err(JustificationVerifyError::AlgorithmHasNoJustification),
             Finality::Grandpa {
@@ -191,12 +211,39 @@ impl<T> NonFinalizedTreeInner<T> {
                 .map_err(JustificationVerifyError::VerificationFailed)?;
 
                 // Justification has been successfully verified!
-                Ok(JustificationApply {
+                Ok(FinalityApply {
                     chain: self,
                     to_finalize: block_index,
                 })
             }
         }
+    }
+
+    /// See [`NonFinalizedTree::verify_grandpa_commit_message`].
+    // TODO: change error type
+    fn verify_grandpa_commit_message(
+        &mut self,
+        scale_encoded_message: &[u8],
+    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+        // TODO: don't unwrap
+        let decoded = protocol::decode_grandpa_commit_message(&scale_encoded_message).unwrap();
+
+        let block_index = match self.blocks.find(|b| b.hash == *decoded.message.target_hash) {
+            Some(idx) => idx,
+            None => {
+                return Err(JustificationVerifyError::UnknownTargetBlock {
+                    block_number: From::from(decoded.message.target_number),
+                    block_hash: *decoded.message.target_hash,
+                });
+            }
+        };
+
+        // TODO: we don't actually verify the validity /!\ /!\
+
+        Ok(FinalityApply {
+            chain: self,
+            to_finalize: block_index,
+        })
     }
 
     /// Implementation of [`NonFinalizedTree::set_finalized_block`].
@@ -296,17 +343,18 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 }
 
-/// Returned by [`NonFinalizedTree::verify_justification`] on success.
+/// Returned by [`NonFinalizedTree::verify_justification`] and
+/// [`NonFinalizedTree::verify_grandpa_commit_message`] on success.
 ///
-/// As long as [`JustificationApply::apply`] isn't called, the underlying [`NonFinalizedTree`]
+/// As long as [`FinalityApply::apply`] isn't called, the underlying [`NonFinalizedTree`]
 /// isn't modified.
 #[must_use]
-pub struct JustificationApply<'c, T> {
+pub struct FinalityApply<'c, T> {
     chain: &'c mut NonFinalizedTreeInner<T>,
     to_finalize: fork_tree::NodeIndex,
 }
 
-impl<'c, T> JustificationApply<'c, T> {
+impl<'c, T> FinalityApply<'c, T> {
     /// Applies the justification, finalizing the given block.
     ///
     /// This function, including its return type, behaves in the same way as
@@ -331,9 +379,9 @@ impl<'c, T> JustificationApply<'c, T> {
     }
 }
 
-impl<'c, T> fmt::Debug for JustificationApply<'c, T> {
+impl<'c, T> fmt::Debug for FinalityApply<'c, T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("JustificationApply").finish()
+        f.debug_tuple("FinalityApply").finish()
     }
 }
 

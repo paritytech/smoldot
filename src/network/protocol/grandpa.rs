@@ -160,6 +160,20 @@ pub fn decode_grandpa_notification(
 #[derive(Debug, derive_more::Display)]
 pub struct DecodeGrandpaNotificationError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
 
+/// Attempt to decode the given SCALE-encoded Grandpa commit message.
+pub fn decode_grandpa_commit_message(
+    scale_encoded: &[u8],
+) -> Result<CommitMessageRef, DecodeGrandpaCommitMessageError> {
+    match nom::combinator::all_consuming(commit_message)(scale_encoded) {
+        Ok((_, commit)) => Ok(commit),
+        Err(err) => Err(DecodeGrandpaCommitMessageError(err)),
+    }
+}
+
+/// Error potentially returned by [`decode_grandpa_commit_message`].
+#[derive(Debug, derive_more::Display)]
+pub struct DecodeGrandpaCommitMessageError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+
 // Nom combinators below.
 
 fn grandpa_notification(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaNotificationRef> {

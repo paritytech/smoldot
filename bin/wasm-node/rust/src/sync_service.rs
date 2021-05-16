@@ -928,8 +928,9 @@ async fn start_relay_chain(
                         network_service::Event::GrandpaCommitMessage { chain_index, message }
                             if chain_index == network_chain_index =>
                         {
-                            // TODO: verify the message and call `sync.set_finalized` or something
-                            // TODO: has_new_finalized = true;
+                            if sync.grandpa_commit_message(&message.as_encoded()).is_ok() {
+                                has_new_finalized = true;
+                            }
                         },
                         _ => {
                             // Different chain index.
