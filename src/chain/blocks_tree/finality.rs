@@ -89,29 +89,32 @@ impl<T> NonFinalizedTree<T> {
 }
 
 impl<T> NonFinalizedTreeInner<T> {
-    /// See [`NonFinalizedTree::verify_justification`].
-    fn verify_justification(
+    /// Common function for verifying GrandPa-finality-related messages.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the finality algorithm of the chain isn't Grandpa.
+    ///
+    // TODO: don't panic if not grandpa?
+    fn verify_grandpa_finality(
         &mut self,
-        scale_encoded_justification: &[u8],
+        target_hash: &[u8; 32],
+        target_number: u64,
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
         match &self.finality {
-            Finality::Outsourced => Err(JustificationVerifyError::AlgorithmHasNoJustification),
+            Finality::Outsourced => panic!(),
             Finality::Grandpa {
                 after_finalized_block_authorities_set_id,
                 finalized_scheduled_change,
                 finalized_triggered_authorities,
             } => {
-                // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa(&scale_encoded_justification)
-                    .map_err(JustificationVerifyError::InvalidJustification)?;
-
                 // Find in the list of non-finalized blocks the one targeted by the justification.
-                let block_index = match self.blocks.find(|b| b.hash == *decoded.target_hash) {
+                let block_index = match self.blocks.find(|b| b.hash == *target_hash) {
                     Some(idx) => idx,
                     None => {
                         return Err(JustificationVerifyError::UnknownTargetBlock {
-                            block_number: From::from(decoded.target_number),
-                            block_hash: *decoded.target_hash,
+                            block_number: From::from(target_number),
+                            block_hash: *target_hash,
                         });
                     }
                 };
@@ -168,7 +171,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 // As explained above, `target_number` must be <= `earliest_trigger`, otherwise the
                 // finalization is unsecure.
                 if let Some(earliest_trigger) = earliest_trigger {
-                    if u64::from(decoded.target_number) > earliest_trigger {
+                    if u64::from(target_number) > earliest_trigger {
                         let block_to_finalize_hash = self
                             .blocks
                             .node_to_root_path(block_index)
@@ -183,8 +186,8 @@ impl<T> NonFinalizedTreeInner<T> {
                             .next()
                             .unwrap();
                         return Err(JustificationVerifyError::TooFarAhead {
-                            justification_block_number: u64::from(decoded.target_number),
-                            justification_block_hash: *decoded.target_hash,
+                            justification_block_number: target_number,
+                            justification_block_hash: *target_hash,
                             block_to_finalize_number: earliest_trigger,
                             block_to_finalize_hash,
                         });
@@ -194,9 +197,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 // Find which authorities are supposed to finalize the target block.
                 let authorities_list = finalized_scheduled_change
                     .as_ref()
-                    .filter(|(trigger_height, _)| {
-                        *trigger_height < u64::from(decoded.target_number)
-                    })
+                    .filter(|(trigger_height, _)| *trigger_height < u64::from(target_number))
                     .map(|(_, list)| list)
                     .unwrap_or(finalized_triggered_authorities);
 
@@ -215,6 +216,24 @@ impl<T> NonFinalizedTreeInner<T> {
                     chain: self,
                     to_finalize: block_index,
                 })
+            }
+        }
+    }
+
+    /// See [`NonFinalizedTree::verify_justification`].
+    fn verify_justification(
+        &mut self,
+        scale_encoded_justification: &[u8],
+    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+        match &self.finality {
+            Finality::Outsourced => Err(JustificationVerifyError::AlgorithmHasNoJustification),
+            Finality::Grandpa { .. } => {
+                // Turn justification into a strongly-typed struct.
+                let decoded = justification::decode::decode_grandpa(&scale_encoded_justification)
+                    .map_err(JustificationVerifyError::InvalidJustification)?;
+
+                // Delegate to the other function.
+                self.verify_grandpa_finality(decoded.target_hash, u64::from(decoded.target_number))
             }
         }
     }

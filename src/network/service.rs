@@ -967,7 +967,7 @@ pub struct EncodedGrandpaCommitMessage(Vec<u8>);
 impl EncodedGrandpaCommitMessage {
     /// Returns the encoded bytes of the commit message.
     pub fn as_encoded(&self) -> &[u8] {
-        // Skip the first byte because the message is a `GrandpaNotificationRef`.
+        // Skip the first byte because `self.0` is a `GrandpaNotificationRef`.
         &self.0[1..]
     }
 

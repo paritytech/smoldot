@@ -928,8 +928,14 @@ async fn start_relay_chain(
                         network_service::Event::GrandpaCommitMessage { chain_index, message }
                             if chain_index == network_chain_index =>
                         {
-                            if sync.grandpa_commit_message(&message.as_encoded()).is_ok() {
-                                has_new_finalized = true;
+                            match sync.grandpa_commit_message(&message.as_encoded()) {
+                                Ok(()) => has_new_finalized = true,
+                                Err(err) => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Error when verifying GrandPa commit message: {}", err
+                                    );
+                                }
                             }
                         },
                         _ => {
