@@ -17,15 +17,17 @@
 
 // TODO: document all this
 
-use crate::finality::justification::decode::PrecommitRef;
+use crate::finality::{grandpa::commit::decode, justification::decode::PrecommitRef};
 
 use alloc::vec::Vec;
 use core::{convert::TryFrom as _, iter};
 
+pub use crate::finality::grandpa::commit::decode::{CommitMessageRef, UnsignedPrecommitRef};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrandpaNotificationRef<'a> {
     Vote(VoteMessageRef<'a>),
-    Commit(CommitMessageRef<'a>),
+    Commit(CommitMessageRef<'a>), // TODO: consider weaker type, since in different module
     Neighbor(NeighborPacket),
     CatchUpRequest(CatchUpRequest),
     CatchUp(CatchUpRef<'a>),
@@ -67,32 +69,9 @@ pub struct UnsignedPrevoteRef<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsignedPrecommitRef<'a> {
-    pub target_hash: &'a [u8; 32],
-    pub target_number: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimaryProposeRef<'a> {
     pub target_hash: &'a [u8; 32],
     pub target_number: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitMessageRef<'a> {
-    pub round_number: u64,
-    pub set_id: u64,
-    pub message: CompactCommitRef<'a>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompactCommitRef<'a> {
-    pub target_hash: &'a [u8; 32],
-    pub target_number: u32,
-    pub precommits: Vec<UnsignedPrecommitRef<'a>>,
-
-    /// List of ed25519 signatures and public keys.
-    pub auth_data: Vec<(&'a [u8; 64], &'a [u8; 32])>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,20 +139,6 @@ pub fn decode_grandpa_notification(
 #[derive(Debug, derive_more::Display)]
 pub struct DecodeGrandpaNotificationError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
 
-/// Attempt to decode the given SCALE-encoded Grandpa commit message.
-pub fn decode_grandpa_commit_message(
-    scale_encoded: &[u8],
-) -> Result<CommitMessageRef, DecodeGrandpaCommitMessageError> {
-    match nom::combinator::all_consuming(commit_message)(scale_encoded) {
-        Ok((_, commit)) => Ok(commit),
-        Err(err) => Err(DecodeGrandpaCommitMessageError(err)),
-    }
-}
-
-/// Error potentially returned by [`decode_grandpa_commit_message`].
-#[derive(Debug, derive_more::Display)]
-pub struct DecodeGrandpaCommitMessageError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
-
 // Nom combinators below.
 
 fn grandpa_notification(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaNotificationRef> {
@@ -185,7 +150,16 @@ fn grandpa_notification(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaNotification
                 GrandpaNotificationRef::Vote,
             ),
             nom::combinator::map(
-                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), commit_message),
+                nom::sequence::preceded(nom::bytes::complete::tag(&[1]), |s| {
+                    decode::decode_partial_grandpa_commit(s)
+                        .map(|(a, b)| (b, a))
+                        .map_err(|_| {
+                            nom::Err::Failure(nom::error::make_error(
+                                s,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })
+                }),
                 GrandpaNotificationRef::Commit,
             ),
             nom::combinator::map(
@@ -289,63 +263,6 @@ fn primary_propose(bytes: &[u8]) -> nom::IResult<&[u8], PrimaryProposeRef> {
             |(target_hash, target_number)| PrimaryProposeRef {
                 target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),
                 target_number,
-            },
-        ),
-    )(bytes)
-}
-
-fn commit_message(bytes: &[u8]) -> nom::IResult<&[u8], CommitMessageRef> {
-    nom::error::context(
-        "commit_message",
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::number::complete::le_u64,
-                nom::number::complete::le_u64,
-                compact_commit,
-            )),
-            |(round_number, set_id, message)| CommitMessageRef {
-                round_number,
-                set_id,
-                message,
-            },
-        ),
-    )(bytes)
-}
-
-fn compact_commit(bytes: &[u8]) -> nom::IResult<&[u8], CompactCommitRef> {
-    nom::error::context(
-        "compact_commit",
-        nom::combinator::map(
-            nom::sequence::tuple((
-                nom::bytes::complete::take(32u32),
-                nom::number::complete::le_u32,
-                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                    nom::multi::many_m_n(num_elems, num_elems, unsigned_precommit)
-                }),
-                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                    nom::multi::many_m_n(
-                        num_elems,
-                        num_elems,
-                        nom::combinator::map(
-                            nom::sequence::tuple((
-                                nom::bytes::complete::take(64u32),
-                                nom::bytes::complete::take(32u32),
-                            )),
-                            |(sig, pubkey)| {
-                                (
-                                    <&[u8; 64]>::try_from(sig).unwrap(),
-                                    <&[u8; 32]>::try_from(pubkey).unwrap(),
-                                )
-                            },
-                        ),
-                    )
-                }),
-            )),
-            |(target_hash, target_number, precommits, auth_data)| CompactCommitRef {
-                target_hash: <&[u8; 32]>::try_from(target_hash).unwrap(),
-                target_number,
-                precommits,
-                auth_data,
             },
         ),
     )(bytes)
