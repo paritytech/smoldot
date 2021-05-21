@@ -146,7 +146,7 @@ impl<C: AsRef<[u8]>> IsParent<C> {
     ///
     /// Must be passed `Some(true)` if the block is known to be a descendant of the target block,
     /// or `None` if it is unknown.
-    /// Passing `Some(false)` always returns [`InProcess::Finished`] containing an error.
+    /// Passing `Some(false)` always returns [`InProgress::Finished`] containing an error.
     pub fn resume(mut self, is_parent: Option<bool>) -> InProgress<C> {
         match is_parent {
             None => {}
