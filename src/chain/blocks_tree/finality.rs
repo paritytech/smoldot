@@ -18,7 +18,7 @@
 //! Extension module containing the API and implementation of everything related to finality.
 
 use super::*;
-use crate::network::protocol; // TODO: shouldn't be depending on networking
+use crate::finality::{grandpa, justification};
 
 impl<T> NonFinalizedTree<T> {
     /// Verifies the given justification.
@@ -91,16 +91,26 @@ impl<T> NonFinalizedTree<T> {
 impl<T> NonFinalizedTreeInner<T> {
     /// Common function for verifying GrandPa-finality-related messages.
     ///
+    /// Returns the index of the possibly finalized block, the expected authorities set id, and
+    /// an iterator to the list of authorities.
+    ///
     /// # Panic
     ///
     /// Panics if the finality algorithm of the chain isn't Grandpa.
     ///
     // TODO: don't panic if not grandpa?
     fn verify_grandpa_finality(
-        &mut self,
+        &'_ self,
         target_hash: &[u8; 32],
         target_number: u64,
-    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+    ) -> Result<
+        (
+            fork_tree::NodeIndex,
+            u64,
+            impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_,
+        ),
+        JustificationVerifyError,
+    > {
         match &self.finality {
             Finality::Outsourced => panic!(),
             Finality::Grandpa {
@@ -201,21 +211,16 @@ impl<T> NonFinalizedTreeInner<T> {
                     .map(|(_, list)| list)
                     .unwrap_or(finalized_triggered_authorities);
 
-                // As per above check, we know that the authorities of the target block are either the
-                // same as the ones of the latest finalized block, or the ones contained in the header of
-                // the latest finalized block.
-                justification::verify::verify(justification::verify::Config {
-                    justification: decoded,
-                    authorities_set_id: *after_finalized_block_authorities_set_id,
-                    authorities_list: authorities_list.iter().map(|a| a.public_key),
-                })
-                .map_err(JustificationVerifyError::VerificationFailed)?;
+                // As per above check, we know that the authorities of the target block are either
+                // the same as the ones of the latest finalized block, or the ones contained in
+                // the header of the latest finalized block.
 
-                // Justification has been successfully verified!
-                Ok(FinalityApply {
-                    chain: self,
-                    to_finalize: block_index,
-                })
+                // First verification step complete.
+                Ok((
+                    block_index,
+                    *after_finalized_block_authorities_set_id,
+                    authorities_list.iter().map(|a| a.public_key),
+                ))
             }
         }
     }
@@ -232,8 +237,25 @@ impl<T> NonFinalizedTreeInner<T> {
                 let decoded = justification::decode::decode_grandpa(&scale_encoded_justification)
                     .map_err(JustificationVerifyError::InvalidJustification)?;
 
-                // Delegate to the other function.
-                self.verify_grandpa_finality(decoded.target_hash, u64::from(decoded.target_number))
+                // Delegate the first step to the other function.
+                let (block_index, authorities_set_id, authorities_list) = self
+                    .verify_grandpa_finality(
+                        decoded.target_hash,
+                        u64::from(decoded.target_number),
+                    )?;
+
+                justification::verify::verify(justification::verify::Config {
+                    justification: decoded,
+                    authorities_set_id,
+                    authorities_list,
+                })
+                .map_err(JustificationVerifyError::VerificationFailed)?;
+
+                // Justification has been successfully verified!
+                Ok(FinalityApply {
+                    chain: self,
+                    to_finalize: block_index,
+                })
             }
         }
     }
@@ -244,25 +266,55 @@ impl<T> NonFinalizedTreeInner<T> {
         &mut self,
         scale_encoded_message: &[u8],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+        // TODO: check if algorithm is grandpa
+
         // TODO: don't unwrap
-        let decoded = protocol::decode_grandpa_commit_message(&scale_encoded_message).unwrap();
+        let decoded =
+            grandpa::commit::decode::decode_grandpa_commit(scale_encoded_message).unwrap();
 
-        let block_index = match self.blocks.find(|b| b.hash == *decoded.message.target_hash) {
-            Some(idx) => idx,
-            None => {
-                return Err(JustificationVerifyError::UnknownTargetBlock {
-                    block_number: From::from(decoded.message.target_number),
-                    block_hash: *decoded.message.target_hash,
-                });
+        // Delegate the first step to the other function.
+        let (block_index, expected_authorities_set_id, authorities_list) = self
+            .verify_grandpa_finality(
+                decoded.message.target_hash,
+                u64::from(decoded.message.target_number),
+            )?;
+
+        let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
+            commit: scale_encoded_message,
+            expected_authorities_set_id,
+            num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
+        });
+
+        loop {
+            match verification {
+                grandpa::commit::verify::InProgress::Finished(Ok(())) => {
+                    drop(authorities_list);
+                    return Ok(FinalityApply {
+                        chain: self,
+                        to_finalize: block_index,
+                    });
+                }
+                grandpa::commit::verify::InProgress::FinishedUnknown => todo!(),
+                grandpa::commit::verify::InProgress::Finished(Err(error)) => todo!(),
+                grandpa::commit::verify::InProgress::IsAuthority(is_authority) => {
+                    let to_find = is_authority.authority_public_key();
+                    let result = authorities_list.clone().any(|a| a.as_ref() == to_find);
+                    verification = is_authority.resume(result);
+                }
+                grandpa::commit::verify::InProgress::IsParent(is_parent) => {
+                    // Find in the list of non-finalized blocks the target of the check.
+                    match self.blocks.find(|b| b.hash == *is_parent.block_hash()) {
+                        Some(idx) => {
+                            let result = self.blocks.is_ancestor(block_index, idx);
+                            verification = is_parent.resume(Some(result));
+                        }
+                        None => {
+                            verification = is_parent.resume(None);
+                        }
+                    };
+                }
             }
-        };
-
-        // TODO: we don't actually verify the validity /!\ /!\
-
-        Ok(FinalityApply {
-            chain: self,
-            to_finalize: block_index,
-        })
+        }
     }
 
     /// Implementation of [`NonFinalizedTree::set_finalized_block`].

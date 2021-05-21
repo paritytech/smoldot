@@ -35,6 +35,7 @@ pub struct Config<C> {
 }
 
 /// Commit verification in progress.
+#[must_use]
 pub enum InProgress<C> {
     /// See [`IsAuthority`].
     IsAuthority(IsAuthority<C>),
@@ -54,7 +55,7 @@ pub enum InProgress<C> {
 pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
     let decoded_commit = match decode::decode_grandpa_commit(config.commit.as_ref()) {
         Ok(c) => c,
-        Err(err) => return InProgress::Finished(Err(Error::InvalidFormat)),
+        Err(_) => return InProgress::Finished(Err(Error::InvalidFormat)),
     };
 
     if decoded_commit.set_id != config.expected_authorities_set_id {
@@ -64,8 +65,6 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
     if decoded_commit.message.auth_data.len() != decoded_commit.message.precommits.len() {
         return InProgress::Finished(Err(Error::InvalidFormat));
     }
-
-    // TODO: check against expected authorities set id?
 
     Verification {
         commit: config.commit,
@@ -81,6 +80,7 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
 
 /// Must return whether a certain public key is in the list of authorities that are allowed to
 /// generate pre-commits.
+#[must_use]
 pub struct IsAuthority<C> {
     inner: Verification<C>,
 }
@@ -97,7 +97,7 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
     ///
     /// Must be passed `true` if the public key is indeed in the list of authorities.
     /// Passing `false` always returns [`InProcess::Finished`] containing an error.
-    pub fn resume(self, is_authority: bool) -> InProgress<C> {
+    pub fn resume(mut self, is_authority: bool) -> InProgress<C> {
         if !is_authority {
             let key = *self.authority_public_key();
             return InProgress::Finished(Err(Error::NotAuthority(key)));
@@ -109,6 +109,7 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
 }
 
 /// Must return whether a certain block is a descendant of the target block.
+#[must_use]
 pub struct IsParent<C> {
     inner: Verification<C>,
     /// For performance reasons, the block number is copied here, but not the block hash. This
@@ -146,7 +147,7 @@ impl<C: AsRef<[u8]>> IsParent<C> {
     /// Must be passed `Some(true)` if the block is known to be a descendant of the target block,
     /// or `None` if it is unknown.
     /// Passing `Some(false)` always returns [`InProcess::Finished`] containing an error.
-    pub fn resume(self, is_parent: Option<bool>) -> InProgress<C> {
+    pub fn resume(mut self, is_parent: Option<bool>) -> InProgress<C> {
         match is_parent {
             None => {}
             Some(true) => self.inner.num_verified_signatures += 1,
