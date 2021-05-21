@@ -96,7 +96,7 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
     /// Resumes the verification process.
     ///
     /// Must be passed `true` if the public key is indeed in the list of authorities.
-    /// Passing `false` always returns [`InProcess::Finished`] containing an error.
+    /// Passing `false` always returns [`InProgress::Finished`] containing an error.
     pub fn resume(mut self, is_authority: bool) -> InProgress<C> {
         if !is_authority {
             let key = *self.authority_public_key();
