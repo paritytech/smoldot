@@ -47,11 +47,10 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// If the verification succeeds, a [`FinalityApply`] object will be returned which can
     /// be used to apply the finalization.
-    // TODO: change error type
     pub fn verify_grandpa_commit_message(
         &mut self,
         scale_encoded_message: &[u8],
-    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
+    ) -> Result<FinalityApply<T>, CommitVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
@@ -98,7 +97,6 @@ impl<T> NonFinalizedTreeInner<T> {
     ///
     /// Panics if the finality algorithm of the chain isn't Grandpa.
     ///
-    // TODO: don't panic if not grandpa?
     fn verify_grandpa_finality(
         &'_ self,
         target_hash: &[u8; 32],
@@ -109,7 +107,7 @@ impl<T> NonFinalizedTreeInner<T> {
             u64,
             impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_,
         ),
-        JustificationVerifyError,
+        FinalityVerifyError,
     > {
         match &self.finality {
             Finality::Outsourced => panic!(),
@@ -122,7 +120,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 let block_index = match self.blocks.find(|b| b.hash == *target_hash) {
                     Some(idx) => idx,
                     None => {
-                        return Err(JustificationVerifyError::UnknownTargetBlock {
+                        return Err(FinalityVerifyError::UnknownTargetBlock {
                             block_number: From::from(target_number),
                             block_hash: *target_hash,
                         });
@@ -195,7 +193,7 @@ impl<T> NonFinalizedTreeInner<T> {
                             })
                             .next()
                             .unwrap();
-                        return Err(JustificationVerifyError::TooFarAhead {
+                        return Err(FinalityVerifyError::TooFarAhead {
                             justification_block_number: target_number,
                             justification_block_hash: *target_hash,
                             block_to_finalize_number: earliest_trigger,
@@ -239,10 +237,8 @@ impl<T> NonFinalizedTreeInner<T> {
 
                 // Delegate the first step to the other function.
                 let (block_index, authorities_set_id, authorities_list) = self
-                    .verify_grandpa_finality(
-                        decoded.target_hash,
-                        u64::from(decoded.target_number),
-                    )?;
+                    .verify_grandpa_finality(decoded.target_hash, u64::from(decoded.target_number))
+                    .map_err(JustificationVerifyError::FinalityVerify)?;
 
                 justification::verify::verify(justification::verify::Config {
                     justification: decoded,
@@ -261,23 +257,25 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 
     /// See [`NonFinalizedTree::verify_grandpa_commit_message`].
-    // TODO: change error type
     fn verify_grandpa_commit_message(
         &mut self,
         scale_encoded_message: &[u8],
-    ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        // TODO: check if algorithm is grandpa
+    ) -> Result<FinalityApply<T>, CommitVerifyError> {
+        // The code below would panic if the chain doesn't use Grandpa.
+        if !matches!(self.finality, Finality::Grandpa { .. }) {
+            return Err(CommitVerifyError::NotGrandpa);
+        }
 
-        // TODO: don't unwrap
-        let decoded =
-            grandpa::commit::decode::decode_grandpa_commit(scale_encoded_message).unwrap();
+        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(scale_encoded_message)
+            .map_err(|_| CommitVerifyError::InvalidCommit)?;
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
             .verify_grandpa_finality(
-                decoded.message.target_hash,
-                u64::from(decoded.message.target_number),
-            )?;
+                decoded_commit.message.target_hash,
+                u64::from(decoded_commit.message.target_number),
+            )
+            .map_err(CommitVerifyError::FinalityVerify)?;
 
         let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
             commit: scale_encoded_message,
@@ -294,8 +292,12 @@ impl<T> NonFinalizedTreeInner<T> {
                         to_finalize: block_index,
                     });
                 }
-                grandpa::commit::verify::InProgress::FinishedUnknown => todo!(),
-                grandpa::commit::verify::InProgress::Finished(Err(error)) => todo!(),
+                grandpa::commit::verify::InProgress::FinishedUnknown => {
+                    return Err(CommitVerifyError::NotEnoughKnownBlocks)
+                }
+                grandpa::commit::verify::InProgress::Finished(Err(error)) => {
+                    return Err(CommitVerifyError::VerificationFailed(error))
+                }
                 grandpa::commit::verify::InProgress::IsAuthority(is_authority) => {
                     let to_find = is_authority.authority_public_key();
                     let result = authorities_list.clone().any(|a| a.as_ref() == to_find);
@@ -463,8 +465,39 @@ pub enum JustificationVerifyError {
     AlgorithmHasNoJustification,
     /// Error while decoding the justification.
     InvalidJustification(justification::decode::Error),
-    /// Justification targets a block that isn't in the chain.
-    #[display(fmt = "Justification targets a block that isn't in the chain.")]
+    /// The justification verification has failed. The justification is invalid and should be
+    /// thrown away.
+    VerificationFailed(justification::verify::Error),
+    /// Error while verifying the finality.
+    FinalityVerify(FinalityVerifyError),
+}
+
+/// Error that can happen when verifying a Grandpa commit.
+#[derive(Debug, derive_more::Display)]
+pub enum CommitVerifyError {
+    /// Chain doesn't use the GrandPa algorithm.
+    NotGrandpa,
+    /// Error while decoding the commit.
+    InvalidCommit,
+    /// Error while verifying the finality.
+    FinalityVerify(FinalityVerifyError),
+    /// Not enough blocks are known by the tree to verify this commit.
+    ///
+    /// This doesn't mean that the commit is bad, but that it can't be verified without adding
+    /// more blocks to the tree.
+    NotEnoughKnownBlocks,
+    /// The commit verification has failed. The commit is invalid and should be thrown away.
+    VerificationFailed(grandpa::commit::verify::Error),
+}
+
+/// Error that can happen when verifying a proof of finality.
+#[derive(Debug, derive_more::Display)]
+pub enum FinalityVerifyError {
+    /// Finality proof targets a block that isn't in the chain.
+    #[display(
+        fmt = "Justification targets a block (#{}) that isn't in the chain.",
+        block_number
+    )]
     UnknownTargetBlock {
         /// Number of the block that isn't in the chain.
         block_number: u64,
@@ -487,9 +520,6 @@ pub enum JustificationVerifyError {
         /// Hash of the block to finalize first.
         block_to_finalize_hash: [u8; 32],
     },
-    /// The justification verification has failed. The justification is invalid and should be
-    /// thrown away.
-    VerificationFailed(justification::verify::Error),
 }
 
 /// Iterator producing the newly-finalized blocks removed from the state when the finalized block

@@ -606,7 +606,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     pub fn grandpa_commit_message(
         &mut self,
         scale_encoded_message: &[u8],
-    ) -> Result<(), blocks_tree::JustificationVerifyError> {
+    ) -> Result<(), blocks_tree::CommitVerifyError> {
+        // TODO: must handle the `NotEnoughBlocks` error separately
         self.chain
             .verify_grandpa_commit_message(scale_encoded_message)?
             .apply();

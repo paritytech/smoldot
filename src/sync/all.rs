@@ -774,7 +774,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn grandpa_commit_message(
         &mut self,
         scale_encoded_message: &[u8],
-    ) -> Result<(), blocks_tree::JustificationVerifyError> {
+    ) -> Result<(), blocks_tree::CommitVerifyError> {
         // TODO: clearly indicate if message has been ignored
         match &mut self.inner {
             AllSyncInner::Optimistic(_) => Ok(()),
