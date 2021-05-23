@@ -207,7 +207,12 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// The order of the blocks is unspecified.
     pub fn iter(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
-        self.inner.as_ref().unwrap().blocks.iter().map(|b| (&b.header).into())
+        self.inner
+            .as_ref()
+            .unwrap()
+            .blocks
+            .iter()
+            .map(|b| (&b.header).into())
     }
 
     /// Reserves additional capacity for at least `additional` new blocks without allocating.
