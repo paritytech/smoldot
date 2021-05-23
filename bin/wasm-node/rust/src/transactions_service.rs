@@ -28,7 +28,9 @@
 use crate::{network_service, sync_service};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
-use smoldot::{chain::fork_tree, header, libp2p::peer_id::PeerId, network::protocol};
+use smoldot::{
+    chain::fork_tree, header, informant::HashDisplay, libp2p::peer_id::PeerId, network::protocol,
+};
 use std::{collections::BTreeMap, convert::TryFrom as _, iter, pin::Pin, sync::Arc};
 
 /// Configuration for a [`TransactionsService`].
@@ -167,6 +169,11 @@ async fn background_task(
     // TODO: must periodically re-send transactions that aren't included in block yet
 
     'channels_rebuild: loop {
+        // This loop is entered when it is necessary to rebuild the subscriptions with the syncing
+        // service. This happens when there is a gap in the blocks, either intentionally (e.g.
+        // after a Grandpa warp sync) or because the transactions service was too busy to process
+        // the new blocks.
+
         // Note that the new blocks subscription must be aquired first, in order to guarantee
         // that all finalized blocks updated have earlier been notified on the new blocks
         // subscription.
@@ -185,15 +192,30 @@ async fn background_task(
                 .number,
             header::hash_from_scale_encoded_header(&current_finalized_block_header),
         );
+        worker.blocks_tree.clear();
+        worker.best_block_index = None;
 
-        // TODO: reset the worker, including all active watchers
+        // TODO: reset finalized_downloading_blocks too?
+
+        // As explained above, this code is reached if there is a gap in the blocks.
+        // Consequently, we drop all pending transactions.
+        for (_, sender) in worker.pending_transactions.values_mut() {
+            let _ = sender.send(TransactionStatus::Dropped).await; // TODO: await?
+        }
+        worker.pending_transactions.clear();
+
+        log::debug!(
+            target: "tx-service",
+            "Reset transactions watcher to finalized block {}.",
+            HashDisplay(&worker.latest_finalized_block.1)
+        );
 
         loop {
             futures::select! {
                 new_block = new_blocks_receiver.next().fuse() => {
                     if let Some(new_block) = new_block {
                         let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
-                        worker.new_block(new_block.scale_encoded_header);
+                        worker.new_block(new_block.scale_encoded_header, &new_block.parent_hash);
                         if new_block.is_new_best {
                             worker.set_best_block(hash).await;
                         }
@@ -211,7 +233,7 @@ async fn background_task(
                     while let Some(new_block) = new_blocks_receiver.next().now_or_never() {
                         if let Some(new_block) = new_block {
                             let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
-                            worker.new_block(new_block.scale_encoded_header);
+                            worker.new_block(new_block.scale_encoded_header, &new_block.parent_hash);
                             if new_block.is_new_best {
                                 worker.set_best_block(hash).await;
                             }
@@ -338,30 +360,29 @@ enum DownloadStatus {
 
 impl Worker {
     /// Insert a new block in the worker when the sync service hears about it.
-    fn new_block(&mut self, new_block_header: Vec<u8>) {
-        let decoded_header = header::decode(&new_block_header).unwrap();
-
+    fn new_block(&mut self, new_block_header: Vec<u8>, parent_hash: &[u8; 32]) {
         let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
         debug_assert!(self
             .blocks_tree
             .find(|b| b.hash == new_block_hash)
             .is_none());
 
-        let parent_index_in_tree = if *decoded_header.parent_hash == self.latest_finalized_block.1 {
+        let parent_index_in_tree = if *parent_hash == self.latest_finalized_block.1 {
             None
         } else {
-            // The parent of each new best block must already be in the tree, otherwise there is
-            // a bug somewhere.
-            Some(
-                self.blocks_tree
-                    .find(|b| b.hash == *decoded_header.parent_hash)
-                    .unwrap(),
-            )
+            // The transactions service tracks all new blocks.
+            // The parent of each new best block must therefore already be in the tree.
+            Some(self.blocks_tree.find(|b| b.hash == *parent_hash).unwrap())
         };
 
-        let download_status = if self.block_downloads.len() < self.max_concurrent_downloads {
-            self.push_block_download(new_block_hash);
-            DownloadStatus::Downloading
+        // TODO: only do this for best chain?
+        let download_status = if !self.pending_transactions.is_empty() {
+            if self.block_downloads.len() < self.max_concurrent_downloads {
+                self.push_block_download(new_block_hash);
+                DownloadStatus::Downloading
+            } else {
+                DownloadStatus::NotStarted
+            }
         } else {
             DownloadStatus::NotStarted
         };
@@ -412,19 +433,39 @@ impl Worker {
         }
 
         // Iterate over the nodes that weren't part of the best chain but now are.
+        let mut downloads_to_start = Vec::new();
         for node_index in common_ancestor_to_new_best {
             let block_info = self.blocks_tree.get(node_index).unwrap();
-            if let DownloadStatus::Success(transaction_ids) = &block_info.download_status {
-                for transaction_id in transaction_ids {
-                    let _ = self
-                        .pending_transactions
-                        .get_mut(transaction_id)
-                        .unwrap()
-                        .1
-                        .send(TransactionStatus::InBlock(block_info.hash))
-                        .await;
+            match &block_info.download_status {
+                DownloadStatus::NotStarted => {
+                    if !self.pending_transactions.is_empty() {
+                        downloads_to_start.push(node_index);
+                    }
+                }
+                DownloadStatus::Failed | DownloadStatus::Downloading => {}
+                DownloadStatus::Success(transaction_ids) => {
+                    for transaction_id in transaction_ids {
+                        let _ = self
+                            .pending_transactions
+                            .get_mut(transaction_id)
+                            .unwrap()
+                            .1
+                            .send(TransactionStatus::InBlock(block_info.hash))
+                            .await;
+                    }
                 }
             }
+        }
+
+        for node_index in downloads_to_start {
+            if self.block_downloads.len() >= self.max_concurrent_downloads {
+                break;
+            }
+
+            let block_info = self.blocks_tree.get_mut(node_index).unwrap();
+            block_info.download_status = DownloadStatus::Downloading;
+            let hash = block_info.hash;
+            self.push_block_download(hash);
         }
 
         self.best_block_index = Some(new_best_block_index);
@@ -442,7 +483,7 @@ impl Worker {
             .blocks_tree
             .is_ancestor(new_finalized_index, self.best_block_index.unwrap()));
 
-        // Remove all nodes from the tree, either because they're not finalized or discarded.
+        // Remove nodes from the tree, either because they're not finalized or discarded.
         for pruned_node in self.blocks_tree.prune_ancestors(new_finalized_index) {
             if pruned_node.is_prune_target_ancestor {
                 // Block has been removed from tree because it's finalized.
@@ -479,10 +520,7 @@ impl Worker {
         let index_in_tree = self.blocks_tree.find(|b| b.hash == block_hash).unwrap();
 
         debug_assert!(matches!(
-            self.blocks_tree
-                .get_mut(index_in_tree)
-                .unwrap()
-                .download_status,
+            self.blocks_tree.get(index_in_tree).unwrap().download_status,
             DownloadStatus::Downloading
         ));
 
@@ -491,6 +529,8 @@ impl Worker {
             .unwrap()
             .download_status = match block_body {
             Ok(body) => {
+                let transactions = body;
+
                 todo!()
             }
             Err(()) => DownloadStatus::Failed,
