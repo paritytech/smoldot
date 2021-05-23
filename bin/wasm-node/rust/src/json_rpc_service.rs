@@ -1169,6 +1169,7 @@ impl JsonRpcService {
                 futures::pin_mut!(next_block);
                 match future::select(next_block, &mut unsubscribe_rx).await {
                     future::Either::Left((block, _)) => {
+                        // TODO: don't unwrap `block`! channel can be legitimately closed if full
                         let header = header_conv(header::decode(&block.unwrap()).unwrap());
 
                         let per_source_subscriptions =
