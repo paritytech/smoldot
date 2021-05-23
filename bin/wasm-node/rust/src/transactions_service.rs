@@ -151,27 +151,13 @@ async fn background_task(
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
 ) {
-    // Note that the new blocks subscription must be aquired first, in order to guarantee
-    // that all best and finalized blocks updated have earlier been notified on the new blocks
-    // subscription.
-    // TODO: must subscribe to all new blocks, not just new bests; this isn't done so because subscribing to all new blocks isn't supported by the sync service yet
-    let (_, mut new_blocks_receiver) = sync_service.subscribe_best().await;
-    let (_, mut best_blocks_receiver) = sync_service.subscribe_best().await;
-    let (current_finalized_block_header, mut finalized_block_receiver) =
-        sync_service.subscribe_finalized().await;
-
     let mut worker = Worker {
         sync_service,
         pending_transactions: BTreeMap::new(),
         next_transaction_id: 0,
         blocks_tree: fork_tree::ForkTree::with_capacity(32),
         best_block_index: None,
-        latest_finalized_block: (
-            header::decode(&current_finalized_block_header)
-                .unwrap()
-                .number,
-            header::hash_from_scale_encoded_header(&current_finalized_block_header),
-        ),
+        latest_finalized_block: (0, [0; 32]), // Initialized below.
         finalized_downloading_blocks: Vec::new(),
         block_downloads: FuturesUnordered::new(),
         max_concurrent_downloads,
@@ -180,82 +166,103 @@ async fn background_task(
 
     // TODO: must periodically re-send transactions that aren't included in block yet
 
-    loop {
-        futures::select! {
-            new_block_header = new_blocks_receiver.next().fuse() => {
-                worker.new_block(new_block_header.unwrap());
-            },
+    'channels_rebuild: loop {
+        // Note that the new blocks subscription must be aquired first, in order to guarantee
+        // that all finalized blocks updated have earlier been notified on the new blocks
+        // subscription.
+        let (current_finalized_block_header, mut new_blocks_receiver) = {
+            let subscribe_all = worker.sync_service.subscribe_all(32).await;
+            (
+                subscribe_all.finalized_block_scale_encoded_header,
+                stream::iter(subscribe_all.non_finalized_blocks).chain(subscribe_all.new_blocks),
+            )
+        };
+        let (_, mut finalized_block_receiver) = worker.sync_service.subscribe_finalized().await;
 
-            new_best_block_header = best_blocks_receiver.next().fuse() => {
-                // It is possible that a block has been pushed to both the new blocks channel
-                // and the finalized block channel at the same time, but the finalized block
-                // channel is notified first. In order to fulfill the guarantee that all finalized
-                // blocks must have earlier been reported as new blocks, we first empty the new
-                // blocks receiver.
-                while let Some(new_block_header) = new_blocks_receiver.next().now_or_never() {
-                    worker.new_block(new_block_header.unwrap());
-                }
+        worker.latest_finalized_block = (
+            header::decode(&current_finalized_block_header)
+                .unwrap()
+                .number,
+            header::hash_from_scale_encoded_header(&current_finalized_block_header),
+        );
 
-                worker.set_best_block(header::hash_from_scale_encoded_header(&new_best_block_header.unwrap())).await;
-            },
+        // TODO: reset the worker, including all active watchers
 
-            finalized_block_header = finalized_block_receiver.next().fuse() => {
-                // It is possible that a block has been pushed to both the new blocks channel
-                // and the finalized block channel at the same time, but the finalized block
-                // channel is notified first. In order to fulfill the guarantee that all finalized
-                // blocks must have earlier been reported as new blocks, we first empty the new
-                // blocks receiver.
-                while let Some(new_block_header) = new_blocks_receiver.next().now_or_never() {
-                    worker.new_block(new_block_header.unwrap());
-                }
-
-                // Same principle but for the best block update.
-                while let Some(new_best_header) = best_blocks_receiver.next().now_or_never() {
-                    worker.set_best_block(header::hash_from_scale_encoded_header(&new_best_header.unwrap())).await;
-                }
-
-                worker.new_finalized_block(finalized_block_header.unwrap()).await;
-            },
-
-            download = worker.block_downloads.select_next_some() => {
-                let (block_hash, block_body) = download;
-                worker.download_result(block_hash, block_body);
-            },
-
-            message = from_foreground.next().fuse() => {
-                let message = match message {
-                    Some(msg) => msg,
-                    None => return,
-                };
-
-                match message {
-                    ToBackground::SubmitTransaction {
-                        transaction_bytes,
-                        mut updates_report,
-                    } => {
-                        if worker.pending_transactions.len() >= worker.max_pending_transactions {
-                            let _ = updates_report
-                                .send(TransactionStatus::Dropped)
-                                .await;
-                            continue;
+        loop {
+            futures::select! {
+                new_block = new_blocks_receiver.next().fuse() => {
+                    if let Some(new_block) = new_block {
+                        let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
+                        worker.new_block(new_block.scale_encoded_header);
+                        if new_block.is_new_best {
+                            worker.set_best_block(hash).await;
                         }
+                    } else {
+                        continue 'channels_rebuild;
+                    }
+                },
 
-                        let peers_sent = network_service
-                            .clone()
-                            .announce_transaction(network_chain_index, &transaction_bytes)
-                            .await;
-
-                        if !peers_sent.is_empty() {
-                            let _ = updates_report
-                                .send(TransactionStatus::Broadcast(peers_sent))
-                                .await;
+                finalized_block_header = finalized_block_receiver.next().fuse() => {
+                    // It is possible that a block has been pushed to both the new blocks channel
+                    // and the finalized block channel at the same time, but the finalized block
+                    // channel is notified first. In order to fulfill the guarantee that all finalized
+                    // blocks must have earlier been reported as new blocks, we first empty the new
+                    // blocks receiver.
+                    while let Some(new_block) = new_blocks_receiver.next().now_or_never() {
+                        if let Some(new_block) = new_block {
+                            let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
+                            worker.new_block(new_block.scale_encoded_header);
+                            if new_block.is_new_best {
+                                worker.set_best_block(hash).await;
+                            }
+                        } else {
+                            continue 'channels_rebuild;
                         }
+                    }
 
-                        let transaction_id = worker.next_transaction_id;
-                        worker.next_transaction_id = worker.next_transaction_id.checked_add(1).unwrap();
-                        worker
-                            .pending_transactions
-                            .insert(transaction_id, (transaction_bytes, updates_report));
+                    worker.new_finalized_block(finalized_block_header.unwrap()).await;
+                },
+
+                download = worker.block_downloads.select_next_some() => {
+                    let (block_hash, block_body) = download;
+                    worker.download_result(block_hash, block_body);
+                },
+
+                message = from_foreground.next().fuse() => {
+                    let message = match message {
+                        Some(msg) => msg,
+                        None => return,
+                    };
+
+                    match message {
+                        ToBackground::SubmitTransaction {
+                            transaction_bytes,
+                            mut updates_report,
+                        } => {
+                            if worker.pending_transactions.len() >= worker.max_pending_transactions {
+                                let _ = updates_report
+                                    .send(TransactionStatus::Dropped)
+                                    .await;
+                                continue;
+                            }
+
+                            let peers_sent = network_service
+                                .clone()
+                                .announce_transaction(network_chain_index, &transaction_bytes)
+                                .await;
+
+                            if !peers_sent.is_empty() {
+                                let _ = updates_report
+                                    .send(TransactionStatus::Broadcast(peers_sent))
+                                    .await;
+                            }
+
+                            let transaction_id = worker.next_transaction_id;
+                            worker.next_transaction_id = worker.next_transaction_id.checked_add(1).unwrap();
+                            worker
+                                .pending_transactions
+                                .insert(transaction_id, (transaction_bytes, updates_report));
+                        }
                     }
                 }
             }
