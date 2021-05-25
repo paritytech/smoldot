@@ -24,6 +24,48 @@
 //! transaction on the network, it gets reported to the service, which then tries to send it to
 //! the peers the node is currently connected to. Afterwards, the service will inspect the stream
 //! of best and finalized blocks to find out whether the transaction has been included or not.
+//!
+//! # How watching transactions works
+//!
+//! Calling [`TransactionsService::submit_extrinsic`] returns a channel receiver that will contain
+//! status updates about this transaction.
+//!
+//! In order to implement this, the [`TransactionsService`] will follow all the blocks that are
+//! verified locally by the [`sync_service::SyncService`] (see
+//! [`sync_service::SyncService::subscribe_all`]) and download from the network the body of all
+//! the blocks in the best chain.
+//!
+//! When a block body download fails, it is ignored, in the hopes that the block will not be part
+//! of the finalized chain. If the block body download of a finalized block fails, we enter "panic
+//! mode" (not an actual Rust panic, just a way to describe the logic) and all watched
+//! transactions are dropped.
+//!
+//! The same "panic mode" happens if there's an accidental gap in the chain, which wills typically
+//! happen if the [`sync_service::SyncService`] is overwhelmed.
+//!
+//! If the channel returned by [`TransactionsService::submit_extrinsic`] is full, it will
+//! automatically be closed so as to not block the transactions service if the receive is too slow
+//! to be processed.
+//!
+//! # About duplicate transactions
+//!
+//! The Substrate and Polkadot runtimes support nonce-less unsigned transactions. In other words,
+//! a user can submit the same transaction (the exact same bytes every time) as many time as they
+//! want.
+//!
+//! While the chain can accept the same transaction multiple times over time, a Substrate node
+//! will only allow submitting it *once at a time*. In other words, any given unsigned transaction
+//! will never be included more than once in any given block. If you try to submit an unsigned
+//! transaction while the same transaction is already pending, the Substrate node will ignore it
+//! or return an error.
+//!
+//! Contrary to Substrate, the smoldot Wasm client can be used by multiple UIs at the same time.
+//! When a UI submits an unsigned transaction, we don't want to do the same as Substrate and
+//! refuse it if it is already pending, as it would make it possible for a UI to determine
+//! whether another UI has already submitted this transaction, and thus allow communications
+//! between UIs. Instead, the smoldot Wasm client return another sender to the same already-pending
+//! transaction.
+//!
 
 use crate::{network_service, sync_service};
 
@@ -86,12 +128,14 @@ impl TransactionsService {
     /// possible.
     ///
     /// The return value of this method is a channel which will receive updates on the state
-    /// of the extrinsic. The channel is closed when no new update is expected.
+    /// of the extrinsic. The channel is closed when no new update is expected or if it becomes
+    /// full.
     ///
     /// > **Note**: Dropping the value returned does not cancel sending out the extrinsic.
-    pub async fn submit_extrinsic(&self, transaction: &[u8]) -> mpsc::Receiver<TransactionStatus> {
+    #[must_use = "Use `submit_extrinsic` instead if you don't need the return value"]
+    pub async fn submit_and_watch_extrinsic(&self, transaction: &[u8], channel_size: usize) -> mpsc::Receiver<TransactionStatus> {
         // TODO: think about the size and full-ness of this channel
-        let (updates_report, rx) = mpsc::channel(16);
+        let (updates_report, rx) = mpsc::channel(channel_size);
 
         self.to_background
             .lock()
@@ -104,6 +148,14 @@ impl TransactionsService {
             .unwrap();
 
         rx
+    }
+
+    /// Similar to [`TransactionsService::submit_and_watch_extrinsic`], but doesn't return any
+    /// channel.
+    pub async fn submit_extrinsic(&self, transaction: &[u8]) {
+        // It is easier to build a channel and destroy it afterwards than have different paths
+        // depending on whether or not a channel should exist in the first place.
+        self.submit_and_watch_extrinsic(transaction, 0);
     }
 }
 

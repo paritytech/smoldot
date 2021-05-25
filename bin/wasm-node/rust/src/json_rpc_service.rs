@@ -972,7 +972,7 @@ impl JsonRpcService {
     ) {
         let mut transaction_updates = self
             .transactions_service
-            .submit_extrinsic(&transaction.0)
+            .submit_and_watch_extrinsic(&transaction.0, 16)
             .await;
 
         let subscription = self
