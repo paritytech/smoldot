@@ -47,7 +47,7 @@
 //! automatically be closed so as to not block the transactions service if the receive is too slow
 //! to be processed.
 //!
-//! # About duplicate transactions
+//! # About duplicate unsigned transactions
 //!
 //! The Substrate and Polkadot runtimes support nonce-less unsigned transactions. In other words,
 //! a user can submit the same transaction (the exact same bytes every time) as many time as they
@@ -132,9 +132,16 @@ impl TransactionsService {
     /// full.
     ///
     /// > **Note**: Dropping the value returned does not cancel sending out the extrinsic.
+    ///
+    /// If this exact same transaction has already been submitted before, the transaction isn't
+    /// added a second time. Instead, a second channel is created pointing to the already-existing
+    /// transaction.
     #[must_use = "Use `submit_extrinsic` instead if you don't need the return value"]
-    pub async fn submit_and_watch_extrinsic(&self, transaction: &[u8], channel_size: usize) -> mpsc::Receiver<TransactionStatus> {
-        // TODO: think about the size and full-ness of this channel
+    pub async fn submit_and_watch_extrinsic(
+        &self,
+        transaction: &[u8],
+        channel_size: usize,
+    ) -> mpsc::Receiver<TransactionStatus> {
         let (updates_report, rx) = mpsc::channel(channel_size);
 
         self.to_background
@@ -252,7 +259,7 @@ async fn background_task(
         // As explained above, this code is reached if there is a gap in the blocks.
         // Consequently, we drop all pending transactions.
         for (_, sender) in worker.pending_transactions.values_mut() {
-            let _ = sender.send(TransactionStatus::Dropped).await; // TODO: await?
+            let _ = sender.send(TransactionStatus::Dropped).await; // TODO: remove await
         }
         worker.pending_transactions.clear();
 
@@ -316,7 +323,7 @@ async fn background_task(
                             if worker.pending_transactions.len() >= worker.max_pending_transactions {
                                 let _ = updates_report
                                     .send(TransactionStatus::Dropped)
-                                    .await;
+                                    .await;// TODO: remove await
                                 continue;
                             }
 
@@ -328,7 +335,7 @@ async fn background_task(
                             if !peers_sent.is_empty() {
                                 let _ = updates_report
                                     .send(TransactionStatus::Broadcast(peers_sent))
-                                    .await;
+                                    .await;// TODO: remove await
                             }
 
                             let transaction_id = worker.next_transaction_id;
@@ -479,7 +486,7 @@ impl Worker {
                         .unwrap()
                         .1
                         .send(TransactionStatus::Retracted(block_info.hash))
-                        .await;
+                        .await;// TODO: remove await
                 }
             }
         }
@@ -503,7 +510,7 @@ impl Worker {
                             .unwrap()
                             .1
                             .send(TransactionStatus::InBlock(block_info.hash))
-                            .await;
+                            .await;// TODO: remove await
                     }
                 }
             }
@@ -552,7 +559,7 @@ impl Worker {
                                 .unwrap()
                                 .1
                                 .send(TransactionStatus::Finalized(pruned_node.user_data.hash))
-                                .await;
+                                .await;// TODO: remove await
                         }
                     }
                 }
