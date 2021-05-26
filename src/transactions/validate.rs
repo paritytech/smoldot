@@ -20,7 +20,7 @@ use crate::{
     util,
 };
 
-use alloc::vec::Vec;
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{convert::TryFrom as _, iter};
 
 /// Configuration for a transaction validation process.
