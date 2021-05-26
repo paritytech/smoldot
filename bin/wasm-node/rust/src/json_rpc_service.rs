@@ -370,12 +370,6 @@ impl JsonRpcService {
                 );
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
-                // Send the transaction to the transactions service. It will be sent to the
-                // rest of the network asynchronously.
-                self.transactions_service
-                    .submit_extrinsic(&transaction.0)
-                    .await;
-
                 // In Substrate, `author_submitExtrinsic` returns the hash of the extrinsic. It
                 // is unclear whether it has to actually be the hash of the transaction or if it
                 // could be any opaque value. Additionally, there isn't any other JSON-RPC method
@@ -385,6 +379,12 @@ impl JsonRpcService {
                 hash_context.update(&transaction.0);
                 let mut transaction_hash: [u8; 32] = Default::default();
                 transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
+
+                // Send the transaction to the transactions service. It will be sent to the
+                // rest of the network asynchronously.
+                self.transactions_service
+                    .submit_extrinsic(transaction.0)
+                    .await;
 
                 self.send_back(
                     &methods::Response::author_submitExtrinsic(methods::HashHexString(
@@ -972,7 +972,7 @@ impl JsonRpcService {
     ) {
         let mut transaction_updates = self
             .transactions_service
-            .submit_and_watch_extrinsic(&transaction.0, 16)
+            .submit_and_watch_extrinsic(transaction.0, 16)
             .await;
 
         let subscription = self
