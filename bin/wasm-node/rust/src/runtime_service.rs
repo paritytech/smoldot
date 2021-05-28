@@ -505,8 +505,8 @@ struct LatestKnownRuntime {
     /// See [`RuntimeService::subscribe_best`].
     best_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
 
-    /// Return value of calling [`SyncService::is_near_head_of_chain_heuristic`] after the latest
-    /// best block update.
+    /// Return value of calling [`sync_service::SyncService::is_near_head_of_chain_heuristic`]
+    /// after the latest best block update.
     best_near_head_of_chain: bool,
 }
 
