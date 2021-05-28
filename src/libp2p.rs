@@ -117,7 +117,6 @@ pub mod discovery;
 pub mod peer_id;
 pub mod peerset;
 
-pub use established::{ConfigRequestResponse, ConfigRequestResponseIn};
 pub use multiaddr::Multiaddr;
 #[doc(inline)]
 pub use parity_multiaddr as multiaddr;
@@ -132,18 +131,6 @@ pub struct Config<TPeer> {
     /// handshake.
     /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
     pub randomness_seed: [u8; 32],
-
-    /// Addresses to listen for incoming connections.
-    pub listen_addresses: Vec<Multiaddr>,
-
-    pub overlay_networks: Vec<OverlayNetworkConfig>,
-
-    pub request_response_protocols: Vec<ConfigRequestResponse>,
-
-    /// Name of the ping protocol on the network.
-    pub ping_protocol: String,
-
-    pub known_nodes: Vec<(TPeer, PeerId, Multiaddr)>,
 
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specifications.
@@ -166,29 +153,6 @@ pub struct Config<TPeer> {
     pub pending_api_events_buffer_size: NonZeroUsize,
 }
 
-/// Configuration for a specific overlay network.
-///
-/// See [`Config::overlay_networks`].
-pub struct OverlayNetworkConfig {
-    /// Name of the protocol negotiated on the wire.
-    pub protocol_name: String,
-
-    /// Optional alternative names for this protocol. Can represent different versions.
-    ///
-    /// Negotiated in order in which they are passed.
-    pub fallback_protocol_names: Vec<String>,
-
-    /// Maximum size, in bytes, of the handshake that can be received.
-    pub max_handshake_size: usize,
-
-    /// Maximum size, in bytes, of a notification that can be received.
-    pub max_notification_size: usize,
-
-    /// List of node identities that are known to belong to this overlay network. The node
-    /// identities are indices in [`Config::known_nodes`].
-    pub bootstrap_nodes: Vec<usize>,
-}
-
 /// Identifier of a pending connection requested by the network through a [`StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(peerset::ConnectionId); // TODO: must never be reused /!\
@@ -206,31 +170,11 @@ pub struct Network<TNow, TPeer, TConn> {
     /// See [`Config::noise_key`].
     noise_key: connection::NoiseKey,
 
-    /// See [`OverlayNetwork`].
-    overlay_networks: Arc<[OverlayNetwork]>,
-
-    /// See [`Config::request_response_protocols`].
-    request_response_protocols: Vec<ConfigRequestResponse>,
-
-    /// See [`Config::ping_protocol`].
-    ping_protocol: String,
-
     /// Generator for randomness seeds given to the established connections.
     randomness_seeds: Mutex<ChaCha20Rng>,
 
     /// Receiver connected to [`Guarded::events_tx`].
     events_rx: Mutex<mpsc::Receiver<Event<TConn>>>,
-}
-
-/// State of a specific overlay network.
-///
-/// This struct is a slight variation to [`OverlayNetworkConfig`].
-struct OverlayNetwork {
-    /// See [`OverlayNetworkConfig`].
-    config: OverlayNetworkConfig,
-
-    /// Identifier of this overlay network according to the peerset.
-    peerset_id: peerset::OverlayNetworkId,
 }
 
 /// Fields of [`Network`] behind a mutex.
@@ -263,15 +207,6 @@ where
             overlay_networks_capacity: config.overlay_networks.len(),
         });
 
-        let overlay_networks = config
-            .overlay_networks
-            .into_iter()
-            .map(|config| OverlayNetwork {
-                config,
-                peerset_id: peerset.add_overlay_network(),
-            })
-            .collect::<Arc<[_]>>();
-
         let mut ids = Vec::with_capacity(config.known_nodes.len());
         for (user_data, peer_id, multiaddr) in config.known_nodes {
             ids.push(peer_id.clone());
@@ -279,22 +214,8 @@ where
             node.add_known_address(multiaddr);
         }
 
-        for overlay_network in &*overlay_networks {
-            for bootstrap_node in &overlay_network.config.bootstrap_nodes {
-                // TODO: cloning :(
-                peerset
-                    .node_mut(ids[*bootstrap_node].clone())
-                    .into_known()
-                    .unwrap()
-                    .add_to_overlay(overlay_network.peerset_id);
-            }
-        }
-
         Network {
             noise_key: config.noise_key,
-            overlay_networks,
-            request_response_protocols: config.request_response_protocols,
-            ping_protocol: config.ping_protocol,
             events_rx: Mutex::new(events_rx),
             guarded: Mutex::new(Guarded { peerset, events_tx }),
             randomness_seeds: Mutex::new(ChaCha20Rng::from_seed(config.randomness_seed)),
@@ -313,19 +234,6 @@ where
     /// Returns the Noise key originalled passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &connection::NoiseKey {
         &self.noise_key
-    }
-
-    /// Returns the list the overlay networks originally passed as [`Config::overlay_networks`].
-    pub fn overlay_networks(&self) -> impl ExactSizeIterator<Item = &OverlayNetworkConfig> {
-        self.overlay_networks.iter().map(|v| &v.config)
-    }
-
-    /// Returns the list the request-response protocols originally passed as
-    /// [`Config::request_response_protocols`].
-    pub fn request_response_protocols(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &ConfigRequestResponse> {
-        self.request_response_protocols.iter()
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -544,7 +452,7 @@ where
             .connection
             .as_alive()
             .ok_or(QueueNotificationError::NotConnected)?
-            .write_notification_unbounded(substream_id, notification.into());
+            .write_unbounded(substream_id, notification.into());
 
         // Note that no update of the `Guarded` is necessary. The `Guarded` doesn't track
         // notifications being sent.
@@ -649,11 +557,7 @@ where
 
         if let Some(connection) = connection_lock.connection.as_alive() {
             // TODO: must check if substream_id is still valid
-            connection.accept_in_notifications_substream(
-                substream_id,
-                handshake,
-                overlay_network_index,
-            );
+            connection.accept_in_substream(substream_id, handshake, overlay_network_index);
         } else {
             // The connection no longer exists. This state mismatch is a normal situation. See
             // the implementations notes at the top of the file for more information.
@@ -918,28 +822,7 @@ where
 
     async fn build_connection_config(&self) -> established::Config {
         let randomness_seed = self.randomness_seeds.lock().await.gen();
-        established::Config {
-            notifications_protocols: self
-                .overlay_networks
-                .iter()
-                .flat_map(|net| {
-                    let max_handshake_size = net.config.max_handshake_size;
-                    let max_notification_size = net.config.max_notification_size;
-                    iter::once(&net.config.protocol_name)
-                        .chain(net.config.fallback_protocol_names.iter())
-                        .map(move |name| {
-                            established::ConfigNotifications {
-                                name: name.clone(), // TODO: cloning :-/
-                                max_handshake_size,
-                                max_notification_size,
-                            }
-                        })
-                })
-                .collect(),
-            request_protocols: self.request_response_protocols.clone(),
-            randomness_seed,
-            ping_protocol: self.ping_protocol.clone(), // TODO: cloning :-/
-        }
+        established::Config { randomness_seed }
     }
 
     pub async fn open_next_substream(&'_ self) -> Option<SubstreamOpen<'_, TNow, TPeer, TConn>> {
@@ -1205,7 +1088,7 @@ where
                     .connection
                     .as_alive()
                     .unwrap() // TODO: shouldn't unwrap here
-                    .notifications_substream_user_data_mut(id)
+                    .substream_user_data_mut(id)
                     .unwrap();
 
                 let mut connection = guarded.peerset.connection_mut(self.id).unwrap();
@@ -1234,7 +1117,7 @@ where
                     .connection
                     .as_alive()
                     .unwrap() // TODO: shouldn't unwrap here
-                    .notifications_substream_user_data_mut(id)
+                    .substream_user_data_mut(id)
                     .unwrap();
 
                 let mut connection = guarded.peerset.connection_mut(self.id).unwrap();
@@ -1535,7 +1418,7 @@ where
 
         // TODO: connection_id might be wrong and not correspond to the right connection
         let substream_id = if let Some(established) = connection.connection.as_alive() {
-            established.open_notifications_substream(
+            established.open_substream(
                 now,
                 self.overlay_network_index,
                 handshake.into(),
