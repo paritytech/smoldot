@@ -32,8 +32,7 @@ use futures::{channel::mpsc, prelude::*};
 use smoldot::{
     informant::HashDisplay,
     libp2p::{
-        async_rw_with_buffers,
-        connection,
+        async_rw_with_buffers, connection,
         multiaddr::{Multiaddr, Protocol},
         peer_id::PeerId,
     },
