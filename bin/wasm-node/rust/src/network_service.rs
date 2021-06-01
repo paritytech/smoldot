@@ -325,6 +325,11 @@ impl NetworkService {
                             }
                         };
 
+                        // TODO: should have a more robust way of limiting the number of connections
+                        if network_service.peers_list().await.count() >= 10 {
+                            continue;
+                        }
+
                         let start_connect =
                             match network_service.network.fill_out_slots(chain_index).await {
                                 Some(sc) => sc,
@@ -403,6 +408,9 @@ impl NetworkService {
             let network_service = Arc::downgrade(&network_service);
             async move {
                 loop {
+                    // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
+                    ffi::Delay::new(Duration::from_secs(1)).await;
+
                     let network_service = match network_service.upgrade() {
                         Some(ns) => ns,
                         None => {
