@@ -65,3 +65,11 @@ instantly cancelled by calling `client.cancelAll(userDataId)`.
 The `userDataId` is opaque from the point of view of smoldot, but can be used in order to match
 requests with responses. Smoldot will also attempt to distribute resources allocated to processing
 JSON-RPC requests equally based on the value of `userDataId`.
+
+## Future changes
+
+The API described above is mostly stable. It is planned, however, in the future, to give the
+possibility to add and remove chains while the client is running instead of passing a list at
+initialization.
+
+See https://github.com/paritytech/smoldot/issues/501.
