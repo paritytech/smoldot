@@ -44,7 +44,7 @@ use tracing::Instrument as _;
 /// Configuration for a [`NetworkService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
@@ -116,7 +116,7 @@ pub struct NetworkService {
 /// Fields of [`NetworkService`] behind a mutex.
 struct Guarded {
     /// See [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 }
 
 impl NetworkService {

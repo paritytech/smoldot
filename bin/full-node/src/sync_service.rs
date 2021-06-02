@@ -35,7 +35,7 @@ use tracing::Instrument as _;
 /// Configuration for a [`SyncService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<full_sqlite::SqliteFullDatabase>,
