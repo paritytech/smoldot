@@ -133,7 +133,7 @@ jobs:
       - id: rust-version
         run: echo "::set-output name=version::`cargo read-manifest --manifest-path=./bin/wasm-node/rust/Cargo.toml | jq .version`"
       - run: exit 1
-        if: ${{ steps.js-version.outputs.version != '' }}   # Defensive test against mistakes in the CI script
+        if: ${{ steps.js-version.outputs.version == '' }}   # Defensive test against mistakes in the CI script
       - run: exit 1
         if: ${{ steps.js-version.outputs.version != steps.rust-version.outputs.version }}
 
