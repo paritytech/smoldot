@@ -40,6 +40,10 @@ smoldot.start({
         unsentQueue.forEach((m) => client.sendJsonRpc(m.message, 0, m.connectionId));
         unsentQueue = [];
     })
+    .catch((error) => {
+        console.error(error);
+        process.exit(1);
+    });
 
 let server = http.createServer(function (request, response) {
     response.writeHead(404);
