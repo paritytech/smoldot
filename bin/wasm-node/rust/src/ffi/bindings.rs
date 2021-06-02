@@ -138,9 +138,10 @@ extern "C" {
     ///
     /// The `error_ptr_ptr` parameter should be treated as a pointer to two consecutive
     /// little-endian 32-bits unsigned numbers. If an error happened, call [`alloc`] to allocate
-    /// memory, write an error message in that given location, then write that location at the
-    /// location indicated by `error_ptr_ptr` and the length of that string at the location
-    /// `error_ptr_ptr + 4`.
+    /// memory, write a UTF-8 error message in that given location, then write that location at
+    /// the location indicated by `error_ptr_ptr` and the length of that string at the location
+    /// `error_ptr_ptr + 4`. The buffer is then de-allocated by the client. If no error happens,
+    /// nothing should be written to `error_ptr_ptr`.
     ///
     /// At any time, a connection can be in one of the three following states:
     ///
