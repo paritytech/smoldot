@@ -20,6 +20,7 @@
 import * as smoldot from '../src/index.js';
 import { default as websocket } from 'websocket';
 import * as http from 'http';
+import * as process from 'process';
 // Adjust these chain specs for the chain you want to connect to.
 import * as fs from 'fs';
 
