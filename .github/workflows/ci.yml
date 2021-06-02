@@ -130,6 +130,8 @@ jobs:
       # Compares whether the version in `package.json` matches the version in `Cargo.toml`.
       - run: JS_VERSION=`jq .version ./bin/wasm-node/javascript/package.json`
       - run: RUST_VERSION=`cargo read-manifest --manifest-path=./bin/wasm-node/rust/Cargo.toml | jq .version`
+      - run: echo $JS_VERSION
+      - run: echo $RUST_VERSION
       - run: exit 1
         if: ${{ env.JS_VERSION != env.RUST_VERSION }}
 
