@@ -55,12 +55,15 @@ impl TransactionsService {
     pub async fn new(mut config: Config) -> Self {
         let (to_background, from_foreground) = mpsc::channel(8);
 
-        (config.tasks_executor)("transactions-service".into(), Box::pin(background_task(
-            config.network_service.0,
-            config.network_service.1,
-            config.sync_service,
-            from_foreground,
-        )));
+        (config.tasks_executor)(
+            "transactions-service".into(),
+            Box::pin(background_task(
+                config.network_service.0,
+                config.network_service.1,
+                config.sync_service,
+                from_foreground,
+            )),
+        );
 
         TransactionsService {
             to_background: Mutex::new(to_background),
