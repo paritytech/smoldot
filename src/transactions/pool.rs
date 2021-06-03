@@ -41,7 +41,7 @@
 //! The transactions pool tracks the height of the *best* chain, and only of the best chain. More
 //! precisely, it is aware of the height of the current best block.
 //!
-//! # Details
+//! # Usage
 //!
 //! Each transaction exposes three properties:
 //!
@@ -49,6 +49,23 @@
 //! as provided by the runtime: the tags it provides and requires, its longevity, its priority.
 //! - The height of the block, if any, in which the transaction has been included.
 //! - A so-called user data, an opaque field controller by the API user.
+//!
+//! Use [`Pool::add_unvalidated`] to add to the pool a transaction that should be included in a
+//! block at a later point in time.
+//!
+//! Use [`Pool::append_block`] and [`Pool::retract_blocks`] when a new block is considered as
+//! best in order to let the [`Pool`] track the state of the best block of the chain.
+//!
+//! Use [`Pool::unvalidated_transactions`] to obtain the list of transactions that should be
+//! validated. Validation should be performed using the [`validate`](../validate) module, and
+//! the result reported with [`Pool::set_validation_result`].
+//!
+//! # Out of scope
+//!
+//! The follow are examples of things that are out of scope of this data structure:
+//!
+//! - Watching the state of transactions.
+//! - Sending transactions to other peers.
 //!
 
 use super::validate::{InvalidTransaction, ValidTransaction};
@@ -166,6 +183,7 @@ impl<TTx> Pool<TTx> {
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
             scale_encoded: scale_encoded.into(),
+            validation: None,
             included_block_height,
             user_data,
         }));
@@ -191,22 +209,33 @@ impl<TTx> Pool<TTx> {
     ///
     #[track_caller]
     pub fn remove(&mut self, id: TransactionId) -> TTx {
-        let tx = self.transactions.remove(id.0);
+        let tx = self.transactions.remove(id.0); // Panics if `id` is invalid.
 
-        // TODO: remove from not_validated if relevant
+        if tx.validation.is_none() {
+            let _removed = self.not_validated.remove(&id);
+            debug_assert!(_removed);
+        }
+
+        if let Some(included_block_height) = tx.included_block_height {
+            let _removed = self.by_height.remove(&(included_block_height, id));
+            debug_assert!(_removed);
+        }
 
         let _id = self
             .by_hash
             .remove(&blake2_hash(&tx.scale_encoded))
             .unwrap();
-        assert_eq!(_id, id);
+        debug_assert_eq!(_id, id);
 
         tx.user_data
     }
 
     /// Returns a list of transactions whose state is "not validated".
     pub fn unvalidated_transactions(&'_ self) -> impl ExactSizeIterator<Item = TransactionId> + '_ {
-        self.not_validated.iter().copied()
+        self.not_validated
+            .iter()
+            .copied()
+            .inspect(move |id| debug_assert!(self.not_validated.contains(id)))
     }
 
     /// Returns the transactions from the pool in the order in which they should be inserted in
@@ -334,6 +363,7 @@ impl<TTx> Pool<TTx> {
     /// Panics if `num_to_retract > self.best_block_height()`, in other words if the block number
     /// would go in the negative.
     ///
+    // TODO: return list of retracted transactions
     pub fn retract_blocks(&mut self, num_to_retract: u64) {
         // Iterate `num_to_retract` times.
         for _ in 0..num_to_retract {
@@ -372,6 +402,9 @@ impl<TTx> Pool<TTx> {
 struct Transaction<TTx> {
     /// Bytes corresponding to the SCALE-encoded transaction.
     scale_encoded: Vec<u8>,
+
+    /// If `Some`, contains the outcome of the validation of this transaction.
+    validation: Option<Result<ValidTransaction, InvalidTransaction>>,
 
     /// If `Some`, the height of the block at which the transaction has been included.
     included_block_height: Option<u64>,
