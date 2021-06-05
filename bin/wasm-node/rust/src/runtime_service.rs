@@ -35,7 +35,7 @@
 //! subscriptions.
 //!
 //! Consequently, you are strongly encouraged to not use both the [`sync_service`] *and* the
-//! [`runtime_service`] of the same chain. They each provide a consistent view of the chain, but
+//! [`RuntimeService`] of the same chain. They each provide a consistent view of the chain, but
 //! this view isn't necessarily the same on both services.
 //!
 //! The main service offered by the runtime service is
