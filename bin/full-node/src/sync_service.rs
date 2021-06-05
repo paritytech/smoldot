@@ -328,6 +328,7 @@ fn start_sync(
                                     is_new_best,
                                     is_new_finalized,
                                     next_actions,
+                                    storage_top_trie_changes,
                                     ..
                                 } => {
                                     // TODO: restore this code

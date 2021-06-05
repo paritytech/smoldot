@@ -1440,9 +1440,11 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
         user_data: TBl,
     ) -> BlockVerification<TRq, TSrc, TBl> {
         match self.inner {
-            HeaderBodyVerifyInner::Optimistic(verify) => {
-                BlockVerification::from_inner(verify.start(now_from_unix_epoch), self.shared)
-            }
+            HeaderBodyVerifyInner::Optimistic(verify) => BlockVerification::from_inner(
+                verify.start(now_from_unix_epoch),
+                self.shared,
+                user_data,
+            ),
         }
     }
 }
@@ -1488,18 +1490,65 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
     fn from_inner(
         inner: optimistic::BlockVerification<(), OptimisticSourceExtra<TSrc>, TBl>,
-        shared: Shared,
+        mut shared: Shared,
+        user_data: TBl,
     ) -> Self {
         match inner {
-            //optimistic::BlockVerification::NewBest { sync, .. } => {}
-            optimistic::BlockVerification::Reset { sync, reason, .. } => {
-                todo!()
+            outcome @ optimistic::BlockVerification::NewBest { .. }
+            | outcome @ optimistic::BlockVerification::Finalized { .. } => {
+                let (mut sync, new_best_number, is_new_finalized) = match outcome {
+                    optimistic::BlockVerification::NewBest {
+                        sync,
+                        new_best_number,
+                        ..
+                    } => (sync, new_best_number, false),
+                    optimistic::BlockVerification::Finalized {
+                        sync,
+                        finalized_blocks,
+                        ..
+                    } => (sync, finalized_blocks.last().unwrap().header.number, true),
+                    _ => unreachable!(),
+                };
+
+                // TODO: transition to all_forks
+
+                let mut next_actions = Vec::new();
+                while let Some(action) = sync.next_request_action() {
+                    next_actions.push(shared.optimistic_action_to_request(action));
+                }
+
+                BlockVerification::Success {
+                    is_new_best: true,
+                    is_new_finalized,
+                    sync: AllSync {
+                        inner: AllSyncInner::Optimistic(sync),
+                        shared,
+                    },
+                    next_actions,
+                }
+            }
+            optimistic::BlockVerification::Reset { mut sync, reason, .. } => {
+                let mut next_actions = Vec::new();
+                while let Some(action) = sync.next_request_action() {
+                    next_actions.push(shared.optimistic_action_to_request(action));
+                }
+
+                BlockVerification::Error {
+                    sync: AllSync {
+                        inner: AllSyncInner::Optimistic(sync),
+                        shared,
+                    },
+                    next_actions,
+                    error: verify::header_only::Error::BadBlockNumber, // TODO: this is the completely wrong error; needs some deeper API changes
+                    user_data,
+                }
             }
             optimistic::BlockVerification::FinalizedStorageGet(inner) => {
                 BlockVerification::FinalizedStorageGet(StorageGet {
                     inner,
                     shared,
                     marker: core::marker::PhantomData,
+                    user_data,
                 })
             }
             optimistic::BlockVerification::FinalizedStoragePrefixKeys(inner) => {
@@ -1507,6 +1556,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     inner,
                     shared,
                     marker: core::marker::PhantomData,
+                    user_data,
                 })
             }
             optimistic::BlockVerification::FinalizedStorageNextKey(inner) => {
@@ -1514,9 +1564,9 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     inner,
                     shared,
                     marker: core::marker::PhantomData,
+                    user_data,
                 })
             }
-            _ => todo!(), // TODO:
         }
     }
 }
@@ -1527,6 +1577,7 @@ pub struct StorageGet<TRq, TSrc, TBl> {
     inner: optimistic::StorageGet<(), OptimisticSourceExtra<TSrc>, TBl>,
     shared: Shared,
     marker: core::marker::PhantomData<TRq>,
+    user_data: TBl,
 }
 
 impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
@@ -1545,7 +1596,7 @@ impl<TRq, TSrc, TBl> StorageGet<TRq, TSrc, TBl> {
     /// Injects the corresponding storage value.
     pub fn inject_value(self, value: Option<&[u8]>) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_value(value);
-        BlockVerification::from_inner(inner, self.shared)
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }
 
@@ -1555,6 +1606,7 @@ pub struct StoragePrefixKeys<TRq, TSrc, TBl> {
     inner: optimistic::StoragePrefixKeys<(), OptimisticSourceExtra<TSrc>, TBl>,
     shared: Shared,
     marker: core::marker::PhantomData<TRq>,
+    user_data: TBl,
 }
 
 impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
@@ -1569,7 +1621,7 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
         keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_keys(keys);
-        BlockVerification::from_inner(inner, self.shared)
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }
 
@@ -1579,6 +1631,7 @@ pub struct StorageNextKey<TRq, TSrc, TBl> {
     inner: optimistic::StorageNextKey<(), OptimisticSourceExtra<TSrc>, TBl>,
     shared: Shared,
     marker: core::marker::PhantomData<TRq>,
+    user_data: TBl,
 }
 
 impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
@@ -1594,7 +1647,7 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_key(key);
-        BlockVerification::from_inner(inner, self.shared)
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }
 
