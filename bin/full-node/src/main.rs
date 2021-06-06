@@ -470,7 +470,9 @@ async fn open_database(
                 if database.block_hash_by_number(0).unwrap().next().unwrap()
                     != genesis_chain_information.finalized_block_header.hash()
                 {
-                    panic!("Mismatch between database and chain specification. Shutting down node.");
+                    panic!(
+                        "Mismatch between database and chain specification. Shutting down node."
+                    );
                 }
 
                 let finalized_block_hash = database.finalized_block_hash().unwrap();
