@@ -28,7 +28,11 @@ use crate::network_service;
 
 use core::{convert::TryFrom as _, num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
-use smoldot::{database::full_sqlite, executor, header, libp2p, network, sync::all};
+use smoldot::{
+    database::full_sqlite,
+    executor, header, libp2p, network,
+    sync::{all, optimistic},
+};
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 use tracing::Instrument as _;
 
@@ -129,7 +133,7 @@ impl SyncService {
 }
 
 enum ToDatabase {
-    //FinalizedBlocks(Vec<all::Block<()>>),
+    FinalizedBlocks(Vec<optimistic::Block<()>>),
 }
 
 /// Returns the background task of the sync service.
@@ -248,11 +252,15 @@ fn start_sync(
                                     u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                                 )
                                 .unwrap(),
-                                direction: network::protocol::BlocksRequestDirection::Ascending,
+                                direction: if ascending {
+                                    network::protocol::BlocksRequestDirection::Ascending
+                                } else {
+                                    network::protocol::BlocksRequestDirection::Descending
+                                },
                                 fields: network::protocol::BlocksRequestFields {
-                                    header: true,
-                                    body: true,
-                                    justification: true,
+                                    header: request_headers,
+                                    body: request_bodies,
+                                    justification: request_justification,
                                 },
                             },
                         );
@@ -310,36 +318,25 @@ fn start_sync(
                                     sync = sync_out;
                                     break;
                                 }
-                                /*all::BlockVerification::Finalized {
-                                    sync: s,
+                                all::BlockVerification::Finalized {
+                                    sync: sync_out,
+                                    next_actions,
                                     finalized_blocks,
                                 } => {
-                                    process = s.process_one();
+                                    // TODO: restore this code
+                                    // Processing has made a step forward.
+                                    // There is nothing to do, but this is used to update to best block
+                                    // shown on the informant.
+                                    /*let mut lock = sync_state.lock().await;
+                                    lock.best_block_hash = new_best_hash;
+                                    lock.best_block_number = new_best_number;
+                                    drop(lock);
 
                                     if let Some(last_finalized) = finalized_blocks.last() {
                                         let mut lock = sync_state.lock().await;
                                         lock.finalized_block_hash = last_finalized.header.hash();
                                         lock.finalized_block_number = last_finalized.header.number;
-                                    }
-
-                                }*/
-                                all::BlockVerification::Success {
-                                    sync: sync_out,
-                                    is_new_best,
-                                    is_new_finalized,
-                                    next_actions,
-                                    storage_top_trie_changes,
-                                    ..
-                                } => {
-                                    // TODO: restore this code
-                                    /*
-                                    // Processing has made a step forward.
-                                    // There is nothing to do, but this is used to update to best block
-                                    // shown on the informant.
-                                    let mut lock = sync_state.lock().await;
-                                    lock.best_block_hash = new_best_hash;
-                                    lock.best_block_number = new_best_number;
-                                    drop(lock);
+                                    }*/
 
                                     // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
                                     for block in &finalized_blocks {
@@ -360,7 +357,26 @@ fn start_sync(
                                         .send(ToDatabase::FinalizedBlocks(finalized_blocks))
                                         .await
                                         .unwrap();
+
+                                    requests_to_start.extend(next_actions);
+                                    sync = sync_out;
                                     break;
+                                }
+                                all::BlockVerification::Success {
+                                    sync: sync_out,
+                                    is_new_best,
+                                    next_actions,
+                                    ..
+                                } => {
+                                    // TODO: restore this code
+                                    /*
+                                    // Processing has made a step forward.
+                                    // There is nothing to do, but this is used to update to best block
+                                    // shown on the informant.
+                                    let mut lock = sync_state.lock().await;
+                                    lock.best_block_hash = new_best_hash;
+                                    lock.best_block_number = new_best_number;
+                                    drop(lock);
                                      */
 
                                     requests_to_start.extend(next_actions);
@@ -398,51 +414,12 @@ fn start_sync(
                         }
                     }
                     all::ProcessOne::VerifyHeader(verify) => {
-                        let verified_hash = verify.hash();
-
                         match verify.perform(unix_time, ()) {
                             all::HeaderVerifyOutcome::Success {
                                 sync: sync_out,
                                 next_actions,
-                                is_new_best,
-                                is_new_finalized,
                                 ..
                             } => {
-                                /*log::debug!(
-                                    target: "sync-verify",
-                                    "Successfully verified header {} (new best: {})",
-                                    HashDisplay(&verified_hash),
-                                    if is_new_best { "yes" } else { "no" }
-                                );
-
-
-                                if is_new_best {
-                                    has_new_best = true;
-                                }
-                                if is_new_finalized {
-                                    has_new_finalized = true;
-                                }
-
-                                // Elements in `all_notifications` are removed one by one and
-                                // inserted back if the channel is still open.
-                                for index in (0..all_notifications.len()).rev() {
-                                    let mut subscription = all_notifications.swap_remove(index);
-                                    // TODO: the code below is `O(n)` complexity
-                                    let header = sync_out
-                                        .non_finalized_blocks()
-                                        .find(|h| h.hash() == verified_hash)
-                                        .unwrap();
-                                    let notification = BlockNotification {
-                                        is_new_best,
-                                        scale_encoded_header: header.scale_encoding_vec(),
-                                        parent_hash: *header.parent_hash,
-                                    };
-
-                                    if subscription.try_send(notification).is_ok() {
-                                        all_notifications.push(subscription);
-                                    }
-                                }*/
-
                                 requests_to_start.extend(next_actions);
                                 sync = sync_out;
                                 continue;
@@ -464,111 +441,6 @@ fn start_sync(
                     }
                 }
             }
-
-            // TODO: remove; code kept just for reference
-            /*// Verify blocks that have been fetched from queries.
-            let mut process = sync.process_one();
-            loop {
-                match process {
-                    all::ProcessOne::AllSync(s) => {
-                        sync = s;
-                        break;
-                    }
-                    all::ProcessOne::Verify(verify) => {
-                        let mut verify = verify.start(unix_time);
-                        loop {
-                            match verify {
-                                all::BlockVerification::Reset {
-                                    sync: s,
-                                    previous_best_height,
-                                    reason,
-                                } => {
-                                    tracing::warn!(%reason, %previous_best_height, "failed-block-verification");
-                                    process = s.process_one();
-                                    break;
-                                }
-                                all::BlockVerification::Finalized {
-                                    sync: s,
-                                    finalized_blocks,
-                                } => {
-                                    process = s.process_one();
-
-                                    if let Some(last_finalized) = finalized_blocks.last() {
-                                        let mut lock = sync_state.lock().await;
-                                        lock.finalized_block_hash = last_finalized.header.hash();
-                                        lock.finalized_block_number = last_finalized.header.number;
-                                    }
-
-                                    // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
-                                    for block in &finalized_blocks {
-                                        for (key, value) in &block.storage_top_trie_changes {
-                                            if let Some(value) = value {
-                                                finalized_block_storage
-                                                    .insert(key.clone(), value.clone());
-                                            } else {
-                                                let _was_there =
-                                                    finalized_block_storage.remove(key);
-                                                // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
-                                                // assert!(_was_there.is_some());
-                                            }
-                                        }
-                                    }
-
-                                    to_database
-                                        .send(ToDatabase::FinalizedBlocks(finalized_blocks))
-                                        .await
-                                        .unwrap();
-                                    break;
-                                }
-
-                                all::BlockVerification::NewBest {
-                                    sync: s,
-                                    new_best_hash,
-                                    new_best_number,
-                                } => {
-                                    // Processing has made a step forward.
-                                    // There is nothing to do, but this is used to update to best block
-                                    // shown on the informant.
-                                    let mut lock = sync_state.lock().await;
-                                    lock.best_block_hash = new_best_hash;
-                                    lock.best_block_number = new_best_number;
-                                    drop(lock);
-
-                                    process = s.process_one();
-                                    break;
-                                }
-
-                                all::BlockVerification::FinalizedStorageGet(req) => {
-                                    let value = finalized_block_storage
-                                        .get(&req.key_as_vec())
-                                        .map(|v| &v[..]);
-                                    verify = req.inject_value(value);
-                                }
-                                all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                    // TODO: to_vec() :-/
-                                    let req_key = req.key().as_ref().to_vec();
-                                    // TODO: to_vec() :-/
-                                    let next_key = finalized_block_storage
-                                        .range(req.key().as_ref().to_vec()..)
-                                        .find(move |(k, _)| k[..] > req_key[..])
-                                        .map(|(k, _)| k);
-                                    verify = req.inject_key(next_key);
-                                }
-                                all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
-                                    // TODO: to_vec() :-/
-                                    let prefix = req.prefix().as_ref().to_vec();
-                                    // TODO: to_vec() :-/
-                                    let keys = finalized_block_storage
-                                        .range(req.prefix().as_ref().to_vec()..)
-                                        .take_while(|(k, _)| k.starts_with(&prefix))
-                                        .map(|(k, _)| k);
-                                    verify = req.inject_keys(keys);
-                                }
-                            }
-                        }
-                    }
-                }
-            }*/
 
             // Update the current best block, used for CLI-related purposes.
             {
@@ -662,42 +534,42 @@ async fn start_database_write(
     loop {
         match messages_rx.next().await {
             None => break,
-            Some(_) => {} /*Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
-                              let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
-                              let _enter = span.enter();
+            Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
+                let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
+                let _enter = span.enter();
 
-                              let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
-                                  Some(last_finalized.header.hash())
-                              } else {
-                                  None
-                              };
+                let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
+                    Some(last_finalized.header.hash())
+                } else {
+                    None
+                };
 
-                              for block in finalized_blocks {
-                                  // TODO: overhead for building the SCALE encoding of the header
-                                  let result = database.insert(
-                                      &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                                          a.extend_from_slice(b.as_ref());
-                                          a
-                                      }),
-                                      true, // TODO: is_new_best?
-                                      block.body.iter(),
-                                      block
-                                          .storage_top_trie_changes
-                                          .iter()
-                                          .map(|(k, v)| (k, v.as_ref())),
-                                  );
+                for block in finalized_blocks {
+                    // TODO: overhead for building the SCALE encoding of the header
+                    let result = database.insert(
+                        &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        }),
+                        true, // TODO: is_new_best?
+                        block.body.iter(),
+                        block
+                            .storage_top_trie_changes
+                            .iter()
+                            .map(|(k, v)| (k, v.as_ref())),
+                    );
 
-                                  match result {
-                                      Ok(()) => {}
-                                      Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                      Err(err) => panic!("{}", err),
-                                  }
-                              }
+                    match result {
+                        Ok(()) => {}
+                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                        Err(err) => panic!("{}", err),
+                    }
+                }
 
-                              if let Some(new_finalized_hash) = new_finalized_hash {
-                                  database.set_finalized(&new_finalized_hash).unwrap();
-                              }
-                          }*/
+                if let Some(new_finalized_hash) = new_finalized_hash {
+                    database.set_finalized(&new_finalized_hash).unwrap();
+                }
+            }
         }
     }
 }

@@ -1473,12 +1473,23 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// True if the newly-verified block is considered the latest finalized block.
-        is_new_finalized: bool,
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
         /// Next requests that must be started.
         next_actions: Vec<Action>,
+    },
+
+    /// Block has been successfully verified and finalized.
+    // TODO: should refactor that so that `ProcessOne` verifies justifications separately from blocks; the present API doesn't make sense for the all_forks strategy
+    Finalized {
+        /// State machine yielded back. Use to continue the processing.
+        sync: AllSync<TRq, TSrc, TBl>,
+        /// Next requests that must be started.
+        next_actions: Vec<Action>,
+        /// List of blocks that have been finalized. Includes the block that has just been
+        /// verified itself.
+        // TODO leaky type
+        finalized_blocks: Vec<optimistic::Block<TBl>>,
     },
 
     /// Block verification failed.
@@ -1512,22 +1523,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
         user_data: TBl,
     ) -> Self {
         match inner {
-            outcome @ optimistic::BlockVerification::NewBest { .. }
-            | outcome @ optimistic::BlockVerification::Finalized { .. } => {
-                let (mut sync, new_best_number, is_new_finalized) = match outcome {
-                    optimistic::BlockVerification::NewBest {
-                        sync,
-                        new_best_number,
-                        ..
-                    } => (sync, new_best_number, false),
-                    optimistic::BlockVerification::Finalized {
-                        sync,
-                        finalized_blocks,
-                        ..
-                    } => (sync, finalized_blocks.last().unwrap().header.number, true),
-                    _ => unreachable!(),
-                };
-
+            optimistic::BlockVerification::NewBest { mut sync, .. } => {
                 // TODO: transition to all_forks
 
                 let mut next_actions = Vec::new();
@@ -1537,7 +1533,6 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                 BlockVerification::Success {
                     is_new_best: true,
-                    is_new_finalized,
                     sync: AllSync {
                         inner: AllSyncInner::Optimistic(sync),
                         shared,
@@ -1545,9 +1540,28 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     next_actions,
                 }
             }
-            optimistic::BlockVerification::Reset {
-                mut sync, reason, ..
+            optimistic::BlockVerification::Finalized {
+                mut sync,
+                finalized_blocks,
+                ..
             } => {
+                // TODO: transition to all_forks
+
+                let mut next_actions = Vec::new();
+                while let Some(action) = sync.next_request_action() {
+                    next_actions.push(shared.optimistic_action_to_request(action));
+                }
+
+                BlockVerification::Finalized {
+                    sync: AllSync {
+                        inner: AllSyncInner::Optimistic(sync),
+                        shared,
+                    },
+                    next_actions,
+                    finalized_blocks,
+                }
+            }
+            optimistic::BlockVerification::Reset { mut sync, .. } => {
                 let mut next_actions = Vec::new();
                 while let Some(action) = sync.next_request_action() {
                     next_actions.push(shared.optimistic_action_to_request(action));
