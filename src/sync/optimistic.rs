@@ -704,7 +704,7 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
 
     /// Returns true if [`Config::full`] was `Some` at initialization.
     pub fn is_full_verification(&self) -> bool {
-        self.inner.finalized_runtime.is_some() 
+        self.inner.finalized_runtime.is_some()
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
