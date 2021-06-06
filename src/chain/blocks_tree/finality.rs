@@ -451,8 +451,8 @@ impl<T> NonFinalizedTreeInner<T> {
         //
         // The definition of which block is the best can vary between nodes, but because there is
         // an intentional delay between a block being created and it being finalized, the block
-        // being finalized is, under normal circumstances, always a descendant of the current best
-        // block of all nodes.
+        // being finalized is, under normal circumstances, always a common ancestor of the current
+        // best block of all nodes.
         //
         // The situation where this isn't the case is therefore very uncommon: typically after a
         // netsplit (where not all nodes are aware of all blocks), or in extremely unlucky
