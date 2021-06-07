@@ -937,11 +937,11 @@ impl JsonRpcService {
                         self.sync_service
                             .syncing_peers()
                             .await
-                            .map(|(peer_id, best_height, best_hash)| methods::SystemPeer {
+                            .map(|(peer_id, best_number, best_hash)| methods::SystemPeer {
                                 peer_id: peer_id.to_string(),
                                 roles: "unknown".to_string(), // TODO: do properly
                                 best_hash: methods::HashHexString(best_hash),
-                                best_number: best_height,
+                                best_number,
                             })
                             .collect(),
                     )
