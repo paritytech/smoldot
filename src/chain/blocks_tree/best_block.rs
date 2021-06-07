@@ -38,53 +38,38 @@ pub(super) fn is_better_block<T>(
             == *maybe_new_best.parent_hash)
     );
 
+    // A descendant is always preferred to its ancestor.
     if maybe_new_best_parent.map_or(false, |p_idx| blocks.is_ancestor(old_best, p_idx)) {
-        // A descendant is always preferred to its ancestor.
-        true
+        return true;
+    };
+
+    // In order to determine whether the new block is our new best:
+    //
+    // - Find the common ancestor between the current best and the new block's parent.
+    // - Count the number of Babe primary slot claims between the common ancestor and the current
+    //   best.
+    // - Count the number of Babe primary slot claims between the common ancestor and the new
+    //   block's parent. Add one if the new block has a Babe primary slot claim.
+    // - If the number for the new block is strictly superior, then the new block is our new best.
+    let (ascend, descend) = if let Some(maybe_new_best_parent) = maybe_new_best_parent {
+        let (asc, desc) = blocks.ascend_and_descend(old_best, maybe_new_best_parent);
+        (either::Left(asc), either::Left(desc))
     } else {
-        // In order to determine whether the new block is our new best:
-        //
-        // - Find the common ancestor between the current best and the new block's parent.
-        // - Count the number of Babe primary slot claims between the common ancestor and
-        //   the current best.
-        // - Count the number of Babe primary slot claims between the common ancestor and
-        //   the new block's parent. Add one if the new block has a Babe primary slot
-        //   claim.
-        // - If the number for the new block is strictly superior, then the new block is
-        //   out new best.
-        //
-        let (ascend, descend) = if let Some(maybe_new_best_parent) = maybe_new_best_parent {
-            let (asc, desc) = blocks.ascend_and_descend(old_best, maybe_new_best_parent);
-            (either::Left(asc), either::Left(desc))
-        } else {
-            (
-                either::Right(blocks.node_to_root_path(old_best)),
-                either::Right(iter::empty()),
-            )
-        };
+        (
+            either::Right(blocks.node_to_root_path(old_best)),
+            either::Right(iter::empty()),
+        )
+    };
 
-        // TODO: update for Aura?
-        // TODO: what if there's a mix of Babe and non-Babe blocks here?
+    // TODO: update for Aura?
+    // TODO: what if there's a mix of Babe and non-Babe blocks here?
 
-        let curr_best_primary_slots: usize = ascend
-            .map(|i| {
-                if blocks
-                    .get(i)
-                    .unwrap()
-                    .header
-                    .digest
-                    .babe_pre_runtime()
-                    .map_or(false, |pr| pr.is_primary())
-                {
-                    1
-                } else {
-                    0
-                }
-            })
-            .sum();
-
-        let new_block_primary_slots = {
-            if maybe_new_best
+    let curr_best_primary_slots: usize = ascend
+        .map(|i| {
+            if blocks
+                .get(i)
+                .unwrap()
+                .header
                 .digest
                 .babe_pre_runtime()
                 .map_or(false, |pr| pr.is_primary())
@@ -93,26 +78,38 @@ pub(super) fn is_better_block<T>(
             } else {
                 0
             }
-        };
+        })
+        .sum();
 
-        let parent_primary_slots: usize = descend
-            .map(|i| {
-                if blocks
-                    .get(i)
-                    .unwrap()
-                    .header
-                    .digest
-                    .babe_pre_runtime()
-                    .map_or(false, |pr| pr.is_primary())
-                {
-                    1
-                } else {
-                    0
-                }
-            })
-            .sum();
+    let new_block_primary_slots = {
+        if maybe_new_best
+            .digest
+            .babe_pre_runtime()
+            .map_or(false, |pr| pr.is_primary())
+        {
+            1
+        } else {
+            0
+        }
+    };
 
-        // Note the strictly superior. If there is an equality, we keep the current best.
-        parent_primary_slots + new_block_primary_slots > curr_best_primary_slots
-    }
+    let parent_primary_slots: usize = descend
+        .map(|i| {
+            if blocks
+                .get(i)
+                .unwrap()
+                .header
+                .digest
+                .babe_pre_runtime()
+                .map_or(false, |pr| pr.is_primary())
+            {
+                1
+            } else {
+                0
+            }
+        })
+        .sum();
+
+    // Note the strictly superior. If there is an equality, we keep the current best.
+    parent_primary_slots + new_block_primary_slots > curr_best_primary_slots
 }
