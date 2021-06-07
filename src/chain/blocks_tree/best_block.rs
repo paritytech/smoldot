@@ -18,12 +18,12 @@
 //! Extension module containing the best block determination.
 
 use super::*;
-use core::iter;
+use core::{cmp::Ordering, iter};
 
 /// Accepts as parameter a container of blocks and indices within this container.
 ///
-/// Returns true if `maybe_new_best` on top of `maybe_new_best_parent` is a better block compared
-/// to `old_best`.
+/// Returns `Ordering::Greater` if `maybe_new_best` on top of `maybe_new_best_parent` is a better
+/// block compared to `old_best`.
 ///
 /// `maybe_new_best_parent` is to be `None` if the parent is the finalized block that is the
 /// parent of all the leaves of the tree.
@@ -35,7 +35,7 @@ pub(super) fn is_better_block<T>(
     old_best: fork_tree::NodeIndex,
     maybe_new_best_parent: Option<fork_tree::NodeIndex>,
     maybe_new_best: header::HeaderRef,
-) -> bool {
+) -> Ordering {
     debug_assert!(
         maybe_new_best_parent.map_or(true, |p_idx| blocks.get(p_idx).unwrap().hash
             == *maybe_new_best.parent_hash)
@@ -43,7 +43,7 @@ pub(super) fn is_better_block<T>(
 
     // A descendant is always preferred to its ancestor.
     if maybe_new_best_parent.map_or(false, |p_idx| blocks.is_ancestor(old_best, p_idx)) {
-        return true;
+        return Ordering::Greater;
     };
 
     // In order to determine whether the new block is our new best:
@@ -111,6 +111,5 @@ pub(super) fn is_better_block<T>(
         })
         .sum();
 
-    // Note the strictly superior. If there is an equality, we keep the current best.
-    candidate_chain_score + candidate_score > curr_best_chain_score
+    (candidate_chain_score + candidate_score).cmp(&curr_best_chain_score)
 }
