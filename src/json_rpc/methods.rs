@@ -18,7 +18,7 @@
 //! List of requests and how to answer them.
 
 use super::parse;
-use crate::util;
+use crate::{header, util};
 
 use alloc::{
     boxed::Box,
@@ -435,6 +435,33 @@ pub struct Header {
     #[serde(serialize_with = "hex_num")]
     pub number: u64,
     pub digest: HeaderDigest,
+}
+
+impl Header {
+    /// Creates a [`Header`] from a SCALE-encoded header.
+    ///
+    /// Returns an error if the encoding is incorrect.
+    pub fn from_scale_encoded_header(header: &[u8]) -> Result<Header, header::Error> {
+        let header = header::decode(header)?;
+        Ok(Header {
+            parent_hash: HashHexString(*header.parent_hash),
+            extrinsics_root: HashHexString(*header.extrinsics_root),
+            state_root: HashHexString(*header.state_root),
+            number: header.number,
+            digest: HeaderDigest {
+                logs: header
+                    .digest
+                    .logs()
+                    .map(|log| {
+                        HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        }))
+                    })
+                    .collect(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

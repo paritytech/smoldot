@@ -473,7 +473,10 @@ impl JsonRpcService {
                                 .into_iter()
                                 .map(methods::Extrinsic)
                                 .collect(),
-                            header: header_conv(header::decode(&block.header.unwrap()).unwrap()),
+                            header: methods::Header::from_scale_encoded_header(
+                                &block.header.unwrap(),
+                            )
+                            .unwrap(),
                             justification: block.justification.map(methods::HexString),
                         })
                         .to_json_response(request_id)
@@ -503,11 +506,10 @@ impl JsonRpcService {
 
                 self.send_back(
                     &match self.header_query(&hash).await {
-                        Ok(header) => {
-                            let decoded = header::decode(&header).unwrap();
-                            methods::Response::chain_getHeader(header_conv(decoded))
-                                .to_json_response(request_id)
-                        }
+                        Ok(header) => methods::Response::chain_getHeader(
+                            methods::Header::from_scale_encoded_header(&header).unwrap(),
+                        )
+                        .to_json_response(request_id),
                         // TODO: error or null?
                         Err(()) => json_rpc::parse::build_success_response(request_id, "null"),
                     },
@@ -1206,7 +1208,9 @@ impl JsonRpcService {
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((block, _)) => {
                             // TODO: don't unwrap `block`! channel can be legitimately closed if full
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
 
                             let per_source_subscriptions =
                                 client.per_userdata_subscriptions.lock().await;
@@ -1284,7 +1288,9 @@ impl JsonRpcService {
                     futures::pin_mut!(next_block);
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((block, _)) => {
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
 
                             let per_source_subscriptions =
                                 client.per_userdata_subscriptions.lock().await;
@@ -1367,7 +1373,9 @@ impl JsonRpcService {
                     futures::pin_mut!(next_block);
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((block, _)) => {
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
 
                             let per_source_subscriptions =
                                 client.per_userdata_subscriptions.lock().await;
@@ -1605,27 +1613,4 @@ enum StorageQueryError {
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{}", _0)]
     StorageRetrieval(sync_service::StorageQueryError),
-}
-
-fn header_conv<'a>(header: impl Into<smoldot::header::HeaderRef<'a>>) -> methods::Header {
-    let header = header.into();
-
-    methods::Header {
-        parent_hash: methods::HashHexString(*header.parent_hash),
-        extrinsics_root: methods::HashHexString(*header.extrinsics_root),
-        state_root: methods::HashHexString(*header.state_root),
-        number: header.number,
-        digest: methods::HeaderDigest {
-            logs: header
-                .digest
-                .logs()
-                .map(|log| {
-                    methods::HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    }))
-                })
-                .collect(),
-        },
-    }
 }
