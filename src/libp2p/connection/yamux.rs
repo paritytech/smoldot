@@ -526,8 +526,6 @@ impl<T> Yamux<T> {
                                 .checked_sub(u64::from(length_field))
                                 .ok_or(Error::CreditsExceeded)?;
 
-                            // TODO: temporary hack
-                            let syn_ack_flag = !substream.first_message_queued;
                             substream.first_message_queued = true;
                             substream.remote_window_pending_increase += 256 * 1024;
                         }
@@ -710,7 +708,7 @@ impl<T> Yamux<T> {
         );
 
         ExtractOut {
-            connection: self,
+            _connection: self,
             buffers: Some(buffers),
         }
     }
@@ -1009,7 +1007,7 @@ impl<'a, T> SubstreamMut<'a, T> {
 }
 
 pub struct ExtractOut<'a, T> {
-    connection: &'a mut Yamux<T>,
+    _connection: &'a mut Yamux<T>, // TODO: unused field, replace with PhantomData?
     buffers: Option<Vec<either::Either<arrayvec::ArrayVec<u8, 12>, VecWithOffset>>>,
 }
 

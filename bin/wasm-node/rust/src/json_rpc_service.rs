@@ -210,7 +210,6 @@ pub async fn start(config: Config) -> Arc<JsonRpcService> {
         tasks_executor: Mutex::new(config.tasks_executor),
         chain_spec: config.chain_spec,
         network_service: config.network_service.0,
-        network_chain_index: config.network_service.1,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         transactions_service: config.transactions_service,
@@ -298,8 +297,6 @@ pub struct JsonRpcService {
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService>,
-    /// See [`Config::network_service`].
-    network_chain_index: usize,
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
     /// See [`Config::runtime_service`].
@@ -552,7 +549,7 @@ impl JsonRpcService {
                 } else {
                 }
             }
-            methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
+            methods::MethodCall::payment_queryInfo { extrinsic: _, hash } => {
                 assert!(hash.is_none()); // TODO: handle when hash != None
                                          // TODO: complete hack
                 self.send_back(
@@ -1608,17 +1605,6 @@ enum StorageQueryError {
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{}", _0)]
     StorageRetrieval(sync_service::StorageQueryError),
-}
-
-impl StorageQueryError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    fn is_network_problem(&self) -> bool {
-        match self {
-            StorageQueryError::FindStorageRootHashError => true, // TODO: do properly
-            StorageQueryError::StorageRetrieval(error) => error.is_network_problem(),
-        }
-    }
 }
 
 fn header_conv<'a>(header: impl Into<smoldot::header::HeaderRef<'a>>) -> methods::Header {

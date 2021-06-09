@@ -205,8 +205,8 @@ impl InterpreterPrototype {
             Some(import_memory)
         } else if let Some(mem) = module.export_by_name("memory") {
             if let Some(mem) = mem.as_memory() {
-                // TODO: use Result
-                mem.grow(wasmi::memory_units::Pages(heap_pages));
+                // TODO: don't unwrap /!\ need to figure out how heap_pages really works
+                mem.grow(wasmi::memory_units::Pages(heap_pages)).unwrap();
                 Some(mem.clone())
             } else {
                 return Err(NewErr::MemoryIsntMemory);

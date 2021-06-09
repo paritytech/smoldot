@@ -356,9 +356,10 @@ impl<T> VerifyContext<T> {
                 _,
             ) => {
                 if authorities_change {
-                    BlockConsensus::Aura {
-                        authorities_list: todo!(), // TODO: fetch from header
-                    }
+                    todo!() // TODO: fetch from header
+                            /*BlockConsensus::Aura {
+                                authorities_list:
+                            }*/
                 } else {
                     BlockConsensus::Aura {
                         authorities_list: parent_authorities.clone(),

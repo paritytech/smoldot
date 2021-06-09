@@ -22,10 +22,10 @@ use core::{
     convert::TryFrom as _,
     fmt,
     future::Future,
-    iter, marker,
+    marker,
     ops::{Add, Sub},
     pin::Pin,
-    ptr, slice, str,
+    slice, str,
     task::{Context, Poll, Waker},
     time::Duration,
 };
