@@ -626,14 +626,11 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             (
                 FinalizedConsensus::Aura { slot_duration, .. },
                 VerifyConsensusSpecific::Aura { authorities_list },
-            ) => {
-                verify::header_body::ConfigConsensus::Aura {
-                    // TODO: meh for allocation
-                    current_authorities: authorities_list.iter().map(|a| a.into()).collect(),
-                    now_from_unix_epoch: self.now_from_unix_epoch,
-                    slot_duration: *slot_duration,
-                }
-            }
+            ) => verify::header_body::ConfigConsensus::Aura {
+                current_authorities: header::AuraAuthoritiesIter::from_slice(&*authorities_list),
+                now_from_unix_epoch: self.now_from_unix_epoch,
+                slot_duration: *slot_duration,
+            },
             (
                 FinalizedConsensus::Babe {
                     slots_per_epoch, ..
