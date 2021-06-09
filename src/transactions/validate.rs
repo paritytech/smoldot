@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Runtime call to obtain the transactions validity status.
+
 use crate::{
     executor::{host, read_only_runtime_host},
     util,
@@ -67,39 +69,53 @@ pub struct ValidTransaction {
     /// Priority of the transaction.
     ///
     /// Priority determines the ordering of two transactions that have all
-    /// their dependencies (required tags) satisfied. Higher is better.
+    /// [their required tags](ValidTransaction::requires) satisfied. Transactions with a higher
+    /// priority should be included first.
     pub priority: u64,
 
-    /// Transaction dependencies
+    /// Transaction dependencies.
     ///
-    /// A non-empty list signifies that some other transactions which provide
-    /// given tags are required to be included before that one.
+    /// Contains a list of so-called *tags*. The actual bytes of the tags can be compared in order
+    /// to determine whether two tags are equal, but aren't meaningful from the client
+    /// perspective.
+    ///
+    /// A non-empty list signifies that this transaction can't be included before some other
+    /// transactions which [provide](ValidTransaction::provides) the given tags. *All* the tags
+    /// must be fulfilled before the transaction can be included.
     // TODO: better type than `Vec<Vec<u8>>`? I feel like this could be a single `Vec<u8>` that is decoded on the fly?
     pub requires: Vec<Vec<u8>>,
 
-    /// Provided tags
+    /// Tags provided by the transaction.
     ///
-    /// A list of tags this transaction provides. Successfully importing the transaction
-    /// will enable other transactions that depend on (require) those tags to be included as well.
-    /// Provided and required tags allow Substrate to build a dependency graph of transactions
-    /// and import them in the right (linear) order.
+    /// The bytes of the tags aren't meaningful from the client's perspective, but are used to
+    /// enforce an ordering between transactions. See [`ValidTransaction::requires`].
+    ///
+    /// Two transactions that have a provided tag in common are mutually exclusive, and cannot be
+    /// both included in the same chain of blocks.
     // TODO: better type than `Vec<Vec<u8>>`? I feel like this could be a single `Vec<u8>` that is decoded on the fly?
     pub provides: Vec<Vec<u8>>,
 
-    /// Transaction longevity
+    /// Transaction longevity.
     ///
-    /// Longevity describes minimum number of blocks the validity is correct.
-    /// After this period transaction should be removed from the pool or revalidated.
+    /// This value provides a hint of the number of blocks during which the client can assume the
+    /// transaction to be valid. This is provided for optimization purposes, to save the client
+    /// from re-validating every pending transaction at each new block. It is only a hint, and the
+    /// transaction might become invalid sooner.
     ///
-    /// Minimum number of blocks a transaction will remain valid for.
-    /// `u64::max_value()` means "forever".
+    /// After this period, transaction should be removed from the pool or revalidated.
+    ///
+    /// > **Note**: Many transactions are "mortal", meaning that they automatically become invalid
+    /// >           after a certain number of blocks. In that case, the longevity returned by the
+    /// >           validation function will be at most this number of blocks. The concept of
+    /// >           mortal transactions, however, is not relevant from the client's perspective.
     pub longevity: u64,
 
-    /// A flag indicating if the transaction should be propagated to other peers.
+    /// A flag indicating whether the transaction should be propagated to other peers.
     ///
-    /// By setting `false` here the transaction will still be considered for
-    /// including in blocks that are authored on the current node, but will
-    /// never be sent to other peers.
+    /// If `false`, the transaction will still be considered for inclusion in blocks that are
+    /// authored locally, but will not be sent to the rest of the network.
+    ///
+    /// > **Note**: A value of `false` is typically returned for transctions that are very heavy.
     pub propagate: bool,
 }
 
