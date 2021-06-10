@@ -1728,7 +1728,7 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
             _ => unreachable!(), // TODO: change API of inject_in_progress_grandpa instead
         };
 
-        (self.inner, next_actions, error.map(Err).unwrap_or(Ok(())))
+        (self.inner, next_actions, error)
     }
 }
 
