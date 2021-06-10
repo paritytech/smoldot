@@ -112,6 +112,7 @@ use futures::{
 use rand::Rng as _;
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
+pub mod async_rw_with_buffers;
 pub mod connection;
 pub mod discovery;
 pub mod peer_id;
@@ -360,9 +361,9 @@ where
 
     pub fn add_incoming_connection(
         &self,
-        local_listen_address: &Multiaddr,
-        remote_addr: Multiaddr,
-        user_data: TConn,
+        _local_listen_address: &Multiaddr,
+        _remote_addr: Multiaddr,
+        _user_data: TConn,
     ) -> ConnectionId {
         todo!()
     }
@@ -846,7 +847,9 @@ where
                             let pending = guarded.peerset.pending_mut(connection_id.0).unwrap();
                             if *pending.peer_id() != remote_peer_id {
                                 pending.remove_and_purge_address();
-                                return Err(ConnectionError::PeerIdMismatch);
+                                return Err(ConnectionError::PeerIdMismatch {
+                                    actual: remote_peer_id,
+                                });
                             }
 
                             pending.into_established({
@@ -1166,7 +1169,7 @@ where
                 protocol_index: overlay_network_index,
                 handshake,
             }) => {
-                guarded
+                if let Ok(()) = guarded
                     .peerset
                     .connection_mut(self.id)
                     .unwrap()
@@ -1175,16 +1178,24 @@ where
                         peerset::SubstreamDirection::In,
                         id,
                     )
-                    .unwrap();
-
-                guarded
-                    .events_tx
-                    .try_send(Event::NotificationsInOpen {
-                        id: ConnectionId(self.id),
-                        overlay_network_index,
-                        remote_handshake: handshake,
-                    })
-                    .unwrap();
+                {
+                    // No substream of that protocol was opened yet.
+                    guarded
+                        .events_tx
+                        .try_send(Event::NotificationsInOpen {
+                            id: ConnectionId(self.id),
+                            overlay_network_index,
+                            remote_handshake: handshake,
+                        })
+                        .unwrap();
+                } else {
+                    // There was already a substream with that protocol. Immediately refuse the
+                    // new one.
+                    self.connection
+                        .as_alive()
+                        .unwrap() // TODO: is unwrapping correct?
+                        .reject_in_notifications_substream(id);
+                }
             }
             PendingEvent::Inner(established::Event::NotificationsInOpenCancel {
                 protocol_index,
@@ -1280,7 +1291,7 @@ where
                     })
                     .unwrap();
             }
-            PendingEvent::Inner(established::Event::NotificationsOutCloseDemanded { id }) => {
+            PendingEvent::Inner(established::Event::NotificationsOutCloseDemanded { .. }) => {
                 todo!()
             }
             PendingEvent::Inner(established::Event::NotificationsOutReset {
@@ -1492,8 +1503,14 @@ pub enum ConnectionError {
     #[display(fmt = "{}", _0)]
     Handshake(connection::handshake::HandshakeError),
     /// Mismatch between the actual [`PeerId`] and the [`PeerId`] expected by the local node.
-    #[display(fmt = "Mismatch between the actual PeerId and PeerId expected by the local node")]
-    PeerIdMismatch,
+    #[display(
+        fmt = "Mismatch between the actual PeerId ({}) and PeerId expected by the local node",
+        actual
+    )]
+    PeerIdMismatch {
+        /// Actual [`PeerId`] that the remote reports.
+        actual: PeerId,
+    },
 }
 
 pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {

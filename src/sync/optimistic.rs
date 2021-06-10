@@ -50,7 +50,6 @@ use crate::{
     executor::host,
     header,
     trie::calculate_root,
-    verify,
 };
 
 use alloc::{
@@ -74,7 +73,7 @@ use rand::{seq::IteratorRandom as _, SeedableRng as _};
 #[derive(Debug)]
 pub struct Config {
     /// Information about the latest finalized block and its ancestors.
-    pub chain_information: chain_information::ChainInformation,
+    pub chain_information: chain_information::ValidChainInformation,
 
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
@@ -289,18 +288,17 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
-    pub fn as_chain_information(&self) -> chain_information::ChainInformationRef {
+    pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
         self.chain.as_chain_information()
     }
 
     /// Returns the header of the finalized block.
     pub fn finalized_block_header(&self) -> header::HeaderRef {
-        (&self
-            .inner
+        self.inner
             .finalized_chain_information
             .chain_information
-            .finalized_block_header)
-            .into()
+            .as_ref()
+            .finalized_block_header
     }
 
     /// Returns the header of the best block.
@@ -701,6 +699,11 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
     /// Returns the hash of the block about to be verified.
     pub fn hash(&self) -> [u8; 32] {
         header::hash_from_scale_encoded_header(self.header())
+    }
+
+    /// Returns true if [`Config::full`] was `Some` at initialization.
+    pub fn is_full_verification(&self) -> bool {
+        self.inner.finalized_runtime.is_some()
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
@@ -1509,7 +1512,7 @@ pub enum ResetCause {
     /// Error while verifying a header.
     HeaderError(blocks_tree::HeaderVerifyError),
     /// Error while verifying a header and body.
-    HeaderBodyError(verify::header_body::Error), // TODO: change error type?
+    HeaderBodyError(blocks_tree::BodyVerifyError),
     /// Received block isn't a child of the current best block.
     NonCanonical,
     /// Received block number doesn't match expected number.
@@ -1527,7 +1530,7 @@ pub enum ResetCause {
 #[derive(Debug)]
 pub struct Disassemble<TRq, TSrc> {
     /// Information about the latest finalized block and its ancestors.
-    pub chain_information: chain_information::ChainInformation,
+    pub chain_information: chain_information::ValidChainInformation,
 
     /// List of sources that were within the state machine.
     pub sources: Vec<DisassembleSource<TSrc>>,

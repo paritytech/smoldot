@@ -19,9 +19,30 @@
 //!
 //! This service plugs on top of a [`sync_service`], listens for new best blocks and checks
 //! whether the runtime has changed in any way. Its objective is to always provide an up-to-date
-//! [`executor::host::HostVmPrototype`] ready to be called to other services.
+//! [`executor::host::HostVmPrototype`] ready to be called by other services.
+//!
+//! # Usage
+//!
+//! The runtime service lets user subscribe to best and finalized block updates, similar to
+//! the [`sync_service`]. These subscriptions are implemented by subscribing to the underlying
+//! [`sync_service`] and, for each notification, downloading the runtime code of the best or
+//! finalized block. Therefore, these notifications always come with a delay compared to directly
+//! using the [`sync_service`].
+//!
+//! Furthermore, if it isn't possible to download the runtime code of a block (for example because
+//! peers refuse to answer or have already pruned the block) or if the runtime service already has
+//! too many pending downloads, this block is simply skipped and not reported on the
+//! subscriptions.
+//!
+//! Consequently, you are strongly encouraged to not use both the [`sync_service`] *and* the
+//! [`RuntimeService`] of the same chain. They each provide a consistent view of the chain, but
+//! this view isn't necessarily the same on both services.
+//!
+//! The main service offered by the runtime service is
+//! [`RuntimeService::recent_best_block_runtime_call`], that performs a runtime call on the latest
+//! reported best block or more recent.
 
-// TODO: doc
+// TODO: the doc above mentions that you can subscribe to the finalized block, but this is isn't implemented yet ^
 
 use crate::{ffi, lossy_channel, sync_service};
 
@@ -34,7 +55,7 @@ pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 /// Configuration for a runtime service.
 pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
@@ -63,7 +84,7 @@ pub struct Config<'a> {
 /// See [the module-level documentation](..).
 pub struct RuntimeService {
     /// See [`Config::tasks_executor`].
-    tasks_executor: Mutex<Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
+    tasks_executor: Mutex<Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
 
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
@@ -134,6 +155,10 @@ impl RuntimeService {
                 runtime_block_state_root: config.genesis_block_state_root,
                 runtime_version_subscriptions: Vec::new(),
                 best_blocks_subscriptions: Vec::new(),
+                best_near_head_of_chain: config
+                    .sync_service
+                    .is_near_head_of_chain_heuristic()
+                    .await,
             }
         };
 
@@ -173,6 +198,88 @@ impl RuntimeService {
             .map(|r| r.runtime_spec.clone())
             .map_err(|&()| ());
         (current_version, rx)
+    }
+
+    /// Returns the runtime version of the block with the given hash.
+    // TODO: better error type
+    pub async fn runtime_version_of_block(
+        self: &Arc<RuntimeService>,
+        block_hash: &[u8; 32],
+    ) -> Result<executor::CoreVersion, ()> {
+        // If the requested block is the best known block, optimize by
+        // immediately returning the cached spec.
+        {
+            let latest_known_runtime = self.latest_known_runtime.lock().await;
+            if latest_known_runtime.runtime_block_hash == *block_hash {
+                return latest_known_runtime
+                    .runtime
+                    .as_ref()
+                    .map(|r| r.runtime_spec.clone())
+                    .map_err(|&()| ());
+            }
+        }
+
+        // Ask the network for the header of this block, as we need to know the state root.
+        let state_root = {
+            let result = self
+                .sync_service
+                .clone()
+                .block_query(
+                    *block_hash,
+                    protocol::BlocksRequestFields {
+                        header: true,
+                        body: false,
+                        justification: false,
+                    },
+                )
+                .await;
+
+            // Note that the `block_query` method guarantees that the header is present
+            // and valid.
+            let header = if let Ok(block) = result {
+                block.header.unwrap()
+            } else {
+                return Err(());
+            };
+
+            *header::decode(&header).map_err(|_| ())?.state_root
+        };
+
+        // Download the runtime code of this block.
+        let code_query_result = self
+            .sync_service
+            .clone()
+            .storage_query(
+                block_hash,
+                &state_root,
+                iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+            )
+            .await;
+
+        let (code, heap_pages) = {
+            let mut results = match code_query_result {
+                Ok(c) => c,
+                Err(_) => return Err(()),
+            };
+
+            let heap_pages = results.pop().unwrap();
+            let code = results.pop().unwrap();
+            (code, heap_pages)
+        };
+
+        SuccessfulRuntime::from_params(&code, &heap_pages).map(|r| r.runtime_spec)
+    }
+
+    /// Returns the runtime version of the current best block.
+    pub async fn best_block_runtime(
+        self: &Arc<RuntimeService>,
+    ) -> Result<executor::CoreVersion, ()> {
+        let latest_known_runtime = self.latest_known_runtime.lock().await;
+        latest_known_runtime
+            .runtime
+            .as_ref()
+            .map(|r| r.runtime_spec.clone())
+            .map_err(|&()| ())
     }
 
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
@@ -395,6 +502,32 @@ impl RuntimeService {
             }
         }
     }
+
+    /// Returns true if it is believed that we are near the head of the chain.
+    ///
+    /// The way this method is implemented is opaque and cannot be relied on. The return value
+    /// should only ever be shown to the user and not used for any meaningful logic.
+    pub async fn is_near_head_of_chain_heuristic(&self) -> bool {
+        // The runtime service adds a delay between the moment a best block is reported by the
+        // sync service and the moment it is reported by the runtime service.
+        // Because of this, any "far from head of chain" to "near head of chain" transition
+        // must take that delay into account. The other way around ("near" to "far") is
+        // unaffected.
+
+        // If the sync service is far from the head, the runtime service is also far.
+        if !self.sync_service.is_near_head_of_chain_heuristic().await {
+            return false;
+        }
+
+        // If the sync service is near, report the result of `is_near_head_of_chain_heuristic()`
+        // when called at the latest best block that the runtime service reported through its API,
+        // to make sure that we don't report "near" while having reported only blocks that were
+        // far.
+        self.latest_known_runtime
+            .lock()
+            .await
+            .best_near_head_of_chain
+    }
 }
 
 /// Error that can happen when calling a runtime function.
@@ -474,6 +607,10 @@ struct LatestKnownRuntime {
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
     best_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
+
+    /// Return value of calling [`sync_service::SyncService::is_near_head_of_chain_heuristic`]
+    /// after the latest best block update.
+    best_near_head_of_chain: bool,
 }
 
 struct SuccessfulRuntime {
@@ -540,7 +677,7 @@ impl SuccessfulRuntime {
 
 /// Starts the background task that updates the [`LatestKnownRuntime`].
 async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
-    (runtime_service.tasks_executor.lock().await)({
+    (runtime_service.tasks_executor.lock().await)("runtime-download".into(), {
         let runtime_service = runtime_service.clone();
         let blocks_stream = {
             let (best_block_header, best_blocks_subscription) =
@@ -607,6 +744,11 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     )
                     .await;
 
+                let best_near_head_of_chain = runtime_service
+                    .sync_service
+                    .is_near_head_of_chain_heuristic()
+                    .await;
+
                 // Only lock `latest_known_runtime` now that everything is synchronous.
                 let mut latest_known_runtime = runtime_service.latest_known_runtime.lock().await;
                 let latest_known_runtime = &mut *latest_known_runtime;
@@ -632,6 +774,8 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 latest_known_runtime
                     .best_blocks_subscriptions
                     .shrink_to_fit();
+
+                latest_known_runtime.best_near_head_of_chain = best_near_head_of_chain;
 
                 let (new_code, new_heap_pages) = {
                     let mut results = match code_query_result {

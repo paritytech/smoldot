@@ -122,8 +122,8 @@ impl<T> ForkTree<T> {
     }
 
     /// Returns an iterator to all the node values without any specific order.
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.nodes.iter().map(|n| &n.1.data)
+    pub fn iter_unordered(&self) -> impl Iterator<Item = (NodeIndex, &T)> {
+        self.nodes.iter().map(|n| (NodeIndex(n.0), &n.1.data))
     }
 
     /// Returns the value of the node with the given index.
@@ -134,6 +134,16 @@ impl<T> ForkTree<T> {
     /// Returns the value of the node with the given index.
     pub fn get_mut(&mut self, index: NodeIndex) -> Option<&mut T> {
         self.nodes.get_mut(index.0).map(|n| &mut n.data)
+    }
+
+    /// Returns the parent of the given node. Returns `None` if the node doesn't have any parent.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn parent(&self, node: NodeIndex) -> Option<NodeIndex> {
+        self.nodes[node.0].parent.map(NodeIndex)
     }
 
     /// Removes from the tree:

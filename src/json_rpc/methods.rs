@@ -18,7 +18,7 @@
 //! List of requests and how to answer them.
 
 use super::parse;
-use crate::util;
+use crate::{header, util};
 
 use alloc::{
     boxed::Box,
@@ -304,7 +304,7 @@ define_methods! {
     state_getMetadata() -> HexString,
     state_getPairs() -> (), // TODO:
     state_getReadProof() -> (), // TODO:
-    state_getRuntimeVersion() -> RuntimeVersion [chain_getRuntimeVersion],
+    state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion [chain_getRuntimeVersion],
     state_getStorage(key: HexString, hash: Option<HashHexString>) -> HexString [state_getStorageAt],
     state_getStorageHash() -> () [state_getStorageHashAt], // TODO:
     state_getStorageSize() -> () [state_getStorageSizeAt], // TODO:
@@ -435,6 +435,33 @@ pub struct Header {
     #[serde(serialize_with = "hex_num")]
     pub number: u64,
     pub digest: HeaderDigest,
+}
+
+impl Header {
+    /// Creates a [`Header`] from a SCALE-encoded header.
+    ///
+    /// Returns an error if the encoding is incorrect.
+    pub fn from_scale_encoded_header(header: &[u8]) -> Result<Header, header::Error> {
+        let header = header::decode(header)?;
+        Ok(Header {
+            parent_hash: HashHexString(*header.parent_hash),
+            extrinsics_root: HashHexString(*header.extrinsics_root),
+            state_root: HashHexString(*header.state_root),
+            number: header.number,
+            digest: HeaderDigest {
+                logs: header
+                    .digest
+                    .logs()
+                    .map(|log| {
+                        HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        }))
+                    })
+                    .collect(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

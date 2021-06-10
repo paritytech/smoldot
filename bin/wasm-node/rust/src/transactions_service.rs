@@ -78,7 +78,7 @@ use std::{collections::HashMap, convert::TryFrom as _, iter, pin::Pin, sync::Arc
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.

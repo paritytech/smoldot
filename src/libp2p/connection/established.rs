@@ -151,6 +151,11 @@ enum Substream<TNow, TRqUd, TNotifUd> {
         /// Protocol that was negotiated.
         protocol_index: usize,
     },
+    /// API user has refused an incoming substream. Waiting for a close from the remote.
+    /// In order to save a round-trip time, the remote might assume that the protocol negotiation
+    /// has succeeded. As such, it might send additional data on this substream that should be
+    /// ignored.
+    NotificationsInRefused,
     /// A notifications protocol has been negotiated on a substream. Remote can now send
     /// notifications.
     NotificationsIn {
@@ -240,7 +245,7 @@ where
         // `incoming_buffer`. This is intentional, as from the perspective of `read_write` the
         // response arrived after the timeout. It is the responsibility of the user to call
         // `read_write` in an appropriate way for this to not happen.
-        if let Some(event) = self.update_now(now) {
+        if let Some(event) = self.update_now(now.clone()) {
             let wake_up_after = self.inner.next_timeout.clone();
             return Ok(ReadWrite {
                 connection: self,
@@ -251,6 +256,7 @@ where
                 event: Some(event),
             });
         }
+        debug_assert!(self.inner.next_timeout.as_ref().map_or(true, |t| *t > now));
 
         // Decoding the incoming data.
         loop {
@@ -416,6 +422,7 @@ where
                             // TODO: report to user
                             todo!()
                         }
+                        Substream::NotificationsInRefused => {}
                         Substream::PingIn(_) => {}
                         Substream::NotificationsOutClosed => {}
                         Substream::NotificationsOut { user_data, .. }
@@ -543,6 +550,7 @@ where
                 // TODO: report to user
                 None
             }
+            Substream::NotificationsInRefused => None,
             Substream::NotificationsOutNegotiating { user_data, .. }
             | Substream::NotificationsOutHandshakeRecv { user_data, .. } => {
                 Some(Event::NotificationsOutReject {
@@ -576,7 +584,8 @@ where
             .yamux
             .user_datas()
             .find(|(_, substream)| match &substream {
-                Substream::RequestOutNegotiating { timeout, .. }
+                Substream::NotificationsOutNegotiating { timeout, .. }
+                | Substream::RequestOutNegotiating { timeout, .. }
                 | Substream::RequestOut { timeout, .. }
                     if *timeout <= now =>
                 {
@@ -597,6 +606,13 @@ where
                 .reset();
 
             Some(match substream {
+                Substream::NotificationsOutNegotiating { user_data, .. } => {
+                    // TODO: report that it's a timeout and not a rejection
+                    Event::NotificationsOutReject {
+                        id: SubstreamId(timed_out_substream),
+                        user_data,
+                    }
+                }
                 Substream::RequestOutNegotiating { user_data, .. }
                 | Substream::RequestOut { user_data, .. } => Event::Response {
                     id: SubstreamId(timed_out_substream),
@@ -816,8 +832,22 @@ where
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
     /// [`Event::NotificationsInOpen`].
-    pub fn reject_in_notifications_substream(&mut self, _substream_id: SubstreamId) {
-        todo!() // TODO:
+    pub fn reject_in_notifications_substream(&mut self, substream_id: SubstreamId) {
+        let mut substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
+
+        match substream.user_data() {
+            Substream::NotificationsInWait { .. } => {
+                if substream.close().is_none() {
+                    *self
+                        .inner
+                        .yamux
+                        .substream_by_id(substream_id.0)
+                        .unwrap()
+                        .user_data() = Substream::NotificationsInRefused;
+                }
+            }
+            _ => panic!(),
+        }
     }
 
     /// Queues a notification to be written out on the given substream.
@@ -1115,10 +1145,8 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 user_data,
                                 response: leb128::FramedInProgress::new(128 * 1024 * 1024), // TODO: proper max size
                             };
-                            let substream_id = substream.id();
                             let _already_closed = substream.close();
                             debug_assert!(_already_closed.is_none());
-                            substream = self.yamux.substream_by_id(substream_id).unwrap();
                         }
                         Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
                             substream.reset();
@@ -1270,10 +1298,12 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                         user_data,
                     };
 
-                    return Some(Event::NotificationIn {
-                        id: substream_id,
-                        notification: notification.unwrap(),
-                    });
+                    if let Some(notification) = notification {
+                        return Some(Event::NotificationIn {
+                            id: substream_id,
+                            notification,
+                        });
+                    }
                 }
                 Substream::PingIn(mut payload) => {
                     // Inbound ping substream.
@@ -1328,6 +1358,7 @@ where
                 todo!() // TODO:
             }
             Substream::NotificationsIn { .. } => f.debug_tuple("notifications-in").finish(),
+            Substream::NotificationsInRefused => f.debug_tuple("notifications-in-refused").finish(),
             Substream::RequestOutNegotiating { user_data, .. }
             | Substream::RequestOut { user_data, .. } => {
                 f.debug_tuple("request-out").field(&user_data).finish()
