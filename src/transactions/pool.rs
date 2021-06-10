@@ -71,7 +71,7 @@
 use super::validate::{InvalidTransaction, ValidTransaction};
 
 use alloc::{collections::BTreeSet, vec::Vec};
-use core::convert::TryFrom as _;
+use core::{convert::TryFrom as _, fmt};
 use hashbrown::{hash_map, HashMap, HashSet};
 
 /// Identifier of a transaction stored within the [`Pool`].
@@ -107,7 +107,6 @@ pub struct Config {
 }
 
 /// Data structure containing transactions. See the module-level documentation for more info.
-// TODO: impl Debug
 pub struct Pool<TTx> {
     /// Actual list of transactions.
     transactions: slab::Slab<Transaction<TTx>>,
@@ -243,7 +242,8 @@ impl<TTx> Pool<TTx> {
     pub fn inclusion_order(&'_ self) -> impl Iterator<Item = TransactionId> + '_ {
         // FIXME: /!\
         // TODO: /!\
-        core::iter::empty()
+        let _i: core::iter::Empty<_> = todo!();
+        _i
     }
 
     /// Returns the user data associated with a given transaction.
@@ -395,6 +395,18 @@ impl<TTx> Pool<TTx> {
         result: Result<ValidTransaction, InvalidTransaction>,
     ) {
         todo!()
+    }
+}
+
+impl<TTx: fmt::Debug> fmt::Debug for Pool<TTx> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(
+                self.transactions
+                    .iter()
+                    .map(|t| (TransactionId(t.0), &t.1.user_data)),
+            )
+            .finish()
     }
 }
 
