@@ -82,7 +82,7 @@ use super::validate::{InvalidTransaction, ValidTransaction};
 
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{convert::TryFrom as _, fmt};
-use hashbrown::{hash_map, HashMap, HashSet};
+use hashbrown::HashSet;
 
 /// Identifier of a transaction stored within the [`Pool`].
 ///
@@ -112,12 +112,6 @@ pub struct Config {
     /// Non-finalized blocks should be added to the pool after initialization using
     /// [`Pool::append_block`].
     pub finalized_block_height: u64,
-
-    /// Seed used for the randomness used within the transactions pool.
-    ///
-    /// The behaviour of the transactions pool is fully determinisic, but it uses randomness in
-    /// order to avoid hash collision attacks.
-    pub randomness_seed: [u8; 32],
 }
 
 /// Data structure containing transactions. See the module-level documentation for more info.
@@ -131,7 +125,7 @@ pub struct Pool<TTx> {
 
     /// Transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the blake2 hash
     /// of the bytes of the transaction.
-    by_hash: HashMap<[u8; 32], TransactionId, ahash::RandomState>,
+    by_hash: BTreeSet<([u8; 32], TransactionId)>,
 
     /// Transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the block height
     /// in which the transaction is included.
@@ -147,21 +141,7 @@ impl<TTx> Pool<TTx> {
         Pool {
             transactions: slab::Slab::with_capacity(config.capacity),
             not_validated: HashSet::with_capacity_and_hasher(config.capacity, Default::default()),
-            by_hash: HashMap::with_capacity_and_hasher(
-                config.capacity,
-                ahash::RandomState::with_seeds(
-                    u64::from_ne_bytes(<[u8; 8]>::try_from(&config.randomness_seed[0..8]).unwrap()),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[8..16]).unwrap(),
-                    ),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[16..24]).unwrap(),
-                    ),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[24..32]).unwrap(),
-                    ),
-                ),
-            ),
+            by_hash: BTreeSet::new(),
             by_height: BTreeSet::new(),
             best_block_height: config.finalized_block_height,
         }
@@ -178,31 +158,18 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Inserts a new unvalidated transaction in the pool.
-    ///
-    /// Returns `None` if a transaction with the same bytes already exists in the pool.
-    pub fn add_unvalidated(
-        &mut self,
-        scale_encoded: Vec<u8>,
-        user_data: TTx,
-    ) -> Option<TransactionId> {
+    pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
         self.add_unvalidated_inner(scale_encoded, None, user_data)
     }
 
     /// Inserts a new unvalidated transaction in the pool.
-    ///
-    /// Returns `None` if a transaction with the same bytes already exists in the pool.
     fn add_unvalidated_inner(
         &mut self,
         scale_encoded: impl AsRef<[u8]> + Into<Vec<u8>>,
         included_block_height: Option<u64>,
         user_data: TTx,
-    ) -> Option<TransactionId> {
+    ) -> TransactionId {
         let hash = blake2_hash(scale_encoded.as_ref());
-
-        let by_hash_entry = match self.by_hash.entry(hash) {
-            hash_map::Entry::Occupied(_) => return None,
-            hash_map::Entry::Vacant(e) => e,
-        };
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
             scale_encoded: scale_encoded.into(),
@@ -211,7 +178,8 @@ impl<TTx> Pool<TTx> {
             user_data,
         }));
 
-        by_hash_entry.insert(tx_id);
+        let _was_inserted = self.by_hash.insert((hash, tx_id));
+        debug_assert!(_was_inserted);
 
         let _was_inserted = self.not_validated.insert(tx_id);
         debug_assert!(_was_inserted);
@@ -221,7 +189,7 @@ impl<TTx> Pool<TTx> {
             debug_assert!(_was_inserted);
         }
 
-        Some(tx_id)
+        tx_id
     }
 
     /// Removes from the pool the transaction with the given identifier.
@@ -244,11 +212,8 @@ impl<TTx> Pool<TTx> {
             debug_assert!(_removed);
         }
 
-        let _id = self
-            .by_hash
-            .remove(&blake2_hash(&tx.scale_encoded))
-            .unwrap();
-        debug_assert_eq!(_id, id);
+        let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
+        debug_assert!(_removed);
 
         tx.user_data
     }
@@ -287,11 +252,10 @@ impl<TTx> Pool<TTx> {
                 debug_assert!(_removed);
             }
 
-            let _tx_id = self
+            let _removed = self
                 .by_hash
-                .remove(&blake2_hash(&tx.scale_encoded))
-                .unwrap();
-            debug_assert_eq!(_tx_id, tx_id);
+                .remove(&(blake2_hash(&tx.scale_encoded), tx_id));
+            debug_assert!(_removed);
         }
 
         out.into_iter()
@@ -373,8 +337,14 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Tries to find a transaction in the pool whose bytes are `scale_encoded`.
-    pub fn find(&self, scale_encoded: &[u8]) -> Option<TransactionId> {
-        self.by_hash.get(&blake2_hash(&scale_encoded)).cloned()
+    pub fn find(&'_ self, scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> + '_ {
+        let hash = blake2_hash(scale_encoded);
+        self.by_hash
+            .range(
+                (hash, TransactionId(usize::min_value()))
+                    ..=(hash, TransactionId(usize::max_value())),
+            )
+            .map(|(_, tx_id)| *tx_id)
     }
 
     /// Returns the best block height according to the pool.
@@ -388,81 +358,11 @@ impl<TTx> Pool<TTx> {
 
     /// Adds a block to the chain tracked by the transactions pool.
     ///
-    /// `body` must be the list of transactions included in the block, with a user data associated
-    /// to each transaction.
-    ///
-    /// Transactions in `body` that aren't yet present in the pool are added to it in the
-    /// "unverified" state.
-    ///
-    /// The returned iterator is guaranteed to insert all transactions even if it is dropped
-    /// eagerly.
-    // TODO: the way duplicates are handled isn't great
-    pub fn append_block<'a>(
-        &'a mut self,
-        body: impl Iterator<Item = (impl AsRef<[u8]>, TTx)> + 'a,
-    ) -> impl Iterator<Item = TransactionId> + 'a {
-        // A custom iterator is used in order to insert transactions on-the-fly while making sure
-        // to add all the transactions even if the iterator is dropped by the user.
-        //
-        // Apologize for the extreme complexity introduced by using a separate trait, but it is
-        // the only way allowed by Rust to make this compile without adding overly-restrictive
-        // lifetime requirements.
-        trait Dummy {
-            type A: AsRef<[u8]>;
-            type B;
-            fn into_parts(self) -> (Self::A, Self::B);
-        }
-
-        impl<A, B> Dummy for (A, B)
-        where
-            A: AsRef<[u8]>,
-        {
-            type A = A;
-            type B = B;
-            fn into_parts(self) -> (A, B) {
-                self
-            }
-        }
-
-        struct Iter<'a, TTx, TIt>
-        where
-            TIt: Iterator,
-            TIt::Item: Dummy<B = TTx>,
-        {
-            me: &'a mut Pool<TTx>,
-            body: TIt,
-        }
-
-        impl<'a, TTx, TIt> Iterator for Iter<'a, TTx, TIt>
-        where
-            TIt: Iterator,
-            TIt::Item: Dummy<B = TTx>,
-        {
-            type Item = TransactionId;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                let (transaction, user_data) = self.body.next()?.into_parts();
-                let transaction = transaction.as_ref();
-                self.me.add_unvalidated_inner(
-                    transaction,
-                    Some(self.me.best_block_height),
-                    user_data,
-                )
-            }
-        }
-
-        impl<'a, TTx, TIt> Drop for Iter<'a, TTx, TIt>
-        where
-            TIt: Iterator,
-            TIt::Item: Dummy<B = TTx>,
-        {
-            fn drop(&mut self) {
-                while let Some(_) = self.next() {}
-                self.me.best_block_height = self.me.best_block_height.checked_add(1).unwrap();
-            }
-        }
-
-        Iter { me: self, body }
+    /// This function returns an [`AppendBlock`] struct that wraps around the [`Pool`] and lets
+    /// you insert transactions that belong to the body of the new block.
+    pub fn append_block(mut self) -> AppendBlock<TTx> {
+        self.best_block_height = self.best_block_height.checked_add(1).unwrap();
+        AppendBlock { inner: self }
     }
 
     /// Pop a certain number of blocks from the list of blocks.
@@ -570,6 +470,128 @@ impl<TTx: fmt::Debug> fmt::Debug for Pool<TTx> {
                     .map(|t| (TransactionId(t.0), &t.1.user_data)),
             )
             .finish()
+    }
+}
+
+/// Wraps around [`Pool`] while a new best block is being inserted. See [`Pool::append_block`].
+pub struct AppendBlock<TTx> {
+    /// The pool. The best block number has already been incremented.
+    inner: Pool<TTx>,
+}
+
+impl<TTx> AppendBlock<TTx> {
+    /// Adds a transaction to the block being appended.
+    ///
+    /// The transaction is compared against the list of non-included transactions that are already
+    /// in the pool. If a non-included transaction with the same bytes is found, it is switched to
+    /// the "included" state and  [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
+    /// Otherwise, [`AppendBlockTransaction::Unknown`] is returned and the transaction can be
+    /// inserted in the pool.
+    pub fn block_transaction<'a, 'b>(
+        &'a mut self,
+        bytes: &'b [u8],
+    ) -> AppendBlockTransaction<'a, 'b, TTx> {
+        let hash = blake2_hash(bytes);
+
+        // Try find a non-included transaction with that hash.
+        let non_included = self
+            .inner
+            .by_hash
+            .range(
+                (hash, TransactionId(usize::min_value()))
+                    ..=(hash, TransactionId(usize::max_value())),
+            )
+            .find(|(_, tx_id)| {
+                self.inner
+                    .transactions
+                    .get(tx_id.0)
+                    .unwrap()
+                    .included_block_height
+                    .is_none()
+            })
+            .map(|(_, tx_id)| *tx_id);
+
+        // If `non_included` is `Some`, check that its bytes are actually equal to `bytes`.
+        debug_assert!(non_included.map_or(true, |id| self
+            .inner
+            .transactions
+            .get(id.0)
+            .unwrap()
+            .scale_encoded
+            == bytes));
+
+        match non_included {
+            Some(id) => {
+                // Update the transaction stored in the pool.
+                let tx = self.inner.transactions.get_mut(id.0).unwrap();
+                let best_block_height = self.inner.best_block_height;
+
+                debug_assert!(tx.included_block_height.is_none());
+                tx.included_block_height = Some(best_block_height);
+
+                if tx
+                    .validation
+                    .as_ref()
+                    .map_or(false, |(b, _)| *b + 1 != best_block_height)
+                {
+                    tx.validation = None;
+                }
+
+                let user_data = &mut tx.user_data;
+                AppendBlockTransaction::NonIncludedUpdated { id, user_data }
+            }
+            None => AppendBlockTransaction::Unknown(Vacant {
+                inner: &mut self.inner,
+                bytes,
+            }),
+        }
+    }
+
+    /// Finishes the block insertion process.
+    pub fn finish(self) -> Pool<TTx> {
+        self.inner
+    }
+}
+
+impl<TTx: fmt::Debug> fmt::Debug for AppendBlock<TTx> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.inner, f)
+    }
+}
+
+/// See [`AppendBlock::block_transaction`].
+#[derive(Debug)]
+pub enum AppendBlockTransaction<'a, 'b, TTx> {
+    /// Transaction to add isn't in the list of non-included transactions. It can be added to the
+    /// pool.
+    Unknown(Vacant<'a, 'b, TTx>),
+    /// Transaction to add is present in the list of non-included transactions. It is now
+    /// considered included.
+    NonIncludedUpdated {
+        /// Identifier of the non-included transaction with the same bytes.
+        id: TransactionId,
+        /// User data stored alongside with that transaction.
+        user_data: &'a mut TTx,
+    },
+}
+
+/// See [`AppendBlockTransaction::Unknown`].
+pub struct Vacant<'a, 'b, TTx> {
+    inner: &'a mut Pool<TTx>,
+    bytes: &'b [u8],
+}
+
+impl<'a, 'b, TTx> Vacant<'a, 'b, TTx> {
+    /// Inserts the transaction in the pool.
+    pub fn insert(self, user_data: TTx) -> TransactionId {
+        self.inner
+            .add_unvalidated_inner(self.bytes, Some(self.inner.best_block_height), user_data)
+    }
+}
+
+impl<'a, 'b, TTx: fmt::Debug> fmt::Debug for Vacant<'a, 'b, TTx> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.inner, f)
     }
 }
 
