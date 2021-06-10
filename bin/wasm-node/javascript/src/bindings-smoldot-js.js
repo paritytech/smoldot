@@ -172,9 +172,9 @@ export default (config) => {
 
             } catch (error) {
                 const errorStr = error.toString();
-                const mem = Buffer.from(state.exports.memory.buffer);
+                const mem = Buffer.from(config.instance.exports.memory.buffer);
                 const len = Buffer.byteLength(errorStr, 'utf8');
-                const ptr = state.exports.alloc(len);
+                const ptr = config.instance.exports.alloc(len);
                 mem.write(errorStr, ptr);
                 mem.writeUInt32LE(ptr, error_ptr_ptr);
                 mem.writeUInt32LE(len, error_ptr_ptr + 4);
