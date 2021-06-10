@@ -100,7 +100,7 @@ pub use pending_blocks::{RequestId, RequestParams, SourceId};
 #[derive(Debug)]
 pub struct Config {
     /// Information about the latest finalized block and its ancestors.
-    pub chain_information: chain_information::ChainInformation,
+    pub chain_information: chain_information::ValidChainInformation,
 
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
@@ -177,7 +177,11 @@ struct Block<TBl> {
 impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Initializes a new [`AllForksSync`].
     pub fn new(config: Config) -> Self {
-        let finalized_block_height = config.chain_information.finalized_block_header.number;
+        let finalized_block_height = config
+            .chain_information
+            .as_ref()
+            .finalized_block_header
+            .number;
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree::Config {
             chain_information: config.chain_information,
@@ -201,13 +205,16 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
-    pub fn as_chain_information(&self) -> chain_information::ChainInformationRef {
+    pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
         self.chain.as_chain_information()
     }
 
     /// Returns the header of the finalized block.
     pub fn finalized_block_header(&self) -> header::HeaderRef {
-        self.chain.as_chain_information().finalized_block_header
+        self.chain
+            .as_chain_information()
+            .as_ref()
+            .finalized_block_header
     }
 
     /// Returns the header of the best block.
@@ -482,8 +489,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // Set to true below if any block is inserted in `disjoint_headers`.
         let mut any_progress = false;
 
-        // The next block in the list of headers should have a hash equal to this one.
+        // The next block in the list of headers should have a hash and height equal to this one.
         let mut expected_next_hash = requested_block_hash;
+        let mut expected_next_height = requested_block_height;
 
         // Iterate through the headers. If the request has failed, treat it the same way as if
         // no blocks were returned.
@@ -503,6 +511,15 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 Ok(h) => h,
                 Err(_) => continue,
             };
+
+            // Also compare the block numbers.
+            // The utility of checking the height (even though we've already checked the hash) is
+            // questionable, but considering that blocks are identified with their combination of
+            // hash and number, checking both the hash and number might prevent malicious sources
+            // from introducing state inconsistenties.
+            if expected_next_height != decoded_header.number {
+                break;
+            }
 
             match self.block_from_source(
                 source_id,
@@ -548,6 +565,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     // Block of unknown ancestry. Continue looping.
                     any_progress = true;
                     expected_next_hash = *decoded_header.parent_hash;
+                    debug_assert_ne!(expected_next_height, 0);
+                    expected_next_height -= 1;
                 }
             }
         }
@@ -979,7 +998,10 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 Ok(is_new_best)
             }
             Err(blocks_tree::HeaderVerifyError::VerificationFailed(error)) => {
-                Err((error, user_data))
+                Err((HeaderVerifyError::VerificationFailed(error), user_data))
+            }
+            Err(blocks_tree::HeaderVerifyError::ConsensusMismatch) => {
+                Err((HeaderVerifyError::ConsensusMismatch, user_data))
             }
             Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
             | Err(blocks_tree::HeaderVerifyError::BadParent { .. })
@@ -1074,10 +1096,19 @@ pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
         /// State machine yielded back. Use to continue the processing.
         sync: AllForksSync<TBl, TRq, TSrc>,
         /// Error that happened.
-        error: verify::header_only::Error,
+        error: HeaderVerifyError,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
     },
+}
+
+/// Error that can happen when verifying a block header.
+#[derive(Debug, derive_more::Display)]
+pub enum HeaderVerifyError {
+    /// Block uses a different consensus than the rest of the chain.
+    ConsensusMismatch,
+    /// The block verification has failed. The block is invalid and should be thrown away.
+    VerificationFailed(verify::header_only::Error),
 }
 
 /// Information about the verification of a justification that was stored for this block.

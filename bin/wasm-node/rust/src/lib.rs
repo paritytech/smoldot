@@ -27,7 +27,7 @@ use smoldot::{
     chain, chain_spec,
     libp2p::{multiaddr, peer_id::PeerId},
 };
-use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, pin::Pin, sync::Arc, task};
 
 pub mod ffi;
 
@@ -98,7 +98,7 @@ pub async fn start_client(
     let genesis_chain_information = chain_specs
         .iter()
         .map(|chain_spec| {
-            match chain::chain_information::ChainInformation::from_chain_spec(&chain_spec) {
+            match chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec) {
                 Ok(ci) => ci,
                 Err(err) => panic!(
                     "Failed to load information about chain `{}`: {}",
@@ -117,6 +117,7 @@ pub async fn start_client(
                     "Using light checkpoint starting at #{}",
                     light_sync_state
                         .as_chain_information()
+                        .as_ref()
                         .finalized_block_header
                         .number
                 );
@@ -146,7 +147,8 @@ pub async fn start_client(
     // using `await`.
     new_task_tx
         .clone()
-        .unbounded_send(
+        .unbounded_send((
+            "services-initialization".into(),
             start_services(
                 new_task_tx,
                 chain_information,
@@ -155,23 +157,47 @@ pub async fn start_client(
                 json_rpc_running,
             )
             .boxed(),
-        )
+        ))
         .unwrap();
 
     // This is the main future that executes the entire client.
     let mut all_tasks = stream::FuturesUnordered::new();
     async move {
+        // The code below processes tasks that have names.
+        #[pin_project::pin_project]
+        struct FutureAdapter<F> {
+            name: String,
+            #[pin]
+            future: F,
+        }
+        impl<F: Future> Future for FutureAdapter<F> {
+            type Output = F::Output;
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
+                let this = self.project();
+                log::trace!("enter: {}", &this.name);
+                let out = this.future.poll(cx);
+                log::trace!("leave");
+                out
+            }
+        }
+
         // Since `all_tasks` is initially empty, polling it would produce `None` and immediately
         // interrupt the processing.
         // As such, we start by filling it with the initial content of the `new_task` channel.
-        while let Some(Some(task)) = new_task_rx.next().now_or_never() {
-            all_tasks.push(task);
+        while let Some(Some((task_name, task))) = new_task_rx.next().now_or_never() {
+            all_tasks.push(FutureAdapter {
+                name: task_name,
+                future: task,
+            });
         }
 
         loop {
             match future::select(new_task_rx.select_next_some(), all_tasks.next()).await {
-                future::Either::Left((new_task, _)) => {
-                    all_tasks.push(new_task);
+                future::Either::Left(((new_task_name, new_task), _)) => {
+                    all_tasks.push(FutureAdapter {
+                        name: new_task_name,
+                        future: new_task,
+                    });
                 }
                 future::Either::Right((Some(()), _)) => {}
                 future::Either::Right((None, _)) => {
@@ -186,9 +212,12 @@ pub async fn start_client(
 
 /// Starts all the services of the client.
 async fn start_services(
-    new_task_tx: mpsc::UnboundedSender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    chain_information: Vec<chain::chain_information::ChainInformation>,
-    genesis_chain_information: Vec<chain::chain_information::ChainInformation>,
+    new_task_tx: mpsc::UnboundedSender<(
+        String,
+        Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    )>,
+    chain_information: Vec<chain::chain_information::ValidChainInformation>,
+    genesis_chain_information: Vec<chain::chain_information::ValidChainInformation>,
     chain_specs: Vec<chain_spec::ChainSpec>,
     json_rpc_running: Vec<bool>,
 ) {
@@ -198,7 +227,7 @@ async fn start_services(
         network_service::NetworkService::new(network_service::Config {
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
-                move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             num_events_receivers: chain_information.len(), // Configures the length of `network_event_receivers`
             chains: chain_information
@@ -222,15 +251,15 @@ async fn start_services(
                                 list
                             },
                             has_grandpa_protocol: matches!(
-                                genesis_chain_information.finality,
-                                chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                                genesis_chain_information.as_ref().finality,
+                                chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
                             ),
-                            genesis_block_hash: genesis_chain_information
+                            genesis_block_hash: genesis_chain_information.as_ref()
                                 .finalized_block_header
                                 .hash(),
                             best_block: (
-                                chain_information.finalized_block_header.number,
-                                chain_information.finalized_block_header.hash(),
+                                chain_information.as_ref().finalized_block_header.number,
+                                chain_information.as_ref().finalized_block_header.hash(),
                             ),
                             protocol_id: chain_spec.protocol_id().to_string(),
                         }
@@ -252,16 +281,13 @@ async fn start_services(
     > = (0..chain_specs.len()).map(|_| None).collect();
 
     // Start the services of the chains that aren't parachains.
-    for (
-        relay_chain_index,
-        (chain_index, ((chain_information, chain_spec), genesis_chain_information)),
-    ) in chain_information
-        .iter()
-        .zip(chain_specs.iter())
-        .zip(genesis_chain_information.iter())
-        .enumerate()
-        .filter(|(_, ((_, chain_spec), _))| chain_spec.relay_chain().is_none())
-        .enumerate()
+    for (chain_index, ((chain_information, chain_spec), genesis_chain_information)) in
+        chain_information
+            .iter()
+            .zip(chain_specs.iter())
+            .zip(genesis_chain_information.iter())
+            .filter(|((_, chain_spec), _)| chain_spec.relay_chain().is_none())
+            .enumerate()
     {
         // The sync service is leveraging the network service, downloads block headers,
         // and verifies them, to determine what are the best and finalized blocks of the
@@ -271,7 +297,7 @@ async fn start_services(
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
-                    move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                 }),
                 network_service: (network_service.clone(), chain_index),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
@@ -285,12 +311,18 @@ async fn start_services(
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
-                move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             sync_service: sync_service.clone(),
             chain_spec: &chain_spec,
-            genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-            genesis_block_state_root: genesis_chain_information.finalized_block_header.state_root,
+            genesis_block_hash: genesis_chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(),
+            genesis_block_state_root: *genesis_chain_information
+                .as_ref()
+                .finalized_block_header
+                .state_root,
         })
         .await;
 
@@ -338,7 +370,7 @@ async fn start_services(
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
-                    move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                 }),
                 network_service: (network_service.clone(), chain_index),
                 network_events_receiver: network_event_receivers.pop().unwrap(),
@@ -356,12 +388,18 @@ async fn start_services(
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
-                move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             sync_service: sync_service.clone(),
             chain_spec,
-            genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-            genesis_block_state_root: genesis_chain_information.finalized_block_header.state_root,
+            genesis_block_hash: genesis_chain_information
+                .as_ref()
+                .finalized_block_header
+                .hash(),
+            genesis_block_state_root: *genesis_chain_information
+                .as_ref()
+                .finalized_block_header
+                .state_root,
         })
         .await;
 
@@ -387,12 +425,12 @@ async fn start_services(
 
         let (sync_service, runtime_service) = services.unwrap();
 
-        let finalized_header = genesis_chain_information.finalized_block_header;
+        let finalized_header = genesis_chain_information.as_ref().finalized_block_header;
         let transactions_service = Arc::new(
             transactions_service::TransactionsService::new(transactions_service::Config {
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
-                    move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                 }),
                 network_service: (network_service.clone(), 0),
                 sync_service: sync_service.clone(),
@@ -403,7 +441,7 @@ async fn start_services(
         let json_rpc_service = json_rpc_service::start(json_rpc_service::Config {
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
-                move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             network_service: (network_service.clone(), 0),
             sync_service,
@@ -411,7 +449,7 @@ async fn start_services(
             runtime_service,
             chain_spec,
             genesis_block_hash: finalized_header.hash(),
-            genesis_block_state_root: finalized_header.state_root,
+            genesis_block_state_root: *finalized_header.state_root,
             chain_index,
         })
         .await;
@@ -420,16 +458,17 @@ async fn start_services(
     }
 
     new_task_tx
-        .unbounded_send(
-            json_rpc_service::request_handling_task(
+        .unbounded_send((
+            "jsonrpc-initialization".into(),
+            json_rpc_service::spawn_request_handling_task(
                 Arc::new(Mutex::new(Box::new({
                     let new_task_tx = new_task_tx.clone();
-                    move |fut| new_task_tx.unbounded_send(fut).unwrap()
+                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                 }))),
                 json_rpc_services,
             )
             .boxed(),
-        )
+        ))
         .unwrap();
 
     log::info!("Initialization complete");

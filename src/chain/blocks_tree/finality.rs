@@ -20,7 +20,72 @@
 use super::*;
 use crate::finality::{grandpa, justification};
 
+use core::{cmp::Ordering, iter};
+
 impl<T> NonFinalizedTree<T> {
+    /// Returns a list of blocks (by their height and hash) that need to be finalized before any
+    /// of their descendants can be finalized.
+    ///
+    /// In other words, blocks in the [`NonFinalizedTree`] can be immediately finalized by call
+    /// to [`NonFinalizedTree::verify_justification`] or
+    /// [`NonFinalizedTree::verify_grandpa_commit_message`], unless they descend from any of the
+    /// blocks returned by this function, in which case that block must be finalized beforehand.
+    pub fn finality_checkpoints(&self) -> impl Iterator<Item = (u64, &[u8; 32])> {
+        let inner = self.inner.as_ref().unwrap();
+        match &inner.finality {
+            Finality::Outsourced => {
+                // No checkpoint means all blocks allowed.
+                either::Left(iter::empty())
+            }
+            Finality::Grandpa {
+                finalized_scheduled_change,
+                ..
+            } => {
+                // Scheduled change that is already finalized.
+                let scheduled = finalized_scheduled_change.as_ref().map(|(n, _)| *n);
+
+                // TODO: this is ~O(n²), but there's no real alternative here
+                let iter = inner
+                    .blocks
+                    .iter_unordered()
+                    .filter(move |(node_index, block)| {
+                        if scheduled == Some(block.header.number) {
+                            return true;
+                        }
+
+                        for ancestor in inner.blocks.root_to_node_path(*node_index) {
+                            let header = &inner.blocks.get(ancestor).unwrap().header;
+                            for grandpa_digest_item in
+                                header.digest.logs().filter_map(|d| match d {
+                                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
+                                    _ => None,
+                                })
+                            {
+                                match grandpa_digest_item {
+                                    header::GrandpaConsensusLogRef::ScheduledChange(change) => {
+                                        let trigger_block_height = header
+                                            .number
+                                            .checked_add(u64::from(change.delay))
+                                            .unwrap();
+
+                                        if trigger_block_height == block.header.number {
+                                            return true;
+                                        }
+                                    }
+                                    _ => {} // TODO: unimplemented
+                                }
+                            }
+                        }
+
+                        false
+                    })
+                    .map(|(_, block)| (block.header.number, &block.hash));
+
+                either::Right(iter)
+            }
+        }
+    }
+
     /// Verifies the given justification.
     ///
     /// The verification is performed in the context of the chain. In particular, the
@@ -72,6 +137,9 @@ impl<T> NonFinalizedTree<T> {
     /// >           moved to the user.
     ///
     /// The pruning is completely performed, even if the iterator is dropped eagerly.
+    ///
+    /// If necessary, the current best block will be updated to be a descendant of the
+    /// newly-finalized block.
     pub fn set_finalized_block(
         &mut self,
         block_hash: &[u8; 32],
@@ -320,12 +388,23 @@ impl<T> NonFinalizedTreeInner<T> {
     }
 
     /// Implementation of [`NonFinalizedTree::set_finalized_block`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if `block_index_to_finalize` isn't a valid node in the tree.
+    ///
     fn set_finalized_block(
         &mut self,
-        block_index: fork_tree::NodeIndex,
+        block_index_to_finalize: fork_tree::NodeIndex,
     ) -> SetFinalizedBlockIter<T> {
-        let target_block_height = self.blocks.get_mut(block_index).unwrap().header.number;
+        let new_finalized_block_height = self
+            .blocks
+            .get_mut(block_index_to_finalize)
+            .unwrap()
+            .header
+            .number;
 
+        // Update `self.finality`.
         match &mut self.finality {
             Finality::Outsourced => {}
             Finality::Grandpa {
@@ -336,9 +415,8 @@ impl<T> NonFinalizedTreeInner<T> {
                 // Update the scheduled GrandPa change with the latest scheduled-but-non-finalized change
                 // that could be found.
                 *finalized_scheduled_change = None;
-                for node in self.blocks.root_to_node_path(block_index) {
+                for node in self.blocks.root_to_node_path(block_index_to_finalize) {
                     let node = self.blocks.get(node).unwrap();
-                    //node.header.number
                     for grandpa_digest_item in node.header.digest.logs().filter_map(|d| match d {
                         header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
                         _ => None,
@@ -350,7 +428,7 @@ impl<T> NonFinalizedTreeInner<T> {
                                     .number
                                     .checked_add(u64::from(change.delay))
                                     .unwrap();
-                                if trigger_block_height > target_block_height {
+                                if trigger_block_height > new_finalized_block_height {
                                     *finalized_scheduled_change = Some((
                                         trigger_block_height,
                                         change.next_authorities.map(Into::into).collect(),
@@ -368,8 +446,63 @@ impl<T> NonFinalizedTreeInner<T> {
             }
         }
 
-        let new_finalized_block = self.blocks.get_mut(block_index).unwrap();
+        // If the best block isn't a descendant of the block being finalized, then the best
+        // block has to change to a different block.
+        //
+        // The definition of which block is the best can vary between nodes, but because there is
+        // an intentional delay between a block being created and it being finalized, the block
+        // being finalized is, under normal circumstances, always a common ancestor of the current
+        // best block of all nodes.
+        //
+        // The situation where this isn't the case is therefore very uncommon: typically after a
+        // netsplit (where not all nodes are aware of all blocks), or in extremely unlucky
+        // situations.
+        //
+        // Because this is very uncommon, searching for the new best block is implemented in a
+        // naive way, by scanning through each block one by one. This means that, when two blocks
+        // are equal to become the new best, it is not necessarily the earliest received block that
+        // is picked, contrary to the definition of "best block". But again, considering that this
+        // situation is so uncommon, it doesn't really matter.
+        debug_assert!(self.current_best.is_some()); // Can only be `None` if the tree is empty.
+        let updates_best_block = if block_index_to_finalize == self.current_best.unwrap()
+            || !self
+                .blocks
+                .is_ancestor(block_index_to_finalize, self.current_best.unwrap())
+        {
+            let mut new_best_block = None;
+            for (idx, block) in self.blocks.iter_unordered() {
+                if idx == block_index_to_finalize
+                    || !self.blocks.is_ancestor(block_index_to_finalize, idx)
+                {
+                    continue;
+                }
 
+                let replace = if let Some(new_best_block) = new_best_block {
+                    best_block::is_better_block(
+                        &self.blocks,
+                        new_best_block,
+                        self.blocks.parent(idx),
+                        From::from(&block.header),
+                    ) == Ordering::Greater
+                } else {
+                    true
+                };
+
+                if replace {
+                    new_best_block = Some(idx);
+                }
+            }
+
+            debug_assert_ne!(self.current_best, new_best_block);
+            self.current_best = new_best_block;
+            true
+        } else {
+            false
+        };
+
+        let new_finalized_block = self.blocks.get_mut(block_index_to_finalize).unwrap();
+
+        // Update `self.finalized_consensus`.
         match (
             &mut self.finalized_consensus,
             &new_finalized_block.consensus,
@@ -403,6 +536,7 @@ impl<T> NonFinalizedTreeInner<T> {
             _ => unreachable!(),
         }
 
+        // Update `self.finalized_block_header` and `self.finalized_block_hash`.
         mem::swap(
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
@@ -410,8 +544,8 @@ impl<T> NonFinalizedTreeInner<T> {
         self.finalized_block_hash = self.finalized_block_header.hash();
 
         SetFinalizedBlockIter {
-            iter: self.blocks.prune_ancestors(block_index),
-            current_best: &mut self.current_best,
+            iter: self.blocks.prune_ancestors(block_index_to_finalize),
+            updates_best_block,
         }
     }
 }
@@ -526,7 +660,14 @@ pub enum FinalityVerifyError {
 /// is updated.
 pub struct SetFinalizedBlockIter<'a, T> {
     iter: fork_tree::PruneAncestorsIter<'a, Block<T>>,
-    current_best: &'a mut Option<fork_tree::NodeIndex>,
+    updates_best_block: bool,
+}
+
+impl<'a, T> SetFinalizedBlockIter<'a, T> {
+    /// Returns true if the finalization process modifies the best block of the chain.
+    pub fn updates_best_block(&self) -> bool {
+        self.updates_best_block
+    }
 }
 
 impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
@@ -535,9 +676,6 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let pruned = self.iter.next()?;
-            if Some(pruned.index) == *self.current_best {
-                *self.current_best = None;
-            }
             if !pruned.is_prune_target_ancestor {
                 continue;
             }
@@ -554,8 +692,6 @@ impl<'a, T> Drop for SetFinalizedBlockIter<'a, T> {
     fn drop(&mut self) {
         // Make sure the iteration goes to the end.
         for _ in self {}
-
-        // TODO: update current_best with the new best block
     }
 }
 

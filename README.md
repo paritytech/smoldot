@@ -14,6 +14,8 @@ In order to simplify the code, two main design decisions have been made compared
 
 There exists two clients: the full client and the wasm light node.
 
+The main development focus is currently around the wasm light node. Using https://github.com/polkadot-js/api/ and https://github.com/paritytech/substrate-connect/ (which uses smoldot as an implementation detail), one can easily connect to a chain and interact in a fully trust-less way with it, from JavaScript.
+
 ### Full client
 
 The full client is a binary similar to the official Polkadot client, and can be tested with `cargo run`.

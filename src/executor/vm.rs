@@ -116,23 +116,17 @@ enum ModuleInner {
 impl Module {
     /// Compiles the given Wasm code.
     pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, NewErr> {
-        let use_wasmtime = match exec_hint {
-            #[cfg(all(target_arch = "x86_64", feature = "std"))]
-            ExecHint::CompileAheadOfTime => true,
-            #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
-            ExecHint::CompileAheadOfTime => false,
-            ExecHint::Oneshot | ExecHint::Untrusted => false,
-        };
-
         Ok(Module {
-            inner: if use_wasmtime {
+            inner: match exec_hint {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                let out = ModuleInner::Jit(jit::Module::new(module)?);
+                ExecHint::CompileAheadOfTime => ModuleInner::Jit(jit::Module::new(module)?),
                 #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
-                let out = unreachable!();
-                out
-            } else {
-                ModuleInner::Interpreter(interpreter::Module::new(module)?)
+                ExecHint::CompileAheadOfTime => {
+                    ModuleInner::Interpreter(interpreter::Module::new(module)?)
+                }
+                ExecHint::Oneshot | ExecHint::Untrusted => {
+                    ModuleInner::Interpreter(interpreter::Module::new(module)?)
+                }
             },
         })
     }
