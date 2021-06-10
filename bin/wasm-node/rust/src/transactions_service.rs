@@ -110,14 +110,17 @@ impl TransactionsService {
     pub async fn new(mut config: Config) -> Self {
         let (to_background, from_foreground) = mpsc::channel(8);
 
-        (config.tasks_executor)(Box::pin(background_task(
-            config.network_service.0,
-            config.network_service.1,
-            config.sync_service,
-            from_foreground,
-            usize::try_from(config.max_concurrent_downloads).unwrap_or(usize::max_value()),
-            usize::try_from(config.max_pending_transactions).unwrap_or(usize::max_value()),
-        )));
+        (config.tasks_executor)(
+            "transactions-service".into(),
+            Box::pin(background_task(
+                config.network_service.0,
+                config.network_service.1,
+                config.sync_service,
+                from_foreground,
+                usize::try_from(config.max_concurrent_downloads).unwrap_or(usize::max_value()),
+                usize::try_from(config.max_pending_transactions).unwrap_or(usize::max_value()),
+            )),
+        );
 
         TransactionsService {
             to_background: Mutex::new(to_background),
