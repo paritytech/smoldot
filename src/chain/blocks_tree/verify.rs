@@ -68,11 +68,12 @@ impl<T> NonFinalizedTree<T> {
                     },
                 })
             }
-            VerifyOut::Duplicate(self_inner) => {
+            VerifyOut::HeaderDuplicate(self_inner) => {
                 self.inner = Some(self_inner);
                 Ok(HeaderVerifySuccess::Duplicate)
             }
-            _ => unreachable!(),
+            // Can't happen when asked for non-full verification.
+            VerifyOut::Body(..) => unreachable!(),
         }
     }
 
@@ -100,7 +101,10 @@ impl<T> NonFinalizedTree<T> {
             .verify(scale_encoded_header, now_from_unix_epoch, true)
         {
             VerifyOut::Body(step) => step,
-            _ => unreachable!(),
+            VerifyOut::HeaderDuplicate(..) | VerifyOut::HeaderOk(..) | VerifyOut::HeaderErr(..) => {
+                // Can't happen when asked for full verification.
+                unreachable!()
+            }
         }
     }
 }
@@ -130,29 +134,28 @@ impl<T> NonFinalizedTreeInner<T> {
 
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
+        // Check for duplicates.
         if self.blocks.find(|b| b.hash == hash).is_some() {
             return if full {
                 VerifyOut::Body(BodyVerifyStep1::Duplicate(NonFinalizedTree {
                     inner: Some(self),
                 }))
             } else {
-                VerifyOut::Duplicate(self)
+                VerifyOut::HeaderDuplicate(self)
             };
         }
 
         // Try to find the parent block in the tree of known blocks.
         // `Some` with an index of the parent within the tree of unfinalized blocks.
         // `None` means that the parent is the finalized block.
-        //
-        // The parent hash is first checked against `self.current_best`, as it is most likely
-        // that new blocks are built on top of the current best.
         let parent_tree_index = {
             let parent_hash = *decoded_header.parent_hash;
             match self.current_best {
-                Some(best) if parent_hash == self.blocks.get(best).unwrap().hash => {
-                    Some(self.current_best.unwrap())
-                }
+                // The parent hash is first checked against `self.current_best`, as it is most
+                // likely that new blocks are built on top of the current best.
+                Some(best) if parent_hash == self.blocks.get(best).unwrap().hash => Some(best),
                 _ if parent_hash == self.finalized_block_hash => None,
+                // O(n) search for the parent.
                 _ => match self.blocks.find(|b| b.hash == parent_hash) {
                     Some(parent) => Some(parent),
                     None => {
@@ -230,17 +233,13 @@ impl<T> NonFinalizedTreeInner<T> {
                     (
                         FinalizedConsensus::Aura { slot_duration, .. },
                         VerifyConsensusSpecific::Aura { authorities_list },
-                    ) => {
-                        verify::header_only::ConfigConsensus::Aura {
-                            // TODO: meh for allocating :-/
-                            current_authorities: authorities_list
-                                .iter()
-                                .map(|a| a.into())
-                                .collect(),
-                            now_from_unix_epoch,
-                            slot_duration: *slot_duration,
-                        }
-                    }
+                    ) => verify::header_only::ConfigConsensus::Aura {
+                        current_authorities: header::AuraAuthoritiesIter::from_slice(
+                            &*authorities_list,
+                        ),
+                        now_from_unix_epoch,
+                        slot_duration: *slot_duration,
+                    },
                     (
                         FinalizedConsensus::Babe {
                             slots_per_epoch, ..
@@ -284,7 +283,7 @@ impl<T> NonFinalizedTreeInner<T> {
 enum VerifyOut<T> {
     HeaderOk(VerifyContext<T>, bool, BlockConsensus),
     HeaderErr(NonFinalizedTreeInner<T>, HeaderVerifyError),
-    Duplicate(NonFinalizedTreeInner<T>),
+    HeaderDuplicate(NonFinalizedTreeInner<T>),
     Body(BodyVerifyStep1<T>),
 }
 
@@ -356,9 +355,10 @@ impl<T> VerifyContext<T> {
                 _,
             ) => {
                 if authorities_change {
-                    BlockConsensus::Aura {
-                        authorities_list: todo!(), // TODO: fetch from header
-                    }
+                    todo!() // TODO: fetch from header
+                            /*BlockConsensus::Aura {
+                                authorities_list:
+                            }*/
                 } else {
                     BlockConsensus::Aura {
                         authorities_list: parent_authorities.clone(),
@@ -625,14 +625,11 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             (
                 FinalizedConsensus::Aura { slot_duration, .. },
                 VerifyConsensusSpecific::Aura { authorities_list },
-            ) => {
-                verify::header_body::ConfigConsensus::Aura {
-                    // TODO: meh for allocation
-                    current_authorities: authorities_list.iter().map(|a| a.into()).collect(),
-                    now_from_unix_epoch: self.now_from_unix_epoch,
-                    slot_duration: *slot_duration,
-                }
-            }
+            ) => verify::header_body::ConfigConsensus::Aura {
+                current_authorities: header::AuraAuthoritiesIter::from_slice(&*authorities_list),
+                now_from_unix_epoch: self.now_from_unix_epoch,
+                slot_duration: *slot_duration,
+            },
             (
                 FinalizedConsensus::Babe {
                     slots_per_epoch, ..

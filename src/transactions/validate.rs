@@ -92,6 +92,8 @@ pub struct ValidTransaction {
     ///
     /// Two transactions that have a provided tag in common are mutually exclusive, and cannot be
     /// both included in the same chain of blocks.
+    ///
+    /// Guaranteed to never be empty.
     // TODO: better type than `Vec<Vec<u8>>`? I feel like this could be a single `Vec<u8>` that is decoded on the fly?
     pub provides: Vec<Vec<u8>>,
 
@@ -180,6 +182,8 @@ pub enum Error {
     WasmVm(read_only_runtime_host::ErrorDetail),
     /// Error while decoding the output of the runtime.
     OutputDecodeError,
+    /// The list of provided tags ([`ValidTransaction::provides`]). This is a bug in the runtime.
+    EmptyProvidedTags,
 }
 
 /// Errors that can occur while checking the validity of a transaction.
@@ -261,7 +265,17 @@ impl Query {
                 };
 
                 let result = match result {
-                    Ok(r) => r,
+                    Ok(res) => {
+                        if let Ok(res) = res.as_ref() {
+                            if res.provides.is_empty() {
+                                return Query::Finished {
+                                    result: Err(Error::EmptyProvidedTags),
+                                    virtual_machine: success.virtual_machine.into_prototype(),
+                                };
+                            }
+                        }
+                        res
+                    }
                     Err(err) => {
                         return Query::Finished {
                             result: Err(err),

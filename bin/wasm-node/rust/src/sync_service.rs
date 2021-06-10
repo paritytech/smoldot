@@ -1257,8 +1257,8 @@ async fn start_parachain(
     };
     futures::pin_mut!(relay_best_blocks);
 
-    let mut current_finalized_block: header::Header =
-        chain_information.as_ref().finalized_block_header.into();
+    let current_finalized_block: header::Header =
+        chain_information.as_ref().finalized_block_header.into(); // TODO: finality not implemented
     let mut current_best_block = current_finalized_block.clone();
 
     // List of senders that get notified when the best block is modified.
@@ -1298,16 +1298,16 @@ async fn start_parachain(
                         let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
                     }
                     ToBackground::SubscribeAll { send_back, buffer_size } => {
-                        let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                        let (_tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                         let _ = send_back.send(SubscribeAll {
                             finalized_block_scale_encoded_header: current_finalized_block.scale_encoding_vec(),
                             non_finalized_blocks: Vec::new(),  // TODO: wrong /!\
                             new_blocks,
                         });
 
-                        // TODO: `tx` is immediately discarded; the feature isn't actually fully implemented
+                        // TODO: `_tx` is immediately discarded; the feature isn't actually fully implemented
                     }
-                    ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
+                    ToBackground::PeersAssumedKnowBlock { send_back, .. } => {
                         let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
                     }
                     ToBackground::SyncingPeers { send_back } => {

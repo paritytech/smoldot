@@ -27,7 +27,7 @@ use smoldot::{
     chain, chain_spec,
     libp2p::{multiaddr, peer_id::PeerId},
 };
-use std::{collections::HashMap, pin::Pin, sync::Arc, task, time::Duration};
+use std::{collections::HashMap, pin::Pin, sync::Arc, task};
 
 pub mod ffi;
 
@@ -281,16 +281,13 @@ async fn start_services(
     > = (0..chain_specs.len()).map(|_| None).collect();
 
     // Start the services of the chains that aren't parachains.
-    for (
-        relay_chain_index,
-        (chain_index, ((chain_information, chain_spec), genesis_chain_information)),
-    ) in chain_information
-        .iter()
-        .zip(chain_specs.iter())
-        .zip(genesis_chain_information.iter())
-        .enumerate()
-        .filter(|(_, ((_, chain_spec), _))| chain_spec.relay_chain().is_none())
-        .enumerate()
+    for (chain_index, ((chain_information, chain_spec), genesis_chain_information)) in
+        chain_information
+            .iter()
+            .zip(chain_specs.iter())
+            .zip(genesis_chain_information.iter())
+            .filter(|((_, chain_spec), _)| chain_spec.relay_chain().is_none())
+            .enumerate()
     {
         // The sync service is leveraging the network service, downloads block headers,
         // and verifies them, to determine what are the best and finalized blocks of the

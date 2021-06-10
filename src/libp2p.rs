@@ -361,9 +361,9 @@ where
 
     pub fn add_incoming_connection(
         &self,
-        local_listen_address: &Multiaddr,
-        remote_addr: Multiaddr,
-        user_data: TConn,
+        _local_listen_address: &Multiaddr,
+        _remote_addr: Multiaddr,
+        _user_data: TConn,
     ) -> ConnectionId {
         todo!()
     }
@@ -1291,7 +1291,7 @@ where
                     })
                     .unwrap();
             }
-            PendingEvent::Inner(established::Event::NotificationsOutCloseDemanded { id }) => {
+            PendingEvent::Inner(established::Event::NotificationsOutCloseDemanded { .. }) => {
                 todo!()
             }
             PendingEvent::Inner(established::Event::NotificationsOutReset {

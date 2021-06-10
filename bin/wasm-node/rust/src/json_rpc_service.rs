@@ -210,7 +210,6 @@ pub async fn start(config: Config) -> Arc<JsonRpcService> {
         tasks_executor: Mutex::new(config.tasks_executor),
         chain_spec: config.chain_spec,
         network_service: config.network_service.0,
-        network_chain_index: config.network_service.1,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         transactions_service: config.transactions_service,
@@ -298,8 +297,6 @@ pub struct JsonRpcService {
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService>,
-    /// See [`Config::network_service`].
-    network_chain_index: usize,
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
     /// See [`Config::runtime_service`].
@@ -476,7 +473,10 @@ impl JsonRpcService {
                                 .into_iter()
                                 .map(methods::Extrinsic)
                                 .collect(),
-                            header: header_conv(header::decode(&block.header.unwrap()).unwrap()),
+                            header: methods::Header::from_scale_encoded_header(
+                                &block.header.unwrap(),
+                            )
+                            .unwrap(),
                             justification: block.justification.map(methods::HexString),
                         })
                         .to_json_response(request_id)
@@ -506,11 +506,10 @@ impl JsonRpcService {
 
                 self.send_back(
                     &match self.header_query(&hash).await {
-                        Ok(header) => {
-                            let decoded = header::decode(&header).unwrap();
-                            methods::Response::chain_getHeader(header_conv(decoded))
-                                .to_json_response(request_id)
-                        }
+                        Ok(header) => methods::Response::chain_getHeader(
+                            methods::Header::from_scale_encoded_header(&header).unwrap(),
+                        )
+                        .to_json_response(request_id),
                         // TODO: error or null?
                         Err(()) => json_rpc::parse::build_success_response(request_id, "null"),
                     },
@@ -552,7 +551,7 @@ impl JsonRpcService {
                 } else {
                 }
             }
-            methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
+            methods::MethodCall::payment_queryInfo { extrinsic: _, hash } => {
                 assert!(hash.is_none()); // TODO: handle when hash != None
                                          // TODO: complete hack
                 self.send_back(
@@ -1209,7 +1208,9 @@ impl JsonRpcService {
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((block, _)) => {
                             // TODO: don't unwrap `block`! channel can be legitimately closed if full
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
 
                             let per_source_subscriptions =
                                 client.per_userdata_subscriptions.lock().await;
@@ -1287,7 +1288,9 @@ impl JsonRpcService {
                     futures::pin_mut!(next_block);
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((block, _)) => {
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
 
                             let per_source_subscriptions =
                                 client.per_userdata_subscriptions.lock().await;
@@ -1370,7 +1373,9 @@ impl JsonRpcService {
                     futures::pin_mut!(next_block);
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((block, _)) => {
-                            let header = header_conv(header::decode(&block.unwrap()).unwrap());
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
 
                             let per_source_subscriptions =
                                 client.per_userdata_subscriptions.lock().await;
@@ -1608,38 +1613,4 @@ enum StorageQueryError {
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{}", _0)]
     StorageRetrieval(sync_service::StorageQueryError),
-}
-
-impl StorageQueryError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    fn is_network_problem(&self) -> bool {
-        match self {
-            StorageQueryError::FindStorageRootHashError => true, // TODO: do properly
-            StorageQueryError::StorageRetrieval(error) => error.is_network_problem(),
-        }
-    }
-}
-
-fn header_conv<'a>(header: impl Into<smoldot::header::HeaderRef<'a>>) -> methods::Header {
-    let header = header.into();
-
-    methods::Header {
-        parent_hash: methods::HashHexString(*header.parent_hash),
-        extrinsics_root: methods::HashHexString(*header.extrinsics_root),
-        state_root: methods::HashHexString(*header.state_root),
-        number: header.number,
-        digest: methods::HeaderDigest {
-            logs: header
-                .digest
-                .logs()
-                .map(|log| {
-                    methods::HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    }))
-                })
-                .collect(),
-        },
-    }
 }

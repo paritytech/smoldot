@@ -969,7 +969,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let (grandpa_warp_sync, error) =
                     sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot);
 
-                if let Some(error) = error {
+                if let Some(_error) = error {
                     // TODO: error handling
                 }
 
@@ -985,7 +985,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let (grandpa_warp_sync, error) = sync.inject_value(value.map(iter::once));
 
-                if let Some(error) = error {
+                if let Some(_error) = error {
                     // TODO: error handling
                 }
 
@@ -1811,7 +1811,7 @@ impl Shared {
                 let outer_request_id = self
                     .requests
                     .iter()
-                    .find(|(id, s)| **s == RequestMapping::Optimistic(request_id))
+                    .find(|(_, s)| **s == RequestMapping::Optimistic(request_id))
                     .map(|(id, _)| RequestId(id))
                     .unwrap();
                 self.requests.remove(outer_request_id.0);

@@ -73,8 +73,7 @@ pub enum ConfigConsensus<'a> {
         ///
         /// This list is either equal to the parent's list, or, if the parent changes the list of
         /// authorities, equal to that new modified list.
-        // TODO: consider not using a Vec
-        current_authorities: Vec<header::AuraAuthorityRef<'a>>,
+        current_authorities: header::AuraAuthoritiesIter<'a>,
 
         /// Duration of a slot in milliseconds.
         /// Can be found by calling the `AuraApi_slot_duration` runtime function.
@@ -205,7 +204,7 @@ pub fn verify(
                 header: config.block_header.clone(),
                 parent_block_header: config.parent_block_header,
                 now_from_unix_epoch,
-                current_authorities: current_authorities.into_iter(),
+                current_authorities,
                 slot_duration,
             });
 

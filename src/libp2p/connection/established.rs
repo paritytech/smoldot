@@ -1145,10 +1145,8 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 user_data,
                                 response: leb128::FramedInProgress::new(128 * 1024 * 1024), // TODO: proper max size
                             };
-                            let substream_id = substream.id();
                             let _already_closed = substream.close();
                             debug_assert!(_already_closed.is_none());
-                            substream = self.yamux.substream_by_id(substream_id).unwrap();
                         }
                         Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
                             substream.reset();

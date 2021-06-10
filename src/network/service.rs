@@ -555,7 +555,6 @@ where
                 }
                 libp2p::Event::Disconnected {
                     peer_id,
-                    user_data,
                     mut out_overlay_network_indices,
                     ..
                 } => {
@@ -589,10 +588,10 @@ where
                     };
                 }
                 libp2p::Event::NotificationsOutAccept {
-                    id,
                     peer_id,
                     overlay_network_index,
                     remote_handshake,
+                    ..
                 } => {
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
@@ -643,9 +642,9 @@ where
                     // TODO:
                 }
                 libp2p::Event::NotificationsOutClose {
-                    id,
                     peer_id,
                     overlay_network_index,
+                    ..
                 } => {
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
@@ -665,9 +664,9 @@ where
                     remote_handshake,
                 } => {
                     if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
-                        let remote_handshake =
+                        // TODO: don't unwrap; this is just for checking correctness
+                        let _remote_handshake =
                             protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
-                        // TODO: don't unwrap
 
                         let chain_config = &self.chain_configs
                             [overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
@@ -707,11 +706,11 @@ where
                     }
                 }
                 libp2p::Event::NotificationsIn {
-                    id,
                     peer_id,
                     has_symmetric_substream,
                     overlay_network_index,
                     notification,
+                    ..
                 } => {
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: think about possible race conditions regarding missing block
@@ -726,7 +725,7 @@ where
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         // TODO: don't unwrap
-                        let announce = protocol::decode_block_announce(&notification).unwrap();
+                        let _announce = protocol::decode_block_announce(&notification).unwrap();
                         return Event::BlockAnnounce {
                             chain_index,
                             peer_id,
