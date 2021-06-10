@@ -101,6 +101,10 @@ pub struct Config {
 
     /// Height of the finalized block at initialization.
     ///
+    /// The [`Pool`] doesn't track which block is finalized. This value is only used to initialize
+    /// the best block number. The field could also have been called `best_block_height`, but it
+    /// might have created confusion.
+    ///
     /// Non-finalized blocks should be added to the pool after initialization using
     /// [`Pool::append_block`].
     pub finalized_block_height: u64,
@@ -157,6 +161,16 @@ impl<TTx> Pool<TTx> {
             by_height: BTreeSet::new(),
             best_block_height: config.finalized_block_height,
         }
+    }
+
+    /// Returns true if the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.transactions.is_empty()
+    }
+
+    /// Returns the number of transactions in the pool.
+    pub fn len(&self) -> usize {
+        self.transactions.len()
     }
 
     /// Inserts a new unvalidated transaction in the pool.
@@ -302,6 +316,20 @@ impl<TTx> Pool<TTx> {
         // TODO: /!\
         let _i: core::iter::Empty<_> = todo!();
         _i
+    }
+
+    /// Returns the list of all transactions within the pool.
+    pub fn iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
+        self.transactions
+            .iter()
+            .map(|(id, tx)| (TransactionId(id), &tx.user_data))
+    }
+
+    /// Returns the list of all transactions within the pool.
+    pub fn iter_mut(&'_ mut self) -> impl Iterator<Item = (TransactionId, &'_ mut TTx)> + '_ {
+        self.transactions
+            .iter_mut()
+            .map(|(id, tx)| (TransactionId(id), &mut tx.user_data))
     }
 
     /// Returns the user data associated with a given transaction.
@@ -505,7 +533,7 @@ impl<TTx> Pool<TTx> {
             return;
         }
 
-        todo!()
+        todo!() // TODO: finish implementing
     }
 }
 
