@@ -45,8 +45,10 @@
 //!
 //! Each transaction exposes three properties:
 //!
-//! - Whether or not it has been validated, and if yes, the characteristics of the transactions
-//! as provided by the runtime: the tags it provides and requires, its longevity, its priority.
+//! - Whether or not it has been validated, and if yes, the block against which it has been
+//! validated and the characteristics of the transaction as provided by the runtime: the tags it
+//! provides and requires, its longevity, and its priority. See [the `validate` module](../validate)
+//! for more information.
 //! - The height of the block, if any, in which the transaction has been included.
 //! - A so-called user data, an opaque field controller by the API user.
 //!
@@ -54,11 +56,15 @@
 //! block at a later point in time.
 //!
 //! Use [`Pool::append_block`] and [`Pool::retract_blocks`] when a new block is considered as
-//! best in order to let the [`Pool`] track the state of the best block of the chain.
+//! best in order to let the [`Pool`] track the state of the best block of the chain. The
+//! block bodies that are passed to [`Pool::append_block`] are added to the pool.
 //!
 //! Use [`Pool::unvalidated_transactions`] to obtain the list of transactions that should be
 //! validated. Validation should be performed using the [`validate`](../validate) module, and
 //! the result reported with [`Pool::set_validation_result`].
+//!
+//! Use [`Pool::remove_included`] when a block is finalized to remove from the pool the
+//! transactions that are present in the finalized block and below.
 //!
 //! # Out of scope
 //!
@@ -76,8 +82,8 @@ use hashbrown::{hash_map, HashMap, HashSet};
 
 /// Identifier of a transaction stored within the [`Pool`].
 ///
-/// Identifiers can be re-used. In other words, a transaction id can compare equal to an older
-/// transaction id that is no longer in the pool.
+/// Identifiers can be re-used by the pool. In other words, a transaction id can compare equal to
+/// an older transaction id that is no longer in the pool.
 //
 // Implementation note: corresponds to indices within [`Pool::transactions`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -229,16 +235,68 @@ impl<TTx> Pool<TTx> {
         tx.user_data
     }
 
-    /// Returns a list of transactions whose state is "not validated".
-    pub fn unvalidated_transactions(&'_ self) -> impl ExactSizeIterator<Item = TransactionId> + '_ {
-        self.not_validated
-            .iter()
-            .copied()
-            .inspect(move |id| debug_assert!(self.not_validated.contains(id)))
+    /// Removes from the pool all the transactions that are included in a block whose height is
+    /// inferior or equal to the one passed as parameter.
+    ///
+    /// Use this method when a block has been finalized.
+    ///
+    /// The returned iterator is guaranteed to remove all transactions even if it is dropped
+    /// eagerly.
+    pub fn remove_included(
+        &'_ mut self,
+        block_inferior_of_equal: u64,
+    ) -> impl Iterator<Item = (TransactionId, TTx)> + '_ {
+        let to_remove = self
+            .by_height
+            .range(
+                (u64::min_value(), TransactionId(usize::min_value()))
+                    ..=(block_inferior_of_equal, TransactionId(usize::max_value())),
+            )
+            .map(|(_, tx_id)| *tx_id)
+            .collect::<Vec<_>>();
+
+        // TODO: implement more efficiently by not allocating this `out` Vec but removing directly in iterator
+        let mut out = Vec::with_capacity(to_remove.len());
+
+        for tx_id in to_remove {
+            let tx = self.transactions.remove(tx_id.0);
+            out.push((tx_id, tx.user_data));
+
+            debug_assert!(tx.included_block_height.is_some());
+
+            if tx.validation.is_none() {
+                let _removed = self.not_validated.remove(&tx_id);
+                debug_assert!(_removed);
+            }
+
+            let _tx_id = self
+                .by_hash
+                .remove(&blake2_hash(&tx.scale_encoded))
+                .unwrap();
+            debug_assert_eq!(_tx_id, tx_id);
+        }
+
+        out.into_iter()
     }
 
-    /// Returns the transactions from the pool in the order in which they should be inserted in
-    /// authored blocks.
+    /// Returns a list of transactions whose state is "not validated", their user data, and the
+    /// height of the block they should be validated against.
+    ///
+    /// The block height a transaction should be validated against is always equal to either the
+    /// block at which it has been included, or the current best block. It is yielded by the
+    /// iterator for convenience, to avoid writing error-prone code.
+    pub fn unvalidated_transactions(
+        &'_ self,
+    ) -> impl ExactSizeIterator<Item = (TransactionId, &TTx, u64)> + '_ {
+        self.not_validated.iter().copied().map(move |tx_id| {
+            let tx = self.transactions.get(tx_id.0).unwrap();
+            let height = tx.included_block_height.unwrap_or(self.best_block_height);
+            (tx_id, &tx.user_data, height)
+        })
+    }
+
+    /// Returns the transactions from the pool that haven't been included yet in the order in
+    /// which they should be inserted in authored blocks.
     pub fn inclusion_order(&'_ self) -> impl Iterator<Item = TransactionId> + '_ {
         // FIXME: /!\
         // TODO: /!\
@@ -258,6 +316,17 @@ impl<TTx> Pool<TTx> {
     /// Returns `None` if the identifier is invalid.
     pub fn user_data_mut(&mut self, id: TransactionId) -> Option<&mut TTx> {
         Some(&mut self.transactions.get_mut(id.0)?.user_data)
+    }
+
+    /// Returns the block height at which the given transaction has been included.
+    ///
+    /// A transaction has been included if it has been added to the pool with
+    /// [`Pool::append_block`].
+    ///
+    /// Returns `None` if the identifier is invalid or the transaction doesn't belong to any
+    /// block.
+    pub fn included_block_height(&self, id: TransactionId) -> Option<u64> {
+        self.transactions.get(id.0)?.included_block_height
     }
 
     /// Returns the bytes associated with a given transaction.
@@ -284,10 +353,14 @@ impl<TTx> Pool<TTx> {
     /// Adds a block to the chain tracked by the transactions pool.
     ///
     /// `body` must be the list of transactions included in the block, with a user data associated
-    /// to each transaction. The function inserts all transactions.
+    /// to each transaction.
     ///
     /// Transactions in `body` that aren't yet present in the pool are added to it in the
     /// "unverified" state.
+    ///
+    /// The returned iterator is guaranteed to insert all transactions even if it is dropped
+    /// eagerly.
+    // TODO: the way duplicates are handled isn't great
     pub fn append_block<'a>(
         &'a mut self,
         body: impl Iterator<Item = (impl AsRef<[u8]>, TTx)> + 'a,
@@ -358,42 +431,80 @@ impl<TTx> Pool<TTx> {
 
     /// Pop a certain number of blocks from the list of blocks.
     ///
+    /// Transations that were included in these blocks remain in the transactions pool.
+    ///
+    /// Returns the list of transactions that were in blocks that have been retracted.
+    ///
     /// # Panic
     ///
     /// Panics if `num_to_retract > self.best_block_height()`, in other words if the block number
     /// would go in the negative.
     ///
-    // TODO: return list of retracted transactions
-    pub fn retract_blocks(&mut self, num_to_retract: u64) {
-        // Iterate `num_to_retract` times.
-        for _ in 0..num_to_retract {
-            // List of transactions that were included in that block.
-            let transactions_to_retract = self
-                .by_height
-                .range(
-                    (self.best_block_height, TransactionId(usize::min_value()))
-                        ..=(self.best_block_height, TransactionId(usize::max_value())),
-                )
-                .map(|(_, tx_id)| *tx_id)
-                .collect::<Vec<_>>();
+    pub fn retract_blocks(&mut self, num_to_retract: u64) -> impl Iterator<Item = TransactionId> {
+        // Checks that there's no transaction included above `self.best_block_height`.
+        debug_assert!(self
+            .by_height
+            .range(
+                (
+                    self.best_block_height + 1,
+                    TransactionId(usize::min_value()),
+                )..,
+            )
+            .next()
+            .is_none());
 
-            for transaction_id in transactions_to_retract {
-                let mut tx_data = self.transactions.get_mut(transaction_id.0).unwrap();
-                debug_assert_eq!(tx_data.included_block_height, Some(self.best_block_height));
-                tx_data.included_block_height = None;
-            }
+        // Update `best_block_height` as first step, in order to panic sooner in case of underflow.
+        self.best_block_height = self.best_block_height.checked_sub(num_to_retract).unwrap();
 
-            self.best_block_height = self.best_block_height.checked_sub(1).unwrap();
+        // List of transactions that were included in these blocks.
+        let transactions_to_retract = self
+            .by_height
+            .range(
+                (
+                    self.best_block_height + 1,
+                    TransactionId(usize::min_value()),
+                )..,
+            )
+            .map(|(_, tx_id)| *tx_id)
+            .collect::<Vec<_>>();
+
+        // Set `included_block_height` to `None` for each of them.
+        for transaction_id in &transactions_to_retract {
+            let mut tx_data = self.transactions.get_mut(transaction_id.0).unwrap();
+            debug_assert!(tx_data.included_block_height.unwrap() > self.best_block_height);
+            tx_data.included_block_height = None;
         }
+
+        // Return retracted transactions from highest block to lowest block.
+        transactions_to_retract.into_iter().rev()
     }
 
     /// Sets the outcome of validating the transaction with the given identifier.
-    // TODO: pass block hash/number?
+    ///
+    /// The block number must be the block number against which the transaction has been
+    /// validated.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the transaction with the given id is invalid.
+    ///
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
+        block_number_validated_against: u64,
         result: Result<ValidTransaction, InvalidTransaction>,
     ) {
+        let tx = self.transactions.get_mut(id.0).unwrap();
+
+        // If the transaction has been included in a block, immediately return if the validation
+        // has been performed against a different block.
+        if tx
+            .included_block_height
+            .map_or(false, |b| b != block_number_validated_against)
+        {
+            return;
+        }
+
         todo!()
     }
 }
