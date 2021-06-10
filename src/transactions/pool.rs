@@ -615,3 +615,5 @@ struct Transaction<TTx> {
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }
+
+// TODO: needs tests
