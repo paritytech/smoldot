@@ -18,14 +18,15 @@
 //! Transactions pool.
 //!
 //! The transactions pool is a complex data structure that holds a list of pending transactions,
-//! in other words transactions that should later be included in blocks.
+//! in other words transactions that should later be included in blocks, and a list of
+//! transactions that have been included in non-finalized blocks.
 //!
 //! See the [parent module's documentation](..) for an overview of transactions.
 //!
 //! # Overview
 //!
 //! The transactions pool stores a list of transactions that the local node desires to include in
-//! blocks, and a list of transactions that have been included in blocks. Each of these
+//! blocks, and a list of transactions that have already been included in blocks. Each of these
 //! transactions is either validated or not. A transaction in a block is assumed to always succeed
 //! validation. A validated transaction that isn't present in any block is a transaction that is
 //! assumed to be includable in a block in the future.
@@ -35,18 +36,20 @@
 //! after all these tags have been *provided* by transactions earlier in the chain.
 //!
 //! The transactions pool isn't only about deciding which transactions to include in a block when
-//! authoring, but also about watching the status of transactions in the chain. This is relevant
-//! both if the local node can potentially author blocks or not.
+//! authoring, but also about tracking the status of interesting transactions between the moment
+//! they become interesting and the moment the block they are included in becomes finalized. This
+//! is relevant both if the local node can potentially author blocks or not.
 //!
 //! The transactions pool tracks the height of the *best* chain, and only of the best chain. More
-//! precisely, it is aware of the height of the current best block.
+//! precisely, it is aware of the height of the current best block. Forks are tracked.
 //!
 //! # Usage
 //!
-//! Each transaction exposes three properties:
+//! A [`Pool`] is a collection of transactions. Each transaction in the pool exposes three
+//! properties:
 //!
 //! - Whether or not it has been validated, and if yes, the block against which it has been
-//! validated and the characteristics of the transaction as provided by the runtime: the tags it
+//! validated and the characteristics of the transaction (as provided by the runtime): the tags it
 //! provides and requires, its longevity, and its priority. See [the `validate` module](../validate)
 //! for more information.
 //! - The height of the block, if any, in which the transaction has been included.
@@ -63,12 +66,13 @@
 //! validated. Validation should be performed using the [`validate`](../validate) module, and
 //! the result reported with [`Pool::set_validation_result`].
 //!
-//! Use [`Pool::remove_included`] when a block is finalized to remove from the pool the
+//! Use [`Pool::remove_included`] when a block has been finalized to remove from the pool the
 //! transactions that are present in the finalized block and below.
 //!
 //! # Out of scope
 //!
-//! The follow are examples of things that are out of scope of this data structure:
+//! The following are examples of things that are related transactions pool to but out of scope of
+//! this data structure:
 //!
 //! - Watching the state of transactions.
 //! - Sending transactions to other peers.
