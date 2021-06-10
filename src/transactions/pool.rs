@@ -301,14 +301,18 @@ impl<TTx> Pool<TTx> {
     /// height of the block they should be validated against.
     ///
     /// The block height a transaction should be validated against is always equal to either the
-    /// block at which it has been included, or the current best block. It is yielded by the
-    /// iterator for convenience, to avoid writing error-prone code.
+    /// block at which it has been included minus one, or the current best block. It is yielded by
+    /// the iterator for convenience, to avoid writing error-prone code.
     pub fn unvalidated_transactions(
         &'_ self,
     ) -> impl ExactSizeIterator<Item = (TransactionId, &TTx, u64)> + '_ {
         self.not_validated.iter().copied().map(move |tx_id| {
             let tx = self.transactions.get(tx_id.0).unwrap();
-            let height = tx.included_block_height.unwrap_or(self.best_block_height);
+            let height = tx
+                .included_block_height
+                .unwrap_or(self.best_block_height)
+                .checked_sub(1)
+                .unwrap();
             (tx_id, &tx.user_data, height)
         })
     }
@@ -507,6 +511,19 @@ impl<TTx> Pool<TTx> {
             tx_data.included_block_height = None;
         }
 
+        // Must cancel validation results against blocks that have been retracted.
+        // TODO: this is O(n), do better
+        for (_, transaction) in &mut self.transactions {
+            let best_block_height = self.best_block_height;
+            if transaction
+                .validation
+                .as_ref()
+                .map_or(false, |(b, _)| *b > best_block_height)
+            {
+                transaction.validation = None;
+            }
+        }
+
         // Return retracted transactions from highest block to lowest block.
         transactions_to_retract.into_iter().rev()
     }
@@ -515,6 +532,9 @@ impl<TTx> Pool<TTx> {
     ///
     /// The block number must be the block number against which the transaction has been
     /// validated.
+    ///
+    /// The validation result might be ignored if it doesn't match one of the entries returned by
+    /// [`Pool::unvalidated_transactions`].
     ///
     /// # Panic
     ///
@@ -532,12 +552,12 @@ impl<TTx> Pool<TTx> {
         // has been performed against a different block.
         if tx
             .included_block_height
-            .map_or(false, |b| b != block_number_validated_against)
+            .map_or(false, |b| b != block_number_validated_against + 1)
         {
             return;
         }
 
-        todo!() // TODO: finish implementing
+        tx.validation = Some((block_number_validated_against, result));
     }
 }
 
@@ -558,8 +578,9 @@ struct Transaction<TTx> {
     /// Bytes corresponding to the SCALE-encoded transaction.
     scale_encoded: Vec<u8>,
 
-    /// If `Some`, contains the outcome of the validation of this transaction.
-    validation: Option<Result<ValidTransaction, InvalidTransaction>>,
+    /// If `Some`, contains the outcome of the validation of this transaction and the block height
+    /// it was validated against.
+    validation: Option<(u64, Result<ValidTransaction, InvalidTransaction>)>,
 
     /// If `Some`, the height of the block at which the transaction has been included.
     included_block_height: Option<u64>,
