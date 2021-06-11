@@ -86,5 +86,6 @@
 //! client also attempts to not cache that information for *too long* through heuristics.
 //!
 
+pub mod light_pool;
 pub mod pool;
 pub mod validate;

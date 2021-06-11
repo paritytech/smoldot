@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Transactions pool.
+//! General-purpose transactions pool.
 //!
 //! The transactions pool is a complex data structure that holds a list of pending transactions,
 //! in other words transactions that should later be included in blocks, and a list of
