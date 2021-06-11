@@ -15,6 +15,44 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Grandpa warp syncing.
+//!
+//! # Overview
+//!
+//! The Grandpa warp syncing algorithm consists in the following steps:
+//!
+//! - Downloading a warp sync proof from a source. This proof contains a list of *fragments*. Each
+//! fragment represents a change in the list of Grandpa authorities, and a list of signatures of
+//! the previous authorities that certify that this change is correct.
+//! - Verifying the fragments. Each fragment that is successfully verified progresses towards
+//! towards the head of the chain. Even if one fragment is invalid, all the previously-verified
+//! fragments can still be kept, and the warp syncing can resume from there.
+//! - Downloading from a source the runtime code of the final block of the proof.
+//! - Performing some runtime calls in order to obtain the current consensus-related parameters
+//! of the chain. This might require obtaining some storage items, in which case they must also
+//! be downloaded from a source.
+//!
+//! At the end of the syncing, a [`ValidChainInformation`] corresponding to the head of the chain
+//! is yielded.
+//!
+//! # Usage
+//!
+//! Use the [`grandpa_warp_sync`] function to start a Grandpa warp syncing state machine.
+//!
+//! At any given moment, this state machine holds a list of *sources* that it might use to
+//! download the warp sync proof or the runtime code. Sources must be added and removed by the API
+//! user by calling one of the various `add_source` and `remove_source` functions.
+//!
+//! Sources are identified through a [`SourceId`]. Each source has an opaque so-called "user data"
+//! of type `TSrc` associated to it. The content of this "user data" is at the discretion of the
+//! API user.
+//!
+//! The [`InProgressGrandpaWarpSync`] enum must be examined in order to determine how to make the
+//! warp syncing process.
+//!
+//! At the end of the process, a [`Success`] is returned and can be used to kick-off another
+//! syncing phase.
+
 use crate::{
     chain::chain_information::{
         self, babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
@@ -566,7 +604,8 @@ impl<TSrc> Verifier<TSrc> {
         }
     }
 
-    pub fn next(self) -> (InProgressGrandpaWarpSync<TSrc>, Option<FragmentError>) {
+    /// Verifies the next warp sync fragment in queue.
+    pub fn next(self) -> (InProgressGrandpaWarpSync<TSrc>, Result<(), FragmentError>) {
         match self.verifier.next() {
             Ok(warp_sync::Next::NotFinished(next_verifier)) => (
                 InProgressGrandpaWarpSync::Verifier(Self {
@@ -577,7 +616,7 @@ impl<TSrc> Verifier<TSrc> {
                     final_set_of_fragments: self.final_set_of_fragments,
                     previous_verifier_values: self.previous_verifier_values,
                 }),
-                None,
+                Ok(()),
             ),
             Ok(warp_sync::Next::Success {
                 header,
@@ -596,7 +635,7 @@ impl<TSrc> Verifier<TSrc> {
                                 },
                             },
                         ),
-                        None,
+                        Ok(()),
                     )
                 } else {
                     (
@@ -606,7 +645,7 @@ impl<TSrc> Verifier<TSrc> {
                             state: self.state,
                             previous_verifier_values: Some((header, chain_information_finality)),
                         }),
-                        None,
+                        Ok(()),
                     )
                 }
             }
@@ -616,7 +655,7 @@ impl<TSrc> Verifier<TSrc> {
                     self.state,
                     self.previous_verifier_values,
                 ),
-                Some(error),
+                Err(error),
             ),
         }
     }
