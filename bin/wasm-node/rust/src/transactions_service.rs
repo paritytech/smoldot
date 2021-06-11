@@ -71,7 +71,12 @@ use crate::{ffi, network_service, sync_service};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use smoldot::{
-    chain::fork_tree, header, informant::HashDisplay, libp2p::peer_id::PeerId, network::protocol,
+    chain::fork_tree,
+    header,
+    informant::HashDisplay,
+    libp2p::peer_id::PeerId,
+    network::protocol,
+    transactions::{pool, validate},
 };
 use std::{collections::HashMap, convert::TryFrom as _, iter, pin::Pin, sync::Arc, time::Duration};
 
@@ -223,10 +228,10 @@ async fn background_task(
 ) {
     let mut worker = Worker {
         sync_service,
-        pending_transactions: HashMap::with_capacity_and_hasher(
-            max_pending_transactions, // TODO: maybe not equal to max?
-            Default::default(),
-        ),
+        pending_transactions: pool::Pool::new(pool::Config {
+            capacity: max_pending_transactions, // TODO: maybe capacity should not be equal to max?
+            finalized_block_height: 0,          // Pool is re-initialized below.
+        }),
         blocks_tree: fork_tree::ForkTree::with_capacity(32),
         best_block_index: None,
         latest_finalized_block: (0, [0; 32]), // Initialized below.
@@ -270,10 +275,12 @@ async fn background_task(
 
         // As explained above, this code is reached if there is a gap in the blocks.
         // Consequently, we drop all pending transactions.
-        for pending in worker.pending_transactions.values_mut() {
+        for (_, pending) in worker.pending_transactions.iter_mut() {
             send_or_drop(&mut pending.status_update, TransactionStatus::Dropped);
         }
-        worker.pending_transactions.clear();
+        worker
+            .pending_transactions
+            .clear_and_reset(worker.latest_finalized_block.0);
 
         log::debug!(
             target: "tx-service",
@@ -283,6 +290,18 @@ async fn background_task(
         );
 
         loop {
+            // Start the validation process of transactions that need to be validated.
+            {
+                // TODO: add filter to not start validating if already validating
+                let to_start_validate = worker
+                    .pending_transactions
+                    .unvalidated_transactions()
+                    .next()
+                    .map(|(tx_id, ..)| tx_id);
+
+                if let Some(to_start_validate) = to_start_validate {}
+            }
+
             futures::select! {
                 new_block = new_blocks_receiver.next().fuse() => {
                     if let Some(new_block) = new_block {
@@ -302,6 +321,7 @@ async fn background_task(
                     // channel is notified first. In order to fulfill the guarantee that all finalized
                     // blocks must have earlier been reported as new blocks, we first empty the new
                     // blocks receiver.
+                    // TODO: DRY
                     while let Some(new_block) = new_blocks_receiver.next().now_or_never() {
                         if let Some(new_block) = new_block {
                             let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
@@ -324,19 +344,21 @@ async fn background_task(
 
                 // TODO: refactor for performances
                 (transaction_to_reannounce, _, _) = worker.pending_transactions.iter_mut()
-                    .map(|(body, tx)| (&mut tx.when_reannounce).map(move |()| body))
+                    .map(|(tx_id, tx)| (&mut tx.when_reannounce).map(move |()| tx_id))
                     .collect::<future::SelectAll<_>>().fuse() =>
                 {
-                    let transaction_to_reannounce = transaction_to_reannounce.to_owned();
-                    let tx = worker.pending_transactions.get_mut(&transaction_to_reannounce)
-                        .unwrap();
-
                     let peers_sent = network_service
                         .clone()
-                        .announce_transaction(network_chain_index, &transaction_to_reannounce)
+                        .announce_transaction(
+                            network_chain_index,
+                            &worker.pending_transactions.scale_encoding(transaction_to_reannounce).unwrap()
+                        )
                         .await;
 
                     if !peers_sent.is_empty() {
+                        let tx = worker.pending_transactions
+                            .user_data_mut(transaction_to_reannounce)
+                            .unwrap();
                         send_or_drop(&mut tx.status_update, TransactionStatus::Broadcast(peers_sent));
                     }
                 },
@@ -352,6 +374,15 @@ async fn background_task(
                             transaction_bytes,
                             updates_report,
                         } => {
+                            if let Some(tx_id) = worker.pending_transactions.find(&transaction_bytes).next() {
+                                let mut tx = worker.pending_transactions.user_data_mut(tx_id).unwrap();
+                                if let Some(updates_report) = updates_report {
+                                    tx.status_update.push(updates_report);
+                                    // TODO: immediately send the latest known status?
+                                }
+                                continue;
+                            }
+
                             if worker.pending_transactions.len() >= worker.max_pending_transactions {
                                 if let Some(mut updates_report) = updates_report {
                                     let _ = updates_report.try_send(TransactionStatus::Dropped);
@@ -359,19 +390,18 @@ async fn background_task(
                                 continue;
                             }
 
-                            // TODO: move
-                            /**/
-
-                            let entry = worker
+                            worker
                                 .pending_transactions
-                                .entry(transaction_bytes)
-                                .or_insert_with(|| PendingTransaction {
+                                .add_unvalidated(transaction_bytes, PendingTransaction {
                                     when_reannounce: ffi::Delay::new(Duration::new(0, 0)),
-                                    status_update: Vec::with_capacity(1),
+                                    status_update: {
+                                        let mut vec = Vec::with_capacity(1);
+                                        if let Some(updates_report) = updates_report {
+                                            vec.push(updates_report);
+                                        }
+                                        vec
+                                    },
                                 });
-                            if let Some(updates_report) = updates_report {
-                                entry.status_update.push(updates_report);
-                            }
                         }
                     }
                 }
@@ -385,18 +415,20 @@ struct Worker {
     // How to download the bodies of blocks.
     sync_service: Arc<sync_service::SyncService>,
 
-    /// All transactions that were submitted with [`TransactionsService::submit_extrinsic`] and
-    /// their channel to send back their status.
+    /// List of pending transactions.
     ///
-    /// Keys are the transaction's body.
-    ///
-    /// Note that keys are untrusted data. It is important to use a random hashing algorithm in
-    /// order to avoid possible collision attacks.
+    /// Contains all transactions that were submitted with
+    /// [`TransactionsService::submit_extrinsic`] and their channel to send back their status.
     ///
     /// All the entries in this map represent transactions that we're trying to include on the
-    /// network. It is normal to find entries where the value is empty, as they still represent
-    /// transactions that we're trying to include but whose status isn't interesting us.
-    pending_transactions: HashMap<Vec<u8>, PendingTransaction, ahash::RandomState>,
+    /// network. It is normal to find entries where the status report channel is close, as they
+    /// still represent transactions that we're trying to include but whose status isn't
+    /// interesting us.
+    ///
+    /// The best block stored in this pool doesn't necessarily match the best block according to
+    /// [`Worker::best_block_index`]. Instead, it matches the highest block whose
+    /// [`Block::download_status`] is [`DownloadStatus::Success`]
+    pending_transactions: pool::Pool<PendingTransaction>,
 
     /// See [`Config::max_pending_transactions`].
     max_pending_transactions: usize,
@@ -446,7 +478,7 @@ enum DownloadStatus {
     Failed,
     /// Successfully downloaded block body. Contains the list of extrinsics that we have sent
     /// out.
-    Success(Vec<Vec<u8>>),
+    Success,
 }
 
 struct PendingTransaction {
@@ -493,14 +525,15 @@ impl Worker {
         );
     }
 
-    /// Update the best block. Must have been inserted with [`Worker::new_block`].
+    /// Update the best block. Must have been previously inserted with [`Worker::new_block`].
     async fn set_best_block(&mut self, new_best_block_hash: [u8; 32]) {
         let new_best_block_index = self
             .blocks_tree
             .find(|b| b.hash == new_best_block_hash)
             .unwrap();
 
-        // Iterate over all blocks on the tree and report the transaction status updates.
+        // Iterators over the potential re-org. Used below to report the transaction status
+        // updates.
         let (old_best_to_common_ancestor, common_ancestor_to_new_best) =
             if let Some(old_best_index) = self.best_block_index {
                 let (ascend, descend) = self
@@ -518,7 +551,10 @@ impl Worker {
             let block_info = self.blocks_tree.get(node_index).unwrap();
             if let DownloadStatus::Success(transactions) = &block_info.download_status {
                 for transaction in transactions {
-                    let list = self.pending_transactions.get_mut(transaction).unwrap();
+                    let list = self
+                        .pending_transactions
+                        .user_data_mut(transaction)
+                        .unwrap();
                     send_or_drop(
                         &mut list.status_update,
                         TransactionStatus::Retracted(block_info.hash),
@@ -540,7 +576,10 @@ impl Worker {
                 DownloadStatus::Failed | DownloadStatus::Downloading => {}
                 DownloadStatus::Success(transactions) => {
                     for transaction in transactions {
-                        let list = self.pending_transactions.get_mut(transaction).unwrap();
+                        let list = self
+                            .pending_transactions
+                            .user_data_mut(transaction)
+                            .unwrap();
                         send_or_drop(
                             &mut list.status_update,
                             TransactionStatus::InBlock(block_info.hash),
