@@ -117,7 +117,10 @@ export async function start(config) {
     chainSpecs: config.chainSpecs,
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
-    maxLogLevel: config.maxLogLevel || 5
+    maxLogLevel: config.maxLogLevel || 5,
+    forbidTcp: config.forbidTcp,
+    forbidWs: config.forbidWs,
+    forbidWss: config.forbidWss,
   });
 
   // Initialization happens asynchronous, both because we have a worker, but also asynchronously
