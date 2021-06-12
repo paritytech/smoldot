@@ -133,8 +133,8 @@ export default (config) => {
                     };
 
                 } else if (tcpParsed != null) {
+                    // `net` module will be missing when we're not in NodeJS.
                     if (!net || config.forbidTcp) {
-                        // `net` module not available, most likely because we're not in NodeJS.
                         throw new Error('TCP connections not available');
                     }
 
