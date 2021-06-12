@@ -34,7 +34,10 @@ smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
     jsonRpcCallback: (resp, chainIndex, connectionId) => {
         wsConnections[connectionId].sendUTF(resp);
-    }
+    },
+    forbidTcp: false,
+    forbidWs: false,
+    forbidWss: false,
 })
     .then((c) => {
         client = c;

@@ -12,6 +12,9 @@ let sp = smoldot.start({
   chainSpecs: [''],
   jsonRpcCallback: (resp, chainIndex, userData) => { },
   logCallback: (level, target, message) => { },
+  forbidTcp: false,
+  forbidWs: false,
+  forbidWss: false,
 });
 
 // Test when not supplying optional options and optional params

@@ -104,6 +104,9 @@ export default (config) => {
                     if (wsParsed[4] == 'ws') {
                         proto = 'ws';
                     }
+                    if ((proto == 'ws' && config.forbidWs) || (proto == 'wss' && config.forbidWss)) {
+                        throw new Error('Connection type not allowed');
+                    }
                     if (wsParsed[1] == 'ip6') {
                         connection = new Websocket.w3cwebsocket(proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]);
                     } else {
@@ -130,9 +133,9 @@ export default (config) => {
                     };
 
                 } else if (tcpParsed != null) {
-                    if (!net) {
+                    if (!net || config.forbidTcp) {
                         // `net` module not available, most likely because we're not in NodeJS.
-                        return 1;
+                        throw new Error('TCP connections not available');
                     }
 
                     connection = net.createConnection({
@@ -164,7 +167,7 @@ export default (config) => {
                     });
 
                 } else {
-                    return 1;
+                    throw new Error('Unrecognized multiaddr format');
                 }
 
                 connections[id] = connection;

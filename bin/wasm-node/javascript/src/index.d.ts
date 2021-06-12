@@ -33,6 +33,9 @@ export interface SmoldotOptions {
   chainSpecs: string[];
   jsonRpcCallback?: SmoldotJsonRpcCallback;
   logCallback?: SmoldotLogCallback;
+  forbidTcp?: boolean;
+  forbidWs?: boolean;
+  forbidWss?: boolean;
 }
 
 export interface Smoldot {
