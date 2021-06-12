@@ -380,14 +380,18 @@ impl<TTx> Pool<TTx> {
     ///
     /// Transations that were included in these blocks remain in the transactions pool.
     ///
-    /// Returns the list of transactions that were in blocks that have been retracted.
+    /// Returns the list of transactions that were in blocks that have been retracted, with the
+    /// height of the block at which they were.
     ///
     /// # Panic
     ///
     /// Panics if `num_to_retract > self.best_block_height()`, in other words if the block number
     /// would go in the negative.
     ///
-    pub fn retract_blocks(&mut self, num_to_retract: u64) -> impl Iterator<Item = TransactionId> {
+    pub fn retract_blocks(
+        &mut self,
+        num_to_retract: u64,
+    ) -> impl Iterator<Item = (TransactionId, u64)> {
         // Checks that there's no transaction included above `self.best_block_height`.
         debug_assert!(self
             .by_height
@@ -412,11 +416,11 @@ impl<TTx> Pool<TTx> {
                     TransactionId(usize::min_value()),
                 )..,
             )
-            .map(|(_, tx_id)| *tx_id)
+            .map(|(block_height, tx_id)| (*tx_id, *block_height))
             .collect::<Vec<_>>();
 
         // Set `included_block_height` to `None` for each of them.
-        for transaction_id in &transactions_to_retract {
+        for (transaction_id, _) in &transactions_to_retract {
             let mut tx_data = self.transactions.get_mut(transaction_id.0).unwrap();
             debug_assert!(tx_data.included_block_height.unwrap() > self.best_block_height);
             tx_data.included_block_height = None;
@@ -485,6 +489,7 @@ impl<TTx: fmt::Debug> fmt::Debug for Pool<TTx> {
 }
 
 /// Wraps around [`Pool`] while a new best block is being inserted. See [`Pool::append_block`].
+#[must_use]
 pub struct AppendBlock<TTx> {
     /// The pool. The best block number has already been incremented.
     inner: Pool<TTx>,

@@ -264,8 +264,8 @@ impl<T> ForkTree<T> {
         node1: NodeIndex,
         node2: NodeIndex,
     ) -> (
-        impl Iterator<Item = NodeIndex> + 'a,
-        impl Iterator<Item = NodeIndex> + 'a,
+        impl Iterator<Item = NodeIndex> + Clone + 'a,
+        impl Iterator<Item = NodeIndex> + Clone + 'a,
     ) {
         let common_ancestor = self.common_ancestor(node1, node2);
 
@@ -290,7 +290,7 @@ impl<T> ForkTree<T> {
     pub fn node_to_root_path<'a>(
         &'a self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    ) -> impl Iterator<Item = NodeIndex> + Clone + 'a {
         iter::successors(Some(node_index), move |n| {
             self.nodes[n.0].parent.map(NodeIndex)
         })
@@ -305,7 +305,7 @@ impl<T> ForkTree<T> {
     pub fn root_to_node_path<'a>(
         &'a self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    ) -> impl Iterator<Item = NodeIndex> + Clone + 'a {
         debug_assert!(self.nodes.get(usize::max_value()).is_none());
 
         // First element is an invalid key, each successor is the last element of

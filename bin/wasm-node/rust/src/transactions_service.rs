@@ -71,14 +71,13 @@ use crate::{ffi, network_service, sync_service};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use smoldot::{
-    chain::fork_tree,
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
     network::protocol,
-    transactions::{pool, validate},
+    transactions::{light_pool, validate},
 };
-use std::{collections::HashMap, convert::TryFrom as _, iter, pin::Pin, sync::Arc, time::Duration};
+use std::{convert::TryFrom as _, num::NonZeroU64, pin::Pin, sync::Arc, time::Duration};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
@@ -228,13 +227,10 @@ async fn background_task(
 ) {
     let mut worker = Worker {
         sync_service,
-        pending_transactions: pool::Pool::new(pool::Config {
+        pending_transactions: light_pool::LightPool::new(light_pool::Config {
             capacity: max_pending_transactions, // TODO: maybe capacity should not be equal to max?
             finalized_block_height: 0,          // Pool is re-initialized below.
         }),
-        blocks_tree: fork_tree::ForkTree::with_capacity(32),
-        best_block_index: None,
-        latest_finalized_block: (0, [0; 32]), // Initialized below.
         finalized_downloading_blocks: Vec::new(),
         block_downloads: FuturesUnordered::new(),
         max_concurrent_downloads,
@@ -301,6 +297,10 @@ async fn background_task(
 
                 if let Some(to_start_validate) = to_start_validate {}
             }
+
+            // Start block bodies downloads that need to be started.
+            // TODO: do it for the non-best-chain too?
+            for _ in worker.pending_transactions.missing_block_bodies() {}
 
             futures::select! {
                 new_block = new_blocks_receiver.next().fuse() => {
@@ -424,29 +424,10 @@ struct Worker {
     /// network. It is normal to find entries where the status report channel is close, as they
     /// still represent transactions that we're trying to include but whose status isn't
     /// interesting us.
-    ///
-    /// The best block stored in this pool doesn't necessarily match the best block according to
-    /// [`Worker::best_block_index`]. Instead, it matches the highest block whose
-    /// [`Block::download_status`] is [`DownloadStatus::Success`]
-    pending_transactions: pool::Pool<PendingTransaction>,
+    pending_transactions: light_pool::LightPool<PendingTransaction>,
 
     /// See [`Config::max_pending_transactions`].
     max_pending_transactions: usize,
-
-    /// The transactions service maintains, in parallel of the sync service, a tree of all the
-    /// non-finalized blocks. This is necessary in case of a re-org (i.e. the new best block is
-    /// a nephew of the previous best block) in order to know which transactions that were present
-    /// in the previous best chain are still present in the new best chain.
-    // TODO: add a maximum size?
-    blocks_tree: fork_tree::ForkTree<Block>,
-
-    /// Index of the best block in [`Worker::blocks_tree`].
-    /// `None` if the tree is empty or if the best block is also the latest finalized block.
-    best_block_index: Option<fork_tree::NodeIndex>,
-
-    /// Height and hash of the latest finalized block. Root of all the blocks in
-    /// [`Worker::blocks_tree`].
-    latest_finalized_block: (u64, [u8; 32]),
 
     /// List of blocks that have been finalized but whose body is still downloading.
     finalized_downloading_blocks: Vec<Block>,
@@ -490,117 +471,36 @@ struct PendingTransaction {
 impl Worker {
     /// Insert a new block in the worker when the sync service hears about it.
     fn new_block(&mut self, new_block_header: Vec<u8>, parent_hash: &[u8; 32]) {
-        let new_block_hash = header::hash_from_scale_encoded_header(&new_block_header);
-        debug_assert!(self
-            .blocks_tree
-            .find(|b| b.hash == new_block_hash)
-            .is_none());
-
-        let parent_index_in_tree = if *parent_hash == self.latest_finalized_block.1 {
-            None
-        } else {
-            // The transactions service tracks all new blocks.
-            // The parent of each new best block must therefore already be in the tree.
-            Some(self.blocks_tree.find(|b| b.hash == *parent_hash).unwrap())
-        };
-
-        // TODO: only do this for best chain?
-        let download_status = if !self.pending_transactions.is_empty() {
-            if self.block_downloads.len() < self.max_concurrent_downloads {
-                self.push_block_download(new_block_hash);
-                DownloadStatus::Downloading
-            } else {
-                DownloadStatus::NotStarted
-            }
-        } else {
-            DownloadStatus::NotStarted
-        };
-
-        self.blocks_tree.insert(
-            parent_index_in_tree,
-            Block {
-                hash: new_block_hash,
-                download_status,
-            },
+        // TODO: don't unwrap /!\ we're not actually sure that it's the "correct" header format
+        let decoded = header::decode(&new_block_header).unwrap();
+        self.pending_transactions.add_block(
+            decoded.hash(),
+            NonZeroU64::new(decoded.number).unwrap(),
+            parent_hash,
         );
     }
 
     /// Update the best block. Must have been previously inserted with [`Worker::new_block`].
-    async fn set_best_block(&mut self, new_best_block_hash: [u8; 32]) {
-        let new_best_block_index = self
-            .blocks_tree
-            .find(|b| b.hash == new_best_block_hash)
-            .unwrap();
+    async fn set_best_block(&mut self, new_best_block_hash: &[u8; 32], new_best_block_height: u64) {
+        let updates = self
+            .pending_transactions
+            .set_best_block(new_best_block_hash, new_best_block_height);
 
-        // Iterators over the potential re-org. Used below to report the transaction status
-        // updates.
-        let (old_best_to_common_ancestor, common_ancestor_to_new_best) =
-            if let Some(old_best_index) = self.best_block_index {
-                let (ascend, descend) = self
-                    .blocks_tree
-                    .ascend_and_descend(old_best_index, new_best_block_index);
-                (either::Left(ascend), either::Left(descend))
-            } else {
-                let ascend = self.blocks_tree.node_to_root_path(new_best_block_index);
-                let descend = iter::empty::<fork_tree::NodeIndex>();
-                (either::Right(ascend), either::Right(descend))
-            };
+        // There might be entries in common between `retracted_transactions` and
+        // `included_transactions`, in the case of a re-org where a transaction is part of both
+        // the old and new best chain.
+        // In that situation we need to first signal `Retracted`, then only `InBlock`.
+        // Consequently, process `retracted_transactions` first.
 
-        // Iterate over the nodes that used to be part of the best chain but no longer are.
-        for node_index in old_best_to_common_ancestor {
-            let block_info = self.blocks_tree.get(node_index).unwrap();
-            if let DownloadStatus::Success(transactions) = &block_info.download_status {
-                for transaction in transactions {
-                    let list = self
-                        .pending_transactions
-                        .user_data_mut(transaction)
-                        .unwrap();
-                    send_or_drop(
-                        &mut list.status_update,
-                        TransactionStatus::Retracted(block_info.hash),
-                    );
-                }
-            }
+        for (tx_id, hash, _) in updates.retracted_transactions {
+            let tx = self.pending_transactions.user_data_mut(tx_id).unwrap();
+            send_or_drop(&mut tx.status_update, TransactionStatus::Retracted(hash));
         }
 
-        // Iterate over the nodes that weren't part of the best chain but now are.
-        let mut downloads_to_start = Vec::new();
-        for node_index in common_ancestor_to_new_best {
-            let block_info = self.blocks_tree.get(node_index).unwrap();
-            match &block_info.download_status {
-                DownloadStatus::NotStarted => {
-                    if !self.pending_transactions.is_empty() {
-                        downloads_to_start.push(node_index);
-                    }
-                }
-                DownloadStatus::Failed | DownloadStatus::Downloading => {}
-                DownloadStatus::Success(transactions) => {
-                    for transaction in transactions {
-                        let list = self
-                            .pending_transactions
-                            .user_data_mut(transaction)
-                            .unwrap();
-                        send_or_drop(
-                            &mut list.status_update,
-                            TransactionStatus::InBlock(block_info.hash),
-                        );
-                    }
-                }
-            }
+        for (tx_id, hash, _) in updates.included_transactions {
+            let tx = self.pending_transactions.user_data_mut(tx_id).unwrap();
+            send_or_drop(&mut tx.status_update, TransactionStatus::InBlock(hash));
         }
-
-        for node_index in downloads_to_start {
-            if self.block_downloads.len() >= self.max_concurrent_downloads {
-                break;
-            }
-
-            let block_info = self.blocks_tree.get_mut(node_index).unwrap();
-            block_info.download_status = DownloadStatus::Downloading;
-            let hash = block_info.hash;
-            self.push_block_download(hash);
-        }
-
-        self.best_block_index = Some(new_best_block_index);
     }
 
     async fn new_finalized_block(&mut self, finalized_block_header: Vec<u8>) {
@@ -646,6 +546,9 @@ impl Worker {
 
     /// Inject the result of a download in the state machine.
     fn download_result(&mut self, block_hash: [u8; 32], block_body: Result<Vec<Vec<u8>>, ()>) {
+        self.pending_transactions
+            .set_block_body(block_hash, block_height, block_body);
+
         // TODO: what if finalized_downloading
         let index_in_tree = self.blocks_tree.find(|b| b.hash == block_hash).unwrap();
 
