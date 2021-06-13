@@ -75,14 +75,17 @@ pub async fn start_client(
         let mut chain_specs = Vec::new();
         let mut json_rpc_running = Vec::new();
 
-        for chain in chains {
+        for (chain_index, chain) in chains.enumerate() {
             chain_specs.push(
                 match chain_spec::ChainSpec::from_json_bytes(&chain.specification) {
                     Ok(cs) => {
-                        log::info!("Loaded chain specs for {}", cs.name());
+                        log::info!("Loaded chain spec #{}: {}", chain_index, cs.name());
                         cs
                     }
-                    Err(err) => ffi::throw(format!("Error while opening chain specs: {}", err)),
+                    Err(err) => ffi::throw(format!(
+                        "Error while opening chain spec #{}: {}",
+                        chain_index, err
+                    )),
                 },
             );
 
