@@ -25,6 +25,7 @@
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     chain, chain_spec,
+    informant::HashDisplay,
     libp2p::{multiaddr, peer_id::PeerId},
 };
 use std::{collections::HashMap, pin::Pin, sync::Arc, task};
@@ -99,7 +100,15 @@ pub async fn start_client(
         .iter()
         .map(|chain_spec| {
             match chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec) {
-                Ok(ci) => ci,
+                Ok(ci) => {
+                    log::info!(
+                        "Genesis hash of {} is: {}",
+                        chain_spec.name(),
+                        HashDisplay(&ci.as_ref().finalized_block_header.hash())
+                    );
+
+                    ci
+                }
                 Err(err) => panic!(
                     "Failed to load information about chain `{}`: {}",
                     chain_spec.name(),
