@@ -47,6 +47,9 @@ pub fn persisted_validation_data_parameters(
         .chain(iter::once(either::Right(assumption.scale_encoded())))
 }
 
+/// Name of the runtime function to call in order to obtain the parachain heads.
+pub const PERSISTED_VALIDATION_FUNCTION_NAME: &str = "ParachainHost_persisted_validation_data";
+
 /// An assumption being made about the state of an occupied core.
 // TODO: what does that mean?
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

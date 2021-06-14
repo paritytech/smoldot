@@ -1331,7 +1331,7 @@ async fn start_parachain(
                 // For each relay chain block, call `ParachainHost_persisted_validation_data` in
                 // order to know where the parachains are.
                 let pvd_result = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
-                    "ParachainHost_persisted_validation_data",
+                    para::PERSISTED_VALIDATION_FUNCTION_NAME,
                     para::persisted_validation_data_parameters(
                         parachain_config.parachain_id,
                         para::OccupiedCoreAssumption::TimedOut
