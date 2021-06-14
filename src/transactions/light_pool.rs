@@ -36,24 +36,23 @@ use super::{
 use crate::chain::fork_tree;
 
 use alloc::vec::Vec;
-use core::{fmt, iter, num::NonZeroU64};
+use core::{convert::TryFrom as _, fmt, iter};
 
 pub use pool::TransactionId;
 
 /// Configuration for [`Pool::new`].
 pub struct Config {
     /// Number of transactions to initially allocate memory for.
-    pub capacity: usize,
+    pub transactions_capacity: usize,
 
-    /// Height of the finalized block at initialization.
-    ///
-    /// The [`Pool`] doesn't track which block is finalized. This value is only used to initialize
-    /// the best block number. The field could also have been called `best_block_height`, but it
-    /// might have created confusion.
+    /// Number of blocks to initially allocate memory for.
+    pub blocks_capacity: usize,
+
+    /// Hash of the finalized block at initialization.
     ///
     /// Non-finalized blocks should be added to the pool after initialization using
     /// [`Pool::append_block`].
-    pub finalized_block_height: u64,
+    pub finalized_block: [u8; 32],
 }
 
 /// Data structure containing transactions. See the module-level documentation for more info.
@@ -61,6 +60,9 @@ pub struct LightPool<TTx, TBl> {
     /// Inner transactions pool.
     ///
     /// Always contains `Some`, except temporarily to use [`pool::Pool::append_block`].
+    ///
+    /// The block heights reported by this pool are not *actual* block heights. Instead, the
+    /// finalized block passed at initialization by the user is always block number 0.
     pool: Option<pool::Pool<TTx>>,
 
     /// Tree of all the non-finalized blocks. This is necessary in case of a re-org (i.e. the new
@@ -69,23 +71,42 @@ pub struct LightPool<TTx, TBl> {
     // TODO: add a maximum size?
     blocks_tree: fork_tree::ForkTree<Block<TBl>>,
 
+    /// Contains all blocks in [`LightPool::blocks_tree`], indexed by their hash.
+    blocks_by_id: hashbrown::HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
+
     /// Index of the best block in [`LightPool::blocks_tree`].
     /// `None` if the tree is empty and that the best block is also the latest finalized block.
     best_block_index: Option<fork_tree::NodeIndex>,
 
-    /// Height and hash of the latest finalized block. Root of all the blocks in
-    /// [`LightPool::blocks_tree`].
-    latest_finalized_block: (u64, [u8; 32]),
+    /// As explained in [`LightPool::pool`], the block heights in the underlying pool aren't the
+    /// *actual* block heights. This field contains the block height that the current best block
+    /// has in the underlying pool. It is set even if the current best block hasn't been included
+    /// in the underlying pool yet.
+    best_block_virtual_height: u64,
+
+    /// Hash of the latest finalized block. Root of all the blocks in [`LightPool::blocks_tree`].
+    latest_finalized_block: [u8; 32],
 }
 
 impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Initializes a new transactions pool.
     pub fn new(config: Config) -> Self {
         LightPool {
-            pool: todo!(),
-            blocks_tree: fork_tree::ForkTree::with_capacity(0), // TODO: capacity?
+            pool: Some(pool::Pool::new(pool::Config {
+                capacity: config.transactions_capacity,
+                // As explained in the doc of `pool`, the block numbers of the pool aren't the
+                // actual block heights.
+                finalized_block_height: 0,
+            })),
+            blocks_tree: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
+            blocks_by_id: hashbrown::HashMap::with_capacity_and_hasher(
+                config.blocks_capacity,
+                Default::default(),
+            ),
             best_block_index: None,
-            latest_finalized_block: todo!(),
+            // Must match the finalized block height passed to the underlying pool.
+            best_block_virtual_height: 0,
+            latest_finalized_block: config.finalized_block,
         }
     }
 
@@ -140,15 +161,59 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     }
 
     /// Returns a list of transactions whose state is "not validated", their user data, and the
-    /// height of the block they should be validated against.
+    /// hash and user data of the block they should be validated against.
     ///
     /// The block height a transaction should be validated against is always equal to either the
     /// block at which it has been included minus one, or the current best block. It is yielded by
     /// the iterator for convenience, to avoid writing error-prone code.
     pub fn unvalidated_transactions(
         &'_ self,
-    ) -> impl ExactSizeIterator<Item = (TransactionId, &TTx, u64)> + '_ {
-        self.pool.as_ref().unwrap().unvalidated_transactions()
+    ) -> impl ExactSizeIterator<Item = (TransactionId, &'_ TTx, &'_ [u8; 32], &'_ TBl)> + '_ {
+        self.pool.as_ref().unwrap().unvalidated_transactions().map(
+            move |(tx_id, tx_user_data, block_height)| {
+                let block_index = self
+                    .virtual_block_height_to_block_index(block_height)
+                    .unwrap();
+                let block = self.blocks_tree.get(block_index).unwrap();
+                (tx_id, tx_user_data, &block.hash, &block.user_data)
+            },
+        )
+    }
+
+    fn virtual_block_height_to_block_index(
+        &self,
+        virtual_height: u64,
+    ) -> Option<fork_tree::NodeIndex> {
+        //
+        //       virtual_height
+        //         +
+        //         v
+        //
+        // B - B - B - B                             self.pool
+        //
+        // B - B - B - B - B - B                     self.blocks_tree
+        //
+        //                     ^
+        //                     +
+        //                   self.best_block_virtual_height
+        //                   self.best_block_index
+        //
+        let diff = self
+            .best_block_virtual_height
+            .checked_sub(virtual_height)
+            .unwrap();
+
+        if let Some(best_block_index) = self.best_block_index {
+            let mut index = Some(best_block_index);
+            for _ in 0..diff {
+                index = self.blocks_tree.parent(index.unwrap());
+            }
+            index
+        } else {
+            // If `best_block_index` is `None`, then `self.blocks_tree` is empty.
+            assert_eq!(diff, 0);
+            None
+        }
     }
 
     /// Returns the list of all transactions within the pool.
@@ -214,26 +279,24 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     ///
     /// Panics if the parent block cannot be found in the collection.
     ///
-    pub fn add_block(
-        &mut self,
-        hash: [u8; 32],
-        height: NonZeroU64,
-        parent_hash: &[u8; 32],
-        user_data: TBl,
-    ) {
-        let parent_index_in_tree = if *parent_hash == self.latest_finalized_block.1 {
+    pub fn add_block(&mut self, hash: [u8; 32], parent_hash: &[u8; 32], user_data: TBl) {
+        let parent_index_in_tree = if *parent_hash == self.latest_finalized_block {
             None
         } else {
             // The transactions service tracks all new blocks.
             // The parent of each new best block must therefore already be in the tree.
-            Some(self.blocks_tree.find(|b| b.hash == *parent_hash).unwrap())
+            Some(*self.blocks_by_id.get(parent_hash).unwrap())
         };
 
-        self.blocks_tree.insert(
+        let entry = match self.blocks_by_id.entry(hash) {
+            hashbrown::hash_map::Entry::Occupied(_) => return,
+            hashbrown::hash_map::Entry::Vacant(e) => e,
+        };
+
+        let block_index = self.blocks_tree.insert(
             parent_index_in_tree,
             Block {
                 hash,
-                height,
                 body: if self.pool.as_ref().unwrap().is_empty() {
                     BodyState::NotNeeded
                 } else {
@@ -242,24 +305,19 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 user_data,
             },
         );
+
+        entry.insert(block_index);
     }
 
     /// Sets the passed block as the new best block of the chain.
     ///
     /// # Panic
     ///
-    /// Panics if no block with the given hash and height hasn't been inserted before.
+    /// Panics if no block with the given hash and height has been inserted before.
     ///
     #[must_use]
-    pub fn set_best_block(
-        &mut self,
-        new_best_block_hash: &[u8; 32],
-        new_best_block_height: u64,
-    ) -> SetBestBlock {
-        let new_best_block_index = self
-            .blocks_tree
-            .find(|b| b.height.get() == new_best_block_height && b.hash == *new_best_block_hash)
-            .unwrap();
+    pub fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) -> SetBestBlock {
+        let new_best_block_index = *self.blocks_by_id.get(new_best_block_hash).unwrap();
 
         // Iterators over the potential re-org. Used below to report the transaction status
         // updates.
@@ -277,42 +335,57 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
         // Blocks in `self.pool` correspond to the longest serie of consecutive blocks whose body
         // is known. We need to retract them.
-        let retracted_transactions = {
-            let mut retracted_transactions = Vec::new();
-            let pool_best_block_height = self.pool.as_ref().unwrap().best_block_height();
+        let mut retracted_transactions = Vec::new();
 
-            for to_retract_index in old_best_to_common_ancestor {
-                let to_retract = self.blocks_tree.get(to_retract_index).unwrap();
-                if to_retract.height.get() > pool_best_block_height {
-                    continue;
-                }
+        for to_retract_index in old_best_to_common_ancestor {
+            // Runs unconditionally for each block. For this reason there's no `break` in the
+            // rest of this loop.
+            self.best_block_virtual_height -= 1;
 
-                debug_assert!(matches!(to_retract.body, BodyState::Known(_)));
-
-                retracted_transactions.extend(
-                    self.pool
-                        .as_mut()
-                        .unwrap()
-                        .retract_blocks(1)
-                        .map(|(tx_id, _)| (tx_id, to_retract.hash, to_retract.height.get())),
-                );
+            // If `self.best_block_virtual_height` is inferior to the pool's best, then we
+            // need to retract.
+            let need_to_retract =
+                self.best_block_virtual_height < self.pool.as_ref().unwrap().best_block_height();
+            if !need_to_retract {
+                continue;
             }
 
-            retracted_transactions
-        };
+            let to_retract = self.blocks_tree.get(to_retract_index).unwrap();
+            debug_assert!(matches!(to_retract.body, BodyState::Known(_)));
+
+            retracted_transactions.extend(
+                self.pool
+                    .as_mut()
+                    .unwrap()
+                    .retract_blocks(1)
+                    .map(|(tx_id, _)| (tx_id, to_retract.hash)),
+            );
+        }
+
+        debug_assert!(
+            self.best_block_virtual_height >= self.pool.as_ref().unwrap().best_block_height()
+        );
 
         // Insert in `self.pool` the new longest serie of consecutive best blocks whose body is
         // known.
         let mut included_transactions = Vec::new();
         for node_index in common_ancestor_to_new_best {
-            let block = self.blocks_tree.get(node_index).unwrap();
-            if block.height.get() != self.pool.as_ref().unwrap().best_block_height() + 1 {
-                break;
+            // Runs unconditionally for each block. For this reason there's no `break` in the
+            // rest of this loop.
+            self.best_block_virtual_height += 1;
+
+            // If the best block is a direct child (not a descendant) of the pool's best block,
+            // then try to insert the block in that pool.
+            let try_to_insert = self.best_block_virtual_height
+                == self.pool.as_ref().unwrap().best_block_height() + 1;
+            if !try_to_insert {
+                continue;
             }
 
+            let block = self.blocks_tree.get(node_index).unwrap();
             let block_body = match &block.body {
                 BodyState::Known(b) => b,
-                BodyState::NotNeeded | BodyState::Needed => break,
+                BodyState::NotNeeded | BodyState::Needed => continue,
             };
 
             let mut append_block = self.pool.take().unwrap().append_block();
@@ -320,7 +393,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 match append_block.block_transaction(transaction) {
                     // Transaction in the block matches one of the transactions in the pool.
                     pool::AppendBlockTransaction::NonIncludedUpdated { id, .. } => {
-                        included_transactions.push((id, block.hash, block.height.get()));
+                        included_transactions.push((id, block.hash));
                     }
 
                     // Transaction in the block isn't in the pool. In a full node situation, one
@@ -337,7 +410,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             self.pool = Some(append_block.finish());
 
             debug_assert_eq!(
-                block.height.get(),
+                self.best_block_virtual_height,
                 self.pool.as_ref().unwrap().best_block_height()
             );
         }
@@ -356,19 +429,15 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     ///
     /// # Panic
     ///
-    /// Panics if no block with the given hash and height hasn't been inserted before.
+    /// Panics if no block with the given hash and height has been inserted before.
     ///
     #[must_use]
     pub fn set_block_body(
         &'_ mut self,
         block_hash: &[u8; 32],
-        block_height: u64,
         body: impl Iterator<Item = impl Into<Vec<u8>>>,
     ) -> impl Iterator<Item = TransactionId> + '_ {
-        let block_index = self
-            .blocks_tree
-            .find(|b| b.height.get() == block_height && b.hash == *block_hash)
-            .unwrap();
+        let block_index = *self.blocks_by_id.get(block_hash).unwrap();
 
         self.blocks_tree.get_mut(block_index).unwrap().body =
             BodyState::Known(body.map(Into::into).collect());
@@ -383,11 +452,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         // Value returned from the function.
         let mut included_transactions = Vec::new();
 
-        // If the parent of the block whose body is known is the highest that's been included in
-        // `self.pool`, we might need to insert blocks in `self.pools`.
+        // Try add more blocks to `self.pool`.
         if is_in_best_chain
-            && self.blocks_tree.get(block_index).unwrap().height.get()
-                == self.pool.as_ref().unwrap().best_block_height() + 1
+            && self.best_block_virtual_height == self.pool.as_ref().unwrap().best_block_height()
+        // TODO: wrong /!\
         {
             for maybe_to_insert_index in self
                 .blocks_tree
@@ -395,10 +463,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 .skip_while(|ni| *ni != block_index)
             {
                 let maybe_to_insert_block = self.blocks_tree.get(maybe_to_insert_index).unwrap();
-                debug_assert_eq!(
+                /*debug_assert_eq!(
                     maybe_to_insert_block.height.get(),
                     self.pool.as_ref().unwrap().best_block_height() + 1
-                );
+                );*/
 
                 let block_body = match &maybe_to_insert_block.body {
                     BodyState::Known(b) => b,
@@ -437,7 +505,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Blocks that were inserted when there wasn't any transaction in the pool are never
     /// returned.
     // TODO: return whether in best chain
-    pub fn missing_block_bodies(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
+    pub fn missing_block_bodies(&'_ self) -> impl Iterator<Item = (&'_ [u8; 32], &'_ TBl)> + '_ {
         self.blocks_tree
             .iter_unordered()
             .filter_map(move |(_, block)| {
@@ -445,7 +513,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     return None;
                 }
 
-                Some((block.height.get(), &block.hash)) // TODO:
+                Some((&block.hash, &block.user_data))
             })
     }
 
@@ -485,23 +553,22 @@ impl<TTx: fmt::Debug, TBl> fmt::Debug for LightPool<TTx, TBl> {
 #[derive(Debug, Clone)]
 pub struct SetBestBlock {
     /// List of transactions that were included in a block of the best chain but no longer are,
-    /// and the hash and height of the block in which it was.
+    /// and the hash of the block in which it was.
     ///
     /// Can share some entries with [`SetBestBlock::included_transactions`] in case a transaction
     /// has been retracted then included.
-    pub retracted_transactions: Vec<(TransactionId, [u8; 32], u64)>,
+    pub retracted_transactions: Vec<(TransactionId, [u8; 32])>,
 
     /// List of transactions that weren't included in a block of the best chain but now are, and
-    /// the hash and height of the block in which it was found.
+    /// the hash of the block in which it was found.
     ///
     /// Can share some entries with [`SetBestBlock::retracted_transactions`] in case a transaction
     /// has been retracted then included.
-    pub included_transactions: Vec<(TransactionId, [u8; 32], u64)>,
+    pub included_transactions: Vec<(TransactionId, [u8; 32])>,
 }
 
 struct Block<TBl> {
     hash: [u8; 32],
-    height: NonZeroU64,
     body: BodyState,
     user_data: TBl,
 }

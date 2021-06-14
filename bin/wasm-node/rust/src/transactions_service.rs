@@ -77,7 +77,7 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{convert::TryFrom as _, num::NonZeroU64, pin::Pin, sync::Arc, time::Duration};
+use std::{cmp, convert::TryFrom as _, num::NonZeroU64, pin::Pin, sync::Arc, time::Duration};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
@@ -228,8 +228,9 @@ async fn background_task(
     let mut worker = Worker {
         sync_service,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
-            capacity: max_pending_transactions, // TODO: maybe capacity should not be equal to max?
-            finalized_block_height: 0,          // Pool is re-initialized below.
+            transactions_capacity: cmp::min(8, max_pending_transactions),
+            blocks_capacity: 32,
+            finalized_block: ([0; 32], 0), // Pool is re-initialized below.
         }),
         finalized_downloading_blocks: Vec::new(),
         block_downloads: FuturesUnordered::new(),
@@ -339,7 +340,20 @@ async fn background_task(
 
                 download = worker.block_downloads.select_next_some() => {
                     let (block_hash, block_body) = download;
-                    worker.download_result(block_hash, block_body);
+                    if let Ok(block_body) = block_body {
+                        let included_transactions = worker
+                            .pending_transactions
+                            .set_block_body(&block_hash, block_body.into_iter())
+                            .collect::<Vec<_>>();
+
+                        for tx_id in included_transactions {
+                            let tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
+                            send_or_drop(
+                                &mut tx.status_update,
+                                TransactionStatus::InBlock(block_hash),
+                            );
+                        }
+                    }
                 },
 
                 // TODO: refactor for performances
@@ -424,7 +438,7 @@ struct Worker {
     /// network. It is normal to find entries where the status report channel is close, as they
     /// still represent transactions that we're trying to include but whose status isn't
     /// interesting us.
-    pending_transactions: light_pool::LightPool<PendingTransaction>,
+    pending_transactions: light_pool::LightPool<PendingTransaction, Block>,
 
     /// See [`Config::max_pending_transactions`].
     max_pending_transactions: usize,
@@ -442,25 +456,7 @@ struct Worker {
     max_concurrent_downloads: usize,
 }
 
-struct Block {
-    hash: [u8; 32],
-    download_status: DownloadStatus,
-}
-
-enum DownloadStatus {
-    /// Download hasn't been started yet.
-    NotStarted,
-    /// One of the futures in [`Worker::block_downloads`] is current downloading the body of this
-    /// block.
-    Downloading,
-    /// Failed to download block body.
-    /// This can legitimately happen if all the other nodes we are connected to have discarded
-    /// this block.
-    Failed,
-    /// Successfully downloaded block body. Contains the list of extrinsics that we have sent
-    /// out.
-    Success,
-}
+struct Block {}
 
 struct PendingTransaction {
     /// When to gossip the transaction on the network again.
@@ -477,14 +473,15 @@ impl Worker {
             decoded.hash(),
             NonZeroU64::new(decoded.number).unwrap(),
             parent_hash,
+            Block {},
         );
     }
 
     /// Update the best block. Must have been previously inserted with [`Worker::new_block`].
-    async fn set_best_block(&mut self, new_best_block_hash: &[u8; 32], new_best_block_height: u64) {
+    async fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) {
         let updates = self
             .pending_transactions
-            .set_best_block(new_best_block_hash, new_best_block_height);
+            .set_best_block(new_best_block_hash);
 
         // There might be entries in common between `retracted_transactions` and
         // `included_transactions`, in the case of a re-org where a transaction is part of both
@@ -493,12 +490,18 @@ impl Worker {
         // Consequently, process `retracted_transactions` first.
 
         for (tx_id, hash, _) in updates.retracted_transactions {
-            let tx = self.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
+            let tx = self
+                .pending_transactions
+                .transaction_user_data_mut(tx_id)
+                .unwrap();
             send_or_drop(&mut tx.status_update, TransactionStatus::Retracted(hash));
         }
 
         for (tx_id, hash, _) in updates.included_transactions {
-            let tx = self.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
+            let tx = self
+                .pending_transactions
+                .transaction_user_data_mut(tx_id)
+                .unwrap();
             send_or_drop(&mut tx.status_update, TransactionStatus::InBlock(hash));
         }
     }
@@ -526,7 +529,10 @@ impl Worker {
                     DownloadStatus::Downloading => {}
                     DownloadStatus::Success(transactions) => {
                         for transaction in transactions {
-                            let mut list = self.pending_transactions.remove_transaction(&transaction).unwrap();
+                            let mut list = self
+                                .pending_transactions
+                                .remove_transaction(&transaction)
+                                .unwrap();
                             send_or_drop(
                                 &mut list.status_update,
                                 TransactionStatus::Finalized(pruned_node.user_data.hash),
@@ -540,29 +546,6 @@ impl Worker {
                 // Block has been removed from tree because it's a sibling of a finalized block
                 // and not itself finalized.
                 // TODO: ?!
-            }
-        }
-    }
-
-    /// Inject the result of a download in the state machine.
-    fn download_result(
-        &mut self,
-        block_hash: &[u8; 32],
-        block_height: u64,
-        block_body: Result<Vec<Vec<u8>>, ()>,
-    ) {
-        if let Ok(block_body) = block_body {
-            let included_transactions = self
-                .pending_transactions
-                .set_block_body(block_hash, block_height, block_body.into_iter())
-                .collect::<Vec<_>>();
-
-            for tx_id in included_transactions {
-                let tx = self.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
-                send_or_drop(
-                    &mut tx.status_update,
-                    TransactionStatus::InBlock(*block_hash),
-                );
             }
         }
     }
