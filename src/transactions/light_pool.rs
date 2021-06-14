@@ -112,6 +112,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
     /// Removes all transactions from the pool, and sets the current best block height to the
     /// value passed as parameter.
+    // TODO: change
     pub fn clear_and_reset(&mut self, new_best_block_height: u64) {
         self.pool
             .as_mut()
@@ -160,26 +161,25 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .remove_included(block_inferior_of_equal)
     }
 
-    /// Returns a list of transactions whose state is "not validated", their user data, and the
-    /// hash and user data of the block they should be validated against.
+    /// Returns a list of transactions whose state is "not validated", and their user data.
     ///
-    /// The block height a transaction should be validated against is always equal to either the
-    /// block at which it has been included minus one, or the current best block. It is yielded by
-    /// the iterator for convenience, to avoid writing error-prone code.
+    /// These transactions should always be validated against the current best block.
     pub fn unvalidated_transactions(
         &'_ self,
-    ) -> impl ExactSizeIterator<Item = (TransactionId, &'_ TTx, &'_ [u8; 32], &'_ TBl)> + '_ {
+    ) -> impl ExactSizeIterator<Item = (TransactionId, &'_ TTx)> + '_ {
         self.pool.as_ref().unwrap().unvalidated_transactions().map(
-            move |(tx_id, tx_user_data, block_height)| {
-                let block_index = self
-                    .virtual_block_height_to_block_index(block_height)
-                    .unwrap();
-                let block = self.blocks_tree.get(block_index).unwrap();
-                (tx_id, tx_user_data, &block.hash, &block.user_data)
+            move |(tx_id, tx_user_data, _block_height)| {
+                debug_assert_eq!(
+                    _block_height,
+                    self.pool.as_ref().unwrap().best_block_height()
+                );
+
+                (tx_id, tx_user_data)
             },
         )
     }
 
+    // TODO: unneeded?
     fn virtual_block_height_to_block_index(
         &self,
         virtual_height: u64,
@@ -242,17 +242,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         self.pool.as_mut().unwrap().user_data_mut(id)
     }
 
-    /// Returns the block height at which the given transaction has been included.
-    ///
-    /// A transaction has been included if it has been added to the pool with
-    /// [`Pool::append_block`].
-    ///
-    /// Returns `None` if the identifier is invalid or the transaction doesn't belong to any
-    /// block.
-    pub fn included_block_height(&self, id: TransactionId) -> Option<u64> {
-        self.pool.as_ref().unwrap().included_block_height(id)
-    }
-
     /// Returns the bytes associated with a given transaction.
     ///
     /// Returns `None` if the identifier is invalid.
@@ -313,7 +302,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     ///
     /// # Panic
     ///
-    /// Panics if no block with the given hash and height has been inserted before.
+    /// Panics if no block with the given hash has been inserted before.
     ///
     #[must_use]
     pub fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) -> SetBestBlock {
@@ -429,7 +418,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     ///
     /// # Panic
     ///
-    /// Panics if no block with the given hash and height has been inserted before.
+    /// Panics if no block with the given hash has been inserted before.
     ///
     #[must_use]
     pub fn set_block_body(

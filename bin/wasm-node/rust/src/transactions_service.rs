@@ -230,7 +230,7 @@ async fn background_task(
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity: cmp::min(8, max_pending_transactions),
             blocks_capacity: 32,
-            finalized_block: ([0; 32], 0), // Pool is re-initialized below.
+            finalized_block: [0; 32], // Pool is re-initialized below.
         }),
         finalized_downloading_blocks: Vec::new(),
         block_downloads: FuturesUnordered::new(),
@@ -307,7 +307,7 @@ async fn background_task(
                 new_block = new_blocks_receiver.next().fuse() => {
                     if let Some(new_block) = new_block {
                         let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
-                        worker.new_block(new_block.scale_encoded_header, &new_block.parent_hash);
+                        worker.new_block(&new_block.scale_encoded_header, &new_block.parent_hash);
                         if new_block.is_new_best {
                             worker.set_best_block(hash).await;
                         }
@@ -326,7 +326,7 @@ async fn background_task(
                     while let Some(new_block) = new_blocks_receiver.next().now_or_never() {
                         if let Some(new_block) = new_block {
                             let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
-                            worker.new_block(new_block.scale_encoded_header, &new_block.parent_hash);
+                            worker.new_block(&new_block.scale_encoded_header, &new_block.parent_hash);
                             if new_block.is_new_best {
                                 worker.set_best_block(hash).await;
                             }
@@ -466,12 +466,9 @@ struct PendingTransaction {
 
 impl Worker {
     /// Insert a new block in the worker when the sync service hears about it.
-    fn new_block(&mut self, new_block_header: Vec<u8>, parent_hash: &[u8; 32]) {
-        // TODO: don't unwrap /!\ we're not actually sure that it's the "correct" header format
-        let decoded = header::decode(&new_block_header).unwrap();
+    fn new_block(&mut self, new_block_header: &Vec<u8>, parent_hash: &[u8; 32]) {
         self.pending_transactions.add_block(
-            decoded.hash(),
-            NonZeroU64::new(decoded.number).unwrap(),
+            header::hash_from_scale_encoded_header(&new_block_header),
             parent_hash,
             Block {},
         );
@@ -489,7 +486,7 @@ impl Worker {
         // In that situation we need to first signal `Retracted`, then only `InBlock`.
         // Consequently, process `retracted_transactions` first.
 
-        for (tx_id, hash, _) in updates.retracted_transactions {
+        for (tx_id, hash) in updates.retracted_transactions {
             let tx = self
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
@@ -497,7 +494,7 @@ impl Worker {
             send_or_drop(&mut tx.status_update, TransactionStatus::Retracted(hash));
         }
 
-        for (tx_id, hash, _) in updates.included_transactions {
+        for (tx_id, hash) in updates.included_transactions {
             let tx = self
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
