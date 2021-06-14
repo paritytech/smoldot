@@ -57,7 +57,7 @@ pub struct Config {
 }
 
 /// Data structure containing transactions. See the module-level documentation for more info.
-pub struct LightPool<TTx> {
+pub struct LightPool<TTx, TBl> {
     /// Inner transactions pool.
     ///
     /// Always contains `Some`, except temporarily to use [`pool::Pool::append_block`].
@@ -67,7 +67,7 @@ pub struct LightPool<TTx> {
     /// best block is a nephew of the previous best block) in order to know which transactions
     /// that were present in the previous best chain are still present in the new best chain.
     // TODO: add a maximum size?
-    blocks_tree: fork_tree::ForkTree<Block>,
+    blocks_tree: fork_tree::ForkTree<Block<TBl>>,
 
     /// Index of the best block in [`LightPool::blocks_tree`].
     /// `None` if the tree is empty and that the best block is also the latest finalized block.
@@ -78,7 +78,7 @@ pub struct LightPool<TTx> {
     latest_finalized_block: (u64, [u8; 32]),
 }
 
-impl<TTx> LightPool<TTx> {
+impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Initializes a new transactions pool.
     pub fn new(config: Config) -> Self {
         LightPool {
@@ -98,13 +98,8 @@ impl<TTx> LightPool<TTx> {
             .clear_and_reset(new_best_block_height);
     }
 
-    /// Returns true if the pool is empty.
-    pub fn is_empty(&self) -> bool {
-        self.pool.as_ref().unwrap().is_empty()
-    }
-
     /// Returns the number of transactions in the pool.
-    pub fn len(&self) -> usize {
+    pub fn num_transactions(&self) -> usize {
         self.pool.as_ref().unwrap().len()
     }
 
@@ -123,7 +118,7 @@ impl<TTx> LightPool<TTx> {
     /// Panics if the identifier is invalid.
     ///
     #[track_caller]
-    pub fn remove(&mut self, id: TransactionId) -> TTx {
+    pub fn remove_transaction(&mut self, id: TransactionId) -> TTx {
         self.pool.as_mut().unwrap().remove(id)
     }
 
@@ -157,26 +152,28 @@ impl<TTx> LightPool<TTx> {
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
+    pub fn transactions_iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
         self.pool.as_ref().unwrap().iter()
     }
 
     /// Returns the list of all transactions within the pool.
-    pub fn iter_mut(&'_ mut self) -> impl Iterator<Item = (TransactionId, &'_ mut TTx)> + '_ {
+    pub fn transactions_iter_mut(
+        &'_ mut self,
+    ) -> impl Iterator<Item = (TransactionId, &'_ mut TTx)> + '_ {
         self.pool.as_mut().unwrap().iter_mut()
     }
 
     /// Returns the user data associated with a given transaction.
     ///
     /// Returns `None` if the identifier is invalid.
-    pub fn user_data(&self, id: TransactionId) -> Option<&TTx> {
+    pub fn transaction_user_data(&self, id: TransactionId) -> Option<&TTx> {
         self.pool.as_ref().unwrap().user_data(id)
     }
 
     /// Returns the user data associated with a given transaction.
     ///
     /// Returns `None` if the identifier is invalid.
-    pub fn user_data_mut(&mut self, id: TransactionId) -> Option<&mut TTx> {
+    pub fn transaction_user_data_mut(&mut self, id: TransactionId) -> Option<&mut TTx> {
         self.pool.as_mut().unwrap().user_data_mut(id)
     }
 
@@ -199,7 +196,10 @@ impl<TTx> LightPool<TTx> {
     }
 
     /// Tries to find a transaction in the pool whose bytes are `scale_encoded`.
-    pub fn find(&'_ self, scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> + '_ {
+    pub fn find_transaction(
+        &'_ self,
+        scale_encoded: &[u8],
+    ) -> impl Iterator<Item = TransactionId> + '_ {
         self.pool.as_ref().unwrap().find(scale_encoded)
     }
 
@@ -214,7 +214,13 @@ impl<TTx> LightPool<TTx> {
     ///
     /// Panics if the parent block cannot be found in the collection.
     ///
-    pub fn add_block(&mut self, hash: [u8; 32], height: NonZeroU64, parent_hash: &[u8; 32]) {
+    pub fn add_block(
+        &mut self,
+        hash: [u8; 32],
+        height: NonZeroU64,
+        parent_hash: &[u8; 32],
+        user_data: TBl,
+    ) {
         let parent_index_in_tree = if *parent_hash == self.latest_finalized_block.1 {
             None
         } else {
@@ -229,10 +235,11 @@ impl<TTx> LightPool<TTx> {
                 hash,
                 height,
                 body: if self.pool.as_ref().unwrap().is_empty() {
-                    None // TODO: do the "doesn't need a body" thing
+                    BodyState::NotNeeded
                 } else {
-                    None
+                    BodyState::Needed
                 },
+                user_data,
             },
         );
     }
@@ -280,7 +287,7 @@ impl<TTx> LightPool<TTx> {
                     continue;
                 }
 
-                debug_assert!(to_retract.body.is_some());
+                debug_assert!(matches!(to_retract.body, BodyState::Known(_)));
 
                 retracted_transactions.extend(
                     self.pool
@@ -304,8 +311,8 @@ impl<TTx> LightPool<TTx> {
             }
 
             let block_body = match &block.body {
-                Some(b) => b,
-                None => break,
+                BodyState::Known(b) => b,
+                BodyState::NotNeeded | BodyState::Needed => break,
             };
 
             let mut append_block = self.pool.take().unwrap().append_block();
@@ -353,17 +360,18 @@ impl<TTx> LightPool<TTx> {
     ///
     #[must_use]
     pub fn set_block_body(
-        &mut self,
+        &'_ mut self,
         block_hash: &[u8; 32],
         block_height: u64,
         body: impl Iterator<Item = impl Into<Vec<u8>>>,
-    ) -> impl Iterator<Item = TransactionId> {
+    ) -> impl Iterator<Item = TransactionId> + '_ {
         let block_index = self
             .blocks_tree
             .find(|b| b.height.get() == block_height && b.hash == *block_hash)
             .unwrap();
 
-        self.blocks_tree.get_mut(block_index).unwrap().body = Some(body.map(Into::into).collect());
+        self.blocks_tree.get_mut(block_index).unwrap().body =
+            BodyState::Known(body.map(Into::into).collect());
 
         let is_in_best_chain = self.blocks_tree.is_ancestor(
             // `best_block_index` can only be `None` iff the list of blocks is empty, which we
@@ -393,11 +401,12 @@ impl<TTx> LightPool<TTx> {
                 );
 
                 let block_body = match &maybe_to_insert_block.body {
-                    Some(b) => b,
-                    None => break,
+                    BodyState::Known(b) => b,
+                    BodyState::NotNeeded | BodyState::Needed => break,
                 };
 
                 let mut append_block = self.pool.take().unwrap().append_block();
+                // TODO: DRY with other code above
                 for transaction in block_body {
                     match append_block.block_transaction(transaction) {
                         // Transaction in the block matches one of the transactions in the pool.
@@ -432,9 +441,10 @@ impl<TTx> LightPool<TTx> {
         self.blocks_tree
             .iter_unordered()
             .filter_map(move |(_, block)| {
-                if block.body.is_none() {
+                if !matches!(block.body, BodyState::Needed) {
                     return None;
                 }
+
                 Some((block.height.get(), &block.hash)) // TODO:
             })
     }
@@ -465,7 +475,7 @@ impl<TTx> LightPool<TTx> {
     }
 }
 
-impl<TTx: fmt::Debug> fmt::Debug for LightPool<TTx> {
+impl<TTx: fmt::Debug, TBl> fmt::Debug for LightPool<TTx, TBl> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.pool, f)
     }
@@ -489,10 +499,17 @@ pub struct SetBestBlock {
     pub included_transactions: Vec<(TransactionId, [u8; 32], u64)>,
 }
 
-struct Block {
+struct Block<TBl> {
     hash: [u8; 32],
     height: NonZeroU64,
-    body: Option<Vec<Vec<u8>>>,
+    body: BodyState,
+    user_data: TBl,
+}
+
+enum BodyState {
+    Needed,
+    NotNeeded,
+    Known(Vec<Vec<u8>>),
 }
 
 // TODO: needs tests

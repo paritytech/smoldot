@@ -271,7 +271,7 @@ async fn background_task(
 
         // As explained above, this code is reached if there is a gap in the blocks.
         // Consequently, we drop all pending transactions.
-        for (_, pending) in worker.pending_transactions.iter_mut() {
+        for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             send_or_drop(&mut pending.status_update, TransactionStatus::Dropped);
         }
         worker
@@ -343,7 +343,7 @@ async fn background_task(
                 },
 
                 // TODO: refactor for performances
-                (transaction_to_reannounce, _, _) = worker.pending_transactions.iter_mut()
+                (transaction_to_reannounce, _, _) = worker.pending_transactions.transactions_iter_mut()
                     .map(|(tx_id, tx)| (&mut tx.when_reannounce).map(move |()| tx_id))
                     .collect::<future::SelectAll<_>>().fuse() =>
                 {
@@ -357,7 +357,7 @@ async fn background_task(
 
                     if !peers_sent.is_empty() {
                         let tx = worker.pending_transactions
-                            .user_data_mut(transaction_to_reannounce)
+                            .transaction_user_data_mut(transaction_to_reannounce)
                             .unwrap();
                         send_or_drop(&mut tx.status_update, TransactionStatus::Broadcast(peers_sent));
                     }
@@ -374,8 +374,8 @@ async fn background_task(
                             transaction_bytes,
                             updates_report,
                         } => {
-                            if let Some(tx_id) = worker.pending_transactions.find(&transaction_bytes).next() {
-                                let mut tx = worker.pending_transactions.user_data_mut(tx_id).unwrap();
+                            if let Some(tx_id) = worker.pending_transactions.find_transaction(&transaction_bytes).next() {
+                                let mut tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
                                 if let Some(updates_report) = updates_report {
                                     tx.status_update.push(updates_report);
                                     // TODO: immediately send the latest known status?
@@ -383,7 +383,7 @@ async fn background_task(
                                 continue;
                             }
 
-                            if worker.pending_transactions.len() >= worker.max_pending_transactions {
+                            if worker.pending_transactions.num_transactions() >= worker.max_pending_transactions {
                                 if let Some(mut updates_report) = updates_report {
                                     let _ = updates_report.try_send(TransactionStatus::Dropped);
                                 }
@@ -493,12 +493,12 @@ impl Worker {
         // Consequently, process `retracted_transactions` first.
 
         for (tx_id, hash, _) in updates.retracted_transactions {
-            let tx = self.pending_transactions.user_data_mut(tx_id).unwrap();
+            let tx = self.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
             send_or_drop(&mut tx.status_update, TransactionStatus::Retracted(hash));
         }
 
         for (tx_id, hash, _) in updates.included_transactions {
-            let tx = self.pending_transactions.user_data_mut(tx_id).unwrap();
+            let tx = self.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
             send_or_drop(&mut tx.status_update, TransactionStatus::InBlock(hash));
         }
     }
@@ -526,7 +526,7 @@ impl Worker {
                     DownloadStatus::Downloading => {}
                     DownloadStatus::Success(transactions) => {
                         for transaction in transactions {
-                            let mut list = self.pending_transactions.remove(&transaction).unwrap();
+                            let mut list = self.pending_transactions.remove_transaction(&transaction).unwrap();
                             send_or_drop(
                                 &mut list.status_update,
                                 TransactionStatus::Finalized(pruned_node.user_data.hash),
@@ -545,29 +545,26 @@ impl Worker {
     }
 
     /// Inject the result of a download in the state machine.
-    fn download_result(&mut self, block_hash: [u8; 32], block_body: Result<Vec<Vec<u8>>, ()>) {
-        self.pending_transactions
-            .set_block_body(block_hash, block_height, block_body);
+    fn download_result(
+        &mut self,
+        block_hash: &[u8; 32],
+        block_height: u64,
+        block_body: Result<Vec<Vec<u8>>, ()>,
+    ) {
+        if let Ok(block_body) = block_body {
+            let included_transactions = self
+                .pending_transactions
+                .set_block_body(block_hash, block_height, block_body.into_iter())
+                .collect::<Vec<_>>();
 
-        // TODO: what if finalized_downloading
-        let index_in_tree = self.blocks_tree.find(|b| b.hash == block_hash).unwrap();
-
-        debug_assert!(matches!(
-            self.blocks_tree.get(index_in_tree).unwrap().download_status,
-            DownloadStatus::Downloading
-        ));
-
-        self.blocks_tree
-            .get_mut(index_in_tree)
-            .unwrap()
-            .download_status = match block_body {
-            Ok(body) => {
-                let transactions = body;
-
-                todo!()
+            for tx_id in included_transactions {
+                let tx = self.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
+                send_or_drop(
+                    &mut tx.status_update,
+                    TransactionStatus::InBlock(*block_hash),
+                );
             }
-            Err(()) => DownloadStatus::Failed,
-        };
+        }
     }
 
     /// Inserts into `block_downloads` a future that downloads the body of the block with the
