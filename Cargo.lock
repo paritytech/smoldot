@@ -77,17 +77,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ahash"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43bb833f0bf979d8475d38fbf09ed3b8a55e1885fe93ad3f93239fc6a4f17b98"
-dependencies = [
- "getrandom 0.2.0",
- "once_cell",
- "version_check",
-]
-
-[[package]]
 name = "ansi_term"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2521,10 +2510,8 @@ dependencies = [
 name = "smoldot-js"
 version = "0.2.5"
 dependencies = [
- "ahash 0.7.4",
  "blake2-rfc",
  "derive_more",
- "either",
  "fnv",
  "futures",
  "lazy_static",

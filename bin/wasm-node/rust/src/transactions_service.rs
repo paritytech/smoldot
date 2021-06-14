@@ -268,7 +268,7 @@ async fn background_task(
         // As explained above, this code is reached if there is a gap in the blocks.
         // Consequently, we drop all pending transactions.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
-            send_or_drop(&mut pending.status_update, TransactionStatus::Dropped);
+            pending.update_status(TransactionStatus::Dropped);
         }
         worker
             .pending_transactions
@@ -296,19 +296,29 @@ async fn background_task(
             }
 
             // Start block bodies downloads that need to be started.
-            // TODO: prioritize best chain?
-            for (block_hash, block) in worker.pending_transactions.missing_block_bodies() {
-                // The transaction pool isn't aware of the fact that we're currently downloading
-                // a block's body. Skip when that is the case.
-                if block.downloading {
-                    continue;
-                }
+            loop {
+                // TODO: prioritize best chain?
+                let (block_hash, block) = match worker
+                    .pending_transactions
+                    .missing_block_bodies()
+                    .find(|(_, block)| {
+                        // The transaction pool isn't aware of the fact that we're currently downloading
+                        // a block's body. Skip when that is the case.
+                        if block.downloading {
+                            return false;
+                        }
 
-                // Don't try again block downloads that have failed before.
-                if block.failed_downloads >= 1 {
-                    // TODO: try downloading again if finalized or best chain
-                    continue;
-                }
+                        // Don't try again block downloads that have failed before.
+                        if block.failed_downloads >= 1 {
+                            // TODO: try downloading again if finalized or best chain
+                            return false;
+                        }
+
+                        true
+                    }) {
+                    Some(b) => b,
+                    None => break,
+                };
 
                 // Actual download start.
                 worker.block_downloads.push({
@@ -326,11 +336,18 @@ async fn background_task(
                         .boxed()
                 });
 
+                let block_hash = *block_hash;
                 worker
                     .pending_transactions
-                    .block_user_data_mut(block_hash)
+                    .block_user_data_mut(&block_hash)
                     .unwrap()
                     .downloading = true;
+            }
+
+            // Remove finalized blocks from the pool when possible.
+            for (block_hash, block) in worker.pending_transactions.prune_finalized_with_body() {
+                debug_assert!(!block.downloading);
+                // TODO: report finalized transactions
             }
 
             // Refuse to store blocks that are older than `latest_finalized - 32`. If that
@@ -371,7 +388,11 @@ async fn background_task(
                         }
                     }
 
-                    worker.new_finalized_block(finalized_block_header.unwrap()).await;
+                    let finalized_hash =
+                        header::hash_from_scale_encoded_header(&finalized_block_header.unwrap());
+                    worker
+                        .pending_transactions
+                        .set_finalized_block(&finalized_hash);
                 },
 
                 download = worker.block_downloads.select_next_some() => {
@@ -397,10 +418,7 @@ async fn background_task(
 
                         for tx_id in included_transactions {
                             let tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
-                            send_or_drop(
-                                &mut tx.status_update,
-                                TransactionStatus::InBlock(block_hash),
-                            );
+                            tx.update_status(TransactionStatus::InBlock(block_hash));
                         }
                     }
                 },
@@ -422,7 +440,7 @@ async fn background_task(
                         let tx = worker.pending_transactions
                             .transaction_user_data_mut(transaction_to_reannounce)
                             .unwrap();
-                        send_or_drop(&mut tx.status_update, TransactionStatus::Broadcast(peers_sent));
+                        tx.update_status(TransactionStatus::Broadcast(peers_sent));
                     }
                 },
 
@@ -447,8 +465,7 @@ async fn background_task(
                                     .transaction_user_data_mut(existing_tx_id)
                                     .unwrap();
                                 if let Some(updates_report) = updates_report {
-                                    existing_tx.status_update.push(updates_report);
-                                    // TODO: immediately send the latest known status
+                                    existing_tx.add_status_update(updates_report);
                                 }
                                 continue;
                             }
@@ -474,6 +491,7 @@ async fn background_task(
                                         }
                                         vec
                                     },
+                                    latest_status: None,
                                 });
                         }
                     }
@@ -515,20 +533,6 @@ struct Worker {
     max_concurrent_downloads: usize,
 }
 
-struct Block {
-    /// Number of previous downloads that have failed.
-    failed_downloads: u8,
-
-    /// `True` if the body of this block is currently being downloaded.
-    downloading: bool,
-}
-
-struct PendingTransaction {
-    /// When to gossip the transaction on the network again.
-    when_reannounce: ffi::Delay,
-    status_update: Vec<mpsc::Sender<TransactionStatus>>,
-}
-
 impl Worker {
     /// Insert a new block in the worker when the sync service hears about it.
     fn new_block(&mut self, new_block_header: &Vec<u8>, parent_hash: &[u8; 32]) {
@@ -559,7 +563,7 @@ impl Worker {
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
                 .unwrap();
-            send_or_drop(&mut tx.status_update, TransactionStatus::Retracted(hash));
+            tx.update_status(TransactionStatus::Retracted(hash));
         }
 
         for (tx_id, hash) in updates.included_transactions {
@@ -567,71 +571,49 @@ impl Worker {
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
                 .unwrap();
-            send_or_drop(&mut tx.status_update, TransactionStatus::InBlock(hash));
-        }
-    }
-
-    async fn new_finalized_block(&mut self, finalized_block_header: Vec<u8>) {
-        let finalized_block_hash = header::hash_from_scale_encoded_header(&finalized_block_header);
-
-        // The finalized block must have been inserted in the tree earlier.
-        let new_finalized_index = self
-            .blocks_tree
-            .find(|b| b.hash == finalized_block_hash)
-            .unwrap();
-        debug_assert!(self
-            .blocks_tree
-            .is_ancestor(new_finalized_index, self.best_block_index.unwrap()));
-
-        // Remove nodes from the tree, either because they're not finalized or discarded.
-        for pruned_node in self.blocks_tree.prune_ancestors(new_finalized_index) {
-            if pruned_node.is_prune_target_ancestor {
-                // Block has been removed from tree because it's finalized.
-                match pruned_node.user_data.download_status {
-                    DownloadStatus::NotStarted | DownloadStatus::Failed => {
-                        // TODO: self.push_block_download(pruned_node.user_data.hash);
-                    }
-                    DownloadStatus::Downloading => {}
-                    DownloadStatus::Success(transactions) => {
-                        for transaction in transactions {
-                            let mut list = self
-                                .pending_transactions
-                                .remove_transaction(&transaction)
-                                .unwrap();
-                            send_or_drop(
-                                &mut list.status_update,
-                                TransactionStatus::Finalized(pruned_node.user_data.hash),
-                            );
-                        }
-                    }
-                }
-
-                // TODO: insert into finalized_downloading
-            } else {
-                // Block has been removed from tree because it's a sibling of a finalized block
-                // and not itself finalized.
-                // TODO: ?!
-            }
+            tx.update_status(TransactionStatus::InBlock(hash));
         }
     }
 }
 
-/// For each element in `channels`, tries to send the given item on it. If the channel is full or
-/// disconnected, removes it from the list.
-fn send_or_drop<T: Clone>(channels: &mut Vec<mpsc::Sender<T>>, item: T) {
-    // Special-case if `channels.len() == 1` as 0 or 1 items is by far the most common situation.
-    // This avoids cloning `T` unnecessarily.
-    if channels.len() == 1 {
-        if channels[0].try_send(item).is_err() {
-            channels.clear();
+struct Block {
+    /// Number of previous downloads that have failed.
+    failed_downloads: u8,
+
+    /// `True` if the body of this block is currently being downloaded.
+    downloading: bool,
+}
+
+struct PendingTransaction {
+    /// When to gossip the transaction on the network again.
+    when_reannounce: ffi::Delay,
+
+    /// List of channels that should receive changes to the transaction status.
+    status_update: Vec<mpsc::Sender<TransactionStatus>>,
+
+    // TODO: never updated
+    latest_status: Option<TransactionStatus>,
+}
+
+impl PendingTransaction {
+    fn add_status_update(&mut self, mut channel: mpsc::Sender<TransactionStatus>) {
+        if let Some(latest_status) = &self.latest_status {
+            if channel.try_send(latest_status.clone()).is_err() {
+                return;
+            }
         }
-        return;
+
+        self.status_update.push(channel);
     }
 
-    for n in 0..channels.len() {
-        let mut channel = channels.swap_remove(n);
-        if channel.try_send(item.clone()).is_ok() {
-            channels.push(channel);
+    fn update_status(&mut self, status: TransactionStatus) {
+        for n in 0..self.status_update.len() {
+            let mut channel = self.status_update.swap_remove(n);
+            if channel.try_send(status.clone()).is_ok() {
+                self.status_update.push(channel);
+            }
         }
+
+        self.latest_status = Some(status);
     }
 }

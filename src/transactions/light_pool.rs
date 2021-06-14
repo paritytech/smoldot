@@ -34,12 +34,13 @@
 //!
 //! TODO: write up here about blocks
 //!
-//! Each transaction in the pool exposes two properties:
+//! Each transaction in the pool exposes three properties:
 //!
 //! - Whether or not it has been validated, and if yes, the block against which it has been
 //! validated and the characteristics of the transaction (as provided by the runtime): the tags it
 //! provides and requires, its longevity, and its priority. See [the `validate` module](../validate)
 //! for more information.
+//! - The block, if any, in which the transaction has been included.
 //! - A so-called user data, an opaque field controller by the API user, of type `TTx`.
 //!
 //! Use [`LightPool::add_unvalidated`] to add to the pool a transaction that should be included in
@@ -196,43 +197,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         )
     }
 
-    // TODO: unneeded?
-    fn virtual_block_height_to_block_index(
-        &self,
-        virtual_height: u64,
-    ) -> Option<fork_tree::NodeIndex> {
-        //
-        //       virtual_height
-        //         +
-        //         v
-        //
-        // B - B - B - B                             self.pool
-        //
-        // B - B - B - B - B - B                     self.blocks_tree
-        //
-        //                     ^
-        //                     +
-        //                   self.best_block_virtual_height
-        //                   self.best_block_index
-        //
-        let diff = self
-            .best_block_virtual_height
-            .checked_sub(virtual_height)
-            .unwrap();
-
-        if let Some(best_block_index) = self.best_block_index {
-            let mut index = Some(best_block_index);
-            for _ in 0..diff {
-                index = self.blocks_tree.parent(index.unwrap());
-            }
-            index
-        } else {
-            // If `best_block_index` is `None`, then `self.blocks_tree` is empty.
-            assert_eq!(diff, 0);
-            None
-        }
-    }
-
     /// Returns the list of all transactions within the pool.
     pub fn transactions_iter(&'_ self) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
         self.pool.as_ref().unwrap().iter()
@@ -292,13 +256,17 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         block_hash_validated_against: &[u8; 32],
         result: Result<ValidTransaction, InvalidTransaction>,
     ) {
-        let block_index = self.blocks_by_id.remove(block_hash_validated_against).unwrap();
+        let block_index = self
+            .blocks_by_id
+            .remove(block_hash_validated_against)
+            .unwrap();
 
-        self.pool.as_mut().unwrap().set_validation_result(
+        todo!()
+        /*self.pool.as_mut().unwrap().set_validation_result(
             id,
             block_number_validated_against,
             result,
-        )
+        )*/
     }
 
     /// Adds a block to the collection of blocks.
@@ -618,11 +586,14 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Removes from the pool as many blocks as possible from the finalized chain. Blocks are
     /// removed from parent to child until either the first non-finalized block or a block whose
     /// body is missing is encountered.
+    // TODO: remove transactions that were included in these blocks
     pub fn prune_finalized_with_body(&mut self) -> impl Iterator<Item = ([u8; 32], TBl)> {
-        self.pool
-            .as_mut()
-            .unwrap()
-            .remove_included(block_inferior_of_equal)
+        // TODO: /!\
+        core::iter::empty()
+        /*self.pool
+        .as_mut()
+        .unwrap()
+        .remove_included(block_inferior_of_equal)*/
     }
 
     /// Returns the number of blocks between the oldest block stored in this data structure and
