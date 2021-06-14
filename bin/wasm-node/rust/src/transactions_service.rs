@@ -77,7 +77,7 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, convert::TryFrom as _, pin::Pin, sync::Arc, time::Duration};
+use std::{cmp, convert::TryFrom as _, iter, pin::Pin, sync::Arc, time::Duration};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
@@ -453,7 +453,45 @@ async fn background_task(
                 _ = &mut worker.next_validation_start => {
                     worker.next_validation_start = ffi::Delay::new(Duration::from_secs(2));
 
-                    // TODO: start validation
+                    for (tx_id, _) in worker.pending_transactions.unvalidated_transactions() {
+                        let tx_body = worker.pending_transactions.scale_encoding(tx_id).unwrap();
+
+                        // TODO: should be async
+
+                        let encoded_validate_result = worker.runtime_service.recent_best_block_runtime_call(
+                            validate::VALIDATION_FUNCTION_NAME,
+                            validate::validate_transaction_runtime_parameters(
+                                iter::once(tx_body),
+                                validate::TransactionSource::External
+                            )
+                        ).await;
+
+                        let encoded_validate = match encoded_validate_result {
+                            Ok(r) => r,
+                            Err(error) => {
+                                log::warn!(
+                                    target: "transactions-service",
+                                    "Failed to perform transaction validation: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        };
+
+                        let decoded_validate = match validate::decode_validate_transaction_return_value(&encoded_validate) {
+                            Ok(d) => d,
+                            Err(error) => {
+                                log::warn!(
+                                    target: "transactions-service",
+                                    "Unable to decode transaction validation output: {}",
+                                    error
+                                );
+                                continue;
+                            }
+                        };
+
+                        panic!("{:?}", decoded_validate);
+                    }
                 }
 
                 message = from_foreground.next().fuse() => {

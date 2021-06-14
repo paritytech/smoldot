@@ -181,10 +181,14 @@ pub enum Error {
     #[display(fmt = "{}", _0)]
     WasmVm(read_only_runtime_host::ErrorDetail),
     /// Error while decoding the output of the runtime.
-    OutputDecodeError,
+    OutputDecodeError(DecodeError),
     /// The list of provided tags ([`ValidTransaction::provides`]). This is a bug in the runtime.
     EmptyProvidedTags,
 }
+
+/// Error that can happen during the decoding.
+#[derive(Debug, derive_more::Display)]
+pub struct DecodeError();
 
 /// Errors that can occur while checking the validity of a transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,27 +199,50 @@ pub enum TransactionValidityError {
     Unknown(UnknownTransaction),
 }
 
+/// Produces the input to pass to the `TaggedTransactionQueue_validate_transaction` runtime call.
+pub fn validate_transaction_runtime_parameters(
+    scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+    source: TransactionSource,
+) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
+    // The `TaggedTransactionQueue_validate_transaction` function expects a SCALE-encoded
+    // `(source, tx)`. The encoding is performed manually in order to avoid performing
+    // redundant data copies.
+    let source = match source {
+        TransactionSource::InBlock => &[0],
+        TransactionSource::Local => &[1],
+        TransactionSource::External => &[2],
+    };
+
+    iter::once(source)
+        .map(either::Either::Left)
+        .chain(scale_encoded_transaction.map(either::Either::Right))
+}
+
+/// Name of the runtime function to call in order to validate a transaction.
+pub const VALIDATION_FUNCTION_NAME: &str = "TaggedTransactionQueue_validate_transaction";
+
+/// Attempt to decode the return value of the  `TaggedTransactionQueue_validate_transaction`
+/// runtime call.
+pub fn decode_validate_transaction_return_value(
+    scale_encoded: &[u8],
+) -> Result<Result<ValidTransaction, TransactionValidityError>, DecodeError> {
+    match nom::combinator::all_consuming(transaction_validity)(scale_encoded) {
+        Ok((_, data)) => Ok(data),
+        Err(_) => Err(DecodeError()),
+    }
+}
+
 /// Validates a transaction by calling `TaggedTransactionQueue_validate_transaction`.
 pub fn validate_transaction(
-    config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
+    config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
 ) -> Query {
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
         virtual_machine: config.runtime,
-        function_to_call: "TaggedTransactionQueue_validate_transaction",
-        parameter: {
-            // The `TaggedTransactionQueue_validate_transaction` function expects a SCALE-encoded
-            // `(source, tx)`. The encoding is performed manually in order to avoid performing
-            // redundant data copies.
-            let source = match config.source {
-                TransactionSource::InBlock => &[0],
-                TransactionSource::Local => &[1],
-                TransactionSource::External => &[2],
-            };
-
-            iter::once(source)
-                .map(either::Either::Left)
-                .chain(config.scale_encoded_transaction.map(either::Either::Right))
-        },
+        function_to_call: VALIDATION_FUNCTION_NAME,
+        parameter: validate_transaction_runtime_parameters(
+            config.scale_encoded_transaction,
+            config.source,
+        ),
     });
 
     match vm {
@@ -256,12 +283,8 @@ impl Query {
                 // errors.
                 let result = {
                     let output = success.virtual_machine.value();
-                    let decoded =
-                        nom::combinator::all_consuming(transaction_validity)(output.as_ref());
-                    match decoded {
-                        Ok((_, s)) => Ok(s),
-                        Err(_) => Err(Error::OutputDecodeError),
-                    }
+                    decode_validate_transaction_return_value(output.as_ref())
+                        .map_err(Error::OutputDecodeError)
                 };
 
                 let result = match result {

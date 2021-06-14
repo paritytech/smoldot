@@ -341,7 +341,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         for to_retract_index in old_best_to_common_ancestor {
             // Runs unconditionally for each block. For this reason there's no `break` in the
             // rest of this loop.
-            self.best_block_virtual_height -= 1;
+            self.best_block_virtual_height = self.best_block_virtual_height.checked_sub(1).unwrap();
 
             // If `self.best_block_virtual_height` is inferior to the pool's best, then we
             // need to retract.
