@@ -65,17 +65,21 @@ pub struct LightPool<TTx, TBl> {
     /// finalized block passed at initialization by the user is always block number 0.
     pool: Option<pool::Pool<TTx>>,
 
-    /// Tree of all the non-finalized blocks. This is necessary in case of a re-org (i.e. the new
-    /// best block is a nephew of the previous best block) in order to know which transactions
-    /// that were present in the previous best chain are still present in the new best chain.
+    /// Tree of all the non-finalized and finalized blocks. This is necessary in case of a re-org
+    /// (i.e. the new best block is a nephew of the previous best block) in order to know which
+    /// transactions that were present in the previous best chain are still present in the new
+    /// best chain.
     blocks_tree: fork_tree::ForkTree<Block<TBl>>,
 
     /// Contains all blocks in [`LightPool::blocks_tree`], indexed by their hash.
     blocks_by_id: hashbrown::HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
 
-    /// Index of the best block in [`LightPool::blocks_tree`].
-    /// `None` if the tree is empty and that the best block is also the latest finalized block.
+    /// Index of the best block in [`LightPool::blocks_tree`]. `None` iff the tree is empty.
     best_block_index: Option<fork_tree::NodeIndex>,
+
+    /// Hash of the block that serves as root of all the blocks in [`LightPool::blocks_tree`].
+    /// Always a finalized block.
+    blocks_tree_root_hash: [u8; 32],
 
     /// As explained in [`LightPool::pool`], the block heights in the underlying pool aren't the
     /// *actual* block heights. This field contains the block height that the current best block
@@ -83,8 +87,9 @@ pub struct LightPool<TTx, TBl> {
     /// in the underlying pool yet.
     best_block_virtual_height: u64,
 
-    /// Hash of the latest finalized block. Root of all the blocks in [`LightPool::blocks_tree`].
-    latest_finalized_block: [u8; 32],
+    /// Equivalent to [`LightPool::best_block_virtual_height`] but for the finalized block.
+    /// Always inferior or equal to [`LightPool::best_block_virtual_height`].
+    finalized_block_virtual_height: u64,
 }
 
 impl<TTx, TBl> LightPool<TTx, TBl> {
@@ -103,9 +108,11 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 Default::default(),
             ),
             best_block_index: None,
+            blocks_tree_root_hash: config.finalized_block_hash,
             // Must match the finalized block height passed to the underlying pool.
             best_block_virtual_height: 0,
-            latest_finalized_block: config.finalized_block_hash,
+            // Must match the finalized block height passed to the underlying pool.
+            finalized_block_virtual_height: 0,
         }
     }
 
@@ -117,16 +124,59 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         self.blocks_by_id.clear();
         self.best_block_index = None;
         self.best_block_virtual_height = 0;
-        self.latest_finalized_block = new_finalized_block_hash;
+        self.finalized_block_virtual_height = 0;
+        self.blocks_tree_root_hash = new_finalized_block_hash;
     }
 
     /// Sets the finalized block of the chain.
     ///
+    /// Removes and returns the blocks that are not part of the finalized chain. The finalized
+    /// chain itself, however, isn't removed.
+    ///
+    /// The current best block (set using [`LightPool::set_best_block`]) must be a descendant of
+    /// or equal to the node passed as parameter. This guarantees that no transaction gets
+    /// retracted.
+    ///
     /// # Panic
     ///
     /// Panics if no block with the given hash has been inserted before.
+    /// Panics if the current best block isn't a descendant of or equal to the new finalized
+    /// block.
     ///
-    pub fn set_finalized_block(&mut self, new_finalized_block_hash: &[u8; 32]) {}
+    pub fn set_finalized_block(
+        &mut self,
+        new_finalized_block_hash: &[u8; 32],
+    ) -> impl Iterator<Item = ([u8; 32], TBl)> {
+        let new_finalized_block_index = *self.blocks_by_id.get(new_finalized_block_hash).unwrap();
+        assert!(self
+            .blocks_tree
+            .is_ancestor(new_finalized_block_index, self.best_block_index.unwrap()));
+
+        // TODO: don't allocate a Vec here
+        let mut out = Vec::new();
+        for pruned_block in self.blocks_tree.prune_uncles(new_finalized_block_index) {
+            debug_assert!(!pruned_block.is_prune_target_ancestor);
+
+            let _expected_index = self.blocks_by_id.remove(&pruned_block.user_data.hash);
+            debug_assert_eq!(_expected_index, Some(pruned_block.index));
+
+            out.push((
+                pruned_block.user_data.hash,
+                pruned_block.user_data.user_data,
+            ));
+        }
+
+        out.into_iter()
+    }
+
+    /// Removes from the pool as many blocks as possible from the finalized chain. Blocks are
+    /// removed until either the finalized block or a block whose body is missing is encountered.
+    pub fn prune_finalized_with_body(&mut self) -> impl Iterator<Item = ([u8; 32], TBl)> {
+        self.pool
+            .as_mut()
+            .unwrap()
+            .remove_included(block_inferior_of_equal)
+    }
 
     /// Returns the number of transactions in the pool.
     pub fn num_transactions(&self) -> usize {
@@ -150,23 +200,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     #[track_caller]
     pub fn remove_transaction(&mut self, id: TransactionId) -> TTx {
         self.pool.as_mut().unwrap().remove(id)
-    }
-
-    /// Removes from the pool all the transactions that are included in a block whose height is
-    /// inferior or equal to the one passed as parameter.
-    ///
-    /// Use this method when a block has been finalized.
-    ///
-    /// The returned iterator is guaranteed to remove all transactions even if it is dropped
-    /// eagerly.
-    pub fn remove_included(
-        &'_ mut self,
-        block_inferior_of_equal: u64,
-    ) -> impl Iterator<Item = (TransactionId, TTx)> + '_ {
-        self.pool
-            .as_mut()
-            .unwrap()
-            .remove_included(block_inferior_of_equal)
     }
 
     /// Returns a list of transactions whose state is "not validated", and their user data.
@@ -277,7 +310,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the parent block cannot be found in the collection.
     ///
     pub fn add_block(&mut self, hash: [u8; 32], parent_hash: &[u8; 32], user_data: TBl) {
-        let parent_index_in_tree = if *parent_hash == self.latest_finalized_block {
+        let parent_index_in_tree = if *parent_hash == self.blocks_tree_root_hash {
             None
         } else {
             // The transactions service tracks all new blocks.

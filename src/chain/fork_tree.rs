@@ -176,7 +176,7 @@ impl<T> ForkTree<T> {
     ///
     /// This function is similar to [`ForkTree::prune_ancestors`], except that all nodes returned
     /// by the iterator are guaranteed to have [`PrunedNode::is_prune_target_ancestor`] equal
-    /// to `true`.
+    /// to `false`.
     ///
     /// # Panic
     ///
