@@ -25,6 +25,7 @@
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     chain, chain_spec,
+    informant::HashDisplay,
     libp2p::{multiaddr, peer_id::PeerId},
 };
 use std::{collections::HashMap, pin::Pin, sync::Arc, task};
@@ -75,14 +76,17 @@ pub async fn start_client(
         let mut chain_specs = Vec::new();
         let mut json_rpc_running = Vec::new();
 
-        for chain in chains {
+        for (chain_index, chain) in chains.enumerate() {
             chain_specs.push(
                 match chain_spec::ChainSpec::from_json_bytes(&chain.specification) {
                     Ok(cs) => {
-                        log::info!("Loaded chain specs for {}", cs.name());
+                        log::info!("Loaded chain spec #{}: {}", chain_index, cs.name());
                         cs
                     }
-                    Err(err) => ffi::throw(format!("Error while opening chain specs: {}", err)),
+                    Err(err) => ffi::throw(format!(
+                        "Error while opening chain spec #{}: {}",
+                        chain_index, err
+                    )),
                 },
             );
 
@@ -99,7 +103,15 @@ pub async fn start_client(
         .iter()
         .map(|chain_spec| {
             match chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec) {
-                Ok(ci) => ci,
+                Ok(ci) => {
+                    log::info!(
+                        "Genesis hash of {} is: {}",
+                        chain_spec.name(),
+                        HashDisplay(&ci.as_ref().finalized_block_header.hash())
+                    );
+
+                    ci
+                }
                 Err(err) => panic!(
                     "Failed to load information about chain `{}`: {}",
                     chain_spec.name(),
@@ -445,7 +457,7 @@ async fn start_services(
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
-            network_service: (network_service.clone(), 0),
+            network_service: (network_service.clone(), chain_index),
             sync_service,
             transactions_service,
             runtime_service,

@@ -48,6 +48,9 @@ const startInstance = async (config) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'jsonrpc', data, chainIndex, userData });
     },
+    forbidTcp: config.forbidTcp,
+    forbidWs: config.forbidWs,
+    forbidWss: config.forbidWss,
   };
 
   const { bindings: smoldotJsBindings } = smoldot_js_builder(smoldotJsConfig);

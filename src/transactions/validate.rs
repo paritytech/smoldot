@@ -23,7 +23,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{convert::TryFrom as _, iter};
+use core::{iter, num::NonZeroU64};
 
 /// Configuration for a transaction validation process.
 pub struct Config<TTx> {
@@ -110,7 +110,7 @@ pub struct ValidTransaction {
     /// >           after a certain number of blocks. In that case, the longevity returned by the
     /// >           validation function will be at most this number of blocks. The concept of
     /// >           mortal transactions, however, is not relevant from the client's perspective.
-    pub longevity: u64,
+    pub longevity: NonZeroU64,
 
     /// A flag indicating whether the transaction should be propagated to other peers.
     ///
@@ -387,17 +387,17 @@ fn valid_transaction(bytes: &[u8]) -> nom::IResult<&[u8], ValidTransaction> {
         "valid transaction",
         nom::combinator::map(
             nom::sequence::tuple((
-                nom::bytes::complete::take(8u32),
+                nom::number::complete::le_u64,
                 tags,
                 tags,
-                nom::bytes::complete::take(8u32),
+                nom::combinator::map_opt(nom::number::complete::le_u64, NonZeroU64::new),
                 util::nom_bool_decode,
             )),
             |(priority, requires, provides, longevity, propagate)| ValidTransaction {
-                priority: u64::from_le_bytes(<[u8; 8]>::try_from(priority).unwrap()),
+                priority,
                 requires,
                 provides,
-                longevity: u64::from_le_bytes(<[u8; 8]>::try_from(longevity).unwrap()),
+                longevity,
                 propagate,
             },
         ),

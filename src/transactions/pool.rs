@@ -372,6 +372,25 @@ impl<TTx> Pool<TTx> {
     /// you insert transactions that belong to the body of the new block.
     pub fn append_block(mut self) -> AppendBlock<TTx> {
         self.best_block_height = self.best_block_height.checked_add(1).unwrap();
+
+        // Un-validate non-included transactions whose longevity has expired.
+        // TODO: O(n) :-/
+        for (_, tx) in &mut self.transactions {
+            if tx.included_block_height.is_some() {
+                continue;
+            }
+
+            match tx.validation {
+                Some((block_validated, Ok(ValidTransaction { longevity, .. })))
+                    if block_validated.saturating_add(longevity.get())
+                        <= self.best_block_height =>
+                {
+                    tx.validation = None;
+                }
+                _ => {}
+            };
+        }
+
         AppendBlock { inner: self }
     }
 
