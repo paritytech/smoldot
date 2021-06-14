@@ -444,7 +444,7 @@ async fn start_services(
                     let new_task_tx = new_task_tx.clone();
                     move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                 }),
-                network_service: (network_service.clone(), 0),
+                network_service: (network_service.clone(), chain_index),
                 sync_service: sync_service.clone(),
             })
             .await,
@@ -455,7 +455,7 @@ async fn start_services(
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
-            network_service: (network_service.clone(), 0),
+            network_service: (network_service.clone(), chain_index),
             sync_service,
             transactions_service,
             runtime_service,
