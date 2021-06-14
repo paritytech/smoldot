@@ -229,16 +229,11 @@ impl<TSrc> GrandpaWarpSync<TSrc> {
                     },
                     None,
                 ) => {
-                    let babe_next_epoch_query =
-                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                            runtime: virtual_machine,
-                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
-                        });
-                    return Self::from_babe_fetch_epoch_query(
-                        babe_next_epoch_query,
-                        Some(current_epoch),
-                        state,
-                    );
+                    fetched_current_epoch = Some(current_epoch);
+                    query = babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                        runtime: virtual_machine,
+                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
+                    });
                 }
                 (
                     babe_fetch_epoch::Query::Finished {
