@@ -84,10 +84,6 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
-
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
 
@@ -117,8 +113,6 @@ impl TransactionsService {
         (config.tasks_executor)(
             "transactions-service".into(),
             Box::pin(background_task(
-                config.network_service.0,
-                config.network_service.1,
                 config.sync_service,
                 from_foreground,
                 usize::try_from(config.max_concurrent_downloads).unwrap_or(usize::max_value()),
@@ -218,8 +212,6 @@ enum ToBackground {
 
 /// Background task running in parallel of the front service.
 async fn background_task(
-    network_service: Arc<network_service::NetworkService>,
-    network_chain_index: usize,
     sync_service: Arc<sync_service::SyncService>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     max_concurrent_downloads: usize,
@@ -296,33 +288,33 @@ async fn background_task(
             }
 
             // Start block bodies downloads that need to be started.
-            loop {
+            while worker.block_downloads.len() < worker.max_concurrent_downloads {
                 // TODO: prioritize best chain?
-                let (block_hash, block) = match worker
-                    .pending_transactions
-                    .missing_block_bodies()
-                    .find(|(_, block)| {
-                        // The transaction pool isn't aware of the fact that we're currently downloading
-                        // a block's body. Skip when that is the case.
-                        if block.downloading {
-                            return false;
-                        }
+                let block_hash =
+                    match worker
+                        .pending_transactions
+                        .missing_block_bodies()
+                        .find(|(_, block)| {
+                            // The transaction pool isn't aware of the fact that we're currently downloading
+                            // a block's body. Skip when that is the case.
+                            if block.downloading {
+                                return false;
+                            }
 
-                        // Don't try again block downloads that have failed before.
-                        if block.failed_downloads >= 1 {
-                            // TODO: try downloading again if finalized or best chain
-                            return false;
-                        }
+                            // Don't try again block downloads that have failed before.
+                            if block.failed_downloads >= 1 {
+                                // TODO: try downloading again if finalized or best chain
+                                return false;
+                            }
 
-                        true
-                    }) {
-                    Some(b) => b,
-                    None => break,
-                };
+                            true
+                        }) {
+                        Some((b, _)) => *b,
+                        None => break,
+                    };
 
                 // Actual download start.
                 worker.block_downloads.push({
-                    let block_hash = *block_hash;
                     let download_future = worker.sync_service.clone().block_query(
                         block_hash,
                         protocol::BlocksRequestFields {
@@ -336,7 +328,6 @@ async fn background_task(
                         .boxed()
                 });
 
-                let block_hash = *block_hash;
                 worker
                     .pending_transactions
                     .block_user_data_mut(&block_hash)
@@ -423,11 +414,15 @@ async fn background_task(
                     }
                 },
 
-                // TODO: refactor for performances
-                (transaction_to_reannounce, _, _) = worker.pending_transactions.transactions_iter_mut()
+                /*// TODO: refactor for performances
+                (transaction_to_reannounce, _) = worker.pending_transactions.transactions_iter_mut()
                     .map(|(tx_id, tx)| (&mut tx.when_reannounce).map(move |()| tx_id))
-                    .collect::<future::SelectAll<_>>().fuse() =>
+                    .collect::<stream::FuturesUnordered<_>>()
+                    .chain(stream::pending())
+                    .into_future() =>
                 {
+                    let transaction_to_reannounce = transaction_to_reannounce.unwrap();
+
                     let peers_sent = network_service
                         .clone()
                         .announce_transaction(
@@ -442,7 +437,7 @@ async fn background_task(
                             .unwrap();
                         tx.update_status(TransactionStatus::Broadcast(peers_sent));
                     }
-                },
+                },*/
 
                 message = from_foreground.next().fuse() => {
                     let message = match message {
