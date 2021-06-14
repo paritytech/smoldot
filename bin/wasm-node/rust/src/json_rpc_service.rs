@@ -506,12 +506,28 @@ impl JsonRpcService {
 
                 self.send_back(
                     &match self.header_query(&hash).await {
-                        Ok(header) => methods::Response::chain_getHeader(
-                            methods::Header::from_scale_encoded_header(&header).unwrap(),
-                        )
-                        .to_json_response(request_id),
-                        // TODO: error or null?
-                        Err(()) => json_rpc::parse::build_success_response(request_id, "null"),
+                        Ok(header) => {
+                            // In the case of a parachain, it is possible for the header to be in
+                            // a format that smoldot isn't capable of parsing. In that situation,
+                            // we take of liberty of returning a JSON-RPC error.
+                            match methods::Header::from_scale_encoded_header(&header) {
+                                Ok(decoded) => methods::Response::chain_getHeader(decoded)
+                                    .to_json_response(request_id),
+                                Err(error) => json_rpc::parse::build_error_response(
+                                    request_id,
+                                    json_rpc::parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        &format!("Failed to decode header: {}", error),
+                                    ),
+                                    None,
+                                ),
+                            }
+                        }
+                        Err(()) => {
+                            // Failed to retreive the header.
+                            // TODO: error or null?
+                            json_rpc::parse::build_success_response(request_id, "null")
+                        }
                     },
                     user_data,
                 );
