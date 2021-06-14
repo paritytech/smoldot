@@ -433,6 +433,7 @@ async fn start_services(
                     move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                 }),
                 sync_service: sync_service.clone(),
+                runtime_service: runtime_service.clone(),
                 max_pending_transactions: 64,
                 max_concurrent_downloads: 3,
             })

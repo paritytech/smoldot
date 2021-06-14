@@ -67,7 +67,7 @@
 //! transaction.
 //!
 
-use crate::{ffi, network_service, sync_service};
+use crate::{ffi, runtime_service, sync_service};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use smoldot::{
@@ -86,6 +86,9 @@ pub struct Config {
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
+
+    /// Service responsible for synchronizing the chain.
+    pub runtime_service: Arc<runtime_service::RuntimeService>,
 
     /// Maximum number of pending transactions allowed in the service.
     ///
@@ -114,6 +117,7 @@ impl TransactionsService {
             "transactions-service".into(),
             Box::pin(background_task(
                 config.sync_service,
+                config.runtime_service,
                 from_foreground,
                 usize::try_from(config.max_concurrent_downloads).unwrap_or(usize::max_value()),
                 usize::try_from(config.max_pending_transactions).unwrap_or(usize::max_value()),
@@ -213,12 +217,14 @@ enum ToBackground {
 /// Background task running in parallel of the front service.
 async fn background_task(
     sync_service: Arc<sync_service::SyncService>,
+    runtime_service: Arc<runtime_service::RuntimeService>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
 ) {
     let mut worker = Worker {
         sync_service,
+        runtime_service,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity: cmp::min(8, max_pending_transactions),
             blocks_capacity: 32,
@@ -227,6 +233,7 @@ async fn background_task(
         block_downloads: FuturesUnordered::new(),
         max_concurrent_downloads,
         max_pending_transactions,
+        next_validation_start: ffi::Delay::new(Duration::new(0, 0)),
     };
 
     // TODO: must periodically re-send transactions that aren't included in block yet
@@ -443,6 +450,12 @@ async fn background_task(
                     }
                 },*/
 
+                _ = &mut worker.next_validation_start => {
+                    worker.next_validation_start = ffi::Delay::new(Duration::from_secs(2));
+
+                    // TODO: start validation
+                }
+
                 message = from_foreground.next().fuse() => {
                     let message = match message {
                         Some(msg) => msg,
@@ -502,8 +515,11 @@ async fn background_task(
 
 /// Background worker running in parallel of the front service.
 struct Worker {
-    // How to download the bodies of blocks.
+    // How to download the bodies of blocks and synchronize the chain.
     sync_service: Arc<sync_service::SyncService>,
+
+    // How to validate the transactions.
+    runtime_service: Arc<runtime_service::RuntimeService>,
 
     /// List of pending transactions.
     ///
@@ -527,6 +543,9 @@ struct Worker {
     /// See [`Config::max_concurrent_downloads`]. Maximum number of elements in
     /// [`Worker::block_downloads`].
     max_concurrent_downloads: usize,
+
+    /// When to start the next transaction validation.
+    next_validation_start: ffi::Delay,
 }
 
 impl Worker {
