@@ -28,6 +28,27 @@
 //! - The [`LightPool`] tracks all forks, not just the best chain, so as to not require fetching
 //! again later the block bodies that are already known in case of a double re-org.
 //!
+//! # Usage
+//!
+//! A [`LightPool`] is a collection of transactions and a tree of blocks.
+//!
+//! TODO: write up here about blocks
+//!
+//! Each transaction in the pool exposes two properties:
+//!
+//! - Whether or not it has been validated, and if yes, the block against which it has been
+//! validated and the characteristics of the transaction (as provided by the runtime): the tags it
+//! provides and requires, its longevity, and its priority. See [the `validate` module](../validate)
+//! for more information.
+//! - A so-called user data, an opaque field controller by the API user, of type `TTx`.
+//!
+//! Use [`LightPool::add_unvalidated`] to add to the pool a transaction that should be included in
+//! a block at a later point in time.
+//!
+//! Use [`LightPool::unvalidated_transactions`] to obtain the list of transactions that should be
+//! validated. Validation should be performed using the [`validate`](../validate) module, and
+//! the result reported with [`LightPool::set_validation_result`].
+//!
 
 use super::{
     pool,
@@ -77,6 +98,10 @@ pub struct LightPool<TTx, TBl> {
     /// Index of the best block in [`LightPool::blocks_tree`]. `None` iff the tree is empty.
     best_block_index: Option<fork_tree::NodeIndex>,
 
+    /// Index of the finalized block in [`LightPool::blocks_tree`]. `None` if the tree is empty
+    /// or if the finalized block is [`LightPool::blocks_tree_root_hash`].
+    finalized_block_index: Option<fork_tree::NodeIndex>,
+
     /// Hash of the block that serves as root of all the blocks in [`LightPool::blocks_tree`].
     /// Always a finalized block.
     blocks_tree_root_hash: [u8; 32],
@@ -108,6 +133,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 Default::default(),
             ),
             best_block_index: None,
+            finalized_block_index: None,
             blocks_tree_root_hash: config.finalized_block_hash,
             // Must match the finalized block height passed to the underlying pool.
             best_block_virtual_height: 0,
@@ -126,56 +152,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         self.best_block_virtual_height = 0;
         self.finalized_block_virtual_height = 0;
         self.blocks_tree_root_hash = new_finalized_block_hash;
-    }
-
-    /// Sets the finalized block of the chain.
-    ///
-    /// Removes and returns the blocks that are not part of the finalized chain. The finalized
-    /// chain itself, however, isn't removed.
-    ///
-    /// The current best block (set using [`LightPool::set_best_block`]) must be a descendant of
-    /// or equal to the node passed as parameter. This guarantees that no transaction gets
-    /// retracted.
-    ///
-    /// # Panic
-    ///
-    /// Panics if no block with the given hash has been inserted before.
-    /// Panics if the current best block isn't a descendant of or equal to the new finalized
-    /// block.
-    ///
-    pub fn set_finalized_block(
-        &mut self,
-        new_finalized_block_hash: &[u8; 32],
-    ) -> impl Iterator<Item = ([u8; 32], TBl)> {
-        let new_finalized_block_index = *self.blocks_by_id.get(new_finalized_block_hash).unwrap();
-        assert!(self
-            .blocks_tree
-            .is_ancestor(new_finalized_block_index, self.best_block_index.unwrap()));
-
-        // TODO: don't allocate a Vec here
-        let mut out = Vec::new();
-        for pruned_block in self.blocks_tree.prune_uncles(new_finalized_block_index) {
-            debug_assert!(!pruned_block.is_prune_target_ancestor);
-
-            let _expected_index = self.blocks_by_id.remove(&pruned_block.user_data.hash);
-            debug_assert_eq!(_expected_index, Some(pruned_block.index));
-
-            out.push((
-                pruned_block.user_data.hash,
-                pruned_block.user_data.user_data,
-            ));
-        }
-
-        out.into_iter()
-    }
-
-    /// Removes from the pool as many blocks as possible from the finalized chain. Blocks are
-    /// removed until either the finalized block or a block whose body is missing is encountered.
-    pub fn prune_finalized_with_body(&mut self) -> impl Iterator<Item = ([u8; 32], TBl)> {
-        self.pool
-            .as_mut()
-            .unwrap()
-            .remove_included(block_inferior_of_equal)
     }
 
     /// Returns the number of transactions in the pool.
@@ -296,6 +272,33 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         scale_encoded: &[u8],
     ) -> impl Iterator<Item = TransactionId> + '_ {
         self.pool.as_ref().unwrap().find(scale_encoded)
+    }
+
+    /// Sets the outcome of validating the transaction with the given identifier.
+    ///
+    /// The block hash must be the block hash against which the transaction has been
+    /// validated.
+    ///
+    /// The validation result might be ignored if it doesn't match one of the entries returned by
+    /// [`Pool::unvalidated_transactions`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the transaction with the given id is invalid.
+    ///
+    pub fn set_validation_result(
+        &mut self,
+        id: TransactionId,
+        block_hash_validated_against: &[u8; 32],
+        result: Result<ValidTransaction, InvalidTransaction>,
+    ) {
+        let block_index = self.blocks_by_id.remove(block_hash_validated_against).unwrap();
+
+        self.pool.as_mut().unwrap().set_validation_result(
+            id,
+            block_number_validated_against,
+            result,
+        )
     }
 
     /// Adds a block to the collection of blocks.
@@ -563,29 +566,76 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             })
     }
 
-    /// Sets the outcome of validating the transaction with the given identifier.
+    /// Sets the finalized block of the chain.
     ///
-    /// The block number must be the block number against which the transaction has been
-    /// validated.
+    /// Removes and returns the blocks that are not part of the finalized chain. Please note that
+    /// the finalized chain itself, however, isn't removed.
     ///
-    /// The validation result might be ignored if it doesn't match one of the entries returned by
-    /// [`Pool::unvalidated_transactions`].
+    /// The current best block (set using [`LightPool::set_best_block`]) must be a descendant of
+    /// or equal to the node passed as parameter. This guarantees that no transaction gets
+    /// retracted.
     ///
     /// # Panic
     ///
-    /// Panics if the transaction with the given id is invalid.
+    /// Panics if no block with the given hash has been inserted before.
+    /// Panics if the current best block isn't a descendant of or equal to the new finalized
+    /// block.
     ///
-    pub fn set_validation_result(
+    pub fn set_finalized_block(
         &mut self,
-        id: TransactionId,
-        block_number_validated_against: u64,
-        result: Result<ValidTransaction, InvalidTransaction>,
-    ) {
-        self.pool.as_mut().unwrap().set_validation_result(
-            id,
-            block_number_validated_against,
-            result,
-        )
+        new_finalized_block_hash: &[u8; 32],
+    ) -> impl Iterator<Item = ([u8; 32], TBl)> {
+        self.finalized_block_index = if *new_finalized_block_hash == self.blocks_tree_root_hash {
+            None
+        } else {
+            let index = *self.blocks_by_id.get(new_finalized_block_hash).unwrap();
+            assert!(self
+                .blocks_tree
+                .is_ancestor(index, self.best_block_index.unwrap()));
+            Some(index)
+        };
+
+        // TODO: don't allocate a Vec here
+        let mut out = Vec::new();
+
+        if let Some(new_finalized_block_index) = self.finalized_block_index {
+            for pruned_block in self.blocks_tree.prune_uncles(new_finalized_block_index) {
+                debug_assert!(!pruned_block.is_prune_target_ancestor);
+
+                let _expected_index = self.blocks_by_id.remove(&pruned_block.user_data.hash);
+                debug_assert_eq!(_expected_index, Some(pruned_block.index));
+
+                out.push((
+                    pruned_block.user_data.hash,
+                    pruned_block.user_data.user_data,
+                ));
+            }
+        }
+
+        out.into_iter()
+    }
+
+    /// Removes from the pool as many blocks as possible from the finalized chain. Blocks are
+    /// removed from parent to child until either the first non-finalized block or a block whose
+    /// body is missing is encountered.
+    pub fn prune_finalized_with_body(&mut self) -> impl Iterator<Item = ([u8; 32], TBl)> {
+        self.pool
+            .as_mut()
+            .unwrap()
+            .remove_included(block_inferior_of_equal)
+    }
+
+    /// Returns the number of blocks between the oldest block stored in this data structure and
+    /// the finalized block.
+    pub fn oldest_block_finality_lag(&self) -> usize {
+        if let Some(finalized_block_index) = self.finalized_block_index {
+            self.blocks_tree
+                .root_to_node_path(finalized_block_index)
+                .count()
+        } else {
+            debug_assert!(self.blocks_tree.is_empty());
+            0
+        }
     }
 }
 

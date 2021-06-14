@@ -333,6 +333,12 @@ async fn background_task(
                     .downloading = true;
             }
 
+            // Refuse to store blocks that are older than `latest_finalized - 32`. If that
+            // happens, we jump to "catastrophic mode".
+            if worker.pending_transactions.oldest_block_finality_lag() >= 32 {
+                continue 'channels_rebuild;
+            }
+
             futures::select! {
                 new_block = new_blocks_receiver.next().fuse() => {
                     if let Some(new_block) = new_block {
