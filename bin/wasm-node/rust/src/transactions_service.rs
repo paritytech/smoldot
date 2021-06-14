@@ -224,7 +224,6 @@ async fn background_task(
             blocks_capacity: 32,
             finalized_block_hash: [0; 32], // Pool is re-initialized below.
         }),
-        finalized_downloading_blocks: Vec::new(),
         block_downloads: FuturesUnordered::new(),
         max_concurrent_downloads,
         max_pending_transactions,
@@ -336,8 +335,8 @@ async fn background_task(
             }
 
             // Remove finalized blocks from the pool when possible.
-            for (block_hash, block) in worker.pending_transactions.prune_finalized_with_body() {
-                debug_assert!(!block.downloading);
+            for (_, _block) in worker.pending_transactions.prune_finalized_with_body() {
+                debug_assert!(!_block.downloading);
                 // TODO: report finalized transactions
             }
 
@@ -381,9 +380,14 @@ async fn background_task(
 
                     let finalized_hash =
                         header::hash_from_scale_encoded_header(&finalized_block_header.unwrap());
-                    worker
+                    for _ in worker
                         .pending_transactions
-                        .set_finalized_block(&finalized_hash);
+                        .set_finalized_block(&finalized_hash)
+                    {
+                        // Nothing to do here.
+                        // We could in principle interrupt any on-going download of that block,
+                        // but it is not worth the effort.
+                    }
                 },
 
                 download = worker.block_downloads.select_next_some() => {
@@ -515,9 +519,6 @@ struct Worker {
     /// See [`Config::max_pending_transactions`].
     max_pending_transactions: usize,
 
-    /// List of blocks that have been finalized but whose body is still downloading.
-    finalized_downloading_blocks: Vec<Block>,
-
     /// List of ongoing block body downloads.
     /// The output of the future is a block hash and a block body.
     block_downloads:
@@ -586,7 +587,8 @@ struct PendingTransaction {
     /// List of channels that should receive changes to the transaction status.
     status_update: Vec<mpsc::Sender<TransactionStatus>>,
 
-    // TODO: never updated
+    /// Latest known status of the transaction. Used when a new sender is added to
+    /// [`PendingTransaction::status_update`].
     latest_status: Option<TransactionStatus>,
 }
 

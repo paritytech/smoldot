@@ -285,9 +285,8 @@ impl<TTx> Pool<TTx> {
             let tx = self.transactions.get(tx_id.0).unwrap();
             let height = tx
                 .included_block_height
-                .unwrap_or(self.best_block_height)
-                .checked_sub(1)
-                .unwrap();
+                .map(|n| n.checked_sub(1).unwrap())
+                .unwrap_or(self.best_block_height);
             (tx_id, &tx.user_data, height)
         })
     }
