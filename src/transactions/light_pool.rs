@@ -36,7 +36,7 @@ use super::{
 use crate::chain::fork_tree;
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, fmt, iter};
+use core::{fmt, iter};
 
 pub use pool::TransactionId;
 
@@ -52,7 +52,7 @@ pub struct Config {
     ///
     /// Non-finalized blocks should be added to the pool after initialization using
     /// [`Pool::append_block`].
-    pub finalized_block: [u8; 32],
+    pub finalized_block_hash: [u8; 32],
 }
 
 /// Data structure containing transactions. See the module-level documentation for more info.
@@ -68,7 +68,6 @@ pub struct LightPool<TTx, TBl> {
     /// Tree of all the non-finalized blocks. This is necessary in case of a re-org (i.e. the new
     /// best block is a nephew of the previous best block) in order to know which transactions
     /// that were present in the previous best chain are still present in the new best chain.
-    // TODO: add a maximum size?
     blocks_tree: fork_tree::ForkTree<Block<TBl>>,
 
     /// Contains all blocks in [`LightPool::blocks_tree`], indexed by their hash.
@@ -106,19 +105,28 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             best_block_index: None,
             // Must match the finalized block height passed to the underlying pool.
             best_block_virtual_height: 0,
-            latest_finalized_block: config.finalized_block,
+            latest_finalized_block: config.finalized_block_hash,
         }
     }
 
-    /// Removes all transactions from the pool, and sets the current best block height to the
-    /// value passed as parameter.
-    // TODO: change
-    pub fn clear_and_reset(&mut self, new_best_block_height: u64) {
-        self.pool
-            .as_mut()
-            .unwrap()
-            .clear_and_reset(new_best_block_height);
+    /// Removes all transactions and blocks from the pool, and sets the current finalized block
+    /// hash to the value passed as parameter.
+    pub fn clear_and_reset(&mut self, new_finalized_block_hash: [u8; 32]) {
+        self.pool.as_mut().unwrap().clear_and_reset(0);
+        self.blocks_tree.clear();
+        self.blocks_by_id.clear();
+        self.best_block_index = None;
+        self.best_block_virtual_height = 0;
+        self.latest_finalized_block = new_finalized_block_hash;
     }
+
+    /// Sets the finalized block of the chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if no block with the given hash has been inserted before.
+    ///
+    pub fn set_finalized_block(&mut self, new_finalized_block_hash: &[u8; 32]) {}
 
     /// Returns the number of transactions in the pool.
     pub fn num_transactions(&self) -> usize {
@@ -410,6 +418,22 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             retracted_transactions,
             included_transactions,
         }
+    }
+
+    /// Returns the user data associated with a given block.
+    ///
+    /// Returns `None` if the block hash doesn't correspond to a known block.
+    pub fn block_user_data(&self, hash: &[u8; 32]) -> Option<&TBl> {
+        let index = *self.blocks_by_id.get(hash)?;
+        Some(&self.blocks_tree.get(index).unwrap().user_data)
+    }
+
+    /// Returns the user data associated with a given block.
+    ///
+    /// Returns `None` if the block hash doesn't correspond to a known block.
+    pub fn block_user_data_mut(&mut self, hash: &[u8; 32]) -> Option<&mut TBl> {
+        let index = *self.blocks_by_id.get(hash)?;
+        Some(&mut self.blocks_tree.get_mut(index).unwrap().user_data)
     }
 
     /// Sets the list of transactions that are present in the body of a block.

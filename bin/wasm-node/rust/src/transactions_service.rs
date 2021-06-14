@@ -77,7 +77,7 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, convert::TryFrom as _, num::NonZeroU64, pin::Pin, sync::Arc, time::Duration};
+use std::{cmp, convert::TryFrom as _, pin::Pin, sync::Arc, time::Duration};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
@@ -230,7 +230,7 @@ async fn background_task(
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity: cmp::min(8, max_pending_transactions),
             blocks_capacity: 32,
-            finalized_block: [0; 32], // Pool is re-initialized below.
+            finalized_block_hash: [0; 32], // Pool is re-initialized below.
         }),
         finalized_downloading_blocks: Vec::new(),
         block_downloads: FuturesUnordered::new(),
@@ -258,17 +258,12 @@ async fn background_task(
             )
         };
         let (_, mut finalized_block_receiver) = worker.sync_service.subscribe_finalized().await;
-
-        worker.latest_finalized_block = (
-            header::decode(&current_finalized_block_header)
-                .unwrap()
-                .number,
-            header::hash_from_scale_encoded_header(&current_finalized_block_header),
-        );
-        worker.blocks_tree.clear();
-        worker.best_block_index = None;
+        let current_finalized_block_hash =
+            header::hash_from_scale_encoded_header(&current_finalized_block_header);
 
         // TODO: reset finalized_downloading_blocks too?
+
+        worker.block_downloads.clear();
 
         // As explained above, this code is reached if there is a gap in the blocks.
         // Consequently, we drop all pending transactions.
@@ -277,13 +272,12 @@ async fn background_task(
         }
         worker
             .pending_transactions
-            .clear_and_reset(worker.latest_finalized_block.0);
+            .clear_and_reset(current_finalized_block_hash);
 
         log::debug!(
             target: "tx-service",
-            "Transactions watcher moved to finalized block {} (#{}).",
-            HashDisplay(&worker.latest_finalized_block.1),
-            worker.latest_finalized_block.0
+            "Transactions watcher moved to finalized block {}.",
+            HashDisplay(&current_finalized_block_hash),
         );
 
         loop {
@@ -296,12 +290,48 @@ async fn background_task(
                     .next()
                     .map(|(tx_id, ..)| tx_id);
 
-                if let Some(to_start_validate) = to_start_validate {}
+                if let Some(to_start_validate) = to_start_validate {
+                    // TODO:
+                }
             }
 
             // Start block bodies downloads that need to be started.
-            // TODO: do it for the non-best-chain too?
-            for _ in worker.pending_transactions.missing_block_bodies() {}
+            // TODO: prioritize best chain?
+            for (block_hash, block) in worker.pending_transactions.missing_block_bodies() {
+                // The transaction pool isn't aware of the fact that we're currently downloading
+                // a block's body. Skip when that is the case.
+                if block.downloading {
+                    continue;
+                }
+
+                // Don't try again block downloads that have failed before.
+                if block.failed_downloads >= 1 {
+                    // TODO: try downloading again if finalized or best chain
+                    continue;
+                }
+
+                // Actual download start.
+                worker.block_downloads.push({
+                    let block_hash = *block_hash;
+                    let download_future = worker.sync_service.clone().block_query(
+                        block_hash,
+                        protocol::BlocksRequestFields {
+                            body: true,
+                            header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
+                            justification: false,
+                        },
+                    );
+
+                    async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) }
+                        .boxed()
+                });
+
+                worker
+                    .pending_transactions
+                    .block_user_data_mut(block_hash)
+                    .unwrap()
+                    .downloading = true;
+            }
 
             futures::select! {
                 new_block = new_blocks_receiver.next().fuse() => {
@@ -309,7 +339,7 @@ async fn background_task(
                         let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
                         worker.new_block(&new_block.scale_encoded_header, &new_block.parent_hash);
                         if new_block.is_new_best {
-                            worker.set_best_block(hash).await;
+                            worker.set_best_block(&hash).await;
                         }
                     } else {
                         continue 'channels_rebuild;
@@ -328,7 +358,7 @@ async fn background_task(
                             let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
                             worker.new_block(&new_block.scale_encoded_header, &new_block.parent_hash);
                             if new_block.is_new_best {
-                                worker.set_best_block(hash).await;
+                                worker.set_best_block(&hash).await;
                             }
                         } else {
                             continue 'channels_rebuild;
@@ -339,7 +369,20 @@ async fn background_task(
                 },
 
                 download = worker.block_downloads.select_next_some() => {
+                    // A block body download has finished, successfully or not.
                     let (block_hash, block_body) = download;
+
+                    let mut block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
+                        Some(b) => b,
+                        None => continue,  // It is possible that this block has been finalized.
+                    };
+
+                    debug_assert!(block.downloading);
+                    block.downloading = false;
+                    if block_body.is_err() {
+                        block.failed_downloads = block.failed_downloads.saturating_add(1);
+                    }
+
                     if let Ok(block_body) = block_body {
                         let included_transactions = worker
                             .pending_transactions
@@ -388,15 +431,24 @@ async fn background_task(
                             transaction_bytes,
                             updates_report,
                         } => {
-                            if let Some(tx_id) = worker.pending_transactions.find_transaction(&transaction_bytes).next() {
-                                let mut tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
+                            // Handle the situation where the same transaction has already been
+                            // submitted in the pool before.
+                            let existing_tx_id = worker.pending_transactions
+                                .find_transaction(&transaction_bytes)
+                                .next();
+                            if let Some(existing_tx_id) = existing_tx_id {
+                                let existing_tx = worker.pending_transactions
+                                    .transaction_user_data_mut(existing_tx_id)
+                                    .unwrap();
                                 if let Some(updates_report) = updates_report {
-                                    tx.status_update.push(updates_report);
-                                    // TODO: immediately send the latest known status?
+                                    existing_tx.status_update.push(updates_report);
+                                    // TODO: immediately send the latest known status
                                 }
                                 continue;
                             }
 
+                            // We intentionally limit the number of transactions in the pool,
+                            // and immediately drop new transactions of this limit is reached.
                             if worker.pending_transactions.num_transactions() >= worker.max_pending_transactions {
                                 if let Some(mut updates_report) = updates_report {
                                     let _ = updates_report.try_send(TransactionStatus::Dropped);
@@ -404,6 +456,7 @@ async fn background_task(
                                 continue;
                             }
 
+                            // Success path. Inserting in pool.
                             worker
                                 .pending_transactions
                                 .add_unvalidated(transaction_bytes, PendingTransaction {
@@ -456,7 +509,13 @@ struct Worker {
     max_concurrent_downloads: usize,
 }
 
-struct Block {}
+struct Block {
+    /// Number of previous downloads that have failed.
+    failed_downloads: u8,
+
+    /// `True` if the body of this block is currently being downloaded.
+    downloading: bool,
+}
 
 struct PendingTransaction {
     /// When to gossip the transaction on the network again.
@@ -470,7 +529,10 @@ impl Worker {
         self.pending_transactions.add_block(
             header::hash_from_scale_encoded_header(&new_block_header),
             parent_hash,
-            Block {},
+            Block {
+                failed_downloads: 0,
+                downloading: false,
+            },
         );
     }
 
@@ -545,23 +607,6 @@ impl Worker {
                 // TODO: ?!
             }
         }
-    }
-
-    /// Inserts into `block_downloads` a future that downloads the body of the block with the
-    /// given hash.
-    fn push_block_download(&mut self, block_hash: [u8; 32]) {
-        self.block_downloads.push({
-            let download_future = self.sync_service.clone().block_query(
-                block_hash,
-                protocol::BlocksRequestFields {
-                    body: true,
-                    header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
-                    justification: false,
-                },
-            );
-
-            async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) }.boxed()
-        });
     }
 }
 
