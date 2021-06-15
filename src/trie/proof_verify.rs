@@ -152,11 +152,17 @@ pub fn trie_node_info<'a, 'b>(
         config.proof.clone().nth(proof_iter).unwrap()
     };
 
+    // Number of nibbles that have been found during the iteration below.
+    // Used only for debugging purposes.
+    let mut iter_nibbles = 0usize;
+
     // The verification consists in iterating using `expected_nibbles_iter` and `node_value`.
     let mut expected_nibbles_iter = config.requested_key;
     loop {
         if node_value.is_empty() {
-            return Err(Error::InvalidNodeValue);
+            return Err(Error::InvalidNodeValue {
+                invalid_node_nibbles: iter_nibbles,
+            });
         }
 
         let has_children = (node_value[0] & 0x80) != 0;
@@ -171,12 +177,16 @@ pub fn trie_node_info<'a, 'b>(
                 let mut continue_iter = accumulator == 63;
                 while continue_iter {
                     if node_value.is_empty() {
-                        return Err(Error::InvalidNodeValue);
+                        return Err(Error::InvalidNodeValue {
+                            invalid_node_nibbles: iter_nibbles,
+                        });
                     }
                     continue_iter = node_value[0] == 255;
-                    accumulator = accumulator
-                        .checked_add(usize::from(node_value[0]))
-                        .ok_or(Error::InvalidNodeValue)?;
+                    accumulator = accumulator.checked_add(usize::from(node_value[0])).ok_or(
+                        Error::InvalidNodeValue {
+                            invalid_node_nibbles: iter_nibbles,
+                        },
+                    )?;
                     node_value = &node_value[1..];
                 }
                 accumulator
@@ -189,7 +199,9 @@ pub fn trie_node_info<'a, 'b>(
                 1 + ((pk_len - 1) / 2)
             };
             if node_value.len() < pk_len_bytes {
-                return Err(Error::InvalidNodeValue);
+                return Err(Error::InvalidNodeValue {
+                    invalid_node_nibbles: iter_nibbles,
+                });
             }
 
             let pk_nibbles_iter = node_value
@@ -216,14 +228,18 @@ pub fn trie_node_info<'a, 'b>(
                         children: Children::None,
                     });
                 }
-                Some(_) => {}
+                Some(_) => {
+                    iter_nibbles += 1;
+                }
             }
         }
 
         // After the partial key, the node value optionally contains a bitfield of child nodes.
         let children_bitmap = if has_children {
             if node_value.len() < 2 {
-                return Err(Error::InvalidNodeValue);
+                return Err(Error::InvalidNodeValue {
+                    invalid_node_nibbles: iter_nibbles,
+                });
             }
             let val = u16::from_le_bytes(<[u8; 2]>::try_from(&node_value[..2]).unwrap());
             node_value = &node_value[2..];
@@ -252,10 +268,16 @@ pub fn trie_node_info<'a, 'b>(
 
                 // Find the Merkle value of that child in `node_value`.
                 let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue)?;
+                    .map_err(
+                        |_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue {
+                            invalid_node_nibbles: iter_nibbles,
+                        },
+                    )?;
                 node_value = node_value_update;
                 if node_value.len() < len {
-                    return Err(Error::InvalidNodeValue);
+                    return Err(Error::InvalidNodeValue {
+                        invalid_node_nibbles: iter_nibbles,
+                    });
                 }
 
                 // The Merkle value that was just found is the one that interests us.
@@ -270,11 +292,14 @@ pub fn trie_node_info<'a, 'b>(
                         let proof_iter = merkle_values
                             .iter()
                             .position(|v| v[..] == node_value[..len])
-                            .ok_or(Error::MissingProofEntry)?;
+                            .ok_or(Error::MissingProofEntry {
+                                closest_ancestor_nibbles: iter_nibbles,
+                            })?;
                         node_value = config.proof.clone().nth(proof_iter).unwrap();
                     }
 
                     // Break out of the children iteration, to jump to the next node.
+                    iter_nibbles += 1;
                     break;
                 }
 
@@ -287,20 +312,32 @@ pub fn trie_node_info<'a, 'b>(
             // Skip over the Merkle values of the children.
             for _ in 0..children_bitmap.count_ones() {
                 let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                    .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue)?;
+                    .map_err(
+                        |_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue {
+                            invalid_node_nibbles: iter_nibbles,
+                        },
+                    )?;
                 node_value = node_value_update;
                 if node_value.len() < len {
-                    return Err(Error::InvalidNodeValue);
+                    return Err(Error::InvalidNodeValue {
+                        invalid_node_nibbles: iter_nibbles,
+                    });
                 }
                 node_value = &node_value[len..];
             }
 
             // Now at the value that interests us.
             let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue)?;
+                .map_err(
+                    |_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue {
+                        invalid_node_nibbles: iter_nibbles,
+                    },
+                )?;
             node_value = node_value_update;
             if node_value.len() != len {
-                return Err(Error::InvalidNodeValue);
+                return Err(Error::InvalidNodeValue {
+                    invalid_node_nibbles: iter_nibbles,
+                });
             }
             return Ok(TrieNodeInfo {
                 node_value: Some(node_value),
@@ -362,9 +399,15 @@ pub enum Error {
     /// Trie root wasn't found in the proof.
     TrieRootNotFound,
     /// One of the node values in the proof has an invalid format.
-    InvalidNodeValue,
+    InvalidNodeValue {
+        /// Number of nibbles in the key of the node whose value is invalid.
+        invalid_node_nibbles: usize,
+    },
     /// Missing an entry in the proof.
-    MissingProofEntry,
+    MissingProofEntry {
+        /// Number of nibbles in the key of the closest ancestor that was found in the proof.
+        closest_ancestor_nibbles: usize,
+    },
 }
 
 #[cfg(test)]
