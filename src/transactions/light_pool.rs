@@ -54,7 +54,10 @@
 use super::validate::{InvalidTransaction, ValidTransaction};
 use crate::chain::fork_tree;
 
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 use core::{convert::TryFrom as _, fmt, iter};
 
 /// Configuration for [`Pool::new`].
@@ -90,6 +93,11 @@ pub struct LightPool<TTx, TBl> {
 
     /// Symmetry to [`LightPool::transactions_by_inclusion`].
     included_transactions: BTreeSet<(TransactionId, [u8; 32])>,
+
+    transaction_validations:
+        BTreeMap<(TransactionId, [u8; 32]), Result<ValidTransaction, InvalidTransaction>>,
+
+    transactions_by_validation: BTreeSet<([u8; 32], TransactionId)>,
 
     /// List of transactions (represented as indices within [`LightPool::transactions`]) whose
     /// status is "not validated".
@@ -127,6 +135,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             transactions: slab::Slab::with_capacity(config.transactions_capacity),
             transactions_by_inclusion: BTreeSet::new(),
             included_transactions: BTreeSet::new(),
+            transaction_validations: BTreeMap::new(),
+            transactions_by_validation: BTreeSet::new(),
             not_validated: hashbrown::HashSet::with_capacity_and_hasher(
                 config.transactions_capacity,
                 Default::default(),
@@ -149,6 +159,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         self.transactions.clear();
         self.transactions_by_inclusion.clear();
         self.included_transactions.clear();
+        self.transaction_validations.clear();
+        self.transactions_by_validation.clear();
         self.not_validated.clear();
         self.by_hash.clear();
         self.blocks_tree.clear();
@@ -169,7 +181,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
             scale_encoded: scale_encoded.into(),
-            validation: None,
             user_data,
         }));
 
@@ -197,6 +208,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .range((id, [0; 32])..=(id, [0xff; 32]))
             .map(|(_, block)| *block)
             .collect::<Vec<_>>();
+
+        // TODO: remove from validated
 
         // TODO: check if coherent state
         self.not_validated.remove(&id);
@@ -282,12 +295,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// The block hash must be the block hash against which the transaction has been
     /// validated.
     ///
-    /// The validation result might be ignored if it doesn't match one of the entries returned by
-    /// [`Pool::unvalidated_transactions`].
-    ///
     /// # Panic
     ///
     /// Panics if the transaction with the given id is invalid.
+    /// Panics if no block with that hash has been inserted before.
     ///
     pub fn set_validation_result(
         &mut self,
@@ -295,17 +306,20 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         block_hash_validated_against: &[u8; 32],
         result: Result<ValidTransaction, InvalidTransaction>,
     ) {
-        let block_index = self
-            .blocks_by_id
-            .remove(block_hash_validated_against)
-            .unwrap();
+        // Make sure that the block exists.
+        let _block_index = *self.blocks_by_id.get(block_hash_validated_against).unwrap();
 
-        todo!()
-        /*self.pool.as_mut().unwrap().set_validation_result(
-            id,
-            block_number_validated_against,
-            result,
-        )*/
+        // This will replace an existing entry.
+        self.transaction_validations
+            .insert((id, *block_hash_validated_against), result);
+        let inserted = self
+            .transactions_by_validation
+            .insert((*block_hash_validated_against, id));
+
+        if inserted {
+            let _removed = self.not_validated.remove(&id);
+            debug_assert!(_removed);
+        }
     }
 
     /// Adds a block to the collection of blocks.
@@ -583,11 +597,6 @@ pub struct SetBestBlock {
 struct Transaction<TTx> {
     /// Bytes corresponding to the SCALE-encoded transaction.
     scale_encoded: Vec<u8>,
-
-    /// If `Some`, contains the outcome of the validation of this transaction and the block height
-    /// it was validated against.
-    // TODO: change
-    validation: Option<(u64, Result<ValidTransaction, InvalidTransaction>)>,
 
     /// User data chosen by the user.
     user_data: TTx,
