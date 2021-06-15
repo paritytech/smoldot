@@ -399,11 +399,19 @@ pub enum Error {
     /// Trie root wasn't found in the proof.
     TrieRootNotFound,
     /// One of the node values in the proof has an invalid format.
+    #[display(
+        fmt = "A node of the proof has an invalid format (nibbles: {})",
+        invalid_node_nibbles
+    )]
     InvalidNodeValue {
         /// Number of nibbles in the key of the node whose value is invalid.
         invalid_node_nibbles: usize,
     },
     /// Missing an entry in the proof.
+    #[display(
+        fmt = "An entry is missing from the proof (closest ancestor nibbles: {})",
+        closest_ancestor_nibbles
+    )]
     MissingProofEntry {
         /// Number of nibbles in the key of the closest ancestor that was found in the proof.
         closest_ancestor_nibbles: usize,
