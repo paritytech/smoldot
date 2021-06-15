@@ -19,7 +19,8 @@ import * as child_process from 'child_process';
 import * as fs from 'fs';
 
 // Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`.
-const build_profile = 'release';
+// At the moment this defaults to `debug` because correctness is more important than speed.
+const build_profile = 'debug';
 
 // The Rust version to use.
 // The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
