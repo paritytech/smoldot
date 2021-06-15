@@ -91,6 +91,10 @@ pub struct LightPool<TTx, TBl> {
     /// Symmetry to [`LightPool::transactions_by_inclusion`].
     included_transactions: BTreeSet<(TransactionId, [u8; 32])>,
 
+    /// List of transactions (represented as indices within [`LightPool::transactions`]) whose
+    /// status is "not validated".
+    not_validated: hashbrown::HashSet<TransactionId, fnv::FnvBuildHasher>,
+
     /// Transaction ids (i.e. indices within [`LightPool::transactions`]) indexed by the blake2
     /// hash of the bytes of the transaction.
     by_hash: BTreeSet<([u8; 32], TransactionId)>,
@@ -123,6 +127,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             transactions: slab::Slab::with_capacity(config.transactions_capacity),
             transactions_by_inclusion: BTreeSet::new(),
             included_transactions: BTreeSet::new(),
+            not_validated: hashbrown::HashSet::with_capacity_and_hasher(
+                config.transactions_capacity,
+                Default::default(),
+            ),
             by_hash: BTreeSet::new(),
             blocks_tree: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
             blocks_by_id: hashbrown::HashMap::with_capacity_and_hasher(
@@ -141,6 +149,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         self.transactions.clear();
         self.transactions_by_inclusion.clear();
         self.included_transactions.clear();
+        self.not_validated.clear();
         self.by_hash.clear();
         self.blocks_tree.clear();
         self.blocks_by_id.clear();
@@ -167,6 +176,9 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let _was_inserted = self.by_hash.insert((hash, tx_id));
         debug_assert!(_was_inserted);
 
+        let _was_inserted = self.not_validated.insert(tx_id);
+        debug_assert!(_was_inserted);
+
         tx_id
     }
 
@@ -185,6 +197,9 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .range((id, [0; 32])..=(id, [0xff; 32]))
             .map(|(_, block)| *block)
             .collect::<Vec<_>>();
+
+        // TODO: check if coherent state
+        self.not_validated.remove(&id);
 
         for block_hash in blocks_included {
             let _removed = self.included_transactions.remove(&(id, block_hash));
@@ -205,18 +220,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     pub fn unvalidated_transactions(
         &'_ self,
     ) -> impl ExactSizeIterator<Item = (TransactionId, &'_ TTx)> + '_ {
-        core::iter::empty()
-        // TODO:
-        /*self.pool.as_ref().unwrap().unvalidated_transactions().map(
-            move |(tx_id, tx_user_data, _block_height)| {
-                debug_assert_eq!(
-                    _block_height,
-                    self.pool.as_ref().unwrap().best_block_height()
-                );
-
-                (tx_id, tx_user_data)
-            },
-        )*/
+        self.not_validated.iter().copied().map(move |tx_id| {
+            let tx = self.transactions.get(tx_id.0).unwrap();
+            (tx_id, &tx.user_data)
+        })
     }
 
     /// Returns the list of all transactions within the pool.
@@ -389,6 +396,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             }
         }
 
+        self.best_block_index = Some(new_best_block_index);
+
         SetBestBlock {
             retracted_transactions,
             included_transactions,
@@ -423,68 +432,27 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     pub fn set_block_body(
         &'_ mut self,
         block_hash: &[u8; 32],
-        body: impl Iterator<Item = impl Into<Vec<u8>>>,
+        body: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> impl Iterator<Item = TransactionId> + '_ {
         let block_index = *self.blocks_by_id.get(block_hash).unwrap();
 
-        self.blocks_tree.get_mut(block_index).unwrap().body =
-            BodyState::Known(body.map(Into::into).collect());
-
-        let is_in_best_chain = self.blocks_tree.is_ancestor(
-            // `best_block_index` can only be `None` iff the list of blocks is empty, which we
-            // know it can't be since `block_index` has been found. Hence safely unwrapping.
-            self.best_block_index.unwrap(),
-            block_index,
-        );
-
         // Value returned from the function.
+        // TODO: optimize by not having Vec
         let mut included_transactions = Vec::new();
 
-        // TODO:
-        /*// Try add more blocks to `self.pool`.
-        if is_in_best_chain
-            && self.best_block_virtual_height == self.pool.as_ref().unwrap().best_block_height()
-        // TODO: wrong /!\
-        {
-            for maybe_to_insert_index in self
-                .blocks_tree
-                .root_to_node_path(self.best_block_index.unwrap())
-                .skip_while(|ni| *ni != block_index)
-            {
-                let maybe_to_insert_block = self.blocks_tree.get(maybe_to_insert_index).unwrap();
-                /*debug_assert_eq!(
-                    maybe_to_insert_block.height.get(),
-                    self.pool.as_ref().unwrap().best_block_height() + 1
-                );*/
+        for included_body in body {
+            let included_body = included_body.as_ref();
+            let hash = blake2_hash(included_body);
 
-                let block_body = match &maybe_to_insert_block.body {
-                    BodyState::Known(b) => b,
-                    BodyState::NotNeeded | BodyState::Needed => break,
-                };
-
-                let mut append_block = self.pool.take().unwrap().append_block();
-                // TODO: DRY with other code above
-                for transaction in block_body {
-                    match append_block.block_transaction(transaction) {
-                        // Transaction in the block matches one of the transactions in the pool.
-                        pool::AppendBlockTransaction::NonIncludedUpdated { id, .. } => {
-                            included_transactions.push(id);
-                        }
-
-                        // Transaction in the block isn't in the pool. In a full node situation, one
-                        // would at this point insert the transaction in the pool, in order to:
-                        // - Later validate it and prune obsolete non-inserted transaction.
-                        // - Include the transaction in a block if the block it already is in is
-                        // retracted.
-                        // Neither of these points are relevant for this module, and as such we simply
-                        // discard the object that would have let us insert said transaction.
-                        pool::AppendBlockTransaction::Unknown(_insert) => {}
-                    }
-                }
-
-                self.pool = Some(append_block.finish());
+            for (_, known_tx_id) in self.by_hash.range(
+                (hash, TransactionId(usize::min_value()))
+                    ..=(hash, TransactionId(usize::max_value())),
+            ) {
+                included_transactions.push(*known_tx_id);
             }
-        }*/
+        }
+
+        self.blocks_tree.get_mut(block_index).unwrap().body = BodyState::Known;
 
         included_transactions.into_iter()
     }
@@ -576,7 +544,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 .root_to_node_path(finalized_block_index)
                 .count()
         } else {
-            debug_assert!(self.blocks_tree.is_empty());
             0
         }
     }
@@ -635,7 +602,7 @@ struct Block<TBl> {
 enum BodyState {
     Needed,
     NotNeeded,
-    Known(Vec<Vec<u8>>),
+    Known,
 }
 
 /// Utility. Calculates the blake2 hash of the given bytes.
