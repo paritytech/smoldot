@@ -1464,9 +1464,13 @@ async fn parahead(
                 break Err(ParaheadError::ReadOnlyRuntime(error.detail));
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                let storage_value = runtime_call_lock
-                    .storage_entry(&get.key_as_vec())
-                    .map_err(ParaheadError::Call)?;
+                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(todo!()); // TODO:
+                        return Err(ParaheadError::Call(err));
+                    }
+                };
                 runtime_call = get.inject_value(storage_value.map(iter::once));
             }
             read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
