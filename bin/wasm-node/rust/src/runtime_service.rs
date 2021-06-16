@@ -155,6 +155,7 @@ impl RuntimeService {
                 runtime_code: code,
                 heap_pages,
                 runtime_block_hash: config.genesis_block_hash,
+                runtime_block_header: Vec::new(), // TODO: /!\
                 runtime_block_height: 0,
                 runtime_block_state_root: config.genesis_block_state_root,
                 runtime_version_subscriptions: Vec::new(),
@@ -476,11 +477,17 @@ impl RuntimeService {
 #[must_use]
 pub struct RuntimeCallLock<'a> {
     lock: MutexGuard<'a, LatestKnownRuntime>,
+    // TODO: redundant with header
     state_root: [u8; 32],
     call_proof: Vec<Vec<u8>>,
 }
 
 impl<'a> RuntimeCallLock<'a> {
+    /// Returns the SCALE-encoded header of the block the call is being made against.
+    pub fn block_header(&self) -> &[u8] {
+        &self.lock.runtime_block_header
+    }
+
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
         &self.state_root
@@ -582,9 +589,14 @@ struct LatestKnownRuntime {
     /// Hash of a block known to have the runtime found in the [`LatestKnownRuntime::runtime`]
     /// field. Always updated to a recent block having this runtime.
     runtime_block_hash: [u8; 32],
+    /// SCALE encoding of the header of the block whose hash is
+    /// [`LatestKnownRuntime::runtime_block_hash`].
+    runtime_block_header: Vec<u8>,
     /// Height of the block whose hash is [`LatestKnownRuntime::runtime_block_hash`].
+    // TODO: fuse with header
     runtime_block_height: u64,
     /// Storage trie root of the block whose hash is [`LatestKnownRuntime::runtime_block_hash`].
+    // TODO: fuse with header
     runtime_block_state_root: [u8; 32],
 
     /// List of senders that get notified when the runtime specs of the best block changes.
@@ -788,6 +800,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 // `runtime_block_hash` is always updated in order to have the most recent
                 // block possible.
                 latest_known_runtime.runtime_block_hash = new_best_block_hash;
+                latest_known_runtime.runtime_block_header = new_best_block.clone();
                 latest_known_runtime.runtime_block_height = new_best_block_decoded.number;
                 latest_known_runtime.runtime_block_state_root = *new_best_block_decoded.state_root;
 

@@ -71,6 +71,7 @@ use crate::{ffi, runtime_service, sync_service};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use smoldot::{
+    executor::{host, read_only_runtime_host},
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
@@ -458,16 +459,12 @@ async fn background_task(
 
                         // TODO: should be async
 
-                        let encoded_validate_result = worker.runtime_service.recent_best_block_runtime_call(
-                            validate::VALIDATION_FUNCTION_NAME,
-                            validate::validate_transaction_runtime_parameters(
-                                iter::once(tx_body),
-                                validate::TransactionSource::External
-                            )
-                        ).await;
-
-                        let encoded_validate = match encoded_validate_result {
-                            Ok(r) => r,
+                        let validation = match validate_transaction(
+                            &worker.runtime_service,
+                            tx_body,
+                            validate::TransactionSource::External
+                        ).await {
+                            Ok(v) => v,
                             Err(error) => {
                                 log::warn!(
                                     target: "transactions-service",
@@ -478,19 +475,7 @@ async fn background_task(
                             }
                         };
 
-                        let decoded_validate = match validate::decode_validate_transaction_return_value(&encoded_validate) {
-                            Ok(d) => d,
-                            Err(error) => {
-                                log::warn!(
-                                    target: "transactions-service",
-                                    "Unable to decode transaction validation output: {}",
-                                    error
-                                );
-                                continue;
-                            }
-                        };
-
-                        panic!("{:?}", decoded_validate);
+                        panic!("{:?}", validation);
                     }
                 }
 
@@ -670,4 +655,73 @@ impl PendingTransaction {
 
         self.latest_status = Some(status);
     }
+}
+
+async fn validate_transaction(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+    scale_encoded_transaction: impl AsRef<[u8]> + Clone,
+    source: validate::TransactionSource,
+) -> Result<
+    Result<validate::ValidTransaction, validate::TransactionValidityError>,
+    ValidateTransactionError,
+> {
+    let (runtime_call_lock, runtime) = relay_chain_sync
+        .recent_best_block_runtime_call(
+            validate::VALIDATION_FUNCTION_NAME,
+            validate::validate_transaction_runtime_parameters(
+                iter::once(scale_encoded_transaction.as_ref()),
+                validate::TransactionSource::External,
+            ),
+        )
+        .await
+        .map_err(ValidateTransactionError::Call)?;
+
+    let mut validation_in_progress = validate::validate_transaction(validate::Config {
+        runtime,
+        scale_encoded_header: iter::once(runtime_call_lock.block_header()),
+        scale_encoded_transaction: iter::once(scale_encoded_transaction),
+        source,
+    });
+
+    loop {
+        match validation_in_progress {
+            validate::Query::Finished {
+                result: Ok(success),
+                virtual_machine,
+            } => {
+                runtime_call_lock.unlock(virtual_machine);
+                break Ok(success);
+            }
+            validate::Query::Finished {
+                result: Err(error),
+                virtual_machine,
+            } => {
+                runtime_call_lock.unlock(virtual_machine);
+                break Err(ValidateTransactionError::Validation(error));
+            }
+            validate::Query::StorageGet(get) => {
+                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(todo!()); // TODO:
+                        return Err(ValidateTransactionError::Call(err));
+                    }
+                };
+                validation_in_progress = get.inject_value(storage_value.map(iter::once));
+            }
+            validate::Query::NextKey(_) => {
+                todo!() // TODO:
+            }
+            validate::Query::StorageRoot(storage_root) => {
+                validation_in_progress =
+                    storage_root.resume(runtime_call_lock.block_storage_root());
+            }
+        }
+    }
+}
+
+#[derive(derive_more::Display)]
+enum ValidateTransactionError {
+    Call(runtime_service::RuntimeCallError),
+    Validation(validate::Error),
 }
