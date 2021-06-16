@@ -32,7 +32,9 @@ use crate::{ffi, network_service, runtime_service, sync_service, transactions_se
 use futures::{channel::oneshot, lock::Mutex, prelude::*};
 use methods::MethodCall;
 use smoldot::{
-    chain_spec, header,
+    chain_spec,
+    executor::read_only_runtime_host,
+    header,
     json_rpc::{self, methods},
     network::protocol,
 };
@@ -884,31 +886,106 @@ impl JsonRpcService {
                 );
             }
             methods::MethodCall::system_accountNextIndex { account } => {
-                self.send_back(
-                    &match self
-                        .runtime_service
-                        .recent_best_block_runtime_call(
-                            "AccountNonceApi_account_nonce",
-                            iter::once(&account.0),
-                        )
-                        .await
-                    {
-                        Ok(return_value) => {
-                            // TODO: we get a u32 when expecting a u64; figure out problem
-                            // TODO: don't unwrap
-                            let index =
-                                u32::from_le_bytes(<[u8; 4]>::try_from(&return_value[..]).unwrap());
-                            methods::Response::system_accountNextIndex(u64::from(index))
-                                .to_json_response(request_id)
+                let (runtime_call_lock, virtual_machine) = match self
+                    .runtime_service
+                    .recent_best_block_runtime_call(
+                        "AccountNonceApi_account_nonce",
+                        iter::once(&account.0),
+                    )
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(error) => {
+                        self.send_back(
+                            &json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    &error.to_string(),
+                                ),
+                                None,
+                            ),
+                            user_data,
+                        );
+                        return;
+                    }
+                };
+
+                /*// Perform the actual runtime call locally.
+                let mut runtime_call =
+                    match read_only_runtime_host::run(read_only_runtime_host::Config {
+                        virtual_machine,
+                        function_to_call: "AccountNonceApi_account_nonce",
+                        parameter: iter::once(&account.0),
+                    }) {
+                        Ok(vm) => vm,
+                        Err((err, prototype)) => {
+                            runtime_call_lock.unlock(prototype);
+                            return Err(RuntimeCallError::StartError(err));
                         }
-                        Err(error) => json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        ),
-                    },
+                    };
+
+                loop {
+                    match runtime_call {
+                        read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                            if !success.logs.is_empty() {
+                                log::debug!(
+                                    target: "runtime",
+                                    "Runtime logs: {}",
+                                    success.logs
+                                );
+                            }
+
+                            let return_value = success.virtual_machine.value().as_ref().to_owned();
+                            runtime.virtual_machine =
+                                Some(success.virtual_machine.into_prototype());
+                            return Ok((return_value, latest_known_runtime_lock));
+                        }
+                        read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                            runtime.virtual_machine = Some(error.prototype);
+                            return Err(RuntimeCallError::CallError(error.detail));
+                        }
+                        read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                            let requested_key = get.key_as_vec(); // TODO: optimization: don't use as_vec
+                            let storage_value =
+                                match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                    requested_key: &requested_key,
+                                    trie_root_hash: &runtime_block_state_root,
+                                    proof: call_proof.iter().map(|v| &v[..]),
+                                }) {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        // TODO: shouldn't return if error but do a storage_proof instead
+                                        runtime.virtual_machine = Some(
+                                            read_only_runtime_host::RuntimeHostVm::StorageGet(get)
+                                                .into_prototype(),
+                                        );
+                                        return Err(RuntimeCallError::StorageRetrieval(err));
+                                    }
+                                };
+                            runtime_call = get.inject_value(storage_value.as_ref().map(iter::once));
+                        }
+                        read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                            todo!() // TODO:
+                        }
+                        read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                            runtime_call = storage_root.resume(&runtime_block_state_root);
+                        }
+                    }
+                }*/
+
+                /*
+                        // TODO: we get a u32 when expecting a u64; figure out problem
+                        // TODO: don't unwrap
+                        let index =
+                            u32::from_le_bytes(<[u8; 4]>::try_from(&return_value[..]).unwrap());
+                        methods::Response::system_accountNextIndex(u64::from(index))
+                            .to_json_response(request_id)
+
+                self.send_back(
+                    &,
                     user_data,
-                );
+                );*/
             }
             methods::MethodCall::system_chain {} => {
                 self.send_back(

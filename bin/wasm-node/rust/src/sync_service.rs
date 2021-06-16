@@ -36,14 +36,18 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain, header,
+    chain,
+    executor::{host, read_only_runtime_host},
+    header,
     informant::HashDisplay,
     libp2p::{self, PeerId},
     network::{self, protocol, service},
     sync::{all, para},
     trie::{self, prefix_proof, proof_verify},
 };
-use std::{collections::HashMap, convert::TryFrom as _, fmt, num::NonZeroU32, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap, convert::TryFrom as _, fmt, iter, num::NonZeroU32, pin::Pin, sync::Arc,
+};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
@@ -1323,26 +1327,17 @@ async fn start_parachain(
                 // accidentally call this block multiple times.
                 while let Some(_) = relay_best_blocks.next().now_or_never() {}
 
-                // Determine if the call to `recent_best_block_runtime_call` below applies to a
-                // block that is near the head of the chain.
+                // Determine if the call to `recent_best_block_runtime_call` in the `parahead`
+                // function applies to a block that is near the head of the chain.
                 let relay_sync_near_head_of_chain =
                     parachain_config.relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
-                // For each relay chain block, call `ParachainHost_persisted_validation_data` in
-                // order to know where the parachains are.
-                let pvd_result = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
-                    para::PERSISTED_VALIDATION_FUNCTION_NAME,
-                    para::persisted_validation_data_parameters(
-                        parachain_config.parachain_id,
-                        para::OccupiedCoreAssumption::TimedOut
-                    )
-                ).await;
-
+                // Do the actual runtime call to obtain the parahead.
                 // Even if there isn't any bug, the runtime call can likely fail because the relay
                 // chain block has already been pruned from the network. This isn't a severe
                 // error.
-                let encoded_pvd = match pvd_result {
-                    Ok(encoded_pvd) => encoded_pvd,
+                let encoded_head_data = match parahead(&parachain_config.relay_chain_sync, parachain_config.parachain_id).await {
+                    Ok(v) => v,
                     Err(err) => {
                         previous_best_head_data_hash = None;
                         if err.is_network_problem() {
@@ -1358,7 +1353,7 @@ async fn start_parachain(
                 // If this fails, it indicates an incompatibility between smoldot and the relay
                 // chain.
                 let head_data =
-                    match para::decode_persisted_validation_data_return_value(&encoded_pvd) {
+                    match para::decode_persisted_validation_data_return_value(&encoded_head_data) {
                         Ok(Some(pvd)) => pvd.parent_head,
                         Ok(None) => {
                             // `Ok(None)` indicates that the parachain doesn't occupy any core
@@ -1419,6 +1414,86 @@ async fn start_parachain(
                     }
                 }
             }
+        }
+    }
+}
+
+async fn parahead(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+    parachain_id: u32,
+) -> Result<Vec<u8>, ParaheadError> {
+    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
+    // order to know where the parachains are.
+    let (runtime_call_lock, virtual_machine) = relay_chain_sync
+        .recent_best_block_runtime_call(
+            para::PERSISTED_VALIDATION_FUNCTION_NAME,
+            para::persisted_validation_data_parameters(
+                parachain_id,
+                para::OccupiedCoreAssumption::TimedOut,
+            ),
+        )
+        .await
+        .map_err(ParaheadError::Call)?;
+
+    // TODO: move the logic below in the `para` module
+
+    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+        virtual_machine,
+        function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
+        parameter: para::persisted_validation_data_parameters(
+            parachain_id,
+            para::OccupiedCoreAssumption::TimedOut,
+        ),
+    }) {
+        Ok(vm) => vm,
+        Err((err, prototype)) => {
+            runtime_call_lock.unlock(prototype);
+            return Err(ParaheadError::StartError(err));
+        }
+    };
+
+    loop {
+        match runtime_call {
+            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                let output = success.virtual_machine.value().as_ref().to_owned();
+                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
+                break Ok(output);
+            }
+            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_call_lock.unlock(error.prototype);
+                break Err(ParaheadError::ReadOnlyRuntime(error.detail));
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                let storage_value = runtime_call_lock
+                    .storage_entry(&get.key_as_vec())
+                    .map_err(ParaheadError::Call)?;
+                runtime_call = get.inject_value(storage_value.map(iter::once));
+            }
+            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                todo!() // TODO:
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+            }
+        }
+    }
+}
+
+#[derive(derive_more::Display)]
+enum ParaheadError {
+    Call(runtime_service::RuntimeCallError),
+    StartError(host::StartErr),
+    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+}
+
+impl ParaheadError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    fn is_network_problem(&self) -> bool {
+        match self {
+            ParaheadError::Call(err) => err.is_network_problem(),
+            ParaheadError::StartError(_) => false,
+            ParaheadError::ReadOnlyRuntime(_) => false,
         }
     }
 }
