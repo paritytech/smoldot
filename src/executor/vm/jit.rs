@@ -309,9 +309,7 @@ impl JitPrototype {
                 // Basically, we are safe as long as we are sure that we don't potentially grow the
                 // buffer (which would invalidate the buffer pointer).
                 unsafe {
-                    for byte in &mut memory.data_unchecked_mut()[offset..] {
-                        *byte = 0;
-                    }
+                    memory.data_unchecked_mut()[offset..].fill(0);
                 }
             }
         }
