@@ -263,7 +263,7 @@ pub fn validate_transaction(
         offchain_storage_changes: hashbrown::HashMap::default(),
     });
 
-    // Information user later, after `Core_initialize_block` is done.
+    // Information used later, after `Core_initialize_block` is done.
     let stage1 = Stage1 {
         transaction_source: config.source,
         scale_encoded_transaction: config
