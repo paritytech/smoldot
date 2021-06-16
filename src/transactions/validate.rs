@@ -305,50 +305,61 @@ pub enum Query {
 }
 
 impl Query {
-    fn from_step1(inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
-        match inner {
-            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                // No output expected from `Core_initialize_block`.
-                if !success.virtual_machine.value().as_ref().is_empty() {
-                    return Query::Finished {
-                        result: Err(Error::OutputDecodeError(DecodeError())),
+    fn from_step1(mut inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
+        loop {
+            match inner {
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    // No output expected from `Core_initialize_block`.
+                    if !success.virtual_machine.value().as_ref().is_empty() {
+                        return Query::Finished {
+                            result: Err(Error::OutputDecodeError(DecodeError())),
+                            virtual_machine: success.virtual_machine.into_prototype(),
+                        };
+                    }
+
+                    let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
                         virtual_machine: success.virtual_machine.into_prototype(),
-                    };
+                        function_to_call: VALIDATION_FUNCTION_NAME,
+                        parameter: validate_transaction_runtime_parameters(
+                            iter::once(info.scale_encoded_transaction),
+                            info.transaction_source,
+                        ),
+                    });
+
+                    panic!("{:?}", success.storage_top_trie_changes);
+
+                    match vm {
+                        Ok(vm) => {
+                            break Query::from_step2(
+                                vm,
+                                Stage2 {
+                                    storage_top_trie_changes: success.storage_top_trie_changes,
+                                },
+                            )
+                        }
+                        Err((err, virtual_machine)) => {
+                            break Query::Finished {
+                                result: Err(Error::WasmStart(err)),
+                                virtual_machine,
+                            }
+                        }
+                    }
                 }
-
-                let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
-                    virtual_machine: success.virtual_machine.into_prototype(),
-                    function_to_call: VALIDATION_FUNCTION_NAME,
-                    parameter: validate_transaction_runtime_parameters(
-                        iter::once(info.scale_encoded_transaction),
-                        info.transaction_source,
-                    ),
-                });
-
-                panic!("{:?}", success.storage_top_trie_changes);
-
-                match vm {
-                    Ok(vm) => Query::from_step2(
-                        vm,
-                        Stage2 {
-                            storage_top_trie_changes: success.storage_top_trie_changes,
-                        },
-                    ),
-                    Err((err, virtual_machine)) => Query::Finished {
-                        result: Err(Error::WasmStart(err)),
-                        virtual_machine,
-                    },
+                runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                    break Query::Finished {
+                        result: Err(Error::WasmVmReadWrite(err.detail)),
+                        virtual_machine: err.prototype,
+                    }
                 }
+                runtime_host::RuntimeHostVm::StorageGet(i) => {
+                    break Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)))
+                }
+                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
+                    // TODO: this is completely wrong
+                    inner = i.inject_keys(iter::empty::<Vec<u8>>())
+                }
+                runtime_host::RuntimeHostVm::NextKey(inner) => todo!(),
             }
-            runtime_host::RuntimeHostVm::Finished(Err(err)) => Query::Finished {
-                result: Err(Error::WasmVmReadWrite(err.detail)),
-                virtual_machine: err.prototype,
-            },
-            runtime_host::RuntimeHostVm::StorageGet(inner) => todo!(),
-            runtime_host::RuntimeHostVm::PrefixKeys(inner) => {
-                todo!()
-            }
-            runtime_host::RuntimeHostVm::NextKey(inner) => todo!(),
         }
     }
 
@@ -399,7 +410,7 @@ impl Query {
                     if let Some(change) = info.storage_top_trie_changes.get(&i.key_as_vec()) {
                         inner = i.inject_value(change.as_ref().map(iter::once));
                     } else {
-                        break Query::StorageGet(StorageGet(i, info));
+                        break Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)));
                     }
                 }
                 read_only_runtime_host::RuntimeHostVm::StorageRoot(inner) => {
@@ -429,24 +440,42 @@ struct Stage2 {
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(read_only_runtime_host::StorageGet, Stage2);
+pub struct StorageGet(StorageGetInner);
+
+enum StorageGetInner {
+    Stage1(runtime_host::StorageGet, Stage1),
+    Stage2(read_only_runtime_host::StorageGet, Stage2),
+}
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-        self.0.key()
+        match &self.0 {
+            StorageGetInner::Stage1(inner, _) => either::Left(inner.key().map(either::Left)),
+            StorageGetInner::Stage2(inner, _) => either::Right(inner.key().map(either::Right)),
+        }
     }
 
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     ///
     /// This method is a shortcut for calling `key` and concatenating the returned slices.
     pub fn key_as_vec(&self) -> Vec<u8> {
-        self.0.key_as_vec()
+        match &self.0 {
+            StorageGetInner::Stage1(inner, _) => inner.key_as_vec(),
+            StorageGetInner::Stage2(inner, _) => inner.key_as_vec(),
+        }
     }
 
     /// Injects the corresponding storage value.
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
-        Query::from_step2(self.0.inject_value(value), self.1)
+        match self.0 {
+            StorageGetInner::Stage1(inner, stage) => {
+                Query::from_step1(inner.inject_value(value), stage)
+            }
+            StorageGetInner::Stage2(inner, stage) => {
+                Query::from_step2(inner.inject_value(value), stage)
+            }
+        }
     }
 }
 

@@ -703,6 +703,7 @@ async fn validate_transaction(
                 let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
                     Ok(v) => v,
                     Err(err) => {
+                        panic!("{:?}", err);
                         runtime_call_lock.unlock(todo!()); // TODO:
                         return Err(ValidateTransactionError::Call(err));
                     }
