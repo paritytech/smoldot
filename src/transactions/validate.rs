@@ -18,7 +18,7 @@
 //! Runtime call to obtain the transactions validity status.
 
 use crate::{
-    executor::{host, read_only_runtime_host},
+    executor::{host, read_only_runtime_host, runtime_host},
     util,
 };
 
@@ -26,10 +26,14 @@ use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
 /// Configuration for a transaction validation process.
-pub struct Config<TTx> {
+pub struct Config<THeader, TTx> {
     /// Runtime used to get the validate the transaction. Must be built using the Wasm code found
     /// at the `:code` key of the block storage.
     pub runtime: host::HostVmPrototype,
+
+    /// Header of the block to verify the transaction against, in SCALE encoding.
+    /// The runtime of this block must be the one in [`COnfig::runtime`].
+    pub scale_encoded_header: THeader,
 
     /// SCALE-encoded transaction.
     pub scale_encoded_transaction: TTx,
@@ -179,7 +183,10 @@ pub enum Error {
     WasmStart(host::StartErr),
     /// Error while running the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
-    WasmVm(read_only_runtime_host::ErrorDetail),
+    WasmVmReadWrite(runtime_host::ErrorDetail),
+    /// Error while running the Wasm virtual machine.
+    #[display(fmt = "{}", _0)]
+    WasmVmReadOnly(read_only_runtime_host::ErrorDetail),
     /// Error while decoding the output of the runtime.
     OutputDecodeError(DecodeError),
     /// The list of provided tags ([`ValidTransaction::provides`]). This is a bug in the runtime.
@@ -234,19 +241,41 @@ pub fn decode_validate_transaction_return_value(
 
 /// Validates a transaction by calling `TaggedTransactionQueue_validate_transaction`.
 pub fn validate_transaction(
-    config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>,
+    config: Config<
+        impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
+    >,
 ) -> Query {
-    let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
+    // The first step is to call `Core_initialize_block`.
+    let vm = runtime_host::run(runtime_host::Config {
         virtual_machine: config.runtime,
-        function_to_call: VALIDATION_FUNCTION_NAME,
-        parameter: validate_transaction_runtime_parameters(
-            config.scale_encoded_transaction,
-            config.source,
+        function_to_call: "Core_initialize_block",
+        parameter: {
+            // The `Core_initialize_block` function expects a SCALE-encoded partially-initialized
+            // header.
+            config.scale_encoded_header
+        },
+        top_trie_root_calculation_cache: None,
+        storage_top_trie_changes: hashbrown::HashMap::with_capacity_and_hasher(
+            16, // The `Core_initialize_block` function typically doesn't do much.
+            Default::default(),
         ),
+        offchain_storage_changes: hashbrown::HashMap::default(),
     });
 
+    // Information user later, after `Core_initialize_block` is done.
+    let stage1 = Stage1 {
+        transaction_source: config.source,
+        scale_encoded_transaction: config
+            .scale_encoded_transaction
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            }),
+    };
+
     match vm {
-        Ok(vm) => Query::from_inner(vm),
+        Ok(vm) => Query::from_step1(vm, stage1),
         Err((err, virtual_machine)) => Query::Finished {
             result: Err(Error::WasmStart(err)),
             virtual_machine,
@@ -276,60 +305,131 @@ pub enum Query {
 }
 
 impl Query {
-    fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
+    fn from_step1(inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
         match inner {
-            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                // This decoding is done in multiple steps in order to solve borrow checking
-                // errors.
-                let result = {
-                    let output = success.virtual_machine.value();
-                    decode_validate_transaction_return_value(output.as_ref())
-                        .map_err(Error::OutputDecodeError)
-                };
+            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                // No output expected from `Core_initialize_block`.
+                if !success.virtual_machine.value().as_ref().is_empty() {
+                    return Query::Finished {
+                        result: Err(Error::OutputDecodeError(DecodeError())),
+                        virtual_machine: success.virtual_machine.into_prototype(),
+                    };
+                }
 
-                let result = match result {
-                    Ok(res) => {
-                        if let Ok(res) = res.as_ref() {
-                            if res.provides.is_empty() {
-                                return Query::Finished {
-                                    result: Err(Error::EmptyProvidedTags),
-                                    virtual_machine: success.virtual_machine.into_prototype(),
-                                };
-                            }
-                        }
-                        res
-                    }
-                    Err(err) => {
-                        return Query::Finished {
-                            result: Err(err),
-                            virtual_machine: success.virtual_machine.into_prototype(),
-                        }
-                    }
-                };
-
-                Query::Finished {
-                    result: Ok(result),
+                let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
                     virtual_machine: success.virtual_machine.into_prototype(),
+                    function_to_call: VALIDATION_FUNCTION_NAME,
+                    parameter: validate_transaction_runtime_parameters(
+                        iter::once(info.scale_encoded_transaction),
+                        info.transaction_source,
+                    ),
+                });
+
+                panic!("{:?}", success.storage_top_trie_changes);
+
+                match vm {
+                    Ok(vm) => Query::from_step2(
+                        vm,
+                        Stage2 {
+                            storage_top_trie_changes: success.storage_top_trie_changes,
+                        },
+                    ),
+                    Err((err, virtual_machine)) => Query::Finished {
+                        result: Err(Error::WasmStart(err)),
+                        virtual_machine,
+                    },
                 }
             }
-            read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => Query::Finished {
-                result: Err(Error::WasmVm(err.detail)),
+            runtime_host::RuntimeHostVm::Finished(Err(err)) => Query::Finished {
+                result: Err(Error::WasmVmReadWrite(err.detail)),
                 virtual_machine: err.prototype,
             },
-            read_only_runtime_host::RuntimeHostVm::StorageGet(inner) => {
-                Query::StorageGet(StorageGet(inner))
+            runtime_host::RuntimeHostVm::StorageGet(inner) => todo!(),
+            runtime_host::RuntimeHostVm::PrefixKeys(inner) => {
+                todo!()
             }
-            read_only_runtime_host::RuntimeHostVm::StorageRoot(inner) => {
-                Query::StorageRoot(StorageRoot(inner))
+            runtime_host::RuntimeHostVm::NextKey(inner) => todo!(),
+        }
+    }
+
+    fn from_step2(mut inner: read_only_runtime_host::RuntimeHostVm, info: Stage2) -> Self {
+        loop {
+            match inner {
+                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    // This decoding is done in multiple steps in order to solve borrow checking
+                    // errors.
+                    let result = {
+                        let output = success.virtual_machine.value();
+                        decode_validate_transaction_return_value(output.as_ref())
+                            .map_err(Error::OutputDecodeError)
+                    };
+
+                    let result = match result {
+                        Ok(res) => {
+                            if let Ok(res) = res.as_ref() {
+                                if res.provides.is_empty() {
+                                    return Query::Finished {
+                                        result: Err(Error::EmptyProvidedTags),
+                                        virtual_machine: success.virtual_machine.into_prototype(),
+                                    };
+                                }
+                            }
+                            res
+                        }
+                        Err(err) => {
+                            return Query::Finished {
+                                result: Err(err),
+                                virtual_machine: success.virtual_machine.into_prototype(),
+                            }
+                        }
+                    };
+
+                    break Query::Finished {
+                        result: Ok(result),
+                        virtual_machine: success.virtual_machine.into_prototype(),
+                    };
+                }
+                read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                    break Query::Finished {
+                        result: Err(Error::WasmVmReadOnly(err.detail)),
+                        virtual_machine: err.prototype,
+                    }
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageGet(i) => {
+                    if let Some(change) = info.storage_top_trie_changes.get(&i.key_as_vec()) {
+                        inner = i.inject_value(change.as_ref().map(iter::once));
+                    } else {
+                        break Query::StorageGet(StorageGet(i, info));
+                    }
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageRoot(inner) => {
+                    break Query::StorageRoot(StorageRoot(inner, info))
+                }
+                read_only_runtime_host::RuntimeHostVm::NextKey(inner) => {
+                    // TODO: what about `info.storage_top_trie_changes`?
+                    todo!()
+                    //break Query::NextKey(NextKey(inner, info));
+                }
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => Query::NextKey(NextKey(inner)),
         }
     }
 }
 
+struct Stage1 {
+    /// Same value as [`Config::source`].
+    transaction_source: TransactionSource,
+    /// Same value as [`Config::scale_encoded_transaction`].
+    scale_encoded_transaction: Vec<u8>,
+}
+
+struct Stage2 {
+    /// Changes to the storage performed by `Core_initialize_block`.
+    storage_top_trie_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+}
+
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(read_only_runtime_host::StorageGet);
+pub struct StorageGet(read_only_runtime_host::StorageGet, Stage2);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -346,13 +446,13 @@ impl StorageGet {
 
     /// Injects the corresponding storage value.
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
-        Query::from_inner(self.0.inject_value(value))
+        Query::from_step2(self.0.inject_value(value), self.1)
     }
 }
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(read_only_runtime_host::NextKey);
+pub struct NextKey(read_only_runtime_host::NextKey, Stage2);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
@@ -367,18 +467,18 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
-        Query::from_inner(self.0.inject_key(key))
+        Query::from_step2(self.0.inject_key(key), self.1)
     }
 }
 
 /// Fetching the storage trie root is required in order to continue.
 #[must_use]
-pub struct StorageRoot(read_only_runtime_host::StorageRoot);
+pub struct StorageRoot(read_only_runtime_host::StorageRoot, Stage2);
 
 impl StorageRoot {
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
     pub fn resume(self, hash: &[u8; 32]) -> Query {
-        Query::from_inner(self.0.resume(hash))
+        Query::from_step2(self.0.resume(hash), self.1)
     }
 }
 
