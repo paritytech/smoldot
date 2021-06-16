@@ -32,7 +32,9 @@ use crate::{ffi, network_service, runtime_service, sync_service, transactions_se
 use futures::{channel::oneshot, lock::Mutex, prelude::*};
 use methods::MethodCall;
 use smoldot::{
-    chain_spec, header,
+    chain_spec,
+    executor::{host, read_only_runtime_host},
+    header,
     json_rpc::{self, methods},
     network::protocol,
 };
@@ -884,31 +886,22 @@ impl JsonRpcService {
                 );
             }
             methods::MethodCall::system_accountNextIndex { account } => {
-                self.send_back(
-                    &match self
-                        .runtime_service
-                        .recent_best_block_runtime_call(
-                            "AccountNonceApi_account_nonce",
-                            iter::once(&account.0),
-                        )
-                        .await
-                    {
-                        Ok(return_value) => {
-                            // TODO: we get a u32 when expecting a u64; figure out problem
-                            // TODO: don't unwrap
-                            let index =
-                                u32::from_le_bytes(<[u8; 4]>::try_from(&return_value[..]).unwrap());
-                            methods::Response::system_accountNextIndex(u64::from(index))
-                                .to_json_response(request_id)
-                        }
-                        Err(error) => json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        ),
-                    },
-                    user_data,
-                );
+                let response = match account_nonce(&self.runtime_service, account).await {
+                    Ok(nonce) => {
+                        // TODO: we get a u32 when expecting a u64; figure out problem
+                        // TODO: don't unwrap
+                        let index = u32::from_le_bytes(<[u8; 4]>::try_from(&nonce[..]).unwrap());
+                        methods::Response::system_accountNextIndex(u64::from(index))
+                            .to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                };
+
+                self.send_back(&response, user_data);
             }
             methods::MethodCall::system_chain {} => {
                 self.send_back(
@@ -1629,4 +1622,67 @@ enum StorageQueryError {
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{}", _0)]
     StorageRetrieval(sync_service::StorageQueryError),
+}
+
+async fn account_nonce(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+    account: methods::AccountId,
+) -> Result<Vec<u8>, AnnounceNonceError> {
+    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
+    // order to know where the parachains are.
+    let (runtime_call_lock, virtual_machine) = relay_chain_sync
+        .recent_best_block_runtime_call("AccountNonceApi_account_nonce", iter::once(&account.0))
+        .await
+        .map_err(AnnounceNonceError::Call)?;
+
+    // TODO: move the logic below in the `src` directory
+
+    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+        virtual_machine,
+        function_to_call: "AccountNonceApi_account_nonce",
+        parameter: iter::once(&account.0),
+    }) {
+        Ok(vm) => vm,
+        Err((err, prototype)) => {
+            runtime_call_lock.unlock(prototype);
+            return Err(AnnounceNonceError::StartError(err));
+        }
+    };
+
+    loop {
+        match runtime_call {
+            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                let output = success.virtual_machine.value().as_ref().to_owned();
+                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
+                break Ok(output);
+            }
+            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_call_lock.unlock(error.prototype);
+                break Err(AnnounceNonceError::ReadOnlyRuntime(error.detail));
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(todo!()); // TODO:
+                        return Err(AnnounceNonceError::Call(err));
+                    }
+                };
+                runtime_call = get.inject_value(storage_value.map(iter::once));
+            }
+            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                todo!() // TODO:
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+            }
+        }
+    }
+}
+
+#[derive(derive_more::Display)]
+enum AnnounceNonceError {
+    Call(runtime_service::RuntimeCallError),
+    StartError(host::StartErr),
+    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
 }
