@@ -183,16 +183,20 @@ impl VirtualMachinePrototype {
 
     /// Turns this prototype into an actual virtual machine. This requires choosing which function
     /// to execute.
+    ///
+    /// The function will zero the memory starting at offset `zero_memory_above` and above. Pass
+    /// `0` in order to zero the entire memory, or `u32::max_value()` to zero nothing.
     pub fn start(
         mut self,
         function_name: &str,
         params: &[WasmValue],
+        zero_memory_above: u32,
     ) -> Result<VirtualMachine, (StartErr, Self)> {
         Ok(VirtualMachine {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 VirtualMachinePrototypeInner::Jit(inner) => {
-                    match inner.start(function_name, params) {
+                    match inner.start(function_name, params, zero_memory_above) {
                         Ok(vm) => VirtualMachineInner::Jit(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Jit(proto);
@@ -201,7 +205,7 @@ impl VirtualMachinePrototype {
                     }
                 }
                 VirtualMachinePrototypeInner::Interpreter(inner) => {
-                    match inner.start(function_name, params) {
+                    match inner.start(function_name, params, zero_memory_above) {
                         Ok(vm) => VirtualMachineInner::Interpreter(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Interpreter(proto);
