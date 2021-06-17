@@ -72,7 +72,7 @@ pub fn query_metadata(virtual_machine: host::HostVmPrototype) -> Query {
 
     match vm {
         Ok(vm) => Query::from_inner(vm),
-        Err((err, proto)) => Query::Finished(Err(Error::VmStart(err, proto))),
+        Err((err, proto)) => Query::Finished(Err(Error::VmStart(err)), proto),
     }
 }
 
@@ -80,34 +80,42 @@ pub fn query_metadata(virtual_machine: host::HostVmPrototype) -> Query {
 #[must_use]
 pub enum Query {
     /// Fetching the metadata is over.
-    Finished(Result<(Vec<u8>, host::HostVmPrototype), Error>),
+    Finished(Result<Vec<u8>, Error>, host::HostVmPrototype),
     /// Loading a storage value is required in order to continue.
     StorageGet(StorageGet),
 }
 
 impl Query {
+    /// Cancels execution of the virtual machine and returns back the prototype.
+    pub fn into_prototype(self) -> host::HostVmPrototype {
+        match self {
+            Query::Finished(_, vm) => vm,
+            Query::StorageGet(inner) => {
+                read_only_runtime_host::RuntimeHostVm::StorageGet(inner.0).into_prototype()
+            }
+        }
+    }
+
     fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let value =
+                let result =
                     match remove_metadata_length_prefix(success.virtual_machine.value().as_ref()) {
-                        Ok(value) => value.to_owned(),
-                        Err(err) => return Query::Finished(Err(Error::BadLengthPrefix(err))),
+                        Ok(value) => Ok(value.to_owned()),
+                        Err(err) => Err(Error::BadLengthPrefix(err)),
                     };
 
-                Query::Finished(Ok((value, success.virtual_machine.into_prototype())))
+                Query::Finished(result, success.virtual_machine.into_prototype())
             }
             read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => {
-                Query::Finished(Err(Error::WasmRun(err)))
+                Query::Finished(Err(Error::WasmRun(err.detail)), err.prototype)
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(inner) => {
                 Query::StorageGet(StorageGet(inner))
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                Query::Finished(Err(Error::HostFunctionNotAllowed))
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageRoot(_) => {
-                Query::Finished(Err(Error::HostFunctionNotAllowed))
+            st @ read_only_runtime_host::RuntimeHostVm::NextKey(_)
+            | st @ read_only_runtime_host::RuntimeHostVm::StorageRoot(_) => {
+                Query::Finished(Err(Error::HostFunctionNotAllowed), st.into_prototype())
             }
         }
     }
@@ -120,10 +128,10 @@ pub enum Error {
     VmInitialization(host::NewErr),
     /// Error when starting the virtual machine.
     #[display(fmt = "{}", _0)]
-    VmStart(host::StartErr, host::HostVmPrototype),
+    VmStart(host::StartErr),
     /// Error while running the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
-    WasmRun(read_only_runtime_host::Error),
+    WasmRun(read_only_runtime_host::ErrorDetail),
     /// Virtual machine tried to call a host function that isn't valid in this context.
     HostFunctionNotAllowed,
     /// Length prefix doesn't match actual length of the metadata.

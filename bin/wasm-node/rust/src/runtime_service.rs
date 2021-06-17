@@ -125,7 +125,7 @@ impl RuntimeService {
             let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
             loop {
                 match query {
-                    metadata::Query::Finished(Ok((metadata, vm))) => {
+                    metadata::Query::Finished(Ok(metadata), vm) => {
                         runtime.virtual_machine = Some(vm);
                         runtime.metadata = Some(metadata);
                         break;
@@ -139,7 +139,7 @@ impl RuntimeService {
                             .map(|(_, v)| v);
                         query = get.inject_value(value.map(iter::once));
                     }
-                    metadata::Query::Finished(Err(err)) => {
+                    metadata::Query::Finished(Err(err), _) => {
                         panic!("Unable to generate genesis metadata: {}", err)
                     }
                 }
@@ -412,7 +412,7 @@ impl RuntimeService {
         let mut query = metadata::query_metadata(virtual_machine);
         let (metadata_result, virtual_machine) = loop {
             match query {
-                metadata::Query::Finished(Ok((metadata, virtual_machine))) => {
+                metadata::Query::Finished(Ok(metadata), virtual_machine) => {
                     runtime_call_lock.lock.runtime.as_mut().unwrap().metadata =
                         Some(metadata.clone());
                     break (Ok(metadata), virtual_machine);
@@ -421,13 +421,15 @@ impl RuntimeService {
                     match runtime_call_lock.storage_entry(&storage_get.key_as_vec()) {
                         Ok(v) => query = storage_get.inject_value(v.map(iter::once)),
                         Err(err) => {
-                            break (Err(MetadataError::CallError(err)), todo!());
-                            // TODO:
+                            break (
+                                Err(MetadataError::CallError(err)),
+                                metadata::Query::StorageGet(storage_get).into_prototype(),
+                            );
                         }
                     }
                 }
-                metadata::Query::Finished(Err(err)) => {
-                    break (Err(MetadataError::MetadataQuery(err)), todo!()); // TODO:
+                metadata::Query::Finished(Err(err), virtual_machine) => {
+                    break (Err(MetadataError::MetadataQuery(err)), virtual_machine);
                 }
             }
         };
