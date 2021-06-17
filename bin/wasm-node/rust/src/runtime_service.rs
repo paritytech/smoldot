@@ -145,6 +145,7 @@ impl RuntimeService {
                 }
             }
 
+            debug_assert!(header::decode(&config.genesis_block_scale_encoded_header).is_ok());
             LatestKnownRuntime {
                 runtime: Ok(runtime),
                 runtime_code: code,
