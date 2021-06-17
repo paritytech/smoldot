@@ -678,7 +678,7 @@ async fn validate_transaction(
 
     let mut validation_in_progress = validate::validate_transaction(validate::Config {
         runtime,
-        scale_encoded_header: iter::once(runtime_call_lock.block_header()),
+        scale_encoded_header: iter::once(runtime_call_lock.block_scale_encoded_header()),
         scale_encoded_transaction: iter::once(scale_encoded_transaction),
         source,
     });

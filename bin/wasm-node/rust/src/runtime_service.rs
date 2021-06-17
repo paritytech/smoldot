@@ -70,22 +70,14 @@ pub struct Config<'a> {
     /// Specifications of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
 
-    /// Hash of the genesis block of the chain.
+    /// Header of the genesis block of the chain, in SCALE encoding.
     ///
     /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
     /// >           [`RuntimeService::new`] function could in theory use the
     /// >           [`Config::chain_spec`] parameter to derive this value, doing so is quite
     /// >           expensive. We prefer to require this value from the upper layer instead, as
     /// >           it is most likely needed anyway.
-    pub genesis_block_hash: [u8; 32],
-
-    /// Hash of the storage trie root of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`RuntimeService::new`] function could in theory use the
-    /// >           [`Config::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead.
-    pub genesis_block_state_root: [u8; 32],
+    pub genesis_block_scale_encoded_header: Vec<u8>,
 }
 
 /// See [the module-level documentation](..).
@@ -157,10 +149,10 @@ impl RuntimeService {
                 runtime: Ok(runtime),
                 runtime_code: code,
                 heap_pages,
-                runtime_block_hash: config.genesis_block_hash,
-                runtime_block_header: Vec::new(), // TODO: /!\
-                runtime_block_height: 0,
-                runtime_block_state_root: config.genesis_block_state_root,
+                runtime_block_hash: header::hash_from_scale_encoded_header(
+                    &config.genesis_block_scale_encoded_header,
+                ),
+                runtime_block_header: config.genesis_block_scale_encoded_header,
                 runtime_version_subscriptions: Vec::new(),
                 best_blocks_subscriptions: Vec::new(),
                 best_near_head_of_chain: config
@@ -338,13 +330,7 @@ impl RuntimeService {
             loop {
                 // Get `runtime_block_hash`, `runtime_block_height` and `runtime_block_state_root`,
                 // the hash, height, and state trie root of a recent best block that uses this runtime.
-                let (
-                    spec_version,
-                    runtime_block_hash,
-                    runtime_block_header,
-                    runtime_block_height,
-                    runtime_block_state_root,
-                ) = {
+                let (spec_version, runtime_block_hash, runtime_block_header) = {
                     let lock = self.latest_known_runtime.lock().await;
                     (
                         lock.runtime
@@ -355,8 +341,6 @@ impl RuntimeService {
                             .spec_version,
                         lock.runtime_block_hash,
                         lock.runtime_block_header.clone(),
-                        lock.runtime_block_height,
-                        lock.runtime_block_state_root,
                     )
                 };
 
@@ -368,7 +352,7 @@ impl RuntimeService {
                     .sync_service
                     .clone()
                     .call_proof_query(
-                        runtime_block_height,
+                        header::decode(&runtime_block_header).unwrap().number,
                         protocol::CallProofRequestConfig {
                             block_hash: runtime_block_hash,
                             method,
@@ -392,7 +376,6 @@ impl RuntimeService {
                 let virtual_machine = runtime.virtual_machine.take().unwrap();
                 let lock = RuntimeCallLock {
                     lock: latest_known_runtime_lock,
-                    state_root: runtime_block_state_root,
                     runtime_block_header,
                     call_proof,
                 };
@@ -483,21 +466,21 @@ impl RuntimeService {
 #[must_use]
 pub struct RuntimeCallLock<'a> {
     lock: MutexGuard<'a, LatestKnownRuntime>,
-    // TODO: redundant with header
-    state_root: [u8; 32],
     runtime_block_header: Vec<u8>,
     call_proof: Vec<Vec<u8>>,
 }
 
 impl<'a> RuntimeCallLock<'a> {
     /// Returns the SCALE-encoded header of the block the call is being made against.
-    pub fn block_header(&self) -> &[u8] {
+    pub fn block_scale_encoded_header(&self) -> &[u8] {
         &self.runtime_block_header
     }
 
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
-        &self.state_root
+        header::decode(&self.runtime_block_header)
+            .unwrap()
+            .state_root
     }
 
     /// Finds the given key in the call proof and returns the associated storage value.
@@ -508,7 +491,7 @@ impl<'a> RuntimeCallLock<'a> {
     pub fn storage_entry(&self, requested_key: &[u8]) -> Result<Option<&[u8]>, RuntimeCallError> {
         match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
             requested_key: &requested_key,
-            trie_root_hash: &self.state_root,
+            trie_root_hash: self.block_storage_root(),
             proof: self.call_proof.iter().map(|v| &v[..]),
         }) {
             Ok(v) => Ok(v),
@@ -532,7 +515,7 @@ impl<'a> RuntimeCallLock<'a> {
         for key in mem::replace(&mut to_find, Vec::new()) {
             let node_info = proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
                 requested_key: key.iter().cloned(),
-                trie_root_hash: &self.state_root,
+                trie_root_hash: &self.block_storage_root(),
                 proof: self.call_proof.iter().map(|v| &v[..]),
             })
             .map_err(RuntimeCallError::StorageRetrieval)?;
@@ -643,18 +626,11 @@ struct LatestKnownRuntime {
     /// Undecoded storage value of `:heappages` corresponding to the
     /// [`LatestKnownRuntime::runtime`] field.
     heap_pages: Option<Vec<u8>>,
-    /// Hash of a block known to have the runtime found in the [`LatestKnownRuntime::runtime`]
-    /// field. Always updated to a recent block having this runtime.
-    runtime_block_hash: [u8; 32],
     /// SCALE encoding of the header of the block whose hash is
-    /// [`LatestKnownRuntime::runtime_block_hash`].
+    /// [`LatestKnownRuntime::runtime_block_hash`]. Guaranteed to always be a valid header.
     runtime_block_header: Vec<u8>,
-    /// Height of the block whose hash is [`LatestKnownRuntime::runtime_block_hash`].
-    // TODO: fuse with header
-    runtime_block_height: u64,
-    /// Storage trie root of the block whose hash is [`LatestKnownRuntime::runtime_block_hash`].
-    // TODO: fuse with header
-    runtime_block_state_root: [u8; 32],
+    /// Hash of the header in [`LatestKnownRuntime::runtime_block_header`].
+    runtime_block_hash: [u8; 32],
 
     /// List of senders that get notified when the runtime specs of the best block changes.
     /// Whenever [`LatestKnownRuntime::runtime`] is updated, one should emit an item on each
@@ -858,8 +834,6 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 // block possible.
                 latest_known_runtime.runtime_block_hash = new_best_block_hash;
                 latest_known_runtime.runtime_block_header = new_best_block.clone();
-                latest_known_runtime.runtime_block_height = new_best_block_decoded.number;
-                latest_known_runtime.runtime_block_state_root = *new_best_block_decoded.state_root;
 
                 // `continue` if there wasn't any change in `:code` and `:heappages`.
                 if new_code == latest_known_runtime.runtime_code
