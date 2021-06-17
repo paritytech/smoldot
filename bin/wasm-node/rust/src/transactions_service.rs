@@ -670,7 +670,7 @@ async fn validate_transaction(
             validate::VALIDATION_FUNCTION_NAME,
             validate::validate_transaction_runtime_parameters(
                 iter::once(scale_encoded_transaction.as_ref()),
-                validate::TransactionSource::External,
+                source,
             ),
         )
         .await
@@ -703,7 +703,6 @@ async fn validate_transaction(
                 let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
                     Ok(v) => v,
                     Err(err) => {
-                        panic!("{:?}", err);
                         runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
                         return Err(ValidateTransactionError::Call(err));
                     }
@@ -721,6 +720,7 @@ async fn validate_transaction(
     }
 }
 
+/// See [`validate_transaction`].
 #[derive(derive_more::Display)]
 enum ValidateTransactionError {
     Call(runtime_service::RuntimeCallError),
