@@ -146,6 +146,12 @@ impl Future for Delay {
     }
 }
 
+impl future::FusedFuture for Delay {
+    fn is_terminated(&self) -> bool {
+        self.rx.is_terminated()
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct Instant {
     /// Milliseconds.
