@@ -459,7 +459,7 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
             // Instead, just update its parent to be `None` and continue iterating.
             if iter_node.parent == Some(self.new_final.0) {
                 debug_assert!(!self.traversing_up);
-                if self.uncles_only {
+                if !self.uncles_only {
                     iter_node.parent = None;
                 }
                 self.iter = if let Some(next_sibling) = iter_node.next_sibling {
