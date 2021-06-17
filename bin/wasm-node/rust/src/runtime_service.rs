@@ -50,9 +50,12 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
-use log::Metadata;
-use smoldot::{chain_spec, executor, header, metadata, network::protocol, trie::proof_verify};
-use std::{iter, pin::Pin, sync::Arc, time::Duration};
+use smoldot::{
+    chain_spec, executor, header, metadata,
+    network::protocol,
+    trie::{self, proof_verify},
+};
+use std::{iter, mem, pin::Pin, sync::Arc, time::Duration};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
@@ -507,6 +510,56 @@ impl<'a> RuntimeCallLock<'a> {
             Ok(v) => Ok(v),
             Err(err) => Err(RuntimeCallError::StorageRetrieval(err)),
         }
+    }
+
+    /// Finds in the call proof the list of keys that match a certain prefix.
+    ///
+    /// Returns an error if not all the keys could be found in the proof, meaning that the proof
+    /// is invalid.
+    // TODO: if proof is invalid, we should give the option to fetch another call proof
+    pub fn storage_prefix_keys(
+        &'_ self,
+        prefix: &[u8],
+    ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
+        // TODO: this is sub-optimal as we iterate over the proof multiple times and do a lot of Vec allocations
+        let mut to_find = vec![trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>()];
+        let mut output = Vec::new();
+
+        for key in mem::replace(&mut to_find, Vec::new()) {
+            let node_info = proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
+                requested_key: key.iter().cloned(),
+                trie_root_hash: &self.state_root,
+                proof: self.call_proof.iter().map(|v| &v[..]),
+            })
+            .map_err(RuntimeCallError::StorageRetrieval)?;
+
+            if node_info.node_value.is_some() {
+                assert_eq!(key.len() % 2, 0);
+                output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
+            }
+
+            match node_info.children {
+                proof_verify::Children::None => {}
+                proof_verify::Children::One(nibble) => {
+                    let mut child = key.clone();
+                    child.push(nibble);
+                    to_find.push(child);
+                }
+                proof_verify::Children::Multiple { children_bitmap } => {
+                    for nibble in trie::all_nibbles() {
+                        if (children_bitmap & (1 << u8::from(nibble))) == 0 {
+                            continue;
+                        }
+
+                        let mut child = key.clone();
+                        child.push(nibble);
+                        to_find.push(child);
+                    }
+                }
+            }
+        }
+
+        Ok(output.into_iter())
     }
 
     /// End the runtime call.

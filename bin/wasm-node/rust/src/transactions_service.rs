@@ -712,8 +712,20 @@ async fn validate_transaction(
             validate::Query::NextKey(_) => {
                 todo!() // TODO:
             }
-            validate::Query::PrefixKeys(_) => {
-                todo!() // TODO:
+            validate::Query::PrefixKeys(prefix) => {
+                // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
+                let rq_prefix = prefix.prefix().as_ref().to_owned();
+                let result = runtime_call_lock
+                    .storage_prefix_keys(&rq_prefix)
+                    .map(|i| i.map(|v| v.as_ref().to_owned()).collect::<Vec<_>>());
+                match result {
+                    Ok(v) => validation_in_progress = prefix.inject_keys(v.into_iter()),
+                    Err(err) => {
+                        runtime_call_lock
+                            .unlock(validate::Query::PrefixKeys(prefix).into_prototype());
+                        return Err(ValidateTransactionError::Call(err));
+                    }
+                }
             }
             validate::Query::StorageRoot(storage_root) => {
                 validation_in_progress =
