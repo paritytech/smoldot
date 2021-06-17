@@ -254,6 +254,8 @@ impl<C: AsRef<[u8]>> Verification<C> {
                     )));
 
                 self.next_precommit_index += 1;
+                self.next_precommit_author_verified = false;
+                self.next_precommit_block_verified = false;
             } else {
                 debug_assert!(!self.next_precommit_author_verified);
                 debug_assert!(!self.next_precommit_block_verified);
