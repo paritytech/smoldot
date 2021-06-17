@@ -341,6 +341,7 @@ impl RuntimeService {
                 let (
                     spec_version,
                     runtime_block_hash,
+                    runtime_block_header,
                     runtime_block_height,
                     runtime_block_state_root,
                 ) = {
@@ -353,6 +354,7 @@ impl RuntimeService {
                             .decode()
                             .spec_version,
                         lock.runtime_block_hash,
+                        lock.runtime_block_header.clone(),
                         lock.runtime_block_height,
                         lock.runtime_block_state_root,
                     )
@@ -391,6 +393,7 @@ impl RuntimeService {
                 let lock = RuntimeCallLock {
                     lock: latest_known_runtime_lock,
                     state_root: runtime_block_state_root,
+                    runtime_block_header,
                     call_proof,
                 };
 
@@ -482,13 +485,14 @@ pub struct RuntimeCallLock<'a> {
     lock: MutexGuard<'a, LatestKnownRuntime>,
     // TODO: redundant with header
     state_root: [u8; 32],
+    runtime_block_header: Vec<u8>,
     call_proof: Vec<Vec<u8>>,
 }
 
 impl<'a> RuntimeCallLock<'a> {
     /// Returns the SCALE-encoded header of the block the call is being made against.
     pub fn block_header(&self) -> &[u8] {
-        &self.lock.runtime_block_header
+        &self.runtime_block_header
     }
 
     /// Returns the storage root of the block the call is being made against.
