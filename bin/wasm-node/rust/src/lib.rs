@@ -327,14 +327,10 @@ async fn start_services(
             }),
             sync_service: sync_service.clone(),
             chain_spec: &chain_spec,
-            genesis_block_hash: genesis_chain_information
+            genesis_block_scale_encoded_header: genesis_chain_information
                 .as_ref()
                 .finalized_block_header
-                .hash(),
-            genesis_block_state_root: *genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .state_root,
+                .scale_encoding_vec(),
         })
         .await;
 
@@ -404,14 +400,10 @@ async fn start_services(
             }),
             sync_service: sync_service.clone(),
             chain_spec,
-            genesis_block_hash: genesis_chain_information
+            genesis_block_scale_encoded_header: genesis_chain_information
                 .as_ref()
                 .finalized_block_header
-                .hash(),
-            genesis_block_state_root: *genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .state_root,
+                .scale_encoding_vec(),
         })
         .await;
 
