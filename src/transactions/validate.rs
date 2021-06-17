@@ -251,8 +251,7 @@ pub fn validate_transaction(
         virtual_machine: config.runtime,
         function_to_call: "Core_initialize_block",
         parameter: {
-            // The `Core_initialize_block` function expects a SCALE-encoded partially-initialized
-            // header.
+            // The `Core_initialize_block` function expects a SCALE-encoded header.
             config.scale_encoded_header
         },
         top_trie_root_calculation_cache: None,
@@ -300,6 +299,9 @@ pub enum Query {
     StorageGet(StorageGet),
     /// Fetching the key that follows a given one is required in order to continue.
     NextKey(NextKey),
+    /// Fetching the list of keys with a given prefix from the storage is required in order to
+    /// continue.
+    PrefixKeys(PrefixKeys),
     /// Fetching the storage trie root is required in order to continue.
     StorageRoot(StorageRoot),
 }
@@ -319,6 +321,9 @@ impl Query {
             }
             Query::NextKey(inner) => {
                 read_only_runtime_host::RuntimeHostVm::NextKey(inner.0).into_prototype()
+            }
+            Query::PrefixKeys(inner) => {
+                runtime_host::RuntimeHostVm::PrefixKeys(inner.0).into_prototype()
             }
             Query::StorageRoot(inner) => {
                 read_only_runtime_host::RuntimeHostVm::StorageRoot(inner.0).into_prototype()
@@ -376,8 +381,7 @@ impl Query {
                     break Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)));
                 }
                 runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                    // TODO: this is completely wrong
-                    inner = i.inject_keys(iter::empty::<Vec<u8>>())
+                    break Query::PrefixKeys(PrefixKeys(i, info));
                 }
                 runtime_host::RuntimeHostVm::NextKey(inner) => todo!(),
             }
@@ -518,6 +522,23 @@ impl NextKey {
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
         Query::from_step2(self.0.inject_key(key), self.1)
+    }
+}
+
+/// Fetching the list of keys with a given prefix from the parent storage is required in order to
+/// continue.
+#[must_use]
+pub struct PrefixKeys(runtime_host::PrefixKeys, Stage1);
+
+impl PrefixKeys {
+    /// Returns the prefix whose keys to load.
+    pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
+        self.0.prefix()
+    }
+
+    /// Injects the list of keys.
+    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Query {
+        Query::from_step1(self.0.inject_keys(keys), self.1)
     }
 }
 

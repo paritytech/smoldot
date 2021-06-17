@@ -712,6 +712,9 @@ async fn validate_transaction(
             validate::Query::NextKey(_) => {
                 todo!() // TODO:
             }
+            validate::Query::PrefixKeys(_) => {
+                todo!() // TODO:
+            }
             validate::Query::StorageRoot(storage_root) => {
                 validation_in_progress =
                     storage_root.resume(runtime_call_lock.block_storage_root());
