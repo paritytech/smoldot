@@ -704,7 +704,7 @@ async fn validate_transaction(
                     Ok(v) => v,
                     Err(err) => {
                         panic!("{:?}", err);
-                        runtime_call_lock.unlock(todo!()); // TODO:
+                        runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
                         return Err(ValidateTransactionError::Call(err));
                     }
                 };

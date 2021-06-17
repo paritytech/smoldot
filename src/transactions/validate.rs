@@ -305,6 +305,27 @@ pub enum Query {
 }
 
 impl Query {
+    /// Cancels execution of the virtual machine and returns back the prototype.
+    pub fn into_prototype(self) -> host::HostVmPrototype {
+        match self {
+            Query::Finished {
+                virtual_machine, ..
+            } => virtual_machine,
+            Query::StorageGet(StorageGet(StorageGetInner::Stage1(inner, _))) => {
+                runtime_host::RuntimeHostVm::StorageGet(inner).into_prototype()
+            }
+            Query::StorageGet(StorageGet(StorageGetInner::Stage2(inner, _))) => {
+                read_only_runtime_host::RuntimeHostVm::StorageGet(inner).into_prototype()
+            }
+            Query::NextKey(inner) => {
+                read_only_runtime_host::RuntimeHostVm::NextKey(inner.0).into_prototype()
+            }
+            Query::StorageRoot(inner) => {
+                read_only_runtime_host::RuntimeHostVm::StorageRoot(inner.0).into_prototype()
+            }
+        }
+    }
+
     fn from_step1(mut inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
         loop {
             match inner {
@@ -352,7 +373,7 @@ impl Query {
                     }
                 }
                 runtime_host::RuntimeHostVm::StorageGet(i) => {
-                    break Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)))
+                    break Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)));
                 }
                 runtime_host::RuntimeHostVm::PrefixKeys(i) => {
                     // TODO: this is completely wrong
