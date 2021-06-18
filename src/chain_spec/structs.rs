@@ -24,7 +24,7 @@ use super::light_sync_state::LightSyncState;
 
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 use fnv::FnvBuildHasher;
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -35,6 +35,9 @@ pub(super) struct ClientSpec {
     pub(super) id: String,
     #[serde(default)]
     pub(super) chain_type: ChainType,
+    #[serde(default)]
+    // TODO: make use of this
+    pub(super) code_substitutes: HashMap<String, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
     pub(super) protocol_id: Option<String>,
