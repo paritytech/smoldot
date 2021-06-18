@@ -36,7 +36,7 @@ pub(super) struct ClientSpec {
     #[serde(default)]
     pub(super) chain_type: ChainType,
     #[serde(default)]
-    // TODO: make usre of this
+    // TODO: make use of this
     pub(super) code_substitutes: HashMap<String, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
