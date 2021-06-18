@@ -520,7 +520,7 @@ impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
         // Make sure that all elements are removed.
         while let Some(_) = self.next() {}
 
-        debug_assert!(self.tree.get(self.new_final).is_none());
+        debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
     }
 }
 
