@@ -18,7 +18,7 @@
 //! Runtime call to obtain the transactions validity status.
 
 use crate::{
-    executor::{host, read_only_runtime_host, runtime_host},
+    executor::{host, runtime_host},
     header, util,
 };
 
@@ -178,6 +178,8 @@ pub enum UnknownTransaction {
 /// Problem encountered during a call to [`validate_transaction`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
+    /// Error while decoding the block header against which to make the call.
+    InvalidHeader(header::Error),
     /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
     WasmStart(host::StartErr),
@@ -186,7 +188,7 @@ pub enum Error {
     WasmVmReadWrite(runtime_host::ErrorDetail),
     /// Error while running the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
-    WasmVmReadOnly(read_only_runtime_host::ErrorDetail),
+    WasmVmReadOnly(runtime_host::ErrorDetail),
     /// Error while decoding the output of the runtime.
     OutputDecodeError(DecodeError),
     /// The list of provided tags ([`ValidTransaction::provides`]). This is a bug in the runtime.
@@ -246,8 +248,15 @@ pub fn validate_transaction(
     // The `Core_initialize_block` function called below expects a partially-initialized
     // SCALE-encoded header. Importantly, passing the entire header will lead to different code
     // paths in the runtime and not match what Substrate does.
-    // TODO: don't unwrap
-    let decoded_header = header::decode(config.scale_encoded_header).unwrap();
+    let decoded_header = match header::decode(config.scale_encoded_header) {
+        Ok(h) => h,
+        Err(err) => {
+            return Query::Finished {
+                result: Err(Error::InvalidHeader(err)),
+                virtual_machine: config.runtime,
+            }
+        }
+    };
 
     // Start the call to `Core_initialize_block`.
     let vm = runtime_host::run(runtime_host::Config {
@@ -263,7 +272,7 @@ pub fn validate_transaction(
         .scale_encoding(),
         top_trie_root_calculation_cache: None,
         storage_top_trie_changes: hashbrown::HashMap::with_capacity_and_hasher(
-            16, // The `Core_initialize_block` function typically doesn't do much.
+            64, // Rough estimate.
             Default::default(),
         ),
         offchain_storage_changes: hashbrown::HashMap::default(),
@@ -309,8 +318,6 @@ pub enum Query {
     /// Fetching the list of keys with a given prefix from the storage is required in order to
     /// continue.
     PrefixKeys(PrefixKeys),
-    /// Fetching the storage trie root is required in order to continue.
-    StorageRoot(StorageRoot),
 }
 
 impl Query {
@@ -324,21 +331,24 @@ impl Query {
                 runtime_host::RuntimeHostVm::StorageGet(inner).into_prototype()
             }
             Query::StorageGet(StorageGet(StorageGetInner::Stage2(inner, _))) => {
-                read_only_runtime_host::RuntimeHostVm::StorageGet(inner).into_prototype()
+                runtime_host::RuntimeHostVm::StorageGet(inner).into_prototype()
             }
-            Query::NextKey(inner) => {
-                read_only_runtime_host::RuntimeHostVm::NextKey(inner.0).into_prototype()
+            Query::NextKey(NextKey(NextKeyInner::Stage1(inner, _))) => {
+                runtime_host::RuntimeHostVm::NextKey(inner).into_prototype()
             }
-            Query::PrefixKeys(inner) => {
-                runtime_host::RuntimeHostVm::PrefixKeys(inner.0).into_prototype()
+            Query::NextKey(NextKey(NextKeyInner::Stage2(inner, _))) => {
+                runtime_host::RuntimeHostVm::NextKey(inner).into_prototype()
             }
-            Query::StorageRoot(inner) => {
-                read_only_runtime_host::RuntimeHostVm::StorageRoot(inner.0).into_prototype()
+            Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(inner, _))) => {
+                runtime_host::RuntimeHostVm::PrefixKeys(inner).into_prototype()
+            }
+            Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(inner, _))) => {
+                runtime_host::RuntimeHostVm::PrefixKeys(inner).into_prototype()
             }
         }
     }
 
-    fn from_step1(mut inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
+    fn from_step1(inner: runtime_host::RuntimeHostVm, info: Stage1) -> Self {
         loop {
             match inner {
                 runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
@@ -350,26 +360,22 @@ impl Query {
                         };
                     }
 
-                    let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
+                    let vm = runtime_host::run(runtime_host::Config {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: VALIDATION_FUNCTION_NAME,
                         parameter: validate_transaction_runtime_parameters(
                             iter::once(info.scale_encoded_transaction),
                             info.transaction_source,
                         ),
+                        storage_top_trie_changes: success.storage_top_trie_changes,
+                        offchain_storage_changes: success.offchain_storage_changes,
+                        top_trie_root_calculation_cache: Some(
+                            success.top_trie_root_calculation_cache,
+                        ),
                     });
 
-                    panic!("{:?}", success.storage_top_trie_changes);
-
                     match vm {
-                        Ok(vm) => {
-                            break Query::from_step2(
-                                vm,
-                                Stage2 {
-                                    storage_top_trie_changes: success.storage_top_trie_changes,
-                                },
-                            )
-                        }
+                        Ok(vm) => break Query::from_step2(vm, Stage2 {}),
                         Err((err, virtual_machine)) => {
                             break Query::Finished {
                                 result: Err(Error::WasmStart(err)),
@@ -388,17 +394,19 @@ impl Query {
                     break Query::StorageGet(StorageGet(StorageGetInner::Stage1(i, info)));
                 }
                 runtime_host::RuntimeHostVm::PrefixKeys(i) => {
-                    break Query::PrefixKeys(PrefixKeys(i, info));
+                    break Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage1(i, info)));
                 }
-                runtime_host::RuntimeHostVm::NextKey(inner) => todo!(),
+                runtime_host::RuntimeHostVm::NextKey(inner) => {
+                    break Query::NextKey(NextKey(NextKeyInner::Stage1(inner, info)));
+                }
             }
         }
     }
 
-    fn from_step2(mut inner: read_only_runtime_host::RuntimeHostVm, info: Stage2) -> Self {
+    fn from_step2(inner: runtime_host::RuntimeHostVm, info: Stage2) -> Self {
         loop {
             match inner {
-                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                     // This decoding is done in multiple steps in order to solve borrow checking
                     // errors.
                     let result = {
@@ -432,26 +440,20 @@ impl Query {
                         virtual_machine: success.virtual_machine.into_prototype(),
                     };
                 }
-                read_only_runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                runtime_host::RuntimeHostVm::Finished(Err(err)) => {
                     break Query::Finished {
                         result: Err(Error::WasmVmReadOnly(err.detail)),
                         virtual_machine: err.prototype,
                     }
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageGet(i) => {
-                    if let Some(change) = info.storage_top_trie_changes.get(&i.key_as_vec()) {
-                        inner = i.inject_value(change.as_ref().map(iter::once));
-                    } else {
-                        break Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)));
-                    }
+                runtime_host::RuntimeHostVm::StorageGet(i) => {
+                    break Query::StorageGet(StorageGet(StorageGetInner::Stage2(i, info)));
                 }
-                read_only_runtime_host::RuntimeHostVm::StorageRoot(inner) => {
-                    break Query::StorageRoot(StorageRoot(inner, info))
+                runtime_host::RuntimeHostVm::PrefixKeys(i) => {
+                    break Query::PrefixKeys(PrefixKeys(PrefixKeysInner::Stage2(i, info)));
                 }
-                read_only_runtime_host::RuntimeHostVm::NextKey(inner) => {
-                    // TODO: what about `info.storage_top_trie_changes`?
-                    todo!()
-                    //break Query::NextKey(NextKey(inner, info));
+                runtime_host::RuntimeHostVm::NextKey(inner) => {
+                    break Query::NextKey(NextKey(NextKeyInner::Stage2(inner, info)));
                 }
             }
         }
@@ -465,10 +467,7 @@ struct Stage1 {
     scale_encoded_transaction: Vec<u8>,
 }
 
-struct Stage2 {
-    /// Changes to the storage performed by `Core_initialize_block`.
-    storage_top_trie_changes: hashbrown::HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-}
+struct Stage2 {}
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
@@ -476,7 +475,7 @@ pub struct StorageGet(StorageGetInner);
 
 enum StorageGetInner {
     Stage1(runtime_host::StorageGet, Stage1),
-    Stage2(read_only_runtime_host::StorageGet, Stage2),
+    Stage2(runtime_host::StorageGet, Stage2),
 }
 
 impl StorageGet {
@@ -513,12 +512,20 @@ impl StorageGet {
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(read_only_runtime_host::NextKey, Stage2);
+pub struct NextKey(NextKeyInner);
+
+enum NextKeyInner {
+    Stage1(runtime_host::NextKey, Stage1),
+    Stage2(runtime_host::NextKey, Stage2),
+}
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
     pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.0.key()
+        match &self.0 {
+            NextKeyInner::Stage1(inner, _) => either::Left(inner.key()),
+            NextKeyInner::Stage2(inner, _) => either::Right(inner.key()),
+        }
     }
 
     /// Injects the key.
@@ -528,35 +535,42 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
-        Query::from_step2(self.0.inject_key(key), self.1)
+        match self.0 {
+            NextKeyInner::Stage1(inner, stage1) => Query::from_step1(inner.inject_key(key), stage1),
+            NextKeyInner::Stage2(inner, stage2) => Query::from_step2(inner.inject_key(key), stage2),
+        }
     }
 }
 
 /// Fetching the list of keys with a given prefix from the parent storage is required in order to
 /// continue.
 #[must_use]
-pub struct PrefixKeys(runtime_host::PrefixKeys, Stage1);
+pub struct PrefixKeys(PrefixKeysInner);
+
+enum PrefixKeysInner {
+    Stage1(runtime_host::PrefixKeys, Stage1),
+    Stage2(runtime_host::PrefixKeys, Stage2),
+}
 
 impl PrefixKeys {
     /// Returns the prefix whose keys to load.
     pub fn prefix(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.0.prefix()
+        match &self.0 {
+            PrefixKeysInner::Stage1(inner, _) => either::Left(inner.prefix()),
+            PrefixKeysInner::Stage2(inner, _) => either::Right(inner.prefix()),
+        }
     }
 
     /// Injects the list of keys.
     pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Query {
-        Query::from_step1(self.0.inject_keys(keys), self.1)
-    }
-}
-
-/// Fetching the storage trie root is required in order to continue.
-#[must_use]
-pub struct StorageRoot(read_only_runtime_host::StorageRoot, Stage2);
-
-impl StorageRoot {
-    /// Writes the trie root hash to the Wasm VM and prepares it for resume.
-    pub fn resume(self, hash: &[u8; 32]) -> Query {
-        Query::from_step2(self.0.resume(hash), self.1)
+        match self.0 {
+            PrefixKeysInner::Stage1(inner, stage1) => {
+                Query::from_step1(inner.inject_keys(keys), stage1)
+            }
+            PrefixKeysInner::Stage2(inner, stage2) => {
+                Query::from_step2(inner.inject_keys(keys), stage2)
+            }
+        }
     }
 }
 

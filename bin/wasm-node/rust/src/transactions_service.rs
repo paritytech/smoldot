@@ -727,10 +727,6 @@ async fn validate_transaction(
                     }
                 }
             }
-            validate::Query::StorageRoot(storage_root) => {
-                validation_in_progress =
-                    storage_root.resume(runtime_call_lock.block_storage_root());
-            }
         }
     }
 }
