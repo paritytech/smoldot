@@ -32,7 +32,7 @@ pub struct Config<'a, TTx> {
     pub runtime: host::HostVmPrototype,
 
     /// Header of the block to verify the transaction against, in SCALE encoding.
-    /// The runtime of this block must be the one in [`COnfig::runtime`].
+    /// The runtime of this block must be the one in [`Config::runtime`].
     pub scale_encoded_header: &'a [u8],
 
     /// SCALE-encoded transaction.
