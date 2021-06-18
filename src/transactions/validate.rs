@@ -19,21 +19,21 @@
 
 use crate::{
     executor::{host, read_only_runtime_host, runtime_host},
-    util,
+    header, util,
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
 /// Configuration for a transaction validation process.
-pub struct Config<THeader, TTx> {
+pub struct Config<'a, TTx> {
     /// Runtime used to get the validate the transaction. Must be built using the Wasm code found
     /// at the `:code` key of the block storage.
     pub runtime: host::HostVmPrototype,
 
     /// Header of the block to verify the transaction against, in SCALE encoding.
     /// The runtime of this block must be the one in [`COnfig::runtime`].
-    pub scale_encoded_header: THeader,
+    pub scale_encoded_header: &'a [u8],
 
     /// SCALE-encoded transaction.
     pub scale_encoded_transaction: TTx,
@@ -241,19 +241,26 @@ pub fn decode_validate_transaction_return_value(
 
 /// Validates a transaction by calling `TaggedTransactionQueue_validate_transaction`.
 pub fn validate_transaction(
-    config: Config<
-        impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-        impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone,
-    >,
+    config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Query {
-    // The first step is to call `Core_initialize_block`.
+    // The `Core_initialize_block` function called below expects a partially-initialized
+    // SCALE-encoded header. Importantly, passing the entire header will lead to different code
+    // paths in the runtime and not match what Substrate does.
+    // TODO: don't unwrap
+    let decoded_header = header::decode(config.scale_encoded_header).unwrap();
+
+    // Start the call to `Core_initialize_block`.
     let vm = runtime_host::run(runtime_host::Config {
         virtual_machine: config.runtime,
         function_to_call: "Core_initialize_block",
-        parameter: {
-            // The `Core_initialize_block` function expects a SCALE-encoded header.
-            config.scale_encoded_header
-        },
+        parameter: header::HeaderRef {
+            parent_hash: decoded_header.parent_hash,
+            number: decoded_header.number,
+            extrinsics_root: &[0; 32],
+            state_root: &[0; 32],
+            digest: header::DigestRef::empty(),
+        }
+        .scale_encoding(),
         top_trie_root_calculation_cache: None,
         storage_top_trie_changes: hashbrown::HashMap::with_capacity_and_hasher(
             16, // The `Core_initialize_block` function typically doesn't do much.
