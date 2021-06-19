@@ -28,7 +28,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{multiaddr, peer_id::PeerId},
 };
-use std::{collections::HashMap, pin::Pin, sync::Arc, task};
+use std::{collections::HashMap, num::NonZeroU32, pin::Pin, sync::Arc, task};
 
 pub mod ffi;
 
@@ -438,8 +438,9 @@ async fn start_services(
                 }),
                 sync_service: sync_service.clone(),
                 runtime_service: runtime_service.clone(),
-                max_pending_transactions: 64,
-                max_concurrent_downloads: 3,
+                max_pending_transactions: NonZeroU32::new(64).unwrap(),
+                max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
+                max_concurrent_validations: NonZeroU32::new(2).unwrap(),
             })
             .await,
         );

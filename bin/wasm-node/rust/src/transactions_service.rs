@@ -40,7 +40,7 @@
 //! mode" (not an actual Rust panic, just a way to describe the logic) and all watched
 //! transactions are dropped.
 //!
-//! The same "panic mode" happens if there's an accidental gap in the chain, which wills typically
+//! The same "panic mode" happens if there's an accidental gap in the chain, which will typically
 //! happen if the [`sync_service::SyncService`] is overwhelmed.
 //!
 //! If the channel returned by [`TransactionsService::submit_extrinsic`] is full, it will
@@ -69,16 +69,20 @@
 
 use crate::{ffi, runtime_service, sync_service};
 
-use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+    prelude::*,
+    stream::FuturesUnordered,
+};
 use smoldot::{
-    executor::{host, read_only_runtime_host},
     header,
     informant::HashDisplay,
     libp2p::peer_id::PeerId,
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, convert::TryFrom as _, iter, pin::Pin, sync::Arc, time::Duration};
+use std::{cmp, convert::TryFrom as _, iter, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
@@ -94,13 +98,16 @@ pub struct Config {
     /// Maximum number of pending transactions allowed in the service.
     ///
     /// Any extra transaction will lead to [`TransactionStatus::Dropped`].
-    pub max_pending_transactions: u32,
+    pub max_pending_transactions: NonZeroU32,
 
     /// Maximum number of block body downloads that can be performed in parallel.
     ///
     /// > **Note**: This is the maximum number of *blocks* whose body is being download, not the
     /// >           number of block requests emitted on the network.
-    pub max_concurrent_downloads: u32,
+    pub max_concurrent_downloads: NonZeroU32,
+
+    /// Maximum number of transaction validations that can be performed in parallel.
+    pub max_concurrent_validations: NonZeroU32,
 }
 
 /// See [the module-level documentation](..).
@@ -113,15 +120,31 @@ impl TransactionsService {
     /// Builds a new service.
     pub async fn new(mut config: Config) -> Self {
         let (to_background, from_foreground) = mpsc::channel(8);
+        let (to_validation, to_validation_rx) = {
+            let (tx, rx) = mpsc::channel(4); // TODO: correct number
+            (tx, Arc::new(Mutex::new(rx)))
+        };
+
+        for _ in 0..config.max_concurrent_validations.get() {
+            (config.tasks_executor)(
+                "transaction-validation".into(),
+                Box::pin(validation_task(
+                    config.runtime_service.clone(),
+                    to_validation_rx.clone(),
+                )),
+            );
+        }
 
         (config.tasks_executor)(
             "transactions-service".into(),
             Box::pin(background_task(
                 config.sync_service,
-                config.runtime_service,
                 from_foreground,
-                usize::try_from(config.max_concurrent_downloads).unwrap_or(usize::max_value()),
-                usize::try_from(config.max_pending_transactions).unwrap_or(usize::max_value()),
+                to_validation,
+                usize::try_from(config.max_concurrent_downloads.get())
+                    .unwrap_or(usize::max_value()),
+                usize::try_from(config.max_pending_transactions.get())
+                    .unwrap_or(usize::max_value()),
             )),
         );
 
@@ -218,14 +241,13 @@ enum ToBackground {
 /// Background task running in parallel of the front service.
 async fn background_task(
     sync_service: Arc<sync_service::SyncService>,
-    runtime_service: Arc<runtime_service::RuntimeService>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
+    mut to_validation: mpsc::Sender<ToValidationTask>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
 ) {
     let mut worker = Worker {
         sync_service,
-        runtime_service,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity: cmp::min(8, max_pending_transactions),
             blocks_capacity: 32,
@@ -455,27 +477,14 @@ async fn background_task(
                     worker.next_validation_start = ffi::Delay::new(Duration::from_secs(2));
 
                     for (tx_id, _) in worker.pending_transactions.unvalidated_transactions() {
-                        let tx_body = worker.pending_transactions.scale_encoding(tx_id).unwrap();
+                        let (send_back, result_rx) = oneshot::channel();
 
-                        // TODO: should be async
+                        let _ = to_validation.try_send(ToValidationTask::Transaction {
+                            scale_encoded_transaction: worker.pending_transactions.scale_encoding(tx_id).unwrap().to_owned(),
+                            send_back,
+                        });
 
-                        let validation = match validate_transaction(
-                            &worker.runtime_service,
-                            tx_body,
-                            validate::TransactionSource::External
-                        ).await {
-                            Ok(v) => v,
-                            Err(error) => {
-                                log::warn!(
-                                    target: "transactions-service",
-                                    "Failed to perform transaction validation: {}",
-                                    error
-                                );
-                                continue;
-                            }
-                        };
-
-                        panic!("{:?}", validation);
+                        // TODO: finish
                     }
                 }
 
@@ -540,9 +549,6 @@ async fn background_task(
 struct Worker {
     // How to download the bodies of blocks and synchronize the chain.
     sync_service: Arc<sync_service::SyncService>,
-
-    // How to validate the transactions.
-    runtime_service: Arc<runtime_service::RuntimeService>,
 
     /// List of pending transactions.
     ///
@@ -655,6 +661,50 @@ impl PendingTransaction {
 
         self.latest_status = Some(status);
     }
+}
+
+/// Background task running in parallel of the front service.
+async fn validation_task(
+    runtime_service: Arc<runtime_service::RuntimeService>,
+    from_foreground: Arc<Mutex<mpsc::Receiver<ToValidationTask>>>,
+) {
+    loop {
+        let message = {
+            let mut locked = from_foreground.lock().await;
+            match locked.next().await {
+                Some(m) => m,
+                None => return,
+            }
+        };
+
+        match message {
+            ToValidationTask::Transaction {
+                scale_encoded_transaction,
+                send_back,
+            } => {
+                let outcome = validate_transaction(
+                    &runtime_service,
+                    scale_encoded_transaction,
+                    validate::TransactionSource::External,
+                )
+                .await;
+
+                let _ = send_back.send(outcome);
+            }
+        }
+    }
+}
+
+enum ToValidationTask {
+    Transaction {
+        scale_encoded_transaction: Vec<u8>,
+        send_back: oneshot::Sender<
+            Result<
+                Result<validate::ValidTransaction, validate::TransactionValidityError>,
+                ValidateTransactionError,
+            >,
+        >,
+    },
 }
 
 async fn validate_transaction(
