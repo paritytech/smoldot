@@ -57,6 +57,9 @@ pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
+    /// Key to use for the encryption layer of all the connections. Gives the node its identity.
+    pub noise_key: connection::NoiseKey,
+
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
 
@@ -168,7 +171,7 @@ impl NetworkService {
                 chains,
                 known_nodes,
                 listen_addresses: Vec::new(), // TODO:
-                noise_key: connection::NoiseKey::new(&rand::random()),
+                noise_key: config.noise_key,
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 16
                 pending_api_events_buffer_size: NonZeroUsize::new(2048).unwrap(),

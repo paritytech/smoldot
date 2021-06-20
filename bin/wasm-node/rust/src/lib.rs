@@ -26,7 +26,7 @@ use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     chain, chain_spec,
     informant::HashDisplay,
-    libp2p::{multiaddr, peer_id::PeerId},
+    libp2p::{connection, multiaddr, peer_id},
 };
 use std::{collections::HashMap, num::NonZeroU32, pin::Pin, sync::Arc, task};
 
@@ -140,6 +140,14 @@ pub async fn start_client(
         })
         .collect::<Vec<_>>();
 
+    // Key used by the networking. Represents the identity of the node on the peer-to-peer
+    // network.
+    let network_noise_key = connection::NoiseKey::new(&rand::random());
+    log::info!(
+        "Network public key: {}",
+        peer_id::PublicKey::Ed25519(*network_noise_key.libp2p_public_ed25519_key()).into_peer_id()
+    );
+
     // Starting here, the code below initializes the various "services" that make up the node.
     // Services need to be able to spawn asynchronous tasks on their own. Since "spawning a task"
     // isn't really something that a browser or Node environment can do efficiently, we instead
@@ -167,6 +175,7 @@ pub async fn start_client(
                 genesis_chain_information,
                 chain_specs,
                 json_rpc_running,
+                network_noise_key,
             )
             .boxed(),
         ))
@@ -232,6 +241,7 @@ async fn start_services(
     genesis_chain_information: Vec<chain::chain_information::ValidChainInformation>,
     chain_specs: Vec<chain_spec::ChainSpec>,
     json_rpc_running: Vec<bool>,
+    network_noise_key: connection::NoiseKey,
 ) {
     // The network service is responsible for connecting to the peer-to-peer network
     // of all chains.
@@ -242,6 +252,7 @@ async fn start_services(
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             num_events_receivers: chain_information.len(), // Configures the length of `network_event_receivers`
+            noise_key: network_noise_key,
             chains: chain_information
                 .iter()
                 .zip(chain_specs.iter())
@@ -254,7 +265,7 @@ async fn start_services(
                                 for node in chain_spec.boot_nodes() {
                                     let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
                                     if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                                        let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                                        let peer_id = peer_id::PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
                                         list.push((peer_id, address));
                                     } else {
                                         panic!() // TODO:
