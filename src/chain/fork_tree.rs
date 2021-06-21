@@ -496,6 +496,8 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
 
             // Should the node be removed?
             if self.uncles_only && iter_node.is_prune_target_ancestor {
+                // Reset `is_prune_target_ancestor` for next time we do some pruning.
+                iter_node.is_prune_target_ancestor = false;
                 continue;
             }
 
