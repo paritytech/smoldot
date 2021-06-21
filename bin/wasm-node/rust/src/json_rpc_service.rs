@@ -1072,9 +1072,6 @@ impl JsonRpcService {
                                 transactions_service::TransactionStatus::Finalized(block) => {
                                     methods::TransactionStatus::Finalized(block)
                                 }
-                                transactions_service::TransactionStatus::FinalityTimeout(block) => {
-                                    methods::TransactionStatus::FinalityTimeout(block)
-                                }
                             };
 
                             let per_source_subscriptions =

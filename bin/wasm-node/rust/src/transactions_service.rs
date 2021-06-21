@@ -200,22 +200,24 @@ impl TransactionsService {
 pub enum TransactionStatus {
     /// Transaction has been broadcasted to the given peers.
     Broadcast(Vec<PeerId>),
+
     /// Detected a block that is part of the best chain and that contains this transaction.
-    // Contains the hash of the block that contains the transaction.
+    ///
+    /// Contains the hash of the block that contains the transaction.
     InBlock([u8; 32]),
+
     /// Can be sent after [`TransactionStatus::InBlock`] to notify that a re-org happened and the
     /// current best tree of blocks no longer contains the transaction.
     ///
     /// Contains the same block as was previously passed in [`TransactionStatus::InBlock`].
     Retracted([u8; 32]),
-    /// Transaction has been dropped because the service was full or too slow.
+
+    /// Transaction has been dropped because the service was full, too slow, or generally
+    /// encountered a problem.
     Dropped,
+
     /// Transaction has been included in a finalized block.
     Finalized([u8; 32]),
-    /// Transaction is not in a finalized block, but is included in the 512th ancestor of the
-    /// current best block. This can happen if finality has stalled or is simply not available
-    /// on the chain.
-    FinalityTimeout([u8; 32]),
 }
 
 /// Message sent from the foreground service to the background.
@@ -241,13 +243,12 @@ async fn background_task(
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity: cmp::min(8, max_pending_transactions),
             blocks_capacity: 32,
-            finalized_block_hash: [0; 32], // Pool is re-initialized below.
+            finalized_block_hash: [0; 32], // Dummy value. Pool is re-initialized below.
         }),
         block_downloads: FuturesUnordered::new(),
         validations_in_progress: FuturesUnordered::new(),
         max_concurrent_downloads,
         max_pending_transactions,
-        next_validation_start: ffi::Delay::new(Duration::new(0, 0)),
     };
 
     // TODO: must periodically re-send transactions that aren't included in block yet
@@ -273,18 +274,17 @@ async fn background_task(
         let current_finalized_block_hash =
             header::hash_from_scale_encoded_header(&current_finalized_block_header);
 
-        // TODO: reset finalized_downloading_blocks too?
-
-        worker.block_downloads.clear();
-
-        // As explained above, this code is reached if there is a gap in the blocks.
-        // Consequently, we drop all pending transactions.
+        // Drop all pending transactions of the pool.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             pending.update_status(TransactionStatus::Dropped);
         }
         worker
             .pending_transactions
             .clear_and_reset(current_finalized_block_hash);
+
+        // Reset the other fields.
+        worker.block_downloads.clear();
+        worker.validations_in_progress.clear();
 
         log::debug!(
             target: "tx-service",
@@ -293,6 +293,14 @@ async fn background_task(
         );
 
         loop {
+            // If the finalized block moved in such a way that there would be blocks in the
+            // pool whose height is inferior to `latest_finalized - 32`, then jump to
+            // "catastrophic mode" and reset everything. This is to avoid the possibility of an
+            // unreasonable memory consumption.
+            if worker.pending_transactions.oldest_block_finality_lag() >= 32 {
+                continue 'channels_rebuild;
+            }
+
             // Start the validation process of transactions that need to be validated.
             while worker.validations_in_progress.len() < max_concurrent_validations {
                 // Find a transaction that needs to be validated.
@@ -302,67 +310,69 @@ async fn background_task(
                     .filter(|(_, tx)| tx.validation_in_progress.is_none())
                     .next()
                     .map(|(tx_id, ..)| tx_id);
+                let to_start_validate = match to_start_validate {
+                    Some(tx_id) => tx_id,
+                    None => break,
+                };
 
-                if let Some(to_start_validate) = to_start_validate {
-                    let validation_future = {
-                        let runtime_service = worker.runtime_service.clone();
-                        let scale_encoded_transaction = worker
-                            .pending_transactions
-                            .scale_encoding(to_start_validate)
-                            .unwrap()
-                            .to_owned();
-                        async move {
-                            validate_transaction(
-                                &runtime_service,
-                                scale_encoded_transaction,
-                                validate::TransactionSource::External,
-                            )
-                            .await
-                        }
-                    };
-
-                    let (to_execute, result_rx) = validation_future.remote_handle();
-
-                    worker
-                        .validations_in_progress
-                        .push(to_execute.map(move |()| to_start_validate).boxed());
-
-                    let tx = worker
+                // Create the `Future` of the validation process.
+                let validation_future = {
+                    let runtime_service = worker.runtime_service.clone();
+                    let scale_encoded_transaction = worker
                         .pending_transactions
-                        .transaction_user_data_mut(to_start_validate)
-                        .unwrap();
-                    debug_assert!(tx.validation_in_progress.is_none());
-                    tx.validation_in_progress = Some(result_rx);
-                } else {
-                    break;
-                }
+                        .scale_encoding(to_start_validate)
+                        .unwrap()
+                        .to_owned();
+                    async move {
+                        validate_transaction(
+                            &runtime_service,
+                            scale_encoded_transaction,
+                            validate::TransactionSource::External,
+                        )
+                        .await
+                    }
+                };
+
+                // The future with the actual result is stored in the `PendingTransaction`, while
+                // the future that executes the validation is stored in `validations_in_progress`.
+                let (to_execute, result_rx) = validation_future.remote_handle();
+                worker
+                    .validations_in_progress
+                    .push(to_execute.map(move |()| to_start_validate).boxed());
+                let tx = worker
+                    .pending_transactions
+                    .transaction_user_data_mut(to_start_validate)
+                    .unwrap();
+                debug_assert!(tx.validation_in_progress.is_none());
+                tx.validation_in_progress = Some(result_rx);
             }
 
             // Start block bodies downloads that need to be started.
             while worker.block_downloads.len() < worker.max_concurrent_downloads {
                 // TODO: prioritize best chain?
-                let block_hash =
-                    match worker
-                        .pending_transactions
-                        .missing_block_bodies()
-                        .find(|(_, block)| {
-                            // The transaction pool isn't aware of the fact that we're currently downloading
-                            // a block's body. Skip when that is the case.
-                            if block.downloading {
-                                return false;
-                            }
+                let block_hash = worker
+                    .pending_transactions
+                    .missing_block_bodies()
+                    .find(|(_, block)| {
+                        // The transaction pool isn't aware of the fact that we're currently downloading
+                        // a block's body. Skip when that is the case.
+                        if block.downloading {
+                            return false;
+                        }
 
-                            // Don't try again block downloads that have failed before.
-                            if block.failed_downloads >= 1 {
-                                // TODO: try downloading again if finalized or best chain
-                                return false;
-                            }
+                        // Don't try again block downloads that have failed before.
+                        if block.failed_downloads >= 1 {
+                            // TODO: try downloading again if finalized or best chain
+                            return false;
+                        }
 
-                            true
-                        }) {
-                        Some((b, _)) => *b,
-                        None => break,
-                    };
+                        true
+                    })
+                    .map(|(b, _)| *b);
+                let block_hash = match block_hash {
+                    Some(b) => b,
+                    None => break,
+                };
 
                 // Actual download start.
                 worker.block_downloads.push({
@@ -390,12 +400,6 @@ async fn background_task(
             for (_, _block) in worker.pending_transactions.prune_finalized_with_body() {
                 debug_assert!(!_block.downloading);
                 // TODO: report finalized transactions
-            }
-
-            // Refuse to store blocks that are older than `latest_finalized - 32`. If that
-            // happens, we jump to "catastrophic mode".
-            if worker.pending_transactions.oldest_block_finality_lag() >= 32 {
-                continue 'channels_rebuild;
             }
 
             futures::select! {
@@ -518,7 +522,14 @@ async fn background_task(
                         Ok((block_hash, result)) => {
                             worker.pending_transactions.set_validation_result(maybe_validated_tx_id, &block_hash, result);
                         }
-                        Err(_) => todo!()
+                        Err(error) => {
+                            // Transaction couldn't be validated because of an error while
+                            // executing the runtime. This most likely indicates a compatibility
+                            // problem between smoldot and the runtime code. Drop the transaction.
+                            log::warn!(target: "tx-service", "Failed to validate transaction: {}", error);
+                            let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
+                            tx.update_status(TransactionStatus::Dropped);
+                        }
                     }
                 },
 
@@ -619,9 +630,6 @@ struct Worker {
     /// See [`Config::max_concurrent_downloads`]. Maximum number of elements in
     /// [`Worker::block_downloads`].
     max_concurrent_downloads: usize,
-
-    /// When to start the next transaction validation.
-    next_validation_start: ffi::Delay,
 }
 
 impl Worker {
