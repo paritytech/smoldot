@@ -19,8 +19,8 @@
 //!
 //! See [the `pool` module](../pool) documentation for details about the transactions pool.
 //!
-//! Contrary to [`pool::Pool`], this data structure is opinionated towards a certain light client
-//! usage. This means:
+//! Contrary to [`super::pool::Pool`], this data structure is opinionated towards a certain light
+//! client usage. This means:
 //!
 //! - Block bodies are initially unknown and can be added later.
 //! - Transactions included in block bodies that weren't already in the pool aren't added, and
@@ -60,7 +60,7 @@ use alloc::{
 };
 use core::{convert::TryFrom as _, fmt, iter};
 
-/// Configuration for [`Pool::new`].
+/// Configuration for [`LightPool::new`].
 pub struct Config {
     /// Number of transactions to initially allocate memory for.
     pub transactions_capacity: usize,
@@ -69,9 +69,6 @@ pub struct Config {
     pub blocks_capacity: usize,
 
     /// Hash of the finalized block at initialization.
-    ///
-    /// Non-finalized blocks should be added to the pool after initialization using
-    /// [`Pool::append_block`].
     pub finalized_block_hash: [u8; 32],
 }
 
