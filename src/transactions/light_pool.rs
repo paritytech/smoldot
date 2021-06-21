@@ -32,7 +32,15 @@
 //!
 //! A [`LightPool`] is a collection of transactions and a tree of blocks.
 //!
-//! TODO: write up here about blocks
+//! Blocks can be added to the tree using [`LightPool::add_block`]. When a block is added, its
+//! body is unknown. You can add a body to a block using [`LightPool::set_block_body`]. The pool
+//! also tracks a best block and a finalized block. Use [`LightPool::set_best_block`] and
+//! [`LightPool::set_finalized_block`] to match the light pool with the state of the chain.
+//!
+//! Blocks that have been finalized can be removed with [`LightPool::prune_finalized_with_body`].
+//! This method only removes blocks whose body is known. You are encouraged to track the value
+//! of [`LightPool::oldest_block_finality_lag`] and make sure that it doesn't go above a certain
+//! threshold, in order to avoid adding too many blocks to this pool.
 //!
 //! Each transaction in the pool exposes three properties:
 //!
@@ -596,6 +604,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
                 let _expected_index = self.blocks_by_id.remove(&pruned_block.user_data.hash);
                 debug_assert_eq!(_expected_index, Some(pruned_block.index));
+
+                // TODO: must remove included and validated transactions
 
                 out.push((
                     pruned_block.user_data.hash,
