@@ -333,6 +333,11 @@ impl RuntimeService {
                 // the hash, height, and state trie root of a recent best block that uses this runtime.
                 let (spec_version, runtime_block_hash, runtime_block_header) = {
                     let lock = self.latest_known_runtime.lock().await;
+                    debug_assert_eq!(
+                        lock.runtime_block_hash,
+                        header::hash_from_scale_encoded_header(&lock.runtime_block_header)
+                    );
+
                     (
                         lock.runtime
                             .as_ref()
