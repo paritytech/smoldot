@@ -472,7 +472,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         for included_body in body {
             let included_body = included_body.as_ref();
 
-            // Confusingly, .
+            // As explained in the .
             let hash = blake2_hash(included_body);
 
             for (_, known_tx_id) in self.by_hash.range(
@@ -620,7 +620,7 @@ pub struct SetBestBlock {
 
 /// Entry in [`LightPool::transactions`].
 struct Transaction<TTx> {
-    /// Bytes corresponding to the SCALE-encoded transaction.
+    /// Bytes corresponding to the double-SCALE-encoded transaction.
     scale_encoded: Vec<u8>,
 
     /// User data chosen by the user.

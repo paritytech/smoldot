@@ -482,6 +482,9 @@ where
         protocol::decode_call_proof_response(&response).map_err(CallProofRequestError::Decode)
     }
 
+    ///
+    ///
+    /// Must be passed the double-SCALE-encoded transaction.
     pub async fn announce_transaction(
         &self,
         target: &peer_id::PeerId,

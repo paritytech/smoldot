@@ -87,13 +87,19 @@
 //!
 //! ## About length prefixes
 //!
-//! For historical reasons, all transactions must start with a SCALE-compact-encoded integer
-//! containing the length of the transaction (excepting these two bytes).
+//! The meaning of the bytes that a transaction consists of depends on the runtime. It is typically
+//! some sort of `enum`, and the first byte consists in a discriminant.
 //!
-//! The body of a block is made of all transactions directly appended one behind the other. For
-//! example if a block contains two transactions `[8, 0, 0]` and `[12, 3, 3, 3]`, then its
-//! SCALE-encoded body will be `[4, 5, 0, 0, 12, 3, 3, 3]`. The initial `4` is the
-//! SCALE-compact-encoded number of transactions.
+//! Similar objects, such as the block header, are typically passed as to the runtime in their
+//! SCALE encoding. Transactions, however, for historical reasons, are passed in their
+//! double-SCALE-encoding. In other words, transactions are first encoded in SCALE, then prepended
+//! with a SCALE-compact-encoded integer containing their length.
+//!
+//! Transactions are similarly passed over the network in their double-SCALE-encoding.
+//!
+//! A block body consists in a SCALE-encoded `Vec<Vec<u8>>`, where each of the inner `Vec<u8>` is
+//! a (single) SCALE-encoded transaction. A block body is therefore the concatenation of all the
+//! double-SCALE-encoded transactions.
 //!
 
 pub mod light_pool;

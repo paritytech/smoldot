@@ -631,7 +631,7 @@ impl<'a, 'b, TTx: fmt::Debug> fmt::Debug for Vacant<'a, 'b, TTx> {
 
 /// Entry in [`Pool::transactions`].
 struct Transaction<TTx> {
-    /// Bytes corresponding to the SCALE-encoded transaction.
+    /// Bytes corresponding to the double-SCALE-encoded transaction.
     scale_encoded: Vec<u8>,
 
     /// If `Some`, contains the outcome of the validation of this transaction and the block height

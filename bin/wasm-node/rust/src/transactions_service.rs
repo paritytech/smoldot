@@ -145,6 +145,8 @@ impl TransactionsService {
     /// Adds a transaction to the service. The service will try to send it out as soon as
     /// possible.
     ///
+    /// Must pass as parameter the double-SCALE-encoded transaction.
+    ///
     /// The return value of this method is a channel which will receive updates on the state
     /// of the extrinsic. The channel is closed when no new update is expected or if it becomes
     /// full.
