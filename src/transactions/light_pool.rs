@@ -824,6 +824,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 .collect::<Vec<_>>();
 
             for tx_id in included_transactions {
+                // TODO: finish here
                 //self.remove_transaction();
             }
 

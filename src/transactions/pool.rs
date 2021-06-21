@@ -78,6 +78,8 @@
 //! - Sending transactions to other peers.
 //!
 
+// TODO: this code is completely untested
+
 use super::validate::{TransactionValidityError, ValidTransaction};
 
 use alloc::{collections::BTreeSet, vec::Vec};
