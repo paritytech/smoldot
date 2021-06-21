@@ -263,7 +263,6 @@ pub fn validate_transaction(
         virtual_machine: config.runtime,
         function_to_call: "Core_initialize_block",
         parameter: header::HeaderRef {
-            // TODO: not actually sure if these values match what Substrate passes to the runtime
             parent_hash: decoded_header.parent_hash,
             number: decoded_header.number,
             extrinsics_root: &[0; 32],
