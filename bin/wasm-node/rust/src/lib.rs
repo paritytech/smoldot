@@ -28,7 +28,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
-use std::{collections::HashMap, pin::Pin, sync::Arc, task};
+use std::{collections::HashMap, num::NonZeroU32, pin::Pin, sync::Arc, task};
 
 pub mod ffi;
 
@@ -447,8 +447,12 @@ async fn start_services(
                     let new_task_tx = new_task_tx.clone();
                     move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                 }),
-                network_service: (network_service.clone(), chain_index),
                 sync_service: sync_service.clone(),
+                runtime_service: runtime_service.clone(),
+                network_service: (network_service.clone(), chain_index),
+                max_pending_transactions: NonZeroU32::new(64).unwrap(),
+                max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
+                max_concurrent_validations: NonZeroU32::new(2).unwrap(),
             })
             .await,
         );

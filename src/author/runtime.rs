@@ -377,6 +377,7 @@ impl BlockBuild {
                         Err(err) => return BlockBuild::Finished(Err(err)),
                     }
 
+                    // TODO: probably wrong because of double-SCALE-encoding issue
                     shared.block_body.push(extrinsic);
 
                     inner = Inner::Transition(success);
@@ -394,6 +395,7 @@ impl BlockBuild {
                     };
 
                     if result.is_ok() {
+                        // TODO: probably wrong because of double-SCALE-encoding issue
                         shared.block_body.push(match &mut shared.stage {
                             Stage::ApplyExtrinsic(ext) => mem::replace(ext, Vec::new()),
                             _ => unreachable!(),
