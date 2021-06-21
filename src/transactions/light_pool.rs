@@ -331,14 +331,45 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .map(|(_, tx_id)| *tx_id)
     }
 
+    /// Returns `true` if the given transaction has been included in the past in an ancestor of
+    /// the current best block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the transaction with the given id is invalid.
+    ///
+    pub fn is_included_best_chain(&self, id: TransactionId) -> bool {
+        let mut iter = self
+            .included_transactions
+            .range((id, [0; 32])..=(id, [0xff; 32]))
+            .filter(|(_, block_hash)| {
+                let block_index = *self.blocks_by_id.get(block_hash).unwrap();
+                self.best_block_index.map_or(false, |best_idx| {
+                    self.blocks_tree.is_ancestor(block_index, best_idx)
+                })
+            });
+
+        let outcome = iter.next().is_some();
+        if outcome {
+            debug_assert!(iter.next().is_none());
+        }
+        outcome
+    }
+
     /// Returns `true` if the given transaction has been validated in the past against an ancestor
     /// of the best block and is still within its longevity period.
+    ///
+    /// Returns `false` if the block has been included in an ancestor of the best block.
     ///
     /// # Panic
     ///
     /// Panics if the transaction with the given id is invalid.
     ///
     pub fn is_valid_against_best_block(&self, id: TransactionId) -> bool {
+        if self.is_included_best_chain(id) {
+            return false;
+        }
+
         // TODO: wrong implementation /!\
         self.transaction_validations
             .range((id, [0; 32])..=(id, [0xff; 32]))
@@ -520,6 +551,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             self.blocks_tree.get_mut(block_index).unwrap().body,
             BodyState::Known
         ));
+        self.blocks_tree.get_mut(block_index).unwrap().body = BodyState::Known;
 
         let is_in_best_chain = self
             .blocks_tree
@@ -609,8 +641,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             }
         }
 
-        self.blocks_tree.get_mut(block_index).unwrap().body = BodyState::Known;
-
         included_transactions.into_iter()
     }
 
@@ -670,7 +700,57 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 let _expected_index = self.blocks_by_id.remove(&pruned_block.user_data.hash);
                 debug_assert_eq!(_expected_index, Some(pruned_block.index));
 
-                // TODO: must remove included and validated transactions
+                let included_txs = self
+                    .transactions_by_inclusion
+                    .range(
+                        (
+                            pruned_block.user_data.hash,
+                            TransactionId(usize::min_value()),
+                        )
+                            ..=(
+                                pruned_block.user_data.hash,
+                                TransactionId(usize::max_value()),
+                            ),
+                    )
+                    .map(|(_, tx)| *tx)
+                    .collect::<Vec<_>>();
+
+                for tx_id in included_txs {
+                    let _was_removed = self
+                        .transactions_by_inclusion
+                        .remove(&(pruned_block.user_data.hash, tx_id));
+                    debug_assert!(_was_removed);
+                    let _was_removed = self
+                        .included_transactions
+                        .remove(&(tx_id, pruned_block.user_data.hash));
+                    debug_assert!(_was_removed);
+                }
+
+                let validated_txs = self
+                    .transactions_by_validation
+                    .range(
+                        (
+                            pruned_block.user_data.hash,
+                            TransactionId(usize::min_value()),
+                        )
+                            ..=(
+                                pruned_block.user_data.hash,
+                                TransactionId(usize::max_value()),
+                            ),
+                    )
+                    .map(|(_, tx)| *tx)
+                    .collect::<Vec<_>>();
+
+                for tx_id in validated_txs {
+                    let _was_removed = self
+                        .transactions_by_validation
+                        .remove(&(pruned_block.user_data.hash, tx_id));
+                    debug_assert!(_was_removed);
+                    let _was_removed = self
+                        .transaction_validations
+                        .remove(&(tx_id, pruned_block.user_data.hash));
+                    debug_assert!(_was_removed.is_some());
+                }
 
                 out.push((
                     pruned_block.user_data.hash,
