@@ -16,11 +16,11 @@
   "types": "src/index.d.ts",
   "main": "src/index.js",
   "scripts": {
-    "prepublishOnly": "node prepare.js",
-    "prestart": "node prepare.js",
-    "build": "node prepare.js",
+    "prepublishOnly": "node prepare.js --release",
+    "prestart": "node prepare.js --release",
+    "build": "node prepare.js --debug",
     "start": "node test/demo.js",
-    "test": "node prepare.js && dtslint src/ && node test/test.js"
+    "test": "node prepare.js --debug && dtslint src/ && node test/test.js"
   },
   "browser": {
     "./src/compat-nodejs.js": "./src/compat-browser.js"

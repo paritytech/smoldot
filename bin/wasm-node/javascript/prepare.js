@@ -18,9 +18,19 @@
 import * as child_process from 'child_process';
 import * as fs from 'fs';
 
-// Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`.
-// At the moment this defaults to `debug` because correctness is more important than speed.
-const build_profile = 'debug';
+// Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`, based
+// on the CLI options passed by the user.
+let build_profile;
+if (process.argv.slice(2).indexOf("--debug") !== -1) {
+    build_profile = 'debug';
+}
+if (process.argv.slice(2).indexOf("--release") !== -1) {
+    if (build_profile)
+        throw new Error("Can't pass both --debug and --release");
+    build_profile = 'release';
+}
+if (build_profile != 'debug' && build_profile != 'release')
+    throw new Error("Either --debug or --release must be passed");
 
 // The Rust version to use.
 // The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
