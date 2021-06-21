@@ -78,7 +78,7 @@
 //! - Sending transactions to other peers.
 //!
 
-use super::validate::{InvalidTransaction, ValidTransaction};
+use super::validate::{TransactionValidityError, ValidTransaction};
 
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{convert::TryFrom as _, fmt};
@@ -477,7 +477,7 @@ impl<TTx> Pool<TTx> {
         &mut self,
         id: TransactionId,
         block_number_validated_against: u64,
-        result: Result<ValidTransaction, InvalidTransaction>,
+        result: Result<ValidTransaction, TransactionValidityError>,
     ) {
         let tx = self.transactions.get_mut(id.0).unwrap();
 
@@ -636,7 +636,7 @@ struct Transaction<TTx> {
 
     /// If `Some`, contains the outcome of the validation of this transaction and the block height
     /// it was validated against.
-    validation: Option<(u64, Result<ValidTransaction, InvalidTransaction>)>,
+    validation: Option<(u64, Result<ValidTransaction, TransactionValidityError>)>,
 
     /// If `Some`, the height of the block at which the transaction has been included.
     included_block_height: Option<u64>,

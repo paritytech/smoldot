@@ -51,7 +51,7 @@
 //! the result reported with [`LightPool::set_validation_result`].
 //!
 
-use super::validate::{InvalidTransaction, ValidTransaction};
+use super::validate::{TransactionValidityError, ValidTransaction};
 use crate::chain::fork_tree;
 
 use alloc::{
@@ -95,7 +95,7 @@ pub struct LightPool<TTx, TBl> {
     included_transactions: BTreeSet<(TransactionId, [u8; 32])>,
 
     transaction_validations:
-        BTreeMap<(TransactionId, [u8; 32]), Result<ValidTransaction, InvalidTransaction>>,
+        BTreeMap<(TransactionId, [u8; 32]), Result<ValidTransaction, TransactionValidityError>>,
 
     transactions_by_validation: BTreeSet<([u8; 32], TransactionId)>,
 
@@ -304,7 +304,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         &mut self,
         id: TransactionId,
         block_hash_validated_against: &[u8; 32],
-        result: Result<ValidTransaction, InvalidTransaction>,
+        result: Result<ValidTransaction, TransactionValidityError>,
     ) {
         // Make sure that the block exists.
         let _block_index = *self.blocks_by_id.get(block_hash_validated_against).unwrap();

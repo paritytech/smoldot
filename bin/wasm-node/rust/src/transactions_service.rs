@@ -120,30 +120,18 @@ impl TransactionsService {
     /// Builds a new service.
     pub async fn new(mut config: Config) -> Self {
         let (to_background, from_foreground) = mpsc::channel(8);
-        let (to_validation, to_validation_rx) = {
-            let (tx, rx) = mpsc::channel(4); // TODO: correct number
-            (tx, Arc::new(Mutex::new(rx)))
-        };
-
-        for _ in 0..config.max_concurrent_validations.get() {
-            (config.tasks_executor)(
-                "transaction-validation".into(),
-                Box::pin(validation_task(
-                    config.runtime_service.clone(),
-                    to_validation_rx.clone(),
-                )),
-            );
-        }
 
         (config.tasks_executor)(
             "transactions-service".into(),
             Box::pin(background_task(
                 config.sync_service,
+                config.runtime_service,
                 from_foreground,
-                to_validation,
                 usize::try_from(config.max_concurrent_downloads.get())
                     .unwrap_or(usize::max_value()),
                 usize::try_from(config.max_pending_transactions.get())
+                    .unwrap_or(usize::max_value()),
+                usize::try_from(config.max_concurrent_validations.get())
                     .unwrap_or(usize::max_value()),
             )),
         );
@@ -241,19 +229,22 @@ enum ToBackground {
 /// Background task running in parallel of the front service.
 async fn background_task(
     sync_service: Arc<sync_service::SyncService>,
+    runtime_service: Arc<runtime_service::RuntimeService>,
     mut from_foreground: mpsc::Receiver<ToBackground>,
-    mut to_validation: mpsc::Sender<ToValidationTask>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
+    max_concurrent_validations: usize,
 ) {
     let mut worker = Worker {
         sync_service,
+        runtime_service,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity: cmp::min(8, max_pending_transactions),
             blocks_capacity: 32,
             finalized_block_hash: [0; 32], // Pool is re-initialized below.
         }),
         block_downloads: FuturesUnordered::new(),
+        validations_in_progress: FuturesUnordered::new(),
         max_concurrent_downloads,
         max_pending_transactions,
         next_validation_start: ffi::Delay::new(Duration::new(0, 0)),
@@ -303,16 +294,47 @@ async fn background_task(
 
         loop {
             // Start the validation process of transactions that need to be validated.
-            {
-                // TODO: add filter to not start validating if already validating
+            while worker.validations_in_progress.len() < max_concurrent_validations {
+                // Find a transaction that needs to be validated.
                 let to_start_validate = worker
                     .pending_transactions
                     .unvalidated_transactions()
+                    .filter(|(_, tx)| tx.validation_in_progress.is_none())
                     .next()
                     .map(|(tx_id, ..)| tx_id);
 
                 if let Some(to_start_validate) = to_start_validate {
-                    // TODO:
+                    let validation_future = {
+                        let runtime_service = worker.runtime_service.clone();
+                        let scale_encoded_transaction = worker
+                            .pending_transactions
+                            .scale_encoding(to_start_validate)
+                            .unwrap()
+                            .to_owned();
+                        async move {
+                            validate_transaction(
+                                &runtime_service,
+                                scale_encoded_transaction,
+                                validate::TransactionSource::External,
+                            )
+                            .await
+                        }
+                    };
+
+                    let (to_execute, result_rx) = validation_future.remote_handle();
+
+                    worker
+                        .validations_in_progress
+                        .push(to_execute.map(move |()| to_start_validate).boxed());
+
+                    let tx = worker
+                        .pending_transactions
+                        .transaction_user_data_mut(to_start_validate)
+                        .unwrap();
+                    debug_assert!(tx.validation_in_progress.is_none());
+                    tx.validation_in_progress = Some(result_rx);
+                } else {
+                    break;
                 }
             }
 
@@ -448,8 +470,8 @@ async fn background_task(
                     }
                 },
 
-                /*// TODO: refactor for performances
-                (transaction_to_reannounce, _) = worker.pending_transactions.transactions_iter_mut()
+                // TODO: refactor for performances?
+                /*(transaction_to_reannounce, _) = worker.pending_transactions.transactions_iter_mut()
                     .map(|(tx_id, tx)| (&mut tx.when_reannounce).map(move |()| tx_id))
                     .collect::<stream::FuturesUnordered<_>>()
                     .chain(stream::pending())
@@ -473,20 +495,32 @@ async fn background_task(
                     }
                 },*/
 
-                _ = &mut worker.next_validation_start => {
-                    worker.next_validation_start = ffi::Delay::new(Duration::from_secs(2));
+                maybe_validated_tx_id = worker.validations_in_progress.select_next_some() => {
+                    // A transaction validation future has finished. This doesn't necessarily mean
+                    // that a validation has actually finished. The provided
+                    // `maybe_validated_tx_id` is a hint as to which transaction might have
+                    // finished being validated, but without a strong guarantee.
 
-                    for (tx_id, _) in worker.pending_transactions.unvalidated_transactions() {
-                        let (send_back, result_rx) = oneshot::channel();
+                    // Try extract the validation result of this transaction, or `continue` if it
+                    // is a false positive.
+                    let validation_result = match worker.pending_transactions.transaction_user_data_mut(maybe_validated_tx_id) {
+                        None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
+                        Some(tx) => match tx.validation_in_progress.as_mut().and_then(|f| f.now_or_never()) {
+                            None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
+                            Some(result) => {
+                                tx.validation_in_progress = None;
+                                result
+                            },
+                        },
+                    };
 
-                        let _ = to_validation.try_send(ToValidationTask::Transaction {
-                            scale_encoded_transaction: worker.pending_transactions.scale_encoding(tx_id).unwrap().to_owned(),
-                            send_back,
-                        });
-
-                        // TODO: finish
+                    match validation_result {
+                        Ok((block_hash, result)) => {
+                            worker.pending_transactions.set_validation_result(maybe_validated_tx_id, &block_hash, result);
+                        }
+                        Err(_) => todo!()
                     }
-                }
+                },
 
                 message = from_foreground.next().fuse() => {
                     let message = match message {
@@ -536,6 +570,7 @@ async fn background_task(
                                         vec
                                     },
                                     latest_status: None,
+                                    validation_in_progress: None,
                                 });
                         }
                     }
@@ -549,6 +584,9 @@ async fn background_task(
 struct Worker {
     // How to download the bodies of blocks and synchronize the chain.
     sync_service: Arc<sync_service::SyncService>,
+
+    /// How to validate transactions.
+    runtime_service: Arc<runtime_service::RuntimeService>,
 
     /// List of pending transactions.
     ///
@@ -568,6 +606,15 @@ struct Worker {
     /// The output of the future is a block hash and a block body.
     block_downloads:
         FuturesUnordered<future::BoxFuture<'static, ([u8; 32], Result<Vec<Vec<u8>>, ()>)>>,
+
+    /// List of transactions currently being validated.
+    /// Returns the [`light_pool::TransactionId]` of the transaction that has finished being
+    /// validated. The result can then be read from [`PendingTransaction::validation_in_progress`].
+    /// Since transaction IDs can be reused, the returned ID might not correspond to a transaction
+    /// or might correspond to the wrong transaction. This ID being returned is just a hint as to
+    /// which transaction to check, and not an authoritative value.
+    validations_in_progress:
+        FuturesUnordered<future::BoxFuture<'static, light_pool::TransactionId>>,
 
     /// See [`Config::max_concurrent_downloads`]. Maximum number of elements in
     /// [`Worker::block_downloads`].
@@ -638,6 +685,19 @@ struct PendingTransaction {
     /// Latest known status of the transaction. Used when a new sender is added to
     /// [`PendingTransaction::status_update`].
     latest_status: Option<TransactionStatus>,
+
+    /// If `Some`, will receive the result of the validation of the transaction.
+    validation_in_progress: Option<
+        future::RemoteHandle<
+            Result<
+                (
+                    [u8; 32],
+                    Result<validate::ValidTransaction, validate::TransactionValidityError>,
+                ),
+                ValidateTransactionError,
+            >,
+        >,
+    >,
 }
 
 impl PendingTransaction {
@@ -663,56 +723,19 @@ impl PendingTransaction {
     }
 }
 
-/// Background task running in parallel of the front service.
-async fn validation_task(
-    runtime_service: Arc<runtime_service::RuntimeService>,
-    from_foreground: Arc<Mutex<mpsc::Receiver<ToValidationTask>>>,
-) {
-    loop {
-        let message = {
-            let mut locked = from_foreground.lock().await;
-            match locked.next().await {
-                Some(m) => m,
-                None => return,
-            }
-        };
-
-        match message {
-            ToValidationTask::Transaction {
-                scale_encoded_transaction,
-                send_back,
-            } => {
-                let outcome = validate_transaction(
-                    &runtime_service,
-                    scale_encoded_transaction,
-                    validate::TransactionSource::External,
-                )
-                .await;
-
-                let _ = send_back.send(outcome);
-            }
-        }
-    }
-}
-
-enum ToValidationTask {
-    Transaction {
-        scale_encoded_transaction: Vec<u8>,
-        send_back: oneshot::Sender<
-            Result<
-                Result<validate::ValidTransaction, validate::TransactionValidityError>,
-                ValidateTransactionError,
-            >,
-        >,
-    },
-}
-
+/// Actual transaction validation logic. Validates the transaction against a recent best block
+/// of the [`runtime_service::RuntimeService`].
+///
+/// Returns the result of the validation, and the hash of the block it was validated against.
 async fn validate_transaction(
     relay_chain_sync: &Arc<runtime_service::RuntimeService>,
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
 ) -> Result<
-    Result<validate::ValidTransaction, validate::TransactionValidityError>,
+    (
+        [u8; 32],
+        Result<validate::ValidTransaction, validate::TransactionValidityError>,
+    ),
     ValidateTransactionError,
 > {
     let (runtime_call_lock, runtime) = relay_chain_sync
@@ -739,8 +762,12 @@ async fn validate_transaction(
                 result: Ok(success),
                 virtual_machine,
             } => {
+                // TODO: provide hash as method of runtime_call_lock?
+                let block_hash = header::hash_from_scale_encoded_header(
+                    runtime_call_lock.block_scale_encoded_header(),
+                );
                 runtime_call_lock.unlock(virtual_machine);
-                break Ok(success);
+                break Ok((block_hash, success));
             }
             validate::Query::Finished {
                 result: Err(error),
