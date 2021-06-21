@@ -263,8 +263,8 @@ pub fn validate_transaction(
         virtual_machine: config.runtime,
         function_to_call: "Core_initialize_block",
         parameter: header::HeaderRef {
-            parent_hash: decoded_header.parent_hash,
-            number: decoded_header.number,
+            parent_hash: &header::hash_from_scale_encoded_header(config.scale_encoded_header),
+            number: decoded_header.number + 1,
             extrinsics_root: &[0; 32],
             state_root: &[0; 32],
             digest: header::DigestRef::empty(),
