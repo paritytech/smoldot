@@ -533,6 +533,8 @@ async fn background_task(
                         continue;
                     }
 
+                    // TODO: only announce if propagate is true
+
                     // Update transaction state for the next re-announce.
                     tx.when_reannounce = now + Duration::from_secs(5);
                     worker.next_reannounce.push(async move {
