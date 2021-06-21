@@ -67,14 +67,9 @@
 //! transaction.
 //!
 
-use crate::{ffi, runtime_service, sync_service};
+use crate::{ffi, network_service, runtime_service, sync_service};
 
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::Mutex,
-    prelude::*,
-    stream::FuturesUnordered,
-};
+use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use smoldot::{
     header,
     informant::HashDisplay,
@@ -94,6 +89,10 @@ pub struct Config {
 
     /// Service responsible for synchronizing the chain.
     pub runtime_service: Arc<runtime_service::RuntimeService>,
+
+    /// Access to the network, and index of the chain to use to gossip transactions from the point
+    /// of view of the network service.
+    pub network_service: (Arc<network_service::NetworkService>, usize),
 
     /// Maximum number of pending transactions allowed in the service.
     ///
@@ -126,6 +125,8 @@ impl TransactionsService {
             Box::pin(background_task(
                 config.sync_service,
                 config.runtime_service,
+                config.network_service.0,
+                config.network_service.1,
                 from_foreground,
                 usize::try_from(config.max_concurrent_downloads.get())
                     .unwrap_or(usize::max_value()),
@@ -232,6 +233,8 @@ enum ToBackground {
 async fn background_task(
     sync_service: Arc<sync_service::SyncService>,
     runtime_service: Arc<runtime_service::RuntimeService>,
+    network_service: Arc<network_service::NetworkService>,
+    network_chain_index: usize,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     max_concurrent_downloads: usize,
     max_pending_transactions: usize,
@@ -240,6 +243,8 @@ async fn background_task(
     let mut worker = Worker {
         sync_service,
         runtime_service,
+        network_service,
+        network_chain_index,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
             transactions_capacity: cmp::min(8, max_pending_transactions),
             blocks_capacity: 32,
@@ -247,6 +252,7 @@ async fn background_task(
         }),
         block_downloads: FuturesUnordered::new(),
         validations_in_progress: FuturesUnordered::new(),
+        next_reannounce: FuturesUnordered::new(),
         max_concurrent_downloads,
         max_pending_transactions,
     };
@@ -285,6 +291,7 @@ async fn background_task(
         // Reset the other fields.
         worker.block_downloads.clear();
         worker.validations_in_progress.clear();
+        worker.next_reannounce.clear();
 
         log::debug!(
             target: "tx-service",
@@ -304,6 +311,12 @@ async fn background_task(
             // Start the validation process of transactions that need to be validated.
             while worker.validations_in_progress.len() < max_concurrent_validations {
                 // Find a transaction that needs to be validated.
+                //
+                // While this looks like an `O(n)` process, in practice we pick the first
+                // transaction not currently being validated, and only `max_concurrent_validations`
+                // transactions in the list don't match that criteria. Since
+                // `max_concurrent_validations` should be pretty low, this search should complete
+                // very quickly.
                 let to_start_validate = worker
                     .pending_transactions
                     .unvalidated_transactions()
@@ -474,30 +487,52 @@ async fn background_task(
                     }
                 },
 
-                // TODO: refactor for performances?
-                /*(transaction_to_reannounce, _) = worker.pending_transactions.transactions_iter_mut()
-                    .map(|(tx_id, tx)| (&mut tx.when_reannounce).map(move |()| tx_id))
-                    .collect::<stream::FuturesUnordered<_>>()
-                    .chain(stream::pending())
-                    .into_future() =>
-                {
-                    let transaction_to_reannounce = transaction_to_reannounce.unwrap();
+                maybe_reannounce_tx_id = worker.next_reannounce.select_next_some() => {
+                    // A transaction reannounce future has finished. This doesn't necessarily mean
+                    // that a validation actually needs to be reannounced. The provided
+                    // `maybe_reannounce_tx_id` is a hint as to which transaction might need to be
+                    // reannounced, but without a strong guarantee.
 
-                    let peers_sent = network_service
+                    // `continue` if transaction doesn't exist.
+                    if worker.pending_transactions.transaction_user_data(maybe_reannounce_tx_id).is_none() {
+                        continue;
+                    }
+
+                    // Don't gossip the transaction if it hasn't been validated.
+                    // TODO: if best block changes, we would need to reset all the re-announce period of all transactions, awkward!
+                    if !worker.pending_transactions.is_valid_against_best_block(maybe_reannounce_tx_id) {
+                        continue;
+                    }
+
+                    let now = ffi::Instant::now();
+                    let tx = worker.pending_transactions.transaction_user_data_mut(maybe_reannounce_tx_id).unwrap();
+                    if tx.when_reannounce > now {
+                        continue;
+                    }
+
+                    // Update transaction state for the next re-announce.
+                    tx.when_reannounce = now + Duration::from_secs(5);
+                    worker.next_reannounce.push(async move {
+                        ffi::Delay::new(Duration::from_secs(5)).await;
+                        maybe_reannounce_tx_id
+                    }.boxed());
+
+                    // Perform the announce.
+                    let peers_sent = worker.network_service
                         .clone()
                         .announce_transaction(
-                            network_chain_index,
-                            &worker.pending_transactions.scale_encoding(transaction_to_reannounce).unwrap()
+                            worker.network_chain_index,
+                            &worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
 
+                    // TODO: is this correct? and what should we do if announcing the same transaction multiple times? is it cumulative? `Broadcast` isn't super well documented
                     if !peers_sent.is_empty() {
-                        let tx = worker.pending_transactions
-                            .transaction_user_data_mut(transaction_to_reannounce)
-                            .unwrap();
-                        tx.update_status(TransactionStatus::Broadcast(peers_sent));
+                        worker.pending_transactions
+                            .transaction_user_data_mut(maybe_reannounce_tx_id).unwrap()
+                            .update_status(TransactionStatus::Broadcast(peers_sent));
                     }
-                },*/
+                },
 
                 maybe_validated_tx_id = worker.validations_in_progress.select_next_some() => {
                     // A transaction validation future has finished. This doesn't necessarily mean
@@ -521,6 +556,11 @@ async fn background_task(
                     match validation_result {
                         Ok((block_hash, result)) => {
                             worker.pending_transactions.set_validation_result(maybe_validated_tx_id, &block_hash, result);
+
+                            // Schedule this transaction for announcement.
+                            worker.next_reannounce.push(async move {
+                                maybe_validated_tx_id
+                            }.boxed());
                         }
                         Err(error) => {
                             // Transaction couldn't be validated because of an error while
@@ -572,7 +612,7 @@ async fn background_task(
                             worker
                                 .pending_transactions
                                 .add_unvalidated(transaction_bytes, PendingTransaction {
-                                    when_reannounce: ffi::Delay::new(Duration::new(0, 0)),
+                                    when_reannounce: ffi::Instant::now(),
                                     status_update: {
                                         let mut vec = Vec::with_capacity(1);
                                         if let Some(updates_report) = updates_report {
@@ -598,6 +638,12 @@ struct Worker {
 
     /// How to validate transactions.
     runtime_service: Arc<runtime_service::RuntimeService>,
+
+    /// How to gossip transactions.
+    network_service: Arc<network_service::NetworkService>,
+
+    /// Which chain to use in combination with the [`Worker::network_service`].
+    network_chain_index: usize,
 
     /// List of pending transactions.
     ///
@@ -626,6 +672,14 @@ struct Worker {
     /// which transaction to check, and not an authoritative value.
     validations_in_progress:
         FuturesUnordered<future::BoxFuture<'static, light_pool::TransactionId>>,
+
+    /// List of transactions that need to be reannounced.
+    /// Returns the [`light_pool::TransactionId]` of the transaction that needs to be re-announced.
+    /// Since transaction IDs can be reused, the returned ID might not correspond to a transaction
+    /// or might correspond to the wrong transaction. This ID being returned is just a hint as to
+    /// which transaction to check, not an authoritative value, and
+    /// [`PendingTransaction::when_reannounce`] should be checked.
+    next_reannounce: FuturesUnordered<future::BoxFuture<'static, light_pool::TransactionId>>,
 
     /// See [`Config::max_concurrent_downloads`]. Maximum number of elements in
     /// [`Worker::block_downloads`].
@@ -684,8 +738,14 @@ struct Block {
 }
 
 struct PendingTransaction {
-    /// When to gossip the transaction on the network again.
-    when_reannounce: ffi::Delay,
+    /// Earliest moment when to gossip the transaction on the network again.
+    ///
+    /// This should be interpreted as the moment before which to not reannounce, rather than the
+    /// moment when to announce.
+    ///
+    /// In particular, this value might be long in the past, in case for example of a transaction
+    /// that is not validated.
+    when_reannounce: ffi::Instant,
 
     /// List of channels that should receive changes to the transaction status.
     status_update: Vec<mpsc::Sender<TransactionStatus>>,

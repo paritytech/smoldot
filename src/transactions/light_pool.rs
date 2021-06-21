@@ -290,6 +290,21 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .map(|(_, tx_id)| *tx_id)
     }
 
+    /// Returns `true` if the given transaction has been validated in the past against an ancestor
+    /// of the best block and is still within its longevity period.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the transaction with the given id is invalid.
+    ///
+    pub fn is_valid_against_best_block(&self, id: TransactionId) -> bool {
+        // TODO: wrong implementation /!\
+        self.transaction_validations
+            .range((id, [0; 32])..=(id, [0xff; 32]))
+            .count()
+            != 0
+    }
+
     /// Sets the outcome of validating the transaction with the given identifier.
     ///
     /// The block hash must be the block hash against which the transaction has been

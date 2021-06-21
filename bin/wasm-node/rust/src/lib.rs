@@ -449,6 +449,7 @@ async fn start_services(
                 }),
                 sync_service: sync_service.clone(),
                 runtime_service: runtime_service.clone(),
+                network_service: (network_service.clone(), chain_index),
                 max_pending_transactions: NonZeroU32::new(64).unwrap(),
                 max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
                 max_concurrent_validations: NonZeroU32::new(2).unwrap(),
