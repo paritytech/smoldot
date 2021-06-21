@@ -96,6 +96,13 @@ pub struct LightPool<TTx, TBl> {
 
     /// Holds tuples of `(block_hash, transaction_id)`. When an entry is present in this set, it
     /// means that this transaction has been found in the body of this block.
+    ///
+    /// Blocks are guaranteed to be found in [`LightPool::blocks_tree`].
+    ///
+    /// It is guaranteed that when a `(block_hash, transaction_id)` combination is in this
+    /// container, no other parent and child of this block also includes this transaction. In
+    /// other words, a transaction is always included only in the earliest block of any given
+    /// fork.
     transactions_by_inclusion: BTreeSet<([u8; 32], TransactionId)>,
 
     /// Symmetry of [`LightPool::transactions_by_inclusion`].
@@ -104,6 +111,8 @@ pub struct LightPool<TTx, TBl> {
     /// Holds tuples of `(block_hash, transaction_id)`. When an entry is present in this set, it
     /// means that this transaction has been validated against this block. Contains the result of
     /// this validation.
+    ///
+    /// Blocks are guaranteed to be found in [`LightPool::blocks_tree`].
     transaction_validations:
         BTreeMap<(TransactionId, [u8; 32]), Result<ValidTransaction, TransactionValidityError>>,
 
@@ -489,12 +498,14 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
     /// Sets the list of single-SCALE-encoded transactions that are present in the body of a block.
     ///
-    /// Returns the list of transactions that are in the pool and that were found in the body.
+    /// If the block is part of the best chain, returns the list of transactions that are in the
+    /// pool, that were found in the body, and that weren't part of the best chain before.
     ///
     /// # Panic
     ///
     /// Panics if no block with the given hash has been inserted before.
     ///
+    // TODO: return something more precise in case the block in which a transaction is included is updated?
     #[must_use]
     pub fn set_block_body(
         &'_ mut self,
@@ -509,6 +520,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             self.blocks_tree.get_mut(block_index).unwrap().body,
             BodyState::Known
         ));
+
+        let is_in_best_chain = self
+            .blocks_tree
+            .is_ancestor(block_index, self.best_block_index.unwrap());
 
         // Value returned from the function.
         // TODO: optimize by not having Vec
@@ -528,20 +543,70 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 <[u8; 32]>::try_from(hasher.finalize().as_bytes()).unwrap()
             };
 
-            for (_, known_tx_id) in self.by_hash.range(
+            'tx_in_pool: for (_, known_tx_id) in self.by_hash.range(
                 (hash, TransactionId(usize::min_value()))
                     ..=(hash, TransactionId(usize::max_value())),
             ) {
-                included_transactions.push(*known_tx_id);
+                let mut now_included = is_in_best_chain;
+
+                // Check in which other blocks this transaction has been seen before.
+                for (_, existing_included_block) in self
+                    .included_transactions
+                    .range((*known_tx_id, [0x0; 32])..=(*known_tx_id, [0xff; 32]))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
+                    let existing_included_block_idx =
+                        *self.blocks_by_id.get(&existing_included_block).unwrap();
+
+                    // Skip this transaction if it has already been found in a parent.
+                    if self
+                        .blocks_tree
+                        .is_ancestor(existing_included_block_idx, block_index)
+                    {
+                        continue 'tx_in_pool;
+                    }
+
+                    // If the transaction is found in a children, un-include it. from the child.
+                    if self
+                        .blocks_tree
+                        .is_ancestor(block_index, existing_included_block_idx)
+                    {
+                        let _was_removed = self
+                            .transactions_by_inclusion
+                            .remove(&(existing_included_block, *known_tx_id));
+                        debug_assert!(_was_removed);
+
+                        let _was_removed = self
+                            .included_transactions
+                            .remove(&(*known_tx_id, existing_included_block));
+                        debug_assert!(_was_removed);
+
+                        // If `existing_included_block_idx` is in the best chain, set
+                        // `now_included` to false.
+                        if self.blocks_tree.is_ancestor(
+                            existing_included_block_idx,
+                            self.best_block_index.unwrap(),
+                        ) {
+                            now_included = false;
+                        }
+                    }
+                }
+
+                let _was_included = self
+                    .transactions_by_inclusion
+                    .insert((*block_hash, *known_tx_id));
+                debug_assert!(_was_included);
+
+                let _was_included = self
+                    .included_transactions
+                    .insert((*known_tx_id, *block_hash));
+                debug_assert!(_was_included);
+
+                if now_included {
+                    included_transactions.push(*known_tx_id);
+                }
             }
-        }
-
-        for tx_id in &included_transactions {
-            let _was_included = self.transactions_by_inclusion.insert((*block_hash, *tx_id));
-            debug_assert!(_was_included);
-
-            let _was_included = self.included_transactions.insert((*tx_id, *block_hash));
-            debug_assert!(_was_included);
         }
 
         self.blocks_tree.get_mut(block_index).unwrap().body = BodyState::Known;
