@@ -335,7 +335,7 @@ async fn background_task(
                     let runtime_service = worker.runtime_service.clone();
                     let scale_encoded_transaction = worker
                         .pending_transactions
-                        .scale_encoding(to_start_validate)
+                        .double_scale_encoding(to_start_validate)
                         .unwrap()
                         .to_owned();
                     async move {
@@ -550,7 +550,7 @@ async fn background_task(
                         .clone()
                         .announce_transaction(
                             worker.network_chain_index,
-                            &worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
+                            &worker.pending_transactions.double_scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
 

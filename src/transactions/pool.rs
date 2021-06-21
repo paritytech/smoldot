@@ -169,21 +169,21 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Inserts a new unvalidated transaction in the pool.
-    pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
-        self.add_unvalidated_inner(scale_encoded, None, user_data)
+    pub fn add_unvalidated(&mut self, double_scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
+        self.add_unvalidated_inner(double_scale_encoded, None, user_data)
     }
 
     /// Inserts a new unvalidated transaction in the pool.
     fn add_unvalidated_inner(
         &mut self,
-        scale_encoded: impl AsRef<[u8]> + Into<Vec<u8>>,
+        double_scale_encoded: impl AsRef<[u8]> + Into<Vec<u8>>,
         included_block_height: Option<u64>,
         user_data: TTx,
     ) -> TransactionId {
-        let hash = blake2_hash(scale_encoded.as_ref());
+        let hash = blake2_hash(double_scale_encoded.as_ref());
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
-            scale_encoded: scale_encoded.into(),
+            double_scale_encoded: double_scale_encoded.into(),
             validation: None,
             included_block_height,
             user_data,
@@ -223,7 +223,7 @@ impl<TTx> Pool<TTx> {
             debug_assert!(_removed);
         }
 
-        let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
+        let _removed = self.by_hash.remove(&(blake2_hash(&tx.double_scale_encoded), id));
         debug_assert!(_removed);
 
         tx.user_data
@@ -265,7 +265,7 @@ impl<TTx> Pool<TTx> {
 
             let _removed = self
                 .by_hash
-                .remove(&(blake2_hash(&tx.scale_encoded), tx_id));
+                .remove(&(blake2_hash(&tx.double_scale_encoded), tx_id));
             debug_assert!(_removed);
         }
 
@@ -342,13 +342,13 @@ impl<TTx> Pool<TTx> {
     /// Returns the bytes associated with a given transaction.
     ///
     /// Returns `None` if the identifier is invalid.
-    pub fn scale_encoding(&self, id: TransactionId) -> Option<&[u8]> {
-        Some(&self.transactions.get(id.0)?.scale_encoded)
+    pub fn double_scale_encoding(&self, id: TransactionId) -> Option<&[u8]> {
+        Some(&self.transactions.get(id.0)?.double_scale_encoded)
     }
 
-    /// Tries to find a transaction in the pool whose bytes are `scale_encoded`.
-    pub fn find(&'_ self, scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> + '_ {
-        let hash = blake2_hash(scale_encoded);
+    /// Tries to find a transaction in the pool whose bytes are `double_scale_encoded`.
+    pub fn find(&'_ self, double_scale_encoded: &[u8]) -> impl Iterator<Item = TransactionId> + '_ {
+        let hash = blake2_hash(double_scale_encoded);
         self.by_hash
             .range(
                 (hash, TransactionId(usize::min_value()))
@@ -551,7 +551,7 @@ impl<TTx> AppendBlock<TTx> {
             .transactions
             .get(id.0)
             .unwrap()
-            .scale_encoded
+            .double_scale_encoded
             == bytes));
 
         match non_included {
@@ -632,7 +632,7 @@ impl<'a, 'b, TTx: fmt::Debug> fmt::Debug for Vacant<'a, 'b, TTx> {
 /// Entry in [`Pool::transactions`].
 struct Transaction<TTx> {
     /// Bytes corresponding to the double-SCALE-encoded transaction.
-    scale_encoded: Vec<u8>,
+    double_scale_encoded: Vec<u8>,
 
     /// If `Some`, contains the outcome of the validation of this transaction and the block height
     /// it was validated against.
