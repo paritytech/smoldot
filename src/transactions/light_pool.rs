@@ -86,14 +86,20 @@ pub struct LightPool<TTx, TBl> {
     /// Actual list of transactions.
     transactions: slab::Slab<Transaction<TTx>>,
 
+    /// Holds tuples of `(block_hash, transaction_id)`. When an entry is present in this set, it
+    /// means that this transaction has been found in the body of this block.
     transactions_by_inclusion: BTreeSet<([u8; 32], TransactionId)>,
 
-    /// Symmetry to [`LightPool::transactions_by_inclusion`].
+    /// Symmetry of [`LightPool::transactions_by_inclusion`].
     included_transactions: BTreeSet<(TransactionId, [u8; 32])>,
 
+    /// Holds tuples of `(block_hash, transaction_id)`. When an entry is present in this set, it
+    /// means that this transaction has been validated against this block. Contains the result of
+    /// this validation.
     transaction_validations:
         BTreeMap<(TransactionId, [u8; 32]), Result<ValidTransaction, TransactionValidityError>>,
 
+    /// Symmetry of [`LightPool::transaction_validations`].
     transactions_by_validation: BTreeSet<([u8; 32], TransactionId)>,
 
     /// List of transactions (represented as indices within [`LightPool::transactions`]) whose
@@ -212,15 +218,28 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .map(|(_, block)| *block)
             .collect::<Vec<_>>();
 
-        // TODO: remove from validated
+        let blocks_validated = self
+            .transaction_validations
+            .range((id, [0; 32])..=(id, [0xff; 32]))
+            .map(|((_, block), _)| *block)
+            .collect::<Vec<_>>();
 
-        // TODO: check if coherent state
-        self.not_validated.remove(&id);
+        if blocks_validated.is_empty() {
+            let _was_removed = self.not_validated.remove(&id);
+            debug_assert!(_was_removed);
+        }
 
         for block_hash in blocks_included {
             let _removed = self.included_transactions.remove(&(id, block_hash));
             debug_assert!(_removed);
             let _removed = self.transactions_by_inclusion.remove(&(block_hash, id));
+            debug_assert!(_removed);
+        }
+
+        for block_hash in blocks_validated {
+            let _removed = self.transaction_validations.remove(&(id, block_hash));
+            debug_assert!(_removed.is_some());
+            let _removed = self.transactions_by_validation.remove(&(block_hash, id));
             debug_assert!(_removed);
         }
 
@@ -338,7 +357,13 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
         if inserted {
             let _removed = self.not_validated.remove(&id);
-            debug_assert!(_removed);
+            debug_assert_eq!(
+                _removed,
+                self.transaction_validations
+                    .range((id, [0; 32])..=(id, [0xff; 32]))
+                    .count()
+                    == 1
+            );
         }
     }
 
@@ -471,6 +496,11 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let block_index = *self.blocks_by_id.get(block_hash).unwrap();
 
         // TODO: what if body was already known? this will trigger the `debug_assert!(_was_included)` below
+        // TODO: right now we just panic
+        assert!(!matches!(
+            self.blocks_tree.get_mut(block_index).unwrap().body,
+            BodyState::Known
+        ));
 
         // Value returned from the function.
         // TODO: optimize by not having Vec
@@ -580,14 +610,78 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Removes from the pool as many blocks as possible from the finalized chain. Blocks are
     /// removed from parent to child until either the first non-finalized block or a block whose
     /// body is missing is encountered.
-    // TODO: remove transactions that were included in these blocks
-    pub fn prune_finalized_with_body(&mut self) -> impl Iterator<Item = ([u8; 32], TBl)> {
-        // TODO: /!\
-        core::iter::empty()
-        /*self.pool
-        .as_mut()
-        .unwrap()
-        .remove_included(block_inferior_of_equal)*/
+    ///
+    /// Also removes the transactions from the pool that were included in these blocks.
+    #[must_use]
+    pub fn prune_finalized_with_body(
+        &'_ mut self,
+    ) -> impl Iterator<Item = PruneBodyFinalized<TTx, TBl>> + '_ {
+        // TODO: optimize?
+
+        let finalized_block_index = match self.finalized_block_index {
+            Some(idx) => idx,
+            None => return either::Right(iter::empty()),
+        };
+
+        // Find highest finalized block that can be pruned.
+        let (num_blocks_to_remove, upmost_to_remove) = {
+            let search = self
+                .blocks_tree
+                .root_to_node_path(finalized_block_index)
+                .take_while(|idx| {
+                    !matches!(self.blocks_tree.get(*idx).unwrap().body, BodyState::Needed)
+                })
+                .enumerate()
+                .map(|(n, b)| (n + 1, b))
+                .last();
+            match search {
+                Some(idx) => idx,
+                None => return either::Right(iter::empty()),
+            }
+        };
+
+        // Some internal state update.
+        if upmost_to_remove == finalized_block_index {
+            self.finalized_block_index = None;
+            self.blocks_tree_root_hash = self.blocks_tree.get(upmost_to_remove).unwrap().hash;
+        }
+
+        // Return value of the function.
+        let mut return_value = Vec::with_capacity(num_blocks_to_remove);
+
+        // Do the actual pruning.
+        for pruned in self.blocks_tree.prune_ancestors(upmost_to_remove) {
+            // Since all the blocks that we removed are already finalized, we shouldn't find any
+            // sibling when pruning.
+            debug_assert!(pruned.is_prune_target_ancestor);
+
+            let _removed = self.blocks_by_id.remove(&pruned.user_data.hash);
+            debug_assert_eq!(_removed, Some(pruned.index));
+
+            // List of transactions that were included in this block.
+            let included_transactions = self
+                .transactions_by_inclusion
+                .range(
+                    (pruned.user_data.hash, TransactionId(usize::min_value()))
+                        ..=(pruned.user_data.hash, TransactionId(usize::max_value())),
+                )
+                .map(|(_, tx_id)| *tx_id)
+                .collect::<Vec<_>>();
+
+            for tx_id in included_transactions {
+                //self.remove_transaction();
+            }
+
+            // TODO: handle transactions validated against that block /!\ /!\
+        }
+
+        if self.best_block_index.unwrap() == upmost_to_remove {
+            debug_assert!(self.blocks_tree.is_empty());
+            self.best_block_index = None;
+        }
+
+        // Success.
+        either::Left(return_value.into_iter())
     }
 
     /// Returns the number of blocks between the oldest block stored in this data structure and
@@ -613,6 +707,21 @@ impl<TTx: fmt::Debug, TBl> fmt::Debug for LightPool<TTx, TBl> {
             )
             .finish()
     }
+}
+
+/// See [`LightPool::prune_finalized_with_body`].
+pub struct PruneBodyFinalized<TTx, TBl> {
+    /// Hash of the finalized block.
+    pub block_hash: [u8; 32],
+
+    /// User data associated to this block.
+    pub user_data: TBl,
+
+    /// List of transactions that were included in this block. These transactions have been removed
+    /// from the pool.
+    ///
+    /// The user data (`TTx`) is stored in an `Option`.
+    pub included_transactions: Vec<(TransactionId, TTx)>,
 }
 
 /// See [`LightPool::set_best_block`].
