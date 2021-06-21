@@ -358,6 +358,11 @@ async fn background_task(
                     .unwrap();
                 debug_assert!(tx.validation_in_progress.is_none());
                 tx.validation_in_progress = Some(result_rx);
+
+                log::debug!(
+                    target: "tx-service-validation",
+                    "Starting for " // TODO: for what?
+                );
             }
 
             // Start block bodies downloads that need to be started.
@@ -407,6 +412,12 @@ async fn background_task(
                     .block_user_data_mut(&block_hash)
                     .unwrap()
                     .downloading = true;
+
+                log::debug!(
+                    target: "tx-service-blocks-download",
+                    "Started download of {}",
+                    HashDisplay(&block_hash)
+                );
             }
 
             // Remove finalized blocks from the pool when possible.
@@ -465,7 +476,11 @@ async fn background_task(
 
                     let mut block = match worker.pending_transactions.block_user_data_mut(&block_hash) {
                         Some(b) => b,
-                        None => continue,  // It is possible that this block has been finalized.
+                        None => {
+                            // It is possible that this block has been discarded because a sibling
+                            // or uncle has been finalized. This is a normal situation.
+                            continue
+                        },
                     };
 
                     debug_assert!(block.downloading);
@@ -473,6 +488,13 @@ async fn background_task(
                     if block_body.is_err() {
                         block.failed_downloads = block.failed_downloads.saturating_add(1);
                     }
+
+                    log::debug!(
+                        target: "tx-service-blocks-download",
+                        "{} for {}",
+                        if block_body.is_ok() { "Success" } else { "Failed" },
+                        HashDisplay(&block_hash)
+                    );
 
                     if let Ok(block_body) = block_body {
                         let included_transactions = worker
@@ -493,13 +515,14 @@ async fn background_task(
                     // `maybe_reannounce_tx_id` is a hint as to which transaction might need to be
                     // reannounced, but without a strong guarantee.
 
-                    // `continue` if transaction doesn't exist.
+                    // `continue` if transaction doesn't exist. False positive.
                     if worker.pending_transactions.transaction_user_data(maybe_reannounce_tx_id).is_none() {
                         continue;
                     }
 
                     // Don't gossip the transaction if it hasn't been validated.
                     // TODO: if best block changes, we would need to reset all the re-announce period of all transactions, awkward!
+                    // TODO: also, if this is false, then the transaction might never be re-announced ever again
                     if !worker.pending_transactions.is_valid_against_best_block(maybe_reannounce_tx_id) {
                         continue;
                     }
@@ -518,6 +541,7 @@ async fn background_task(
                     }.boxed());
 
                     // Perform the announce.
+                    log::debug!(target: "tx-service", "Announcing");  // TODO: announcing what?
                     let peers_sent = worker.network_service
                         .clone()
                         .announce_transaction(
@@ -555,6 +579,13 @@ async fn background_task(
 
                     match validation_result {
                         Ok((block_hash, result)) => {
+                            log::debug!(
+                                target: "tx-service-validation",
+                                "Success for  at {}: {:?}", // TODO: for what?
+                                HashDisplay(&block_hash),
+                                result
+                            );
+
                             worker.pending_transactions.set_validation_result(maybe_validated_tx_id, &block_hash, result);
 
                             // Schedule this transaction for announcement.
@@ -563,6 +594,12 @@ async fn background_task(
                             }.boxed());
                         }
                         Err(error) => {
+                            log::debug!(
+                                target: "tx-service-validation",
+                                "Failed for  : {}", // TODO: for what?
+                                error
+                            );
+
                             // Transaction couldn't be validated because of an error while
                             // executing the runtime. This most likely indicates a compatibility
                             // problem between smoldot and the runtime code. Drop the transaction.
@@ -877,7 +914,7 @@ async fn validate_transaction(
 }
 
 /// See [`validate_transaction`].
-#[derive(derive_more::Display)]
+#[derive(Debug, derive_more::Display)]
 enum ValidateTransactionError {
     Call(runtime_service::RuntimeCallError),
     Validation(validate::Error),
