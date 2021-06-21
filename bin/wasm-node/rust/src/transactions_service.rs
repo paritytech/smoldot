@@ -363,7 +363,8 @@ async fn background_task(
 
                 log::debug!(
                     target: "tx-service-validation",
-                    "Starting for " // TODO: for what?
+                    "Starting for {}",
+                    HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(to_start_validate).unwrap()))
                 );
             }
 
@@ -423,9 +424,12 @@ async fn background_task(
             }
 
             // Remove finalized blocks from the pool when possible.
-            for (_, _block) in worker.pending_transactions.prune_finalized_with_body() {
-                debug_assert!(!_block.downloading);
-                // TODO: report finalized transactions
+            for block in worker.pending_transactions.prune_finalized_with_body() {
+                debug_assert!(!block.user_data.downloading);
+                for (_, mut tx) in block.included_transactions {
+                    tx.update_status(TransactionStatus::Finalized(block.block_hash));
+                    // `tx` is no longer in the pool.
+                }
             }
 
             futures::select! {
@@ -545,7 +549,11 @@ async fn background_task(
                     }.boxed());
 
                     // Perform the announce.
-                    log::debug!(target: "tx-service", "Announcing");  // TODO: announcing what?
+                    log::debug!(
+                        target: "tx-service",
+                        "Announcing {}",
+                        HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_reannounce_tx_id).unwrap()))
+                    );
                     let peers_sent = worker.network_service
                         .clone()
                         .announce_transaction(
@@ -585,7 +593,8 @@ async fn background_task(
                         Ok((block_hash, result)) => {
                             log::debug!(
                                 target: "tx-service-validation",
-                                "Success for  at {}: {:?}", // TODO: for what?
+                                "Success for {} at {}: {:?}",
+                                HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
                                 HashDisplay(&block_hash),
                                 result
                             );
@@ -600,7 +609,8 @@ async fn background_task(
                         Err(error) => {
                             log::debug!(
                                 target: "tx-service-validation",
-                                "Failed for  : {}", // TODO: for what?
+                                "Failed for {}: {}",
+                                HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
                                 error
                             );
 
@@ -922,4 +932,9 @@ async fn validate_transaction(
 enum ValidateTransactionError {
     Call(runtime_service::RuntimeCallError),
     Validation(validate::Error),
+}
+
+/// Utility. Calculates the blake2 hash of the given bytes.
+fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
+    <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }
