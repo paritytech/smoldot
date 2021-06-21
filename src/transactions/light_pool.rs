@@ -471,6 +471,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
         for included_body in body {
             let included_body = included_body.as_ref();
+
+            // Confusingly, .
             let hash = blake2_hash(included_body);
 
             for (_, known_tx_id) in self.by_hash.range(
@@ -479,6 +481,14 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             ) {
                 included_transactions.push(*known_tx_id);
             }
+        }
+
+        for tx_id in &included_transactions {
+            let _was_included = self.transactions_by_inclusion.insert((*block_hash, *tx_id));
+            debug_assert!(_was_included);
+
+            let _was_included = self.included_transactions.insert((*tx_id, *block_hash));
+            debug_assert!(_was_included);
         }
 
         self.blocks_tree.get_mut(block_index).unwrap().body = BodyState::Known;

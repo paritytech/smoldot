@@ -85,6 +85,16 @@
 //! certain block B, it will forever remain considered as invalid on any descendant of B, but a
 //! client also attempts to not cache that information for *too long* through heuristics.
 //!
+//! ## About length prefixes
+//!
+//! For historical reasons, all transactions must start with a SCALE-compact-encoded integer
+//! containing the length of the transaction (excepting these two bytes).
+//!
+//! The body of a block is made of all transactions directly appended one behind the other. For
+//! example if a block contains two transactions `[8, 0, 0]` and `[12, 3, 3, 3]`, then its
+//! SCALE-encoded body will be `[4, 5, 0, 0, 12, 3, 3, 3]`. The initial `4` is the
+//! SCALE-compact-encoded number of transactions.
+//!
 
 pub mod light_pool;
 pub mod pool;
