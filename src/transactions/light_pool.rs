@@ -178,7 +178,11 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Inserts a new unvalidated transaction in the pool.
     ///
     /// Must be passed as parameter the double-SCALE-encoded transaction.
-    pub fn add_unvalidated(&mut self, double_scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
+    pub fn add_unvalidated(
+        &mut self,
+        double_scale_encoded: Vec<u8>,
+        user_data: TTx,
+    ) -> TransactionId {
         let hash = blake2_hash(double_scale_encoded.as_ref());
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
@@ -223,7 +227,9 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             debug_assert!(_removed);
         }
 
-        let _removed = self.by_hash.remove(&(blake2_hash(&tx.double_scale_encoded), id));
+        let _removed = self
+            .by_hash
+            .remove(&(blake2_hash(&tx.double_scale_encoded), id));
         debug_assert!(_removed);
 
         tx.user_data
@@ -451,7 +457,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         Some(&mut self.blocks_tree.get_mut(index).unwrap().user_data)
     }
 
-    /// Sets the list of transactions that are present in the body of a block.
+    /// Sets the list of single-SCALE-encoded transactions that are present in the body of a block.
     ///
     /// Returns the list of transactions that are in the pool and that were found in the body.
     ///
@@ -467,6 +473,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     ) -> impl Iterator<Item = TransactionId> + '_ {
         let block_index = *self.blocks_by_id.get(block_hash).unwrap();
 
+        // TODO: what if body was already known? this will trigger the `debug_assert!(_was_included)` below
+
         // Value returned from the function.
         // TODO: optimize by not having Vec
         let mut included_transactions = Vec::new();
@@ -474,8 +482,16 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         for included_body in body {
             let included_body = included_body.as_ref();
 
-            // As explained in the .
-            let hash = blake2_hash(included_body);
+            // As explained in the documentation, the transactions passed as parameter are
+            // single-SCALE-encoded, while the ones stored in the pool are double-SCALE-encoded.
+            // This is taken into account when comparing hashes.
+            let hash = {
+                let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
+                hasher
+                    .update(crate::util::encode_scale_compact_usize(included_body.len()).as_ref());
+                hasher.update(included_body);
+                <[u8; 32]>::try_from(hasher.finalize().as_bytes()).unwrap()
+            };
 
             for (_, known_tx_id) in self.by_hash.range(
                 (hash, TransactionId(usize::min_value()))

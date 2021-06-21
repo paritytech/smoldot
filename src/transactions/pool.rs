@@ -169,7 +169,11 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Inserts a new unvalidated transaction in the pool.
-    pub fn add_unvalidated(&mut self, double_scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
+    pub fn add_unvalidated(
+        &mut self,
+        double_scale_encoded: Vec<u8>,
+        user_data: TTx,
+    ) -> TransactionId {
         self.add_unvalidated_inner(double_scale_encoded, None, user_data)
     }
 
@@ -223,7 +227,9 @@ impl<TTx> Pool<TTx> {
             debug_assert!(_removed);
         }
 
-        let _removed = self.by_hash.remove(&(blake2_hash(&tx.double_scale_encoded), id));
+        let _removed = self
+            .by_hash
+            .remove(&(blake2_hash(&tx.double_scale_encoded), id));
         debug_assert!(_removed);
 
         tx.user_data
@@ -514,13 +520,14 @@ pub struct AppendBlock<TTx> {
 }
 
 impl<TTx> AppendBlock<TTx> {
-    /// Adds a transaction to the block being appended.
+    /// Adds a single-SCALE-encoded transaction to the block being appended.
     ///
     /// The transaction is compared against the list of non-included transactions that are already
     /// in the pool. If a non-included transaction with the same bytes is found, it is switched to
     /// the "included" state and  [`AppendBlockTransaction::NonIncludedUpdated`] is returned.
     /// Otherwise, [`AppendBlockTransaction::Unknown`] is returned and the transaction can be
     /// inserted in the pool.
+    // TODO: update for the fact that it's a single-encoded transaction
     pub fn block_transaction<'a, 'b>(
         &'a mut self,
         bytes: &'b [u8],
