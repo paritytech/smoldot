@@ -1661,7 +1661,9 @@ async fn account_nonce(
                 let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
                     Ok(v) => v,
                     Err(err) => {
-                        runtime_call_lock.unlock(todo!()); // TODO:
+                        runtime_call_lock.unlock(
+                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
+                        );
                         return Err(AnnounceNonceError::Call(err));
                     }
                 };
