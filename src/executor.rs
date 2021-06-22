@@ -65,7 +65,7 @@ pub fn storage_heap_pages_to_value(
 }
 
 /// Error potentially returned by [`storage_heap_pages_to_value`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum InvalidHeapPagesError {
     /// Storage value has the wrong length.
     WrongLen,

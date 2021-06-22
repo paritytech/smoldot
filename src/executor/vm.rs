@@ -613,7 +613,7 @@ pub enum ExecOutcome {
 pub struct Trap(String);
 
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error while parsing or compiling the WebAssembly code.
     #[display(fmt = "{}", _0)]
@@ -643,7 +643,7 @@ pub enum StartErr {
 }
 
 /// Opaque error indicating an error while parsing or compiling the WebAssembly code.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 #[display(fmt = "{}", _0)]
 pub struct ModuleError(String);
 

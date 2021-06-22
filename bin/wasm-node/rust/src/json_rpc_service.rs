@@ -858,29 +858,34 @@ impl JsonRpcService {
                 let runtime_spec = if let Some(at) = at {
                     self.runtime_service.runtime_version_of_block(&at.0).await
                 } else {
-                    self.runtime_service.best_block_runtime().await
+                    self.runtime_service
+                        .best_block_runtime()
+                        .await
+                        .map_err(runtime_service::RuntimeVersionOfBlockError::InvalidRuntime)
                 };
 
                 self.send_back(
-                    &if let Ok(runtime_spec) = runtime_spec {
-                        let runtime_spec = runtime_spec.decode();
-                        methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                            spec_name: runtime_spec.spec_name.into(),
-                            impl_name: runtime_spec.impl_name.into(),
-                            authoring_version: u64::from(runtime_spec.authoring_version),
-                            spec_version: u64::from(runtime_spec.spec_version),
-                            impl_version: u64::from(runtime_spec.impl_version),
-                            transaction_version: runtime_spec.transaction_version.map(u64::from),
-                            apis: runtime_spec.apis,
-                        })
-                        .to_json_response(request_id)
-                    } else {
-                        // TODO: error can also be because we failed the storage query; should be more precise
-                        json_rpc::parse::build_error_response(
+                    &match runtime_spec {
+                        Ok(runtime_spec) => {
+                            let runtime_spec = runtime_spec.decode();
+                            methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
+                                spec_name: runtime_spec.spec_name.into(),
+                                impl_name: runtime_spec.impl_name.into(),
+                                authoring_version: u64::from(runtime_spec.authoring_version),
+                                spec_version: u64::from(runtime_spec.spec_version),
+                                impl_version: u64::from(runtime_spec.impl_version),
+                                transaction_version: runtime_spec
+                                    .transaction_version
+                                    .map(u64::from),
+                                apis: runtime_spec.apis,
+                            })
+                            .to_json_response(request_id)
+                        }
+                        Err(error) => json_rpc::parse::build_error_response(
                             request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, "Invalid runtime"),
+                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                             None,
-                        )
+                        ),
                     },
                     user_data,
                 );
