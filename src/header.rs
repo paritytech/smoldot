@@ -135,9 +135,11 @@ pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Er
     let parent_hash: &[u8; 32] = TryFrom::try_from(&scale_encoded[0..32]).unwrap();
     scale_encoded = &scale_encoded[32..];
 
-    let number: parity_scale_codec::Compact<u64> =
-        parity_scale_codec::Decode::decode(&mut scale_encoded)
-            .map_err(Error::BlockNumberDecodeError)?;
+    // TODO: don't go through a usize when decoding the block number, otherwise 32 bits platforms can't support blocks about 4 billion
+    let (scale_encoded, number) =
+        crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(scale_encoded)
+            .map_err(|_| Error::BlockNumberDecodeError)?;
+    let number = u64::try_from(number).map_err(|_| Error::BlockNumberDecodeError)?;
 
     if scale_encoded.len() < 32 + 32 + 1 {
         return Err(Error::TooShort);
@@ -152,7 +154,7 @@ pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Er
 
     let header = HeaderRef {
         parent_hash,
-        number: number.0,
+        number,
         state_root,
         extrinsics_root,
         digest,
@@ -169,13 +171,13 @@ pub enum Error {
     /// Header is too long.
     TooLong,
     /// Error while decoding the block number.
-    BlockNumberDecodeError(parity_scale_codec::Error),
+    BlockNumberDecodeError,
     /// Error while decoding the digest length.
-    DigestLenDecodeError(parity_scale_codec::Error),
+    DigestLenDecodeError,
     /// Error while decoding a digest log item length.
-    DigestItemLenDecodeError(parity_scale_codec::Error),
+    DigestItemLenDecodeError,
     /// Error while decoding a digest item.
-    DigestItemDecodeError(parity_scale_codec::Error),
+    DigestItemDecodeError,
     /// Digest log item with an unrecognized type.
     UnknownDigestLogType(u8),
     /// Found a seal that isn't the last item in the list.
@@ -635,14 +637,9 @@ impl<'a> DigestRef<'a> {
 
     /// Try to decode a list of digest items, from their SCALE encoding.
     fn from_scale_bytes(mut scale_encoded: &'a [u8]) -> Result<(Self, &'a [u8]), Error> {
-        let digest_logs_len = {
-            let len: parity_scale_codec::Compact<u64> =
-                parity_scale_codec::Decode::decode(&mut scale_encoded)
-                    .map_err(Error::DigestLenDecodeError)?;
-            // If the number of digest items can't fit in a `usize`, we know that the buffer can't
-            // be large enough to hold all these items, hence the `TooShort`.
-            usize::try_from(len.0).map_err(|_| Error::TooShort)?
-        };
+        let (scale_encoded, digest_logs_len) =
+            crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(scale_encoded)
+                .map_err(|_| Error::DigestItemLenDecodeError)?;
 
         let mut aura_seal_index = None;
         let mut aura_predigest_index = None;
@@ -1186,11 +1183,9 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
             let engine_id: &[u8; 4] = TryFrom::try_from(&slice[..4]).unwrap();
             slice = &slice[4..];
 
-            let len: parity_scale_codec::Compact<u64> =
-                parity_scale_codec::Decode::decode(&mut slice)
-                    .map_err(Error::DigestItemLenDecodeError)?;
-
-            let len = TryFrom::try_from(len.0).map_err(|_| Error::TooShort)?;
+            let (slice, len) =
+                crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(slice)
+                    .map_err(|_| Error::DigestItemLenDecodeError)?;
 
             if slice.len() < len {
                 return Err(Error::TooShort);
@@ -1213,7 +1208,7 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
         }
         7 => {
             let item = parity_scale_codec::Decode::decode(&mut slice)
-                .map_err(Error::DigestItemDecodeError)?;
+                .map_err(|_| Error::DigestItemDecodeError)?;
             Ok((DigestItemRef::ChangesTrieSignal(item), slice))
         }
         ty => Err(Error::UnknownDigestLogType(ty)),
