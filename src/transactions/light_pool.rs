@@ -511,6 +511,11 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         }
     }
 
+    /// Returns `true` if the block with the given hash is present in the pool.
+    pub fn has_block(&self, hash: &[u8; 32]) -> bool {
+        self.blocks_by_id.contains_key(hash)
+    }
+
     /// Returns the user data associated with a given block.
     ///
     /// Returns `None` if the block hash doesn't correspond to a known block.
