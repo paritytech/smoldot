@@ -116,20 +116,18 @@ impl<'a> GrandpaConsensusLogRef<'a> {
                         .chain(change.scale_encoding().map(either::Right).map(either::Left)),
                 ))
             }
-            GrandpaConsensusLogRef::OnDisabled(n) => either::Either::Right(iter::once(
-                either::Either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
+            GrandpaConsensusLogRef::OnDisabled(n) => either::Right(iter::once(
+                either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
             )),
-            GrandpaConsensusLogRef::Pause(n) => either::Either::Right(iter::once(
-                either::Either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
+            GrandpaConsensusLogRef::Pause(n) => either::Right(iter::once(
+                either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
             )),
-            GrandpaConsensusLogRef::Resume(n) => either::Either::Right(iter::once(
-                either::Either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
+            GrandpaConsensusLogRef::Resume(n) => either::Right(iter::once(
+                either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
             )),
         };
 
-        index
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+        index.map(either::Left).chain(body.map(either::Right))
     }
 }
 
@@ -364,9 +362,8 @@ impl<'a> GrandpaAuthorityRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        iter::once(either::Either::Right(self.public_key)).chain(iter::once(either::Either::Left(
-            self.weight.get().to_le_bytes(),
-        )))
+        iter::once(either::Right(self.public_key))
+            .chain(iter::once(either::Left(self.weight.get().to_le_bytes())))
     }
 }
 

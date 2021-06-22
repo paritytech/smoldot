@@ -211,7 +211,7 @@ impl StorageGet {
                             slice::from_ref(&self.0)
                         }
                     }
-                    either::Either::Right(value_request.key().map(One).map(either::Either::Right))
+                    either::Right(value_request.key().map(One).map(either::Right))
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()

@@ -600,22 +600,22 @@ where
         let mut n = 0;
         let body = iter::from_fn(move || {
             let ret = match (&mut self, n) {
-                (MessageOut::Handshake, 0) => Some(either::Either::Left(HANDSHAKE)),
+                (MessageOut::Handshake, 0) => Some(either::Left(HANDSHAKE)),
                 (MessageOut::Handshake, _) => None,
-                (MessageOut::Ls, 0) => Some(either::Either::Left(&b"ls\n"[..])),
-                (MessageOut::Ls, 500) => Some(either::Either::Left(&b"\n"[..])), // TODO: hack, see below
+                (MessageOut::Ls, 0) => Some(either::Left(&b"ls\n"[..])),
+                (MessageOut::Ls, 500) => Some(either::Left(&b"\n"[..])), // TODO: hack, see below
                 (MessageOut::Ls, _) => None,
                 (MessageOut::LsResponse(list), n) if n % 3 == 0 => {
                     let protocol_len = list.clone().nth(n / 3)?.as_ref().len() + 1;
                     // TODO: overhead
                     let length = leb128::encode_usize(protocol_len).collect::<Vec<_>>();
-                    Some(either::Either::Right(either::Right(length)))
+                    Some(either::Right(either::Right(length)))
                 }
                 (MessageOut::LsResponse(list), n) if n % 3 == 1 => {
                     let protocol = list.clone().nth(n / 3).unwrap();
-                    Some(either::Either::Right(either::Left(protocol)))
+                    Some(either::Right(either::Left(protocol)))
                 }
-                (MessageOut::LsResponse(_), _) => Some(either::Either::Left(&b"\n"[..])),
+                (MessageOut::LsResponse(_), _) => Some(either::Left(&b"\n"[..])),
                 (MessageOut::ProtocolOk(_), 0) | (MessageOut::ProtocolRequest(_), 0) => {
                     let proto = match mem::replace(&mut self, MessageOut::Ls) {
                         MessageOut::ProtocolOk(p) | MessageOut::ProtocolRequest(p) => p,
@@ -623,12 +623,12 @@ where
                     };
                     // TODO: this is completely a hack; decide whether it's acceptable
                     n = 499;
-                    Some(either::Either::Right(either::Left(proto)))
+                    Some(either::Right(either::Left(proto)))
                 }
                 (MessageOut::ProtocolOk(_), _) | (MessageOut::ProtocolRequest(_), _) => {
                     unreachable!()
                 }
-                (MessageOut::ProtocolNa, 0) => Some(either::Either::Left(&b"na\n"[..])),
+                (MessageOut::ProtocolNa, 0) => Some(either::Left(&b"na\n"[..])),
                 (MessageOut::ProtocolNa, _) => None,
             };
 
@@ -640,8 +640,8 @@ where
         });
 
         length_prefix
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+            .map(either::Left)
+            .chain(body.map(either::Right))
     }
 
     /// Write to the given buffer the bytes of the message, starting at `message_offset`. Returns
