@@ -589,10 +589,13 @@ impl<'a> Drop for RuntimeCallLock<'a> {
 /// Error when analyzing the runtime.
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum RuntimeError {
-    Build(executor::host::NewErr),
     /// The `:code` key of the storage is empty..
     CodeNotFound,
+    /// Error while parsing the `:heappages` storage value.
     InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Error while compiling the runtime.
+    Build(executor::host::NewErr),
+    /// Error when determining the runtime specification.
     CoreVersion, // TODO: precise error
 }
 
