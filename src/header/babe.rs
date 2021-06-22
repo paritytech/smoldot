@@ -20,7 +20,6 @@ use crate::util;
 
 use alloc::vec::Vec;
 use core::{cmp, convert::TryFrom, fmt, iter, slice};
-use parity_scale_codec::DecodeAll as _;
 
 /// A consensus log item for BABE.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,11 +54,7 @@ impl<'a> BabeConsensusLogRef<'a> {
                 if slice.len() < 2 || slice[1] != 1 {
                     return Err(Error::BadBabeNextConfigVersion);
                 }
-
-                BabeConsensusLogRef::NextConfigData(
-                    BabeNextConfig::decode_all(&slice[2..])
-                        .map_err(Error::DigestItemDecodeError)?,
-                )
+                BabeConsensusLogRef::NextConfigData(BabeNextConfig::from_slice(&slice[2..])?)
             }
             Some(_) => return Err(Error::BadBabeConsensusRefType),
             None => return Err(Error::TooShort),
@@ -86,17 +81,20 @@ impl<'a> BabeConsensusLogRef<'a> {
         }));
 
         let body = match self {
-            BabeConsensusLogRef::NextEpochData(digest) => {
-                either::Left(digest.scale_encoding().map(either::Left))
-            }
-            BabeConsensusLogRef::OnDisabled(digest) => either::Right(iter::once(either::Right(
-                parity_scale_codec::Encode::encode(digest),
+            BabeConsensusLogRef::NextEpochData(digest) => either::Left(either::Left(
+                digest.scale_encoding().map(either::Left).map(either::Left),
+            )),
+            BabeConsensusLogRef::OnDisabled(digest) => either::Left(either::Right(iter::once(
+                either::Left(either::Right(digest.to_le_bytes())),
             ))),
-            BabeConsensusLogRef::NextConfigData(digest) => {
-                let mut encoded = parity_scale_codec::Encode::encode(digest);
-                encoded.insert(0, 1);
-                either::Right(iter::once(either::Right(encoded)))
-            }
+            BabeConsensusLogRef::NextConfigData(digest) => either::Right(
+                iter::once(either::Right(either::Left(One([1])))).chain(
+                    digest
+                        .scale_encoding()
+                        .map(either::Right)
+                        .map(either::Right),
+                ),
+            ),
         };
 
         index.map(either::Left).chain(body.map(either::Right))
@@ -337,7 +335,10 @@ impl<'a> From<BabeAuthorityRef<'a>> for BabeAuthority {
 
 /// Information about the next epoch config, if changed. This is broadcast in the first
 /// block of the epoch, and applies using the same rules as `NextEpochDescriptor`.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+// TODO: remove the Encode & Decode trait derivation ; unfortunately used elsewhere
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
+)]
 pub struct BabeNextConfig {
     /// Value of `c` in `BabeEpochConfiguration`.
     pub c: (u64, u64),
@@ -372,7 +373,10 @@ impl BabeNextConfig {
 }
 
 /// Types of allowed slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// TODO: remove the Encode & Decode trait derivation ; unfortunately used elsewhere
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
+)]
 pub enum BabeAllowedSlots {
     /// Only allow primary slot claims.
     PrimarySlots,
@@ -389,7 +393,7 @@ impl BabeAllowedSlots {
             Some(0) => BabeAllowedSlots::PrimarySlots,
             Some(1) => BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
             Some(2) => BabeAllowedSlots::PrimaryAndSecondaryVrfSlots,
-            Some(_) => return Err(Error::BadBabePreDigestRefType),
+            _ => return Err(Error::BadBabePreDigestRefType),
         })
     }
 

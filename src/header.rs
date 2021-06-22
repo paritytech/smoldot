@@ -136,7 +136,7 @@ pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Er
     scale_encoded = &scale_encoded[32..];
 
     // TODO: don't go through a usize when decoding the block number, otherwise 32 bits platforms can't support blocks about 4 billion
-    let (scale_encoded, number) =
+    let (mut scale_encoded, number) =
         crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(scale_encoded)
             .map_err(|_| Error::BlockNumberDecodeError)?;
     let number = u64::try_from(number).map_err(|_| Error::BlockNumberDecodeError)?;
@@ -1177,7 +1177,7 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
             let engine_id: &[u8; 4] = TryFrom::try_from(&slice[..4]).unwrap();
             slice = &slice[4..];
 
-            let (slice, len) =
+            let (mut slice, len) =
                 crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(slice)
                     .map_err(|_| Error::DigestItemLenDecodeError)?;
 
