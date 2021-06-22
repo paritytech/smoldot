@@ -591,6 +591,19 @@ async fn background_task(
 
                     match validation_result {
                         Ok((block_hash, result)) => {
+                            // The validation is made using the runtime service, while the state
+                            // of the chain is tracked using the sync service. As such, it is
+                            // possible for the validation to have been performed against a block
+                            // that has already been finalized and removed from the pool.
+                            if !worker.pending_transactions.has_block(&block_hash) {
+                                log::debug!(
+                                    target: "tx-service-validation",
+                                    "Skipping success due to obsolete block {}",
+                                    HashDisplay(&block_hash)
+                                );
+                                continue;
+                            }
+
                             log::debug!(
                                 target: "tx-service-validation",
                                 "Success for {} at {}: {:?}",
