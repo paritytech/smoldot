@@ -459,9 +459,9 @@ impl<TUd> TrieStructure<TUd> {
     /// Iterates over all nodes of the trie, in a specific order.
     fn all_nodes_ordered<'b>(&'b self) -> impl Iterator<Item = usize> + 'b {
         if let Some(root_index) = self.root_index {
-            either::Either::Left(iter::once(root_index).chain(self.descendants(root_index)))
+            either::Left(iter::once(root_index).chain(self.descendants(root_index)))
         } else {
-            either::Either::Right(iter::empty())
+            either::Right(iter::empty())
         }
     }
 

@@ -87,21 +87,19 @@ impl<'a> BabeConsensusLogRef<'a> {
 
         let body = match self {
             BabeConsensusLogRef::NextEpochData(digest) => {
-                either::Either::Left(digest.scale_encoding().map(either::Either::Left))
+                either::Left(digest.scale_encoding().map(either::Left))
             }
-            BabeConsensusLogRef::OnDisabled(digest) => either::Either::Right(iter::once(
-                either::Either::Right(parity_scale_codec::Encode::encode(digest)),
-            )),
+            BabeConsensusLogRef::OnDisabled(digest) => either::Right(iter::once(either::Right(
+                parity_scale_codec::Encode::encode(digest),
+            ))),
             BabeConsensusLogRef::NextConfigData(digest) => {
                 let mut encoded = parity_scale_codec::Encode::encode(digest);
                 encoded.insert(0, 1);
-                either::Either::Right(iter::once(either::Either::Right(encoded)))
+                either::Right(iter::once(either::Right(encoded)))
             }
         };
 
-        index
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+        index.map(either::Left).chain(body.map(either::Right))
     }
 }
 
@@ -302,7 +300,7 @@ impl<'a> BabeAuthorityRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        iter::once(either::Either::Right(self.public_key)).chain(iter::once(either::Either::Left(
+        iter::once(either::Right(self.public_key)).chain(iter::once(either::Left(
             parity_scale_codec::Encode::encode(&self.weight),
         )))
     }
@@ -477,26 +475,22 @@ impl<'a> BabePreDigestRef<'a> {
         }));
 
         let body = match self {
-            BabePreDigestRef::Primary(digest) => either::Either::Left(either::Either::Left(
+            BabePreDigestRef::Primary(digest) => either::Left(either::Left(
                 digest
                     .scale_encoding()
-                    .map(|buf| either::Either::Left(either::Either::Left(buf))),
+                    .map(|buf| either::Left(either::Left(buf))),
             )),
-            BabePreDigestRef::SecondaryPlain(digest) => {
-                either::Either::Left(either::Either::Right(
-                    digest
-                        .scale_encoding()
-                        .map(|buf| either::Either::Left(either::Either::Right(buf))),
-                ))
-            }
+            BabePreDigestRef::SecondaryPlain(digest) => either::Left(either::Right(
+                digest
+                    .scale_encoding()
+                    .map(|buf| either::Left(either::Right(buf))),
+            )),
             BabePreDigestRef::SecondaryVRF(digest) => {
-                either::Either::Right(digest.scale_encoding().map(either::Either::Right))
+                either::Right(digest.scale_encoding().map(either::Right))
             }
         };
 
-        index
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+        index.map(either::Left).chain(body.map(either::Right))
     }
 }
 
@@ -571,8 +565,8 @@ impl<'a> BabePrimaryPreDigestRef<'a> {
             .map(either::Left);
 
         header
-            .chain(iter::once(either::Either::Right(&self.vrf_output[..])))
-            .chain(iter::once(either::Either::Right(&self.vrf_proof[..])))
+            .chain(iter::once(either::Right(&self.vrf_output[..])))
+            .chain(iter::once(either::Right(&self.vrf_proof[..])))
     }
 }
 
@@ -699,8 +693,8 @@ impl<'a> BabeSecondaryVRFPreDigestRef<'a> {
             .map(either::Left);
 
         header
-            .chain(iter::once(either::Either::Right(&self.vrf_output[..])))
-            .chain(iter::once(either::Either::Right(&self.vrf_proof[..])))
+            .chain(iter::once(either::Right(&self.vrf_output[..])))
+            .chain(iter::once(either::Right(&self.vrf_proof[..])))
     }
 }
 

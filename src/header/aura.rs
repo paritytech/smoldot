@@ -84,9 +84,7 @@ impl<'a> AuraConsensusLogRef<'a> {
             ),
         };
 
-        index
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+        index.map(either::Left).chain(body.map(either::Right))
     }
 }
 

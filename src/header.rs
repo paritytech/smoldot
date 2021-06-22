@@ -237,19 +237,13 @@ impl<'a> HeaderRef<'a> {
         let encoded_number =
             parity_scale_codec::Encode::encode(&parity_scale_codec::Compact(self.number));
 
-        iter::once(either::Either::Left(either::Either::Left(
-            &self.parent_hash[..],
-        )))
-        .chain(iter::once(either::Either::Left(either::Either::Right(
-            encoded_number,
-        ))))
-        .chain(iter::once(either::Either::Left(either::Either::Left(
-            &self.state_root[..],
-        ))))
-        .chain(iter::once(either::Either::Left(either::Either::Left(
-            &self.extrinsics_root[..],
-        ))))
-        .chain(self.digest.scale_encoding().map(either::Either::Right))
+        iter::once(either::Left(either::Left(&self.parent_hash[..])))
+            .chain(iter::once(either::Left(either::Right(encoded_number))))
+            .chain(iter::once(either::Left(either::Left(&self.state_root[..]))))
+            .chain(iter::once(either::Left(either::Left(
+                &self.extrinsics_root[..],
+            ))))
+            .chain(self.digest.scale_encoding().map(either::Right))
     }
 
     /// Equivalent to [`HeaderRef::scale_encoding`] but returns the data in a `Vec`.

@@ -223,8 +223,8 @@ pub fn validate_transaction_runtime_parameters(
     };
 
     iter::once(source)
-        .map(either::Either::Left)
-        .chain(scale_encoded_transaction.map(either::Either::Right))
+        .map(either::Left)
+        .chain(scale_encoded_transaction.map(either::Right))
 }
 
 /// Name of the runtime function to call in order to validate a transaction.
