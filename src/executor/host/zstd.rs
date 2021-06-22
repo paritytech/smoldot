@@ -68,7 +68,7 @@ fn zstd_decode(mut data: &[u8], max_allowed: usize) -> Result<Vec<u8>, Error> {
 }
 
 /// Error possibly returned when decoding a zstd-compressed Wasm blob.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// The data is zstandard-compressed, but the data is in an invalid format.
     InvalidZstd,

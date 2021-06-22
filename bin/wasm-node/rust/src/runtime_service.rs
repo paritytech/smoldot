@@ -187,8 +187,8 @@ impl RuntimeService {
     pub async fn subscribe_runtime_version(
         self: &Arc<RuntimeService>,
     ) -> (
-        Result<executor::CoreVersion, ()>,
-        NotificationsReceiver<Result<executor::CoreVersion, ()>>,
+        Result<executor::CoreVersion, RuntimeError>,
+        NotificationsReceiver<Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let (tx, rx) = lossy_channel::channel();
         let mut latest_known_runtime = self.latest_known_runtime.lock().await;
@@ -197,16 +197,15 @@ impl RuntimeService {
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
-            .map_err(|&()| ());
+            .map_err(|err| err.clone());
         (current_version, rx)
     }
 
     /// Returns the runtime version of the block with the given hash.
-    // TODO: better error type
     pub async fn runtime_version_of_block(
         self: &Arc<RuntimeService>,
         block_hash: &[u8; 32],
-    ) -> Result<executor::CoreVersion, ()> {
+    ) -> Result<executor::CoreVersion, RuntimeVersionOfBlockError> {
         // If the requested block is the best known block, optimize by
         // immediately returning the cached spec.
         {
@@ -216,7 +215,7 @@ impl RuntimeService {
                     .runtime
                     .as_ref()
                     .map(|r| r.runtime_spec.clone())
-                    .map_err(|&()| ());
+                    .map_err(|err| RuntimeVersionOfBlockError::InvalidRuntime(err.clone()));
             }
         }
 
@@ -240,10 +239,12 @@ impl RuntimeService {
             let header = if let Ok(block) = result {
                 block.header.unwrap()
             } else {
-                return Err(());
+                return Err(RuntimeVersionOfBlockError::NetworkBlockRequest); // TODO: precise error
             };
 
-            *header::decode(&header).map_err(|_| ())?.state_root
+            *header::decode(&header)
+                .map_err(RuntimeVersionOfBlockError::InvalidBlockHeader)?
+                .state_root
         };
 
         // Download the runtime code of this block.
@@ -258,29 +259,28 @@ impl RuntimeService {
             .await;
 
         let (code, heap_pages) = {
-            let mut results = match code_query_result {
-                Ok(c) => c,
-                Err(_) => return Err(()),
-            };
-
+            let mut results =
+                code_query_result.map_err(RuntimeVersionOfBlockError::StorageQuery)?;
             let heap_pages = results.pop().unwrap();
             let code = results.pop().unwrap();
             (code, heap_pages)
         };
 
-        SuccessfulRuntime::from_params(&code, &heap_pages).map(|r| r.runtime_spec)
+        SuccessfulRuntime::from_params(&code, &heap_pages)
+            .map(|r| r.runtime_spec)
+            .map_err(RuntimeVersionOfBlockError::InvalidRuntime)
     }
 
     /// Returns the runtime version of the current best block.
     pub async fn best_block_runtime(
         self: &Arc<RuntimeService>,
-    ) -> Result<executor::CoreVersion, ()> {
+    ) -> Result<executor::CoreVersion, RuntimeError> {
         let latest_known_runtime = self.latest_known_runtime.lock().await;
         latest_known_runtime
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
-            .map_err(|&()| ())
+            .map_err(|err| err.clone())
     }
 
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
@@ -341,7 +341,7 @@ impl RuntimeService {
                     (
                         lock.runtime
                             .as_ref()
-                            .map_err(|()| RuntimeCallError::InvalidRuntime)?
+                            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
                             .runtime_spec
                             .decode()
                             .spec_version,
@@ -374,7 +374,7 @@ impl RuntimeService {
                 let runtime = latest_known_runtime_lock
                     .runtime
                     .as_mut()
-                    .map_err(|()| RuntimeCallError::InvalidRuntime)?;
+                    .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
                 if runtime.runtime_spec.decode().spec_version != spec_version {
                     continue;
                 }
@@ -400,12 +400,15 @@ impl RuntimeService {
         // First, try the cache.
         {
             let latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-            if let Ok(runtime) = latest_known_runtime_lock.runtime.as_ref() {
-                if let Some(metadata) = runtime.metadata.as_ref() {
-                    return Ok(metadata.clone());
+            match latest_known_runtime_lock.runtime.as_ref() {
+                Ok(runtime) => {
+                    if let Some(metadata) = runtime.metadata.as_ref() {
+                        return Ok(metadata.clone());
+                    }
                 }
-            } else {
-                return Err(MetadataError::InvalidRuntime);
+                Err(err) => {
+                    return Err(MetadataError::InvalidRuntime(err.clone()));
+                }
             }
         }
 
@@ -583,12 +586,22 @@ impl<'a> Drop for RuntimeCallLock<'a> {
     }
 }
 
+/// Error when analyzing the runtime.
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeError {
+    Build(executor::host::NewErr),
+    /// The `:code` key of the storage is empty..
+    CodeNotFound,
+    InvalidHeapPages(executor::InvalidHeapPagesError),
+    CoreVersion, // TODO: precise error
+}
+
 /// Error that can happen when calling a runtime function.
 #[derive(Debug, derive_more::Display)]
 pub enum RuntimeCallError {
     /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid")]
-    InvalidRuntime,
+    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    InvalidRuntime(RuntimeError),
     /// Error while retrieving the storage item from other nodes.
     // TODO: change error type?
     #[display(fmt = "Error in call proof: {}", _0)]
@@ -600,7 +613,7 @@ impl RuntimeCallError {
     /// issue.
     pub fn is_network_problem(&self) -> bool {
         match self {
-            RuntimeCallError::InvalidRuntime => false,
+            RuntimeCallError::InvalidRuntime(_) => false,
             // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
             RuntimeCallError::StorageRetrieval(proof_verify::Error::TrieRootNotFound) => true,
             RuntimeCallError::StorageRetrieval(_) => false,
@@ -615,10 +628,27 @@ pub enum MetadataError {
     #[display(fmt = "{}", _0)]
     CallError(RuntimeCallError),
     /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid")]
-    InvalidRuntime,
+    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    InvalidRuntime(RuntimeError),
     /// Error in the metadata-specific runtime API.
+    #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
     MetadataQuery(metadata::Error),
+}
+
+/// Error that can happen when calling [`RuntimeService::runtime_version_of_block`].
+#[derive(Debug, derive_more::Display)]
+pub enum RuntimeVersionOfBlockError {
+    /// Runtime of the best block isn't valid.
+    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    InvalidRuntime(RuntimeError),
+    /// Error while performing the block request on the network.
+    NetworkBlockRequest, // TODO: precise error
+    /// Failed to decode the header of the block.
+    #[display(fmt = "Failed to decode header of the block: {}", _0)]
+    InvalidBlockHeader(header::Error),
+    /// Error while querying the storage of the block.
+    #[display(fmt = "Error while querying block storage: {}", _0)]
+    StorageQuery(sync_service::StorageQueryError),
 }
 
 struct LatestKnownRuntime {
@@ -626,7 +656,7 @@ struct LatestKnownRuntime {
     /// happened, including a problem when obtaining the runtime specs or the metadata. It is
     /// better to report to the user an error about for example the metadata not being extractable
     /// compared to returning an obsolete version.
-    runtime: Result<SuccessfulRuntime, ()>,
+    runtime: Result<SuccessfulRuntime, RuntimeError>,
 
     /// Undecoded storage value of `:code` corresponding to the [`LatestKnownRuntime::runtime`]
     /// field.
@@ -644,7 +674,8 @@ struct LatestKnownRuntime {
     /// Whenever [`LatestKnownRuntime::runtime`] is updated, one should emit an item on each
     /// sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
-    runtime_version_subscriptions: Vec<lossy_channel::Sender<Result<executor::CoreVersion, ()>>>,
+    runtime_version_subscriptions:
+        Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,
 
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
@@ -685,16 +716,20 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    fn from_params(code: &Option<Vec<u8>>, heap_pages: &Option<Vec<u8>>) -> Result<Self, ()> {
+    fn from_params(
+        code: &Option<Vec<u8>>,
+        heap_pages: &Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
         let vm = match executor::host::HostVmPrototype::new(
-            code.as_ref().ok_or(())?,
-            executor::storage_heap_pages_to_value(heap_pages.as_deref()).map_err(|_| ())?,
+            code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
+            executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                .map_err(RuntimeError::InvalidHeapPages)?,
             executor::vm::ExecHint::CompileAheadOfTime,
         ) {
             Ok(vm) => vm,
             Err(error) => {
                 log::warn!(target: "runtime", "Failed to compile best block runtime: {}", error);
-                return Err(());
+                return Err(RuntimeError::Build(error));
             }
         };
 
@@ -705,7 +740,7 @@ impl SuccessfulRuntime {
                     target: "runtime",
                     "Failed to call Core_version on new runtime",  // TODO: print error message as well ; at the moment the type of the error is `()`
                 );
-                return Err(());
+                return Err(RuntimeError::CoreVersion); // TODO: more precise error
             }
         };
 
@@ -879,7 +914,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                         .runtime
                         .as_ref()
                         .map(|r| r.runtime_spec.clone())
-                        .map_err(|&()| ());
+                        .map_err(|err| err.clone());
                     if subscription.send(to_send).is_ok() {
                         latest_known_runtime
                             .runtime_version_subscriptions

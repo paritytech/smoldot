@@ -2242,7 +2242,7 @@ impl Inner {
 }
 
 /// Error that can happen when initializing a VM.
-#[derive(Debug, derive_more::From, derive_more::Display)]
+#[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error while initializing the virtual machine.
     #[display(fmt = "Error while initializing the virtual machine: {}", _0)]
