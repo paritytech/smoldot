@@ -71,7 +71,7 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// Decodes a SCALE-compact-encoded usize.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
-/// >           the type of `E`. Use `nom::error::Error`.
+/// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
 pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], usize, E> {
