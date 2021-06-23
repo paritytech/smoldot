@@ -51,7 +51,7 @@
 //!
 //! # About heap pages
 //!
-//! In the WebAssembly specifications, the memory available in the WebAssembly virtual machine has
+//! In the WebAssembly specification, the memory available in the WebAssembly virtual machine has
 //! an initial size and a maximum size. One of the instructions available in WebAssembly code is
 //! [the `memory.grow` instruction](https://webassembly.github.io/spec/core/bikeshed/#-hrefsyntax-instr-memorymathsfmemorygrow),
 //! which allows increasing the size of the memory.

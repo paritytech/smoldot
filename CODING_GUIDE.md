@@ -72,7 +72,7 @@ Substrate is organized around components that are considered as core components 
 
 The blockchain-related logic is plugged on top of these core components and can, however, be changed. One can, for example, remove everything related to the Babe consensus algorithm and replace with by another consensus algorithm.
 
-*smoldot*, on the other hand, is implemented following the current state of the Substrate/Polkadot specifications, and assumes that these specifications will never change. This assumption allows, in turn, for better readability and more flexibility when it comes to the purely engineering aspects of the codebase.
+*smoldot*, on the other hand, is implemented following the current state of the Substrate/Polkadot specification, and assumes that this specification will never change. This assumption allows, in turn, for better readability and more flexibility when it comes to the purely engineering aspects of the codebase.
 
 For example, the code that decodes block headers is written in a way that would be relatively painful (but straight-forward) to modify, if the format of a block header ever changed. However, smoldot simply assumes that the format of block headers will rarely, if ever, change.
 

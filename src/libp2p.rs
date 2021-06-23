@@ -147,7 +147,7 @@ pub struct Config<TPeer> {
     pub known_nodes: Vec<(TPeer, PeerId, Multiaddr)>,
 
     /// Key used for the encryption layer.
-    /// This is a Noise static key, according to the Noise specifications.
+    /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
     pub noise_key: connection::NoiseKey,
 

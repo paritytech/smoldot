@@ -13,7 +13,7 @@ the full nodes of the network.
 ```
 import * as smoldot from 'smoldot';
 
-// Load a string chain specifications.
+// Load a string chain specification.
 const chainSpec = Buffer.from(fs.readFileSync('./westend.json')).toString('utf8');
 
 smoldot

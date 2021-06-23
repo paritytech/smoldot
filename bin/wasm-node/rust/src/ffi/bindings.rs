@@ -226,7 +226,7 @@ pub extern "C" fn init(
 ///
 /// A buffer containing a UTF-8 JSON-RPC request must be passed as parameter. The format of the
 /// JSON-RPC requests is described in
-/// [the standard JSON-RPC 2.0 specifications](https://www.jsonrpc.org/specification). A pub-sub
+/// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification). A pub-sub
 /// extension is supported.
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when

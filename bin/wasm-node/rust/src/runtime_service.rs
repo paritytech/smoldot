@@ -67,7 +67,7 @@ pub struct Config<'a> {
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
 
-    /// Specifications of the chain.
+    /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
 
     /// Header of the genesis block of the chain, in SCALE encoding.

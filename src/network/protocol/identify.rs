@@ -28,7 +28,7 @@
 //! [`IdentifyResponse::observed_addr`]. They are necessary in order for nodes to discover their
 //! public address, and in order to insert peers in the Kademlia k-buckets.
 //!
-//! See also [the official specifications](https://github.com/libp2p/specs/tree/69e57d59dc5d59d3979d79842b577ec2c483f7fa/identify).
+//! See also [the official specification](https://github.com/libp2p/specs/tree/69e57d59dc5d59d3979d79842b577ec2c483f7fa/identify).
 
 use super::schema;
 use crate::libp2p::{peer_id::PublicKey, Multiaddr};

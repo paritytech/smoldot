@@ -60,7 +60,7 @@ pub struct Config<TPeer> {
     pub known_nodes: Vec<(TPeer, peer_id::PeerId, multiaddr::Multiaddr)>,
 
     /// Key used for the encryption layer.
-    /// This is a Noise static key, according to the Noise specifications.
+    /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
     pub noise_key: connection::NoiseKey,
 
@@ -86,8 +86,8 @@ pub struct Config<TPeer> {
 pub struct ChainConfig {
     /// Identifier of the protocol, used on the wire to determine which chain messages refer to.
     ///
-    /// > **Note**: This value is typically found in the specifications of the chain (the
-    /// >           "chain specs").
+    /// > **Note**: This value is typically found in the specification of the chain (the
+    /// >           "chain spec").
     pub protocol_id: String,
 
     /// List of node identities that are known to belong to this overlay network. The node
