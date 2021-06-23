@@ -457,7 +457,7 @@ impl<TUd> TrieStructure<TUd> {
     }
 
     /// Iterates over all nodes of the trie, in a specific order.
-    fn all_nodes_ordered<'b>(&'b self) -> impl Iterator<Item = usize> + 'b {
+    fn all_nodes_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
         if let Some(root_index) = self.root_index {
             either::Left(iter::once(root_index).chain(self.descendants(root_index)))
         } else {
@@ -525,10 +525,10 @@ impl<TUd> TrieStructure<TUd> {
     ///
     /// This method is a shortcut for [`TrieStructure::node_by_index`] followed with
     /// [`NodeAccess::full_key`].
-    pub fn node_full_key_by_index<'b>(
-        &'b self,
+    pub fn node_full_key_by_index(
+        &'_ self,
         node_index: NodeIndex,
-    ) -> Option<impl Iterator<Item = Nibble> + 'b> {
+    ) -> Option<impl Iterator<Item = Nibble> + '_> {
         if !self.nodes.contains(node_index.0) {
             return None;
         }
@@ -541,7 +541,7 @@ impl<TUd> TrieStructure<TUd> {
     /// # Panic
     ///
     /// Panics if `target` is not a valid index.
-    fn node_full_key<'b>(&'b self, target: usize) -> impl Iterator<Item = Nibble> + 'b {
+    fn node_full_key(&'_ self, target: usize) -> impl Iterator<Item = Nibble> + '_ {
         self.node_path(target)
             .chain(iter::once(target))
             .flat_map(move |n| {
@@ -559,7 +559,7 @@ impl<TUd> TrieStructure<TUd> {
     /// # Panic
     ///
     /// Panics if `target` is not a valid index.
-    fn node_path<'b>(&'b self, target: usize) -> impl Iterator<Item = usize> + 'b {
+    fn node_path(&'_ self, target: usize) -> impl Iterator<Item = usize> + '_ {
         debug_assert!(self.nodes.get(usize::max_value()).is_none());
         // First element is an invalid key, each successor is the last element of
         // `reverse_node_path(target)` that isn't equal to `current`.
@@ -581,7 +581,7 @@ impl<TUd> TrieStructure<TUd> {
     /// # Panic
     ///
     /// Panics if `target` is not a valid index.
-    fn reverse_node_path<'b>(&'b self, target: usize) -> impl Iterator<Item = usize> + 'b {
+    fn reverse_node_path(&'_ self, target: usize) -> impl Iterator<Item = usize> + '_ {
         // First element is `target`, each successor is `current.parent`.
         // Since `target` must explicitly not be included, we skip the first element.
         iter::successors(Some(target), move |current| {
@@ -596,7 +596,7 @@ impl<TUd> TrieStructure<TUd> {
     /// # Panic
     ///
     /// Panics if `node_index` is not a valid index.
-    fn descendants<'b>(&'b self, node_index: usize) -> impl Iterator<Item = usize> + 'b {
+    fn descendants(&'_ self, node_index: usize) -> impl Iterator<Item = usize> + '_ {
         // First element is `node_index`. Each successor is the first child of `current` or,
         // if `current` doesn't have any children, the next sibling of `current`.
         // Since `node_index` must explicitly not be included, we skip the first element.
@@ -800,7 +800,7 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
     }
 
     /// Returns the full key of the node.
-    pub fn full_key<'b>(&'b self) -> impl Iterator<Item = Nibble> + 'b {
+    pub fn full_key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         match self {
             NodeAccess::Storage(n) => Either::Left(n.full_key()),
             NodeAccess::Branch(n) => Either::Right(n.full_key()),
@@ -808,7 +808,7 @@ impl<'a, TUd> NodeAccess<'a, TUd> {
     }
 
     /// Returns the partial key of the node.
-    pub fn partial_key<'b>(&'b self) -> impl ExactSizeIterator<Item = Nibble> + 'b {
+    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + '_ {
         match self {
             NodeAccess::Storage(n) => Either::Left(n.partial_key()),
             NodeAccess::Branch(n) => Either::Right(n.partial_key()),
@@ -932,12 +932,12 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
     }
 
     /// Returns the full key of the node.
-    pub fn full_key<'b>(&'b self) -> impl Iterator<Item = Nibble> + 'b {
+    pub fn full_key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.trie.node_full_key(self.node_index)
     }
 
     /// Returns the partial key of the node.
-    pub fn partial_key<'b>(&'b self) -> impl ExactSizeIterator<Item = Nibble> + 'b {
+    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + '_ {
         self.trie
             .nodes
             .get(self.node_index)
@@ -1309,12 +1309,12 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
     }
 
     /// Returns the full key of the node.
-    pub fn full_key<'b>(&'b self) -> impl Iterator<Item = Nibble> + 'b {
+    pub fn full_key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         self.trie.node_full_key(self.node_index)
     }
 
     /// Returns the partial key of the node.
-    pub fn partial_key<'b>(&'b self) -> impl ExactSizeIterator<Item = Nibble> + 'b {
+    pub fn partial_key(&'_ self) -> impl ExactSizeIterator<Item = Nibble> + '_ {
         self.trie
             .nodes
             .get(self.node_index)
@@ -1694,7 +1694,7 @@ pub struct PrepareInsertTwo<'a, TUd> {
 
 impl<'a, TUd> PrepareInsertTwo<'a, TUd> {
     /// Key of the branch node that will be inserted.
-    pub fn branch_node_key<'b>(&'b self) -> impl Iterator<Item = Nibble> + 'b {
+    pub fn branch_node_key(&'_ self) -> impl Iterator<Item = Nibble> + '_ {
         if let Some((parent_index, child_index)) = self.branch_parent {
             let parent = self.trie.node_full_key(parent_index);
             let iter = parent

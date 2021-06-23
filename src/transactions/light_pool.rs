@@ -206,7 +206,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let hash = blake2_hash(double_scale_encoded.as_ref());
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
-            double_scale_encoded: double_scale_encoded.into(),
+            double_scale_encoded,
             user_data,
         }));
 
@@ -542,7 +542,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if no block with the given hash has been inserted before.
     ///
     // TODO: return something more precise in case the block in which a transaction is included is updated?
-    #[must_use]
+    #[must_use = "`set_block_body` returns the list of transactions that are now included in the chain"]
     pub fn set_block_body(
         &'_ mut self,
         block_hash: &[u8; 32],

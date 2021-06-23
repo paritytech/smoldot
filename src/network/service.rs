@@ -257,7 +257,7 @@ where
         let chain_grandpa_config = config
             .chains
             .iter()
-            .map(|chain| chain.grandpa_protocol_config.clone().map(Mutex::new))
+            .map(|chain| chain.grandpa_protocol_config.map(Mutex::new))
             .collect();
 
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);

@@ -72,9 +72,9 @@ pub struct BlockAnnounceRef<'a> {
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
-pub fn encode_block_announce<'a>(
-    announce: BlockAnnounceRef<'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+pub fn encode_block_announce(
+    announce: BlockAnnounceRef<'_>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
     let is_best = if announce.is_best { [1u8] } else { [0u8] };
     announce
         .header
@@ -112,9 +112,9 @@ pub struct DecodeBlockAnnounceError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
-pub fn encode_block_announces_handshake<'a>(
-    handshake: BlockAnnouncesHandshakeRef<'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+pub fn encode_block_announces_handshake(
+    handshake: BlockAnnouncesHandshakeRef<'_>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
     let mut header = [0; 5];
     header[0] = handshake.role.scale_encoding()[0];
 

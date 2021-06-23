@@ -537,11 +537,7 @@ async fn start_database_write(
                 let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
                 let _enter = span.enter();
 
-                let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
-                    Some(last_finalized.header.hash())
-                } else {
-                    None
-                };
+                let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
 
                 for block in finalized_blocks {
                     // TODO: overhead for building the SCALE encoding of the header

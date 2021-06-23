@@ -134,7 +134,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             } else {
                 AllSyncInner::GrandpaWarpSync(grandpa_warp_sync::grandpa_warp_sync(
                     grandpa_warp_sync::Config {
-                        start_chain_information: config.chain_information.into(),
+                        start_chain_information: config.chain_information,
                         sources_capacity: config.sources_capacity,
                     },
                 ))
@@ -267,8 +267,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
                 let warp_sync_request = waiting.add_source(GrandpaWarpSyncSourceExtra {
-                    user_data,
                     outer_source_id,
+                    user_data,
                     best_block_number,
                     best_block_hash,
                 });
@@ -289,8 +289,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
                 let source_extra = GrandpaWarpSyncSourceExtra {
-                    user_data,
                     outer_source_id,
+                    user_data,
                     best_block_number,
                     best_block_hash,
                 };
@@ -327,8 +327,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let inner_source_id = optimistic.add_source(
                     OptimisticSourceExtra {
-                        best_block_hash,
                         user_data,
+                        best_block_hash,
                         outer_source_id,
                     },
                     best_block_number,
@@ -1312,8 +1312,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                             sync: AllSync {
                                 inner: AllSyncInner::AllForks(all_forks),
                                 shared: self.shared,
-                            }
-                            .into(),
+                            },
                             next_actions,
                         };
                     }

@@ -460,8 +460,8 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
     // Success! 🚀
     Ok(VerifySuccess {
-        epoch_transition_target,
         slot_number,
+        epoch_transition_target,
     })
 }
 
