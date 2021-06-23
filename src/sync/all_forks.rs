@@ -645,16 +645,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
     pub fn process_one(self) -> ProcessOne<TBl, TRq, TSrc> {
-        let block = self
-            .inner
-            .blocks
-            .unverified_leaves()
-            .find(|block| {
-                block.parent_block_hash == self.chain.finalized_block_hash()
-                    || self
-                        .chain
-                        .contains_non_finalized_block(&block.parent_block_hash)
-            });
+        let block = self.inner.blocks.unverified_leaves().find(|block| {
+            block.parent_block_hash == self.chain.finalized_block_hash()
+                || self
+                    .chain
+                    .contains_non_finalized_block(&block.parent_block_hash)
+        });
 
         if let Some(block) = block {
             ProcessOne::HeaderVerify(HeaderVerify {
