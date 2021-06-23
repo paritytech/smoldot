@@ -297,7 +297,7 @@ where
             request_response_protocols: config.request_response_protocols,
             ping_protocol: config.ping_protocol,
             events_rx: Mutex::new(events_rx),
-            guarded: Mutex::new(Guarded { peerset, events_tx }),
+            guarded: Mutex::new(Guarded { events_tx, peerset }),
             randomness_seeds: Mutex::new(ChaCha20Rng::from_seed(config.randomness_seed)),
         }
     }
