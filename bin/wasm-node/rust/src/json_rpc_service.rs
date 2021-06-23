@@ -675,11 +675,19 @@ impl JsonRpcService {
                         methods::Response::state_getMetadata(methods::HexString(metadata))
                             .to_json_response(request_id)
                     }
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
+                    Err(error) => {
+                        log::warn!(
+                            target: "json-rpc",
+                            "Returning error from `state_getMetadata`. \
+                            API user might not function properly. Error: {}",
+                            error
+                        );
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                            None,
+                        )
+                    }
                 };
 
                 self.send_back(&response, user_data);
