@@ -178,7 +178,7 @@ where
             config: Some(config),
             // Note that the listener theoretically doesn't necessarily have to immediately send
             // a handshake, and could instead wait for a command from the dialer. In practice,
-            // however, the specifications don't mention anything about this, and some libraries
+            // however, the specification doesn't mention anything about this, and some libraries
             // such as js-libp2p wait for the listener to send a handshake before emitting a
             // command.
             state: InProgressState::SendHandshake {

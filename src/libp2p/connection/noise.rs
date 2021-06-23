@@ -79,7 +79,7 @@ pub const PROTOCOL_NAME: &str = "/noise";
 /// libp2p key. The libp2p key is used only to sign the noise public key, while the ECDH is
 /// performed with the noise key.
 ///
-/// From the point of view of the noise protocol specifications, this [`NoiseKey`] corresponds to
+/// From the point of view of the noise protocol specification, this [`NoiseKey`] corresponds to
 /// the static key. The noise key is typically generated at startup and doesn't have to be
 /// persisted on disk, contrary to the libp2p key which is typically persisted after a restart.
 ///
@@ -457,7 +457,7 @@ pub struct HandshakeInProgress {
     /// Libp2p always uses the XX handshake.
     ///
     /// While the `snow` library ensures that the emitted and received messages respect the
-    /// handshake according to the noise specifications, libp2p extends these noise specifications
+    /// handshake according to the noise specification, libp2p extends this noise specification
     /// with a payload that must be transmitted on the second and third messages of the exchange.
     /// This payload must contain a signature of the noise key made using the libp2p key and can
     /// be found in the `tx_payload` field.

@@ -129,7 +129,7 @@ pub struct Config {
     /// List of block hashes that are known to be bad and shouldn't be downloaded or verified.
     ///
     /// > **Note**: This list is typically filled with a list of blocks found in the chain
-    /// >           specifications. It is part of the "trusted setup" of the node, in other words
+    /// >           specification. It is part of the "trusted setup" of the node, in other words
     /// >           the information that is passed by the user and blindly assumed to be true.
     // TODO: unused
     pub banned_blocks: Vec<[u8; 64]>,

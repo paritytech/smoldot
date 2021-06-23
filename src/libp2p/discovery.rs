@@ -34,7 +34,7 @@
 //! running the same chain. // TODO: not implemented yet
 //!
 //! The main discovery mechanism is the DHT. In order to bootstrap this mechanism, a list of nodes
-//! known to always be part of the chain is hardcoded in the chain specifications. These nodes are
+//! known to always be part of the chain is hardcoded in the chain specification. These nodes are
 //! called **boostrap nodes**.
 //!
 

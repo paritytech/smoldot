@@ -171,7 +171,7 @@ pub struct Config {
     /// Service that provides a ready-to-be-called runtime for the current best block.
     pub runtime_service: Arc<runtime_service::RuntimeService>,
 
-    /// Specifications of the chain.
+    /// Specification of the chain.
     pub chain_spec: chain_spec::ChainSpec,
 
     /// Hash of the genesis block of the chain.

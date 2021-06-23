@@ -122,7 +122,7 @@ impl AsRef<[u8]> for CoreVersion {
     }
 }
 
-/// Runtime specifications, once decoded.
+/// Runtime specification, once decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreVersionRef<'a> {
     pub spec_name: &'a str,

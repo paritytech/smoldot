@@ -10,8 +10,6 @@ In order to simplify the code, two main design decisions have been made compared
 
 - No pluggable architecture. `smoldot` supports a certain hardcoded list of consensus algorithms, at the moment Babe, Aura, and GrandPa. Support for other algorithms can only be added by modifying the code of smoldot, and it is not possible to plug a custom algorithm from outside.
 
-## How to test
-
 There exists two clients: the full client and the wasm light node.
 
 The main development focus is currently around the wasm light node. Using https://github.com/polkadot-js/api/ and https://github.com/paritytech/substrate-connect/ (which uses smoldot as an implementation detail), one can easily connect to a chain and interact in a fully trust-less way with it, from JavaScript.
@@ -32,9 +30,11 @@ The following list is a best-effort list of packages that must be available on t
 
 Pre-requisite: in order to run the wasm light node, you must have installed [rustup](https://rustup.rs/).
 
-The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm start`. This will start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
+The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
 
 > Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hardcodes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
+
+The Wasm light node is published on NPM: https://www.npmjs.com/package/smoldot
 
 # Objectives
 
@@ -50,19 +50,20 @@ As a quick overview, at the time of writing of this README, the following is sup
 
 - Verifying Babe and Aura blocks.
 - "Executing" blocks, by calling `Core_execute_block`.
-- Verifying GrandPa justifications.
+- Verifying GrandPa justifications and GrandPa commit messages.
 - "Optimistic syncing", in other words syncing by assuming that there isn't any fork.
 - Verifying storage trie proofs.
 - The WebSocket JSON-RPC server is in progress, but its design is still changing.
 - An informant.
 - A telemetry client (mostly copy-pasted from Substrate and substrate-telemetry).
 - An unfinished new networking stack.
+- A transaction pool for light clients.
+- A SQLite database for the full client.
 
 The following isn't done yet:
 
 - Authoring blocks isn't supported.
-- There is no transaction pool.
-- Anything related to GrandPa networking messages. Finality can only be determined by asking a full node for a justification.
-- No actual database for the full client.
+- Transaction pool for full nodes is non-functional.
+- GrandPa votes gossiping.
 - The changes trie isn't implemented (it is not enabled on Westend, Kusama and Polkadot at the moment).
 - A Prometheus server. While not difficult to implement, it seems a bit overkill to have one at the moment.

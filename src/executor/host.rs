@@ -98,7 +98,7 @@
 //! ## Host functions
 //!
 //! The list of host functions available to the runtime is long and isn't documented here. See
-//! the official specifications for details.
+//! the official specification for details.
 //!
 //! # Usage
 //!
@@ -503,7 +503,7 @@ impl ReadyToRun {
                     // Turn the `i64` into a `u64`, not changing any bit.
                     let ret = u64::from_ne_bytes(ret.to_ne_bytes());
 
-                    // According to the runtime environment specifications, the return value is two
+                    // According to the runtime environment specification, the return value is two
                     // consecutive I32s representing the length and size of the SCALE-encoded
                     // return value.
                     let value_size = u32::try_from(ret >> 32).unwrap();
