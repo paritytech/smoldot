@@ -119,7 +119,7 @@ export default (config) => {
                         config.instance.exports.connection_open(id);
                     };
                     connection.onclose = (event) => {
-                        const message = event.code + " " + event.reason;
+                        const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
                         const len = Buffer.byteLength(message, 'utf8');
                         const ptr = config.instance.exports.alloc(len);
                         Buffer.from(config.instance.exports.memory.buffer).write(message, ptr);
