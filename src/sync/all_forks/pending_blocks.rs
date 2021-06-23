@@ -457,7 +457,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             return None;
         }
 
-        let parent_hash = state.parent_hash().map(|h| *h);
+        let parent_hash = state.parent_hash().copied();
         // TODO: is it ok to just override the UnverifiedBlockState?
         self.blocks
             .insert(
@@ -799,9 +799,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             either::Left(
                 self.blocks
                     .iter()
-                    .filter(move |(_, _, block_info)| match &block_info.state {
-                        UnverifiedBlockState::HeaderKnown { .. } => true,
-                        _ => false,
+                    .filter(move |(_, _, block_info)| {
+                        matches!(&block_info.state, UnverifiedBlockState::HeaderKnown { .. })
                     })
                     .map(|(height, hash, _)| (height, hash)),
             )

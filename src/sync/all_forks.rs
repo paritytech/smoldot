@@ -649,13 +649,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .inner
             .blocks
             .unverified_leaves()
-            .filter(|block| {
+            .find(|block| {
                 block.parent_block_hash == self.chain.finalized_block_hash()
                     || self
                         .chain
                         .contains_non_finalized_block(&block.parent_block_hash)
-            })
-            .next();
+            });
 
         if let Some(block) = block {
             ProcessOne::HeaderVerify(HeaderVerify {
