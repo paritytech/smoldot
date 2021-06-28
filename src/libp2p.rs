@@ -1169,21 +1169,20 @@ where
                 protocol_index: overlay_network_index,
                 handshake,
             }) => {
-                if let Ok(()) = guarded
-                    .peerset
-                    .connection_mut(self.id)
-                    .unwrap()
-                    .add_pending_substream(
-                        self.overlay_networks[overlay_network_index].peerset_id,
-                        peerset::SubstreamDirection::In,
-                        id,
-                    )
-                {
+                let mut connection = guarded.peerset.connection_mut(self.id).unwrap();
+                let peer_id = connection.peer_id().clone();
+
+                if let Ok(()) = connection.add_pending_substream(
+                    self.overlay_networks[overlay_network_index].peerset_id,
+                    peerset::SubstreamDirection::In,
+                    id,
+                ) {
                     // No substream of that protocol was opened yet.
                     guarded
                         .events_tx
                         .try_send(Event::NotificationsInOpen {
                             id: ConnectionId(self.id),
+                            peer_id,
                             overlay_network_index,
                             remote_handshake: handshake,
                         })
@@ -1433,6 +1432,7 @@ pub enum Event<TConn> {
     ///
     NotificationsInOpen {
         id: ConnectionId,
+        peer_id: PeerId, // TODO: is this field necessary? + cloning :-/
         overlay_network_index: usize,
         remote_handshake: Vec<u8>,
     },

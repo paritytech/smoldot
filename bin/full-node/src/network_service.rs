@@ -319,6 +319,14 @@ impl NetworkService {
                                     "grandpa-commit-message"
                                 );
                             }
+                            service::Event::ProtocolError { peer_id, error } => {
+                                // TODO: handle properly?
+                                tracing::warn!(
+                                    %peer_id,
+                                    %error,
+                                    "protocol-error"
+                                );
+                            }
                         }
                     };
 

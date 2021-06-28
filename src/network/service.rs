@@ -599,8 +599,17 @@ where
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         let remote_handshake =
-                            protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
-                        // TODO: don't unwrap
+                            match protocol::decode_block_announces_handshake(&remote_handshake) {
+                                Ok(hs) => hs,
+                                Err(err) => {
+                                    // TODO: close the substream?
+                                    return Event::ProtocolError {
+                                        peer_id,
+                                        error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                                    };
+                                }
+                            };
+
                         // TODO: compare genesis hash with ours
                         return Event::ChainConnected {
                             peer_id,
@@ -655,7 +664,6 @@ where
                             peer_id,
                             chain_index,
                         };
-                    // TODO: don't unwrap
                     } else {
                     }
 
@@ -663,13 +671,20 @@ where
                 }
                 libp2p::Event::NotificationsInOpen {
                     id,
+                    peer_id,
                     overlay_network_index,
                     remote_handshake,
                 } => {
                     if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
-                        // TODO: don't unwrap; this is just for checking correctness
-                        let _remote_handshake =
-                            protocol::decode_block_announces_handshake(&remote_handshake).unwrap();
+                        if let Err(err) =
+                            protocol::decode_block_announces_handshake(&remote_handshake)
+                        {
+                            // TODO: self.libp2p.refuse_notifications_in(*id, *overlay_network_index);
+                            return Event::ProtocolError {
+                                peer_id,
+                                error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                            };
+                        }
 
                         let chain_config = &self.chain_configs
                             [overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
@@ -727,8 +742,13 @@ where
 
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-                        // TODO: don't unwrap
-                        let _announce = protocol::decode_block_announce(&notification).unwrap();
+                        if let Err(err) = protocol::decode_block_announce(&notification) {
+                            return Event::ProtocolError {
+                                peer_id,
+                                error: ProtocolError::BadBlockAnnounce(err),
+                            };
+                        }
+
                         return Event::BlockAnnounce {
                             chain_index,
                             peer_id,
@@ -737,9 +757,17 @@ where
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
                         // TODO: transaction announce
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
-                        // TODO: don't unwrap
                         let decoded_notif =
-                            protocol::decode_grandpa_notification(&notification).unwrap();
+                            match protocol::decode_grandpa_notification(&notification) {
+                                Ok(n) => n,
+                                Err(err) => {
+                                    return Event::ProtocolError {
+                                        peer_id,
+                                        error: ProtocolError::BadGrandpaNotification(err),
+                                    };
+                                }
+                            };
+
                         // Commit messages are the only type of message that is important for
                         // light clients. Anything else is presently ignored.
                         if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
@@ -912,6 +940,14 @@ pub enum Event<'a, TNow, TPeer, TConn> {
     GrandpaCommitMessage {
         chain_index: usize,
         message: EncodedGrandpaCommitMessage,
+    },
+
+    /// Error in the protocol, such as failure to decode a message.
+    ProtocolError {
+        /// Peer that has caused the protocol error.
+        peer_id: peer_id::PeerId,
+        /// Error that happened.
+        error: ProtocolError,
     },
 
     /// A remote has sent a request for identification information.
@@ -1197,4 +1233,15 @@ pub enum CallProofRequestError {
 pub enum GrandpaWarpSyncRequestError {
     Request(libp2p::RequestError),
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
+}
+
+/// See [`Event::ProtocolError`].
+#[derive(Debug, derive_more::Display)]
+pub enum ProtocolError {
+    /// Error while decoding the handshake of the block announces substream.
+    BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
+    /// Error while decoding a received block announce.
+    BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
+    /// Error while decoding a received Grandpa notification.
+    BadGrandpaNotification(protocol::DecodeGrandpaNotificationError),
 }
