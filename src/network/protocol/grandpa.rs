@@ -21,6 +21,7 @@ use crate::finality::{grandpa::commit::decode, justification::decode::PrecommitR
 
 use alloc::vec::Vec;
 use core::{convert::TryFrom as _, iter};
+use nom::Finish as _;
 
 pub use crate::finality::grandpa::commit::decode::{CommitMessageRef, UnsignedPrecommitRef};
 
@@ -129,15 +130,16 @@ pub struct PrevoteRef<'a> {
 pub fn decode_grandpa_notification(
     scale_encoded: &[u8],
 ) -> Result<GrandpaNotificationRef, DecodeGrandpaNotificationError> {
-    match nom::combinator::all_consuming(grandpa_notification)(scale_encoded) {
+    match nom::combinator::all_consuming(grandpa_notification)(scale_encoded).finish() {
         Ok((_, notif)) => Ok(notif),
-        Err(err) => Err(DecodeGrandpaNotificationError(err)),
+        Err(err) => Err(DecodeGrandpaNotificationError(err.code)),
     }
 }
 
 /// Error potentially returned by [`decode_grandpa_notification`].
 #[derive(Debug, derive_more::Display)]
-pub struct DecodeGrandpaNotificationError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+#[display(fmt = "Failed to decode a Grandpa notification")]
+pub struct DecodeGrandpaNotificationError(nom::error::ErrorKind);
 
 // Nom combinators below.
 
