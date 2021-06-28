@@ -498,6 +498,17 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
             if self.uncles_only && iter_node.is_prune_target_ancestor {
                 // Reset `is_prune_target_ancestor` for next time we do some pruning.
                 iter_node.is_prune_target_ancestor = false;
+
+                // Update the inter-node relationships.
+                iter_node.next_sibling = None;
+                if iter_node.previous_sibling.take().is_some() {
+                    // Notice the `take()` here ^
+                    if let Some(parent) = iter_node.parent {
+                        debug_assert!(self.tree.nodes[parent].first_child.is_some());
+                        self.tree.nodes[parent].first_child = Some(maybe_removed_node_index.0);
+                    }
+                }
+
                 continue;
             }
 
