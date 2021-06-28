@@ -296,6 +296,15 @@ impl NetworkService {
                                         message,
                                     };
                                 }
+                                service::Event::ProtocolError { peer_id, error } => {
+                                    // TODO: handle properly?
+                                    log::warn!(
+                                        target: "network",
+                                        "Connection({}) => ProtocolError({})",
+                                        peer_id,
+                                        error,
+                                    );
+                                }
                             }
                         };
 
