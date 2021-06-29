@@ -390,21 +390,15 @@ where
         protocol_index: usize,
         request_data: Vec<u8>,
     ) -> Result<Vec<u8>, RequestError> {
-        // Determine which connect to use to send the request.
+        // Obtain the connect to use to send the request.
         let connection_arc: Arc<Mutex<Connection<_, _>>> = {
             let mut guarded = self.guarded.lock().await;
 
-            let connection = match guarded.peerset.node_mut(target) {
-                NodeMut::Known(n) => n.connections().next().ok_or(RequestError::NotConnected)?,
-                NodeMut::Unknown(_) => return Err(RequestError::NotConnected),
-            };
-
-            guarded
-                .peerset
-                .connection_mut(connection)
-                .unwrap()
-                .into_user_data()
-                .clone()
+            let connection_index = *guarded
+                .connections_by_id
+                .get(target)
+                .ok_or(RequestError::NotConnected)?;
+            guarded.connections[connection_index].clone()
         };
 
         // The response to the request will be sent on this channel.
@@ -420,7 +414,7 @@ where
         // connection.
         connection_lock
             .connection
-            .as_alive()
+            .as_established()
             .ok_or(RequestError::ConnectionClosed)?
             .add_request(now, protocol_index, request_data, send_back);
 
@@ -445,6 +439,52 @@ where
         match receive_result.await {
             Ok(r) => r,
             Err(_) => Err(RequestError::ConnectionClosed),
+        }
+    }
+
+    /// Start opening a notifications substream.
+    pub async fn open_notifications_substream(
+        self,
+        connection_id: ConnectionId,
+        overlay_network_index: usize,
+        now: TNow,
+        handshake: impl Into<Vec<u8>>,
+    ) {
+        // Because the user can cancel the future at any `await` point, all the asynchronous
+        // operations are performed ahead of any state modification.
+
+        let mut guarded = self.guarded.lock().await;
+
+        // Obtain the connect to use to send the request.
+        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
+            let connection_index = *guarded.connections_by_id.get(connection_id).unwrap(); // TODO: don't unwrap
+            guarded.connections[connection_index].clone()
+        };
+
+        let mut connection_lock = connection_arc.lock().await;
+
+        // In order to guarantee a proper ordering of events, any pending event must first be
+        // delivered.
+        connection_lock.propagate_pending_event(&mut guarded).await;
+        debug_assert!(connection_lock.pending_event.is_none());
+
+        let substream_id = if let Some(established) = connection_lock.connection.as_established() {
+            established.open_notifications_substream(
+                now,
+                overlay_network_index,
+                handshake.into(),
+                overlay_network_index,
+            )
+        } else {
+            // The connection no longer exists. This state mismatch is a normal situation. See
+            // the implementations notes at the top of the file for more information.
+            return;
+        };
+
+        // Wake up the task dedicated to this connection in order for the substream to start
+        // opening.
+        if let Some(waker) = connection_lock.waker.take() {
+            let _ = waker.send(());
         }
     }
 
@@ -520,7 +560,7 @@ where
         // TODO: return an error if queue is full
         connection_lock
             .connection
-            .as_alive()
+            .as_established()
             .ok_or(QueueNotificationError::NotConnected)?
             .write_notification_unbounded(substream_id, notification.into());
 
@@ -571,12 +611,10 @@ where
 
         // In order to guarantee a proper ordering of events, any pending event must first be
         // delivered.
-        if connection_lock.pending_event.is_some() {
-            connection_lock.propagate_pending_event(&mut guarded).await;
-            debug_assert!(connection_lock.pending_event.is_none());
-        }
+        connection_lock.propagate_pending_event(&mut guarded).await;
+        debug_assert!(connection_lock.pending_event.is_none());
 
-        if let Some(connection) = connection_lock.connection.as_alive() {
+        if let Some(connection) = connection_lock.connection.as_established() {
             // TODO: must check if substream_id is still valid
             connection.accept_in_notifications_substream(
                 substream_id,
@@ -640,7 +678,7 @@ where
             debug_assert!(connection_lock.pending_event.is_none());
         }
 
-        if let Some(connection) = connection_lock.connection.as_alive() {
+        if let Some(connection) = connection_lock.connection.as_established() {
             // As explained in the documentation, ignore the error where the substream has
             // already been closed. This is a normal situation caused by the racy nature of the
             // API.
@@ -691,6 +729,17 @@ where
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
     ) -> Result<ReadWrite<TNow>, ConnectionError> {
+        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
+            // TODO: ideally we wouldn't need to lock `guarded`, to reduce the possibility of lock contention
+            let mut guarded = self.guarded.lock().await;
+
+            let connection_index = *guarded.connections_by_id.get(connection_id).unwrap(); // TODO: don't unwrap?
+            guarded.connections[connection_index].clone()
+        };
+
+        let mut connection_lock = connection_arc.lock().await;
+        let mut connection_lock = &mut *connection_lock;
+
         let (tx, rx) = oneshot::channel();
 
         let mut read_write = ReadWrite {
@@ -701,20 +750,9 @@ where
             write_close: false,
         };
 
-        // TODO: ideally we wouldn't need to lock `guarded`, to reduce the possibility of lock contention
-
         let mut guarded = self.guarded.lock().await;
-        match guarded
-            .peerset
-            .pending_or_connection_mut(connection_id.0)
-            .unwrap()
-        {
-            PendingOrConnectionMut::Pending(mut pending) => {
-                let pending = pending.user_data_mut().clone();
-                drop(guarded);
-
-                let mut pending = pending.lock().await;
-
+        match &mut connection_lock.inner {
+            ConnectionInner::Handshake(mut handshake) => {
                 let incoming_buffer = match incoming_buffer {
                     Some(b) => b,
                     None => {
@@ -730,8 +768,6 @@ where
                         return Ok(read_write);
                     }
                 };
-
-                let (handshake, user_data) = pending.take().unwrap();
 
                 let mut tx = Some(tx);
 
@@ -764,7 +800,7 @@ where
                 loop {
                     match result {
                         connection::handshake::Handshake::Healthy(updated_handshake) => {
-                            *pending = Some((updated_handshake, user_data));
+                            *handshake = Some((updated_handshake, user_data));
                             break;
                         }
                         connection::handshake::Handshake::Success {
@@ -785,10 +821,9 @@ where
                                 move |_| {
                                     let established = connection.into_connection(config);
                                     Arc::new(Mutex::new(Connection {
-                                        connection: ConnectionInner::Alive(established),
+                                        connection: ConnectionInner::Established(established),
                                         overlay_networks: self.overlay_networks.clone(),
                                         id: connection_id.0,
-                                        user_data: Some(user_data),
                                         pending_event: None,
                                         waker: None,
                                     }))
@@ -825,22 +860,22 @@ where
                     }
                 }
             }
-            PendingOrConnectionMut::Connection(mut established) => {
-                let established = established.user_data_mut().clone();
-                drop(guarded);
-
-                let mut established = established.lock().await;
-
+            ConnectionInner::Established(mut established) => {
                 // Update the waker.
-                established.waker = Some(tx);
+                connection_lock.waker = Some(tx);
 
-                if established.pending_event.is_some() {
+                if connection_lock.pending_event.is_some() {
                     let mut guarded = self.guarded.lock().await;
-                    established.propagate_pending_event(&mut guarded).await;
-                    debug_assert!(established.pending_event.is_none());
+                    connection_lock.propagate_pending_event(&mut guarded).await;
+                    debug_assert!(connection_lock.pending_event.is_none());
                 }
 
-                established.read_write(now, incoming_buffer, outgoing_buffer, &mut read_write)?;
+                connection_lock.read_write(
+                    now,
+                    incoming_buffer,
+                    outgoing_buffer,
+                    &mut read_write,
+                )?;
             }
         }
 
@@ -890,7 +925,6 @@ pub enum Event {
     /// A transport-level connection (e.g. a TCP socket) has been closed.
     Disconnected {
         peer_id: PeerId,
-        user_data: TConn,
         out_overlay_network_indices: Vec<usize>,
         in_overlay_network_indices: Vec<usize>,
     },
@@ -1016,14 +1050,11 @@ struct Connection<TNow> {
     /// Copy of the id of the connection.
     id: ConnectionId,
 
-    /// User data decided by the user for that connection.
-    user_data: Option,
-
     /// Event that has just happened on the connection, but that the [`Guarded`] isn't yet aware
     /// of. See the implementations note at the top of the file for more information.
     pending_event: Option<PendingEvent>,
 
-    /// A sender is stored here when the user call [`Network::read_write`]. The receiving part
+    /// A sender is stored here when the user calls [`Network::read_write`]. The receiving part
     /// notifies the user that they must call [`Network::read_write`] again.
     /// Send a value on that channel in order to notify that data is potentially available to be
     /// sent on the socket, or that the user should call [`Network::read_write`] in general.
@@ -1042,7 +1073,7 @@ where
         read_write: &mut ReadWrite<TNow>,
     ) -> Result<(), ConnectionError> {
         let connection = match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
-            ConnectionInner::Alive(c) => c,
+            ConnectionInner::Established(c) => c,
             ConnectionInner::Errored(err) => return Err(err),
             ConnectionInner::Dead => panic!(),
             ConnectionInner::Poisoned => unreachable!(),
@@ -1059,7 +1090,7 @@ where
                 if read_write.write_close && incoming_buffer.is_none() {
                     self.connection = ConnectionInner::Dead;
                 } else {
-                    self.connection = ConnectionInner::Alive(read_write_result.connection);
+                    self.connection = ConnectionInner::Established(read_write_result.connection);
                 }
 
                 if read_write_result.read_bytes != 0
@@ -1161,7 +1192,7 @@ where
                     // new one.
                     // TODO: punish remote?
                     self.connection
-                        .as_alive()
+                        .as_established()
                         .unwrap() // TODO: is unwrapping correct?
                         .reject_in_notifications_substream(id);
                 }
@@ -1183,7 +1214,7 @@ where
             PendingEvent::Inner(established::Event::NotificationIn { id, notification }) => {
                 let overlay_network_index = *self
                     .connection
-                    .as_alive()
+                    .as_established()
                     .unwrap() // TODO: shouldn't unwrap here
                     .notifications_substream_user_data_mut(id)
                     .unwrap();
@@ -1204,7 +1235,7 @@ where
             }) => {
                 let overlay_network_index = *self
                     .connection
-                    .as_alive()
+                    .as_established()
                     .unwrap() // TODO: shouldn't unwrap here
                     .notifications_substream_user_data_mut(id)
                     .unwrap();
@@ -1318,7 +1349,6 @@ where
                         .events_tx
                         .try_send(Event::Disconnected {
                             peer_id,
-                            user_data: self.user_data.take().unwrap(),
                             in_overlay_network_indices,
                             out_overlay_network_indices,
                         })
@@ -1330,19 +1360,21 @@ where
 }
 
 enum ConnectionInner<TNow> {
-    Alive(established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
+    Handshake(connection::handshake::HealthyHandshake),
+    Established(
+        established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
+    ),
     Errored(ConnectionError),
     Dead,
-    Poisoned,
 }
 
 impl<TNow> ConnectionInner<TNow> {
-    fn as_alive(
+    fn as_established(
         &mut self,
     ) -> Option<
         &mut established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
     > {
-        if let ConnectionInner::Alive(c) = self {
+        if let ConnectionInner::Established(c) = self {
             Some(c)
         } else {
             None
@@ -1353,77 +1385,6 @@ impl<TNow> ConnectionInner<TNow> {
 enum PendingEvent {
     Inner(established::Event<oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
     Disconnect,
-}
-
-pub struct SubstreamOpen<'a, TNow> {
-    network: &'a Network<TNow>,
-    connection: Arc<Mutex<Connection<TNow>>>,
-
-    /// Index of the overlay network whose notifications substream to open.
-    overlay_network_index: usize,
-
-    /// Id of this overlay network according to the peerset.
-    peerset_id: OverlayNetworkId,
-}
-
-impl<'a, TNow> SubstreamOpen<'a, TNow>
-where
-    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-{
-    /// Returns the index of the overlay network whose notifications substream to open.
-    pub fn overlay_network_index(&self) -> usize {
-        self.overlay_network_index
-    }
-
-    /// Perform the substream opening.
-    ///
-    /// No action is actually performed before this method is called.
-    pub async fn open(self, now: TNow, handshake: impl Into<Vec<u8>>) {
-        let mut connection = self.connection.lock().await;
-
-        // Because the user can cancel the future at any `await` point, all the asynchronous
-        // operations are performed ahead of any state modification.
-        let mut guarded = self.network.guarded.lock().await;
-
-        // In order to guarantee a proper ordering of events, any pending event must first be
-        // delivered.
-        if connection.pending_event.is_some() {
-            connection.propagate_pending_event(&mut guarded).await;
-            debug_assert!(connection.pending_event.is_none());
-        }
-
-        // TODO: connection_id might be wrong and not correspond to the right connection
-        let substream_id = if let Some(established) = connection.connection.as_alive() {
-            established.open_notifications_substream(
-                now,
-                self.overlay_network_index,
-                handshake.into(),
-                self.overlay_network_index,
-            )
-        } else {
-            // The connection no longer exists. This state mismatch is a normal situation. See
-            // the implementations notes at the top of the file for more information.
-            return;
-        };
-
-        // Rather than putting a value into `pending_event`, this function immediately updates
-        // `Guarded`. If this was instead done through events, the user could observe that no
-        // substream is being opened as long as the event hasn't been delivered.
-
-        // While updating `Guarded`, it is assumed that there isn't any existing outgoing pending
-        // substream on that overlay index. Hence the `unwrap`. The existence of an instance
-        // of `SubstreamOpen` implies that there is indeed no such pending outgoing substream.
-        let mut peerset_entry = guarded.peerset.connection_mut(connection.id).unwrap();
-        peerset_entry
-            .add_pending_substream(self.peerset_id, SubstreamDirection::Out, substream_id)
-            .unwrap();
-
-        // Wake up the task dedicated to this connection in order for the substream to start
-        // opening.
-        if let Some(waker) = connection.waker.take() {
-            let _ = waker.send(());
-        }
-    }
 }
 
 /// Error potentially returned by [`Network::request`].
