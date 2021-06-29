@@ -18,12 +18,13 @@
 use crate::libp2p::{
     self, connection, discovery::kademlia, multiaddr, peer_id, PeerId, QueueNotificationError,
 };
-use crate::network::protocol;
+use crate::network::{peerset, protocol};
 use crate::util;
 
 use alloc::{
     format,
     string::{String, ToString as _},
+    sync::Arc,
     vec::Vec,
 };
 use core::{
@@ -44,9 +45,6 @@ pub struct Config<TPeer> {
     /// handshake.
     /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
     pub randomness_seed: [u8; 32],
-
-    /// Addresses to listen for incoming connections.
-    pub listen_addresses: Vec<multiaddr::Multiaddr>,
 
     /// List of blockchain peer-to-peer networks to be connected to.
     ///
@@ -123,7 +121,7 @@ pub struct GrandpaState {
 
 /// Identifier of a pending connection requested by the network through a [`StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PendingId(libp2p::PendingId);
+pub struct PendingId(usize);
 
 /// Identifier of a connection spawned by the [`ChainNetwork`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -132,8 +130,11 @@ pub struct ConnectionId(libp2p::ConnectionId);
 /// Data structure containing the list of all connections, pending or not, and their latest known
 /// state. See also [the module-level documentation](..).
 pub struct ChainNetwork<TNow, TPeer, TConn> {
-    /// Underlying data structure that manages the state of the connections and substreams.
-    libp2p: libp2p::Network<TNow, TPeer, TConn>,
+    /// Underlying data structure. Collection of connections.
+    libp2p: libp2p::Network<TNow>,
+
+    /// Extra fields protected by a `Mutex`.
+    guarded: Mutex<Guarded>,
 
     /// See [`Config::chains`].
     chain_configs: Vec<ChainConfig>,
@@ -149,6 +150,18 @@ pub struct ChainNetwork<TNow, TPeer, TConn> {
 
     /// Generator for randomness.
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
+}
+
+struct Guarded {
+    peerset: peerset::Peerset<(), (), (), (), ()>,
+
+    pending_connections: slab::Slab<Pending>,
+}
+
+/// See [`Guarded::pending_connections`].
+struct Pending {
+    peer_id: PeerId,
+    address: multiaddr::Multiaddr,
 }
 
 // Update this when a new request response protocol is added.
@@ -252,6 +265,19 @@ where
         }))
         .collect();
 
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
+        let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
+
+        let mut peerset = peerset::Peerset::new(peerset::Config {
+            overlay_networks_capacity: config.chains.len(),
+            peers_capacity: 0, // TODO:
+            randomness_seed: randomness.sample(rand::distributions::Standard),
+        });
+
+        for (chain_index, _) in config.chains.iter().enumerate() {
+            let overlay_network_id = peerset.add_overlay_network();
+        }
+
         let (substreams_open_tx, substreams_open_rx) = mpsc::channel(0);
 
         let chain_grandpa_config = config
@@ -260,19 +286,19 @@ where
             .map(|chain| chain.grandpa_protocol_config.map(Mutex::new))
             .collect();
 
-        let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
-        let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
-
         ChainNetwork {
             libp2p: libp2p::Network::new(libp2p::Config {
-                known_nodes: config.known_nodes,
-                listen_addresses: config.listen_addresses,
+                capacity: 0, // TODO:
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: inner_randomness_seed,
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 overlay_networks,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
+            }),
+            guarded: Mutex::new(Guarded {
+                peerset,
+                pending_connections: slab::Slab::with_capacity(0), // TODO:
             }),
             chain_configs: config.chains,
             chain_grandpa_config,
@@ -288,8 +314,9 @@ where
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
+    // TODO: note about race
     pub async fn num_established_connections(&self) -> usize {
-        self.libp2p.num_established_connections().await
+        self.libp2p.len().await
     }
 
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
@@ -513,7 +540,8 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_ok(&self, id: PendingId, user_data: TConn) -> ConnectionId {
-        ConnectionId(self.libp2p.pending_outcome_ok(id.0, user_data).await)
+        // TODO: ?!
+        ConnectionId(self.libp2p.insert())
     }
 
     /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
@@ -526,7 +554,7 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
-        self.libp2p.pending_outcome_err(id.0).await
+        // TODO: ?!
     }
 
     /// Returns the next event produced by the service.
@@ -826,36 +854,55 @@ where
 
     /// Waits until a connection is in a state in which a substream can be opened.
     pub async fn next_substream<'a>(&'a self) -> SubstreamOpen<'a, TNow, TPeer, TConn> {
-        loop {
-            // TODO: limit number of slots
+        let mut guarded = self.guarded.lock().await;
 
-            match self.libp2p.open_next_substream().await {
-                Some(inner) => {
-                    return SubstreamOpen {
-                        inner,
-                        chains: &self.chain_configs,
-                    }
-                }
-                None => {
-                    self.substreams_open_rx.lock().await.next().await;
-                }
-            };
+        for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
+            let peerset_id = self.overlay_networks[overlay_network_index].peerset_id;
+
+            // Grab node for which we have an established outgoing connections but haven't yet
+            // opened a substream to.
+            if let Some(node) = guarded.peerset.random_connected_closed_node(peerset_id) {
+                let connection_id = node.connections().next().unwrap();
+                let mut peerset_entry = guarded.peerset.connection_mut(connection_id).unwrap();
+                return Some(SubstreamOpen {
+                    network: self,
+                    connection: peerset_entry.user_data_mut().clone(),
+                    overlay_network_index,
+                    peerset_id,
+                });
+            }
         }
+
+        None
     }
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
     // TODO: give more control, with number of slots and node choice
     pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> Option<StartConnect> {
-        let inner = self
-            .libp2p
-            .fill_out_slots(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-            .await?;
+        let mut guarded = self.guarded.lock().await;
 
-        Some(StartConnect {
-            id: PendingId(inner.id),
-            multiaddr: inner.multiaddr,
-            expected_peer_id: inner.expected_peer_id,
-        })
+        // Solves borrow checking errors regarding the borrow of multiple different fields at the
+        // same time.
+        let guarded = &mut *guarded;
+
+        // TODO: limit number of slots
+
+        // TODO: very wip
+        while let Some(mut node) = guarded.peerset.random_not_connected(
+            self.overlay_networks[chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN].peerset_id,
+        ) {
+            let first_addr = node.known_addresses().cloned().next();
+            if let Some(multiaddr) = first_addr {
+                let id = node.add_outbound_attempt(multiaddr.clone(), Arc::new(Mutex::new(None)));
+                return Some(StartConnect {
+                    id: PendingId(id),
+                    multiaddr,
+                    expected_peer_id: node.peer_id().clone(),
+                });
+            }
+        }
+
+        None
     }
 
     ///
@@ -1111,7 +1158,6 @@ pub struct ReadWrite<TNow> {
 }
 
 pub struct SubstreamOpen<'a, TNow, TPeer, TConn> {
-    inner: libp2p::SubstreamOpen<'a, TNow, TPeer, TConn>,
     chains: &'a Vec<ChainConfig>,
 }
 
