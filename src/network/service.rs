@@ -552,6 +552,12 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
+        let mut guarded = self.guarded.lock().await;
+
+        let removed = guarded.pending_connections.remove(id);
+        //guarded.peerset.pending_mut(removed)
+        //removed.peer_id
+
         // TODO: ?!
     }
 
