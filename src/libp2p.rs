@@ -444,7 +444,7 @@ where
 
     /// Start opening a notifications substream.
     pub async fn open_notifications_substream(
-        self,
+        &self,
         connection_id: ConnectionId,
         overlay_network_index: usize,
         now: TNow,

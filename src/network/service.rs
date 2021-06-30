@@ -1161,39 +1161,57 @@ pub struct ReadWrite<TNow> {
     pub write_close: bool,
 }
 
+#[must_use]
 pub struct SubstreamOpen<'a, TNow> {
-    chains: &'a Vec<ChainConfig>,
+    /// Connection to open a substream on.
+    connection_id: libp2p::ConnectionId,
+
+    /// Index of the overlay network, according to the underlying libp2p state machine.
+    overlay_network_index: usize,
+
+    /// Same as [`ChainNetwork::libp2p`].
+    libp2p: &'a libp2p::Network<TNow>,
+
+    /// Same as [`ChainNetwork::chain_configs`].
+    chain_configs: &'a Vec<ChainConfig>,
 }
 
 impl<'a, TNow> SubstreamOpen<'a, TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
+    /// Start the substream opening. Nothing is done as long as this method isn't called.
     pub async fn open(self, now: TNow) {
         let chain_config =
-            &self.chains[self.inner.overlay_network_index() / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
+            &self.chain_configs[self.overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
 
-        let handshake =
-            if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
-                    best_hash: &chain_config.best_hash,
-                    best_number: chain_config.best_number,
-                    genesis_hash: &chain_config.genesis_hash,
-                    role: chain_config.role,
-                })
-                .fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                })
-            } else if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
-                Vec::new()
-            } else if self.inner.overlay_network_index() % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
-                chain_config.role.scale_encoding().to_vec()
-            } else {
-                unreachable!()
-            };
+        let handshake = if self.overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
+            protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
+                best_hash: &chain_config.best_hash,
+                best_number: chain_config.best_number,
+                genesis_hash: &chain_config.genesis_hash,
+                role: chain_config.role,
+            })
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            })
+        } else if self.overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
+            Vec::new()
+        } else if self.overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
+            chain_config.role.scale_encoding().to_vec()
+        } else {
+            unreachable!()
+        };
 
-        self.inner.open(now, handshake).await;
+        self.libp2p
+            .open_notifications_substream(
+                self.connection_id,
+                self.overlay_network_index,
+                now,
+                handshake,
+            )
+            .await;
     }
 }
 
