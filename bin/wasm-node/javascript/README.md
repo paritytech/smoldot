@@ -35,7 +35,7 @@ smoldot
 When initializing the client with the `start` function, one must pass a list of chain
 specifications corresponding to the various chains the client should try to be connected to.
 
-The `start` function returns a `Promise` that yield a client once the chain specifications have
+The `start` function returns a `Promise` that yields a client once the chain specifications have
 been successfully parsed and basic initialization is finished, but before Internet connections
 are opened towards the chains.
 
@@ -49,12 +49,12 @@ The function accepts three parameters:
 and [the list of requests that smoldot is capable of serving](https://polkadot.js.org/docs/substrate/rpc/).
 - The index of the chain within `chainSpecs`, the list of chains passed at initialization. The
 request will be performed in the context of the chosen chain.
-- A `userDataId` which can be used. More information below.
+- A `userDataId` which can be used to match requests with responses. More information below.
 
 If the request is well formatted, the client will send a response using the `jsonRpcCallback`
 callback that was passed at initialization. This callback takes as parameter the string JSON-RPC
 response, the `chainIndex`, and the `userDataId`. The `chainIndex` and `userDataId` are always
-equal to the values that were passinged to `sendJsonRpc`.
+equal to the values that were passed to `sendJsonRpc`.
 
 If the request is a subscription, the notifications will also be sent back using the same
 `jsonRpcCallback`.
@@ -63,7 +63,7 @@ All the pending requests and active subscriptions corresponding to a given `user
 instantly cancelled by calling `client.cancelAll(userDataId)`.
 
 The `userDataId` is opaque from the point of view of smoldot, but can be used in order to match
-requests with responses. Smoldot will also attempt to distribute resources allocated to processing
+requests with responses. Smoldot will also attempt to distribute resources allocated for processing
 JSON-RPC requests equally based on the value of `userDataId`.
 
 ## Future changes
