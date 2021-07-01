@@ -18,10 +18,11 @@
 use crate::libp2p::{
     self, connection, discovery::kademlia, multiaddr, peer_id, PeerId, QueueNotificationError,
 };
-use crate::network::{peerset, protocol};
+use crate::network::protocol;
 use crate::util;
 
 use alloc::{
+    collections::BTreeSet,
     format,
     string::{String, ToString as _},
     sync::Arc,
@@ -34,10 +35,13 @@ use core::{
     time::Duration,
 };
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
-use rand::{Rng as _, SeedableRng as _};
+use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
+    /// Capacity to initially reserve to the list of peers.
+    pub peers_capacity: usize,
+
     /// Seed for the randomness within the networking state machine.
     ///
     /// While this seed influences the general behaviour of the networking state machine, it
@@ -131,18 +135,14 @@ pub struct ConnectionId(libp2p::ConnectionId);
 /// state. See also [the module-level documentation](..).
 pub struct ChainNetwork<TNow> {
     /// Underlying data structure. Collection of connections.
-    /// The "user data" associated to each connection is its identifier in [`Guarded::peerset`].
-    libp2p: libp2p::Network<peerset::ConnectionId, TNow>,
+    /// The "user data" associated to each connection is its identifier in [`Guarded::connections`].
+    libp2p: libp2p::Network<usize, TNow>,
 
     /// Extra fields protected by a `Mutex`.
     guarded: Mutex<Guarded>,
 
     /// See [`Config::chains`].
     chain_configs: Vec<ChainConfig>,
-
-    /// For each item in [`ChainNetwork::chain_configs`].
-    // TODO: merge with chain_configs?
-    chain_grandpa_config: Vec<Option<Mutex<GrandpaState>>>,
 
     substreams_open_tx: Mutex<mpsc::Sender<()>>,
     substreams_open_rx: Mutex<mpsc::Receiver<()>>,
@@ -152,19 +152,59 @@ pub struct ChainNetwork<TNow> {
 }
 
 struct Guarded {
-    // TODO: remove substreams from the peerset altogether
-    peerset: peerset::Peerset<(), libp2p::ConnectionId, (), (), ()>,
+    /// Mapping of index within [`Guarded::peers`] by network identity.
+    ///
+    /// Because the `PeerId`s are "untrusted input", a randomized hasher is used to avoid
+    /// potential hashmap collision attacks.
+    peers_by_id: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
 
-    pending_connections: slab::Slab<Pending>,
+    /// List of all members of the peer-to-peer network that are known.
+    peers: slab::Slab<Peer>,
+
+    /// Collection of (`peer_index`, `connection_index`), where `peer_index` and
+    /// `connection_index` are respectively the index of a peer in [`Guarded::peers`] and the
+    /// index of a connection in [`Guarded::connections`].
+    peers_connections: BTreeSet<(usize, usize)>,
+
+    /// All connections, both pending and established.
+    ///
+    /// This list is a superset of the list in [`ChainNetwork::libp2p`].
+    connections: slab::Slab<Connection>,
 
     pending_in_accept: Option<(libp2p::ConnectionId, usize, Vec<u8>)>,
+
+    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
+    ///
+    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
+    /// is `None` if the chain doesn't use the Grandpa protocol.
+    chain_grandpa_config: Vec<Option<GrandpaState>>,
 }
 
-/// See [`Guarded::pending_connections`].
-struct Pending {
-    id: peerset::ConnectionId,
+/// See [`Guarded::peers`].
+struct Peer {
+    /// List of addresses assumed to exist.
+    known_addresses: hashbrown::HashMap<multiaddr::Multiaddr, Option<usize>, ahash::RandomState>,
+}
+
+/// See [`Guarded::connections`].
+struct Connection {
+    /// [`PeerId`] of the remote, or *expected* [`PeerId`] (which might end up being different
+    /// from the actual) if the handshake isn't finished yet.
     peer_id: PeerId,
+
+    /// Address on the other side of the connection.
     address: multiaddr::Multiaddr,
+
+    /// `Some` if the connection with the remote has been reached. Contains extra fields.
+    reached: Option<ConnectionReached>,
+}
+
+/// See [`Connection::reached`].
+struct ConnectionReached {
+    /// Identifier of this connection according to [`ChainNetwork::libp2p`].
+    ///
+    /// Since [`libp2p::ConnectionId`] are never re-used, .
+    inner_id: libp2p::ConnectionId,
 }
 
 // Update this when a new request response protocol is added.
@@ -269,23 +309,24 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
         let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
 
-        let mut peerset = peerset::Peerset::new(peerset::Config {
-            overlay_networks_capacity: config.chains.len(),
-            peers_capacity: 0, // TODO:
-            randomness_seed: randomness.sample(rand::distributions::Standard),
-        });
-
-        for (chain_index, _) in config.chains.iter().enumerate() {
-            let overlay_network_id = peerset.add_overlay_network();
-        }
-
         let (substreams_open_tx, substreams_open_rx) = mpsc::channel(0);
 
         let chain_grandpa_config = config
             .chains
             .iter()
-            .map(|chain| chain.grandpa_protocol_config.map(Mutex::new))
+            .map(|chain| chain.grandpa_protocol_config)
             .collect();
+
+        let peers_by_id = {
+            let k0 = randomness.next_u64();
+            let k1 = randomness.next_u64();
+            let k2 = randomness.next_u64();
+            let k3 = randomness.next_u64();
+            hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
+                ahash::RandomState::with_seeds(k0, k1, k2, k3),
+            )
+        };
 
         ChainNetwork {
             libp2p: libp2p::Network::new(libp2p::Config {
@@ -298,12 +339,14 @@ where
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
             }),
             guarded: Mutex::new(Guarded {
-                peerset,
-                pending_connections: slab::Slab::with_capacity(0), // TODO:
+                peers: slab::Slab::with_capacity(config.peers_capacity),
+                peers_by_id,
+                peers_connections: BTreeSet::new(),
+                connections: slab::Slab::with_capacity(0), // TODO:
                 pending_in_accept: None,
+                chain_grandpa_config,
             }),
             chain_configs: config.chains,
-            chain_grandpa_config,
             substreams_open_tx: Mutex::new(substreams_open_tx),
             substreams_open_rx: Mutex::new(substreams_open_rx),
             randomness: Mutex::new(randomness),
@@ -355,20 +398,10 @@ where
     /// Panics if `chain_index` is out of range, or if the chain has GrandPa disabled.
     ///
     pub async fn set_local_grandpa_state(&self, chain_index: usize, grandpa_state: GrandpaState) {
-        // TODO: futures cancellation policy?
-        // TODO: right now we just try to send to everyone no matter which substream is open, which is wasteful
+        let mut guarded = self.guarded.lock().await;
 
-        let grandpa_config = self.chain_grandpa_config[chain_index].as_ref().unwrap();
-        *grandpa_config.lock().await = grandpa_state;
-
-        // Grab the list of peers to send to. This is done *after* updating
-        // `chain_grandpa_config`, so that new substreams that are opened after grabbing this
-        // list are guaranteed to get informed of the updated state.
-        //
-        // It is possible that some of the peers in this list have *just* been opened and are
-        // already aware of the new state. We ignore this problem and just send another neighbor
-        // packet.
-        let target_peers = self.libp2p.peers_list_lock().await.collect::<Vec<_>>();
+        // Store this state for later, in case we open new Grandpa substreams.
+        *guarded.chain_grandpa_config[chain_index].as_mut().unwrap() = grandpa_state;
 
         // Bytes of the neighbor packet to send out.
         let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
@@ -383,37 +416,45 @@ where
         });
 
         // Now sending out.
-        for target in target_peers {
-            // Ignore sending errors.
-            let _ = self
-                .libp2p
-                .queue_notification(
-                    &target,
-                    chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                    packet.clone(),
-                )
-                .await;
+        // TODO: right now we just try to send to everyone no matter which substream is open, which is wasteful
+        for (_, connection) in &guarded.connections {
+            if let Some(reached) = connection.reached.as_ref() {
+                // Ignore sending errors.
+                let _ = self
+                    .libp2p
+                    .queue_notification(
+                        reached.inner_id,
+                        chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                        packet.clone(),
+                    )
+                    .await;
+            }
         }
     }
 
-    // TODO: take peerid by ref?
-    async fn request_connection_id(&self, target: peer_id::PeerId) -> Option<libp2p::ConnectionId> {
-        let mut guarded = self.guarded.lock().await;
+    async fn request_connection_id(
+        &self,
+        target: &peer_id::PeerId,
+    ) -> Option<libp2p::ConnectionId> {
+        let guarded = self.guarded.lock().await;
 
-        let peerset_connection_id = guarded
-            .peerset
-            .node_mut(target)
-            .into_known()?
-            .connections()
-            .next()?;
+        let peer_index = *guarded.peers_by_id.get(&target)?;
 
-        Some(
-            *guarded
-                .peerset
-                .connection_mut(peerset_connection_id)
-                .unwrap()
-                .user_data_mut(),
-        )
+        let inner_id = guarded
+            .peers_connections
+            .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
+            .filter_map(|(_, connection_index)| {
+                guarded
+                    .connections
+                    .get(*connection_index)
+                    .unwrap()
+                    .reached
+                    .as_ref()
+            })
+            .next()?
+            .inner_id;
+
+        Some(inner_id)
     }
 
     /// Sends a blocks request to the given peer.
@@ -421,7 +462,7 @@ where
     pub async fn blocks_request(
         &self,
         now: TNow,
-        target: peer_id::PeerId,
+        target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
@@ -454,7 +495,7 @@ where
     pub async fn grandpa_warp_sync_request(
         &self,
         now: TNow,
-        target: peer_id::PeerId,
+        target: &peer_id::PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
     ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
@@ -484,7 +525,7 @@ where
     pub async fn storage_proof_request(
         &self,
         now: TNow,
-        target: peer_id::PeerId,
+        target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
@@ -528,7 +569,7 @@ where
     pub async fn call_proof_request<'a>(
         &self,
         now: TNow,
-        target: peer_id::PeerId,
+        target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
@@ -568,8 +609,9 @@ where
         chain_index: usize,
         extrinsic: &[u8],
     ) -> Result<(), QueueNotificationError> {
+        // TODO: no, don't use request_connection_id, must have a substream open
         let connection_id = self
-            .request_connection_id(target.clone())
+            .request_connection_id(target)
             .await
             .ok_or(QueueNotificationError::NotConnected)?;
 
@@ -654,8 +696,17 @@ where
                     .await;
             }
 
-            // TODO: group the peer_id retrieval
-            match self.libp2p.next_event().await {
+            let inner_event = self.libp2p.next_event().await;
+
+            // `PeerId` of this connection, or expected `PeerId` if the connection hasn't yet
+            // finished its handshake.
+            let peer_id = &guarded
+                .connections
+                .get(*inner_event.user_data())
+                .unwrap()
+                .peer_id;
+
+            match inner_event {
                 libp2p::Event::HandshakeFinished {
                     id: connection_id,
                     peer_id: actual_peer_id,
@@ -687,13 +738,6 @@ where
                         *elem /= NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     }
 
-                    let peer_id = guarded
-                        .peerset
-                        .connection_mut(peerset_connection_id)
-                        .unwrap()
-                        .peer_id()
-                        .clone();
-
                     // TODO: don't do it if connection remaining
                     return Event::Disconnected {
                         peer_id,
@@ -709,13 +753,6 @@ where
                 } => {
                     // Only protocol 0 (identify) can receive requests at the moment.
                     debug_assert_eq!(protocol_index, 0);
-
-                    let peer_id = guarded
-                        .peerset
-                        .connection_mut(peerset_connection_id)
-                        .unwrap()
-                        .peer_id()
-                        .clone();
 
                     return Event::IdentifyRequestIn {
                         peer_id,
@@ -733,13 +770,6 @@ where
                     user_data: peerset_connection_id,
                     ..
                 } => {
-                    let peer_id = guarded
-                        .peerset
-                        .connection_mut(peerset_connection_id)
-                        .unwrap()
-                        .peer_id()
-                        .clone();
-
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         let remote_handshake =
@@ -803,13 +833,6 @@ where
                     user_data: peerset_connection_id,
                     ..
                 } => {
-                    let peer_id = guarded
-                        .peerset
-                        .connection_mut(peerset_connection_id)
-                        .unwrap()
-                        .peer_id()
-                        .clone();
-
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         return Event::ChainDisconnected {
@@ -827,13 +850,6 @@ where
                     remote_handshake,
                     user_data: peerset_connection_id,
                 } => {
-                    let peer_id = guarded
-                        .peerset
-                        .connection_mut(peerset_connection_id)
-                        .unwrap()
-                        .peer_id()
-                        .clone();
-
                     if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
                         if let Err(err) =
                             protocol::decode_block_announces_handshake(&remote_handshake)
@@ -889,13 +905,6 @@ where
                     user_data: peerset_connection_id,
                     ..
                 } => {
-                    let peer_id = guarded
-                        .peerset
-                        .connection_mut(peerset_connection_id)
-                        .unwrap()
-                        .peer_id()
-                        .clone();
-
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: think about possible race conditions regarding missing block
                     // announcements, as the remote will think we know it's at a certain block
@@ -1070,8 +1079,15 @@ where
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
+    // TODO: this doesn't do what it says it does
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
-        self.libp2p.peers_list_lock().await
+        let guarded = self.guarded.lock().await;
+        guarded
+            .peers_by_id
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
@@ -1278,7 +1294,7 @@ pub struct SubstreamOpen<'a, TNow> {
     overlay_network_index: usize,
 
     /// Same as [`ChainNetwork::libp2p`].
-    libp2p: &'a libp2p::Network<peerset::ConnectionId, TNow>,
+    libp2p: &'a libp2p::Network<usize, TNow>,
 
     /// Same as [`ChainNetwork::chain_configs`].
     chain_configs: &'a Vec<ChainConfig>,

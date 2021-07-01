@@ -254,6 +254,9 @@ struct Guarded<TConn, TNow> {
     connections: slab::Slab<Arc<Mutex<Connection<TConn, TNow>>>>,
 
     /// Container that holds tuples of `(connection_index, overlay_index, direction, state)`.
+    ///
+    /// While the list of open substreams is also known to the [`Connection`] struct, it is
+    /// duplicated here in order to avoid race conditions.
     connection_overlays:
         BTreeMap<(usize, usize, SubstreamDirection, SubstreamState), established::SubstreamId>,
 }
@@ -923,6 +926,36 @@ pub enum Event<TConn> {
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
+}
+
+impl<TConn> Event<TConn> {
+    /// Returns the identifier of the connection concerned by this event.
+    pub fn connection_id(&self) -> ConnectionId {
+        match self {
+            Event::HandshakeFinished { id, .. } => *id,
+            Event::Disconnected { id, .. } => *id,
+            Event::RequestIn { id, .. } => *id,
+            Event::NotificationsOutAccept { id, .. } => *id,
+            Event::NotificationsOutReject { id, .. } => *id,
+            Event::NotificationsOutClose { id, .. } => *id,
+            Event::NotificationsInOpen { id, .. } => *id,
+            Event::NotificationsIn { id, .. } => *id,
+        }
+    }
+
+    /// Returns the user data of the connection concerned by this event.
+    pub fn user_data(&self) -> &TConn {
+        match self {
+            Event::HandshakeFinished { user_data, .. } => user_data,
+            Event::Disconnected { user_data, .. } => user_data,
+            Event::RequestIn { user_data, .. } => user_data,
+            Event::NotificationsOutAccept { user_data, .. } => user_data,
+            Event::NotificationsOutReject { user_data, .. } => user_data,
+            Event::NotificationsOutClose { user_data, .. } => user_data,
+            Event::NotificationsInOpen { user_data, .. } => user_data,
+            Event::NotificationsIn { user_data, .. } => user_data,
+        }
+    }
 }
 
 /// Outcome of calling [`Network::read_write`].
