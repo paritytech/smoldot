@@ -676,7 +676,7 @@ where
                     return Event::Connected(actual_peer_id);
                 }
                 libp2p::Event::Disconnected {
-                    peer_id,
+                    id: connection_id,
                     mut out_overlay_network_indices,
                     user_data: peerset_connection_id,
                     ..
@@ -686,6 +686,14 @@ where
                     for elem in &mut out_overlay_network_indices {
                         *elem /= NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     }
+
+                    let peer_id = guarded
+                        .peerset
+                        .connection_mut(peerset_connection_id)
+                        .unwrap()
+                        .peer_id()
+                        .clone();
+
                     // TODO: don't do it if connection remaining
                     return Event::Disconnected {
                         peer_id,
@@ -855,11 +863,11 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        *pending_in_accept = Some((id, overlay_network_index, handshake));
+                        guarded.pending_in_accept = Some((id, overlay_network_index, handshake));
                     } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 {
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        *pending_in_accept = Some((id, overlay_network_index, Vec::new()));
+                        guarded.pending_in_accept = Some((id, overlay_network_index, Vec::new()));
                     } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 {
                         // Grandpa substream.
                         let chain_config = &self.chain_configs
@@ -869,7 +877,7 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        *pending_in_accept = Some((id, overlay_network_index, handshake));
+                        guarded.pending_in_accept = Some((id, overlay_network_index, handshake));
                     } else {
                         unreachable!()
                     }
