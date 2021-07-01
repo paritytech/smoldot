@@ -186,6 +186,9 @@ struct Guarded {
 
 /// See [`Guarded::peers`].
 struct Peer {
+    /// Identity of this peer.
+    peer_id: PeerId,
+
     /// List of addresses that we assume could be dialed to reach the peer.
     ///
     /// If the value is `Some`, a connection using that address can be found at the given index
@@ -1035,25 +1038,44 @@ where
 
         // TODO: limit number of slots
 
-        for _ in guarded
+        for &(_, peer_index) in guarded
             .peers_chain_memberships
             .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()))
-        {}
-
-        // TODO: very wip
-        /*while let Some(mut node) = guarded.peerset.random_not_connected(
-            self.overlay_networks[chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN].peerset_id,
-        ) {
-            let first_addr = node.known_addresses().cloned().next();
-            if let Some(multiaddr) = first_addr {
-                let id = node.add_outbound_attempt(multiaddr.clone(), Arc::new(Mutex::new(None)));
-                return Some(StartConnect {
-                    id: PendingId(id),
-                    multiaddr,
-                    expected_peer_id: node.peer_id().clone(),
-                });
+        {
+            if guarded.peers[peer_index].known_addresses.is_empty() {
+                continue;
             }
-        }*/
+
+            if guarded.peers[peer_index]
+                .known_addresses
+                .values()
+                .any(|a| a.is_some())
+            {
+                continue;
+            }
+
+            let peer_id = guarded.peers[peer_index].peer_id.clone();
+
+            let (multiaddr, pending_id_store) = guarded.peers[peer_index]
+                .known_addresses
+                .iter_mut()
+                .next()
+                .unwrap();
+
+            let pending_id = guarded.connections.insert(Connection {
+                address: multiaddr.clone(),
+                peer_id: peer_id.clone(),
+                reached: None,
+            });
+
+            *pending_id_store = Some(pending_id);
+
+            return Some(StartConnect {
+                id: PendingId(pending_id),
+                multiaddr: multiaddr.clone(),
+                expected_peer_id: peer_id,
+            });
+        }
 
         None
     }
@@ -1271,7 +1293,11 @@ where
                         )
                     };
 
-                    let peer_index = guarded.peers.insert(Peer { known_addresses });
+                    let peer_index = guarded.peers.insert(Peer {
+                        peer_id: entry.key().clone(),
+                        known_addresses,
+                    });
+
                     entry.insert(peer_index);
                     peer_index
                 }
