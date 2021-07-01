@@ -131,7 +131,8 @@ pub struct ConnectionId(libp2p::ConnectionId);
 /// state. See also [the module-level documentation](..).
 pub struct ChainNetwork<TNow> {
     /// Underlying data structure. Collection of connections.
-    libp2p: libp2p::Network<TNow>,
+    /// The "user data" associated to each connection is its identifier in [`Guarded::peerset`].
+    libp2p: libp2p::Network<peerset::ConnectionId, TNow>,
 
     /// Extra fields protected by a `Mutex`.
     guarded: Mutex<Guarded>,
@@ -143,8 +144,6 @@ pub struct ChainNetwork<TNow> {
     // TODO: merge with chain_configs?
     chain_grandpa_config: Vec<Option<Mutex<GrandpaState>>>,
 
-    pending_in_accept: Mutex<Option<(libp2p::ConnectionId, usize, Vec<u8>)>>,
-
     substreams_open_tx: Mutex<mpsc::Sender<()>>,
     substreams_open_rx: Mutex<mpsc::Receiver<()>>,
 
@@ -153,13 +152,17 @@ pub struct ChainNetwork<TNow> {
 }
 
 struct Guarded {
-    peerset: peerset::Peerset<(), (), (), (), ()>,
+    // TODO: remove substreams from the peerset altogether
+    peerset: peerset::Peerset<(), libp2p::ConnectionId, (), (), ()>,
 
     pending_connections: slab::Slab<Pending>,
+
+    pending_in_accept: Option<(libp2p::ConnectionId, usize, Vec<u8>)>,
 }
 
 /// See [`Guarded::pending_connections`].
 struct Pending {
+    id: peerset::ConnectionId,
     peer_id: PeerId,
     address: multiaddr::Multiaddr,
 }
@@ -175,8 +178,6 @@ where
 {
     /// Initializes a new [`ChainNetwork`].
     pub fn new(config: Config) -> Self {
-        // TODO: figure out the cloning situation here
-
         // The order of protocols here is important, as it defines the values of `protocol_index`
         // to pass to libp2p or that libp2p produces.
         let overlay_networks = config
@@ -299,10 +300,10 @@ where
             guarded: Mutex::new(Guarded {
                 peerset,
                 pending_connections: slab::Slab::with_capacity(0), // TODO:
+                pending_in_accept: None,
             }),
             chain_configs: config.chains,
             chain_grandpa_config,
-            pending_in_accept: Mutex::new(None),
             substreams_open_tx: Mutex::new(substreams_open_tx),
             substreams_open_rx: Mutex::new(substreams_open_rx),
             randomness: Mutex::new(randomness),
@@ -395,6 +396,26 @@ where
         }
     }
 
+    // TODO: take peerid by ref?
+    async fn request_connection_id(&self, target: peer_id::PeerId) -> Option<libp2p::ConnectionId> {
+        let mut guarded = self.guarded.lock().await;
+
+        let peerset_connection_id = guarded
+            .peerset
+            .node_mut(target)
+            .into_known()?
+            .connections()
+            .next()?;
+
+        Some(
+            *guarded
+                .peerset
+                .connection_mut(peerset_connection_id)
+                .unwrap()
+                .user_data_mut(),
+        )
+    }
+
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     pub async fn blocks_request(
@@ -404,20 +425,29 @@ where
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
+        let connection_id =
+            self.request_connection_id(target)
+                .await
+                .ok_or(BlocksRequestError::Request(
+                    libp2p::RequestError::NotConnected,
+                ))?;
+
         let request_data = protocol::build_block_request(config).fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
         });
+
         let response = self
             .libp2p
             .request(
                 now,
-                target,
+                connection_id,
                 self.protocol_index(chain_index, 0),
                 request_data,
             )
             .map_err(BlocksRequestError::Request)
             .await?;
+
         protocol::decode_block_response(&response).map_err(BlocksRequestError::Decode)
     }
 
@@ -428,13 +458,17 @@ where
         chain_index: usize,
         begin_hash: [u8; 32],
     ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
+        let connection_id = self.request_connection_id(target).await.ok_or(
+            GrandpaWarpSyncRequestError::Request(libp2p::RequestError::NotConnected),
+        )?;
+
         let request_data = begin_hash.to_vec();
 
         let response = self
             .libp2p
             .request(
                 now,
-                target,
+                connection_id,
                 self.protocol_index(chain_index, 3),
                 request_data,
             )
@@ -454,21 +488,30 @@ where
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
+        let connection_id =
+            self.request_connection_id(target)
+                .await
+                .ok_or(StorageProofRequestError::Request(
+                    libp2p::RequestError::NotConnected,
+                ))?;
+
         let request_data =
             protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });
+
         let response = self
             .libp2p
             .request(
                 now,
-                target,
+                connection_id,
                 self.protocol_index(chain_index, 1),
                 request_data,
             )
             .map_err(StorageProofRequestError::Request)
             .await?;
+
         protocol::decode_storage_proof_response(&response).map_err(StorageProofRequestError::Decode)
     }
 
@@ -489,21 +532,30 @@ where
         chain_index: usize,
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
+        let connection_id =
+            self.request_connection_id(target)
+                .await
+                .ok_or(CallProofRequestError::Request(
+                    libp2p::RequestError::NotConnected,
+                ))?;
+
         let request_data =
             protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });
+
         let response = self
             .libp2p
             .request(
                 now,
-                target,
+                connection_id,
                 self.protocol_index(chain_index, 1),
                 request_data,
             )
             .map_err(CallProofRequestError::Request)
             .await?;
+
         protocol::decode_call_proof_response(&response).map_err(CallProofRequestError::Decode)
     }
 
@@ -516,12 +568,17 @@ where
         chain_index: usize,
         extrinsic: &[u8],
     ) -> Result<(), QueueNotificationError> {
+        let connection_id = self
+            .request_connection_id(target.clone())
+            .await
+            .ok_or(QueueNotificationError::NotConnected)?;
+
         let mut val = Vec::with_capacity(1 + extrinsic.len());
         val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
         val.extend_from_slice(extrinsic);
         self.libp2p
             .queue_notification(
-                &target,
+                connection_id,
                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
                 val,
             )
@@ -538,8 +595,21 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
-        // TODO: ?!
-        ConnectionId(self.libp2p.insert())
+        let mut guarded = self.guarded.lock().await;
+
+        let removed = guarded.pending_connections.remove(id.0);
+
+        // TODO: err....
+        let inner_id = self.libp2p.insert(todo!()).await;
+
+        let peerset_connection_id = guarded
+            .peerset
+            .pending_mut(removed.id)
+            .unwrap()
+            .into_established(|()| inner_id)
+            .id();
+
+        ConnectionId(inner_id)
     }
 
     /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
@@ -554,11 +624,13 @@ where
     pub async fn pending_outcome_err(&self, id: PendingId) {
         let mut guarded = self.guarded.lock().await;
 
-        let removed = guarded.pending_connections.remove(id);
-        //guarded.peerset.pending_mut(removed)
-        //removed.peer_id
+        let removed = guarded.pending_connections.remove(id.0);
 
-        // TODO: ?!
+        guarded
+            .peerset
+            .pending_mut(removed.id)
+            .unwrap()
+            .remove_and_purge_address();
     }
 
     /// Returns the next event produced by the service.
@@ -573,24 +645,40 @@ where
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
     pub async fn next_event<'a>(&'a self) -> Event<'a, TNow> {
-        let mut pending_in_accept = self.pending_in_accept.lock().await;
+        let mut guarded = self.guarded.lock().await;
 
         loop {
-            if let Some((id, overlay_network_index, handshake)) = &*pending_in_accept {
+            if let Some((id, overlay_network_index, handshake)) = guarded.pending_in_accept.take() {
                 self.libp2p
-                    .accept_notifications_in(*id, *overlay_network_index, handshake.clone()) // TODO: clone :-/
+                    .accept_notifications_in(id, overlay_network_index, handshake)
                     .await;
-                *pending_in_accept = None;
             }
 
+            // TODO: group the peer_id retrieval
             match self.libp2p.next_event().await {
-                libp2p::Event::Connected(peer_id) => {
+                libp2p::Event::HandshakeFinished {
+                    id: connection_id,
+                    peer_id: actual_peer_id,
+                    user_data: peerset_connection_id,
+                } => {
+                    if *guarded
+                        .peerset
+                        .connection_mut(peerset_connection_id)
+                        .unwrap()
+                        .peer_id()
+                        != actual_peer_id
+                    {
+                        todo!() // TODO:
+                    }
+
                     let _ = self.substreams_open_tx.lock().await.try_send(());
-                    return Event::Connected(peer_id);
+                    // TODO: don't do it if already have a connection
+                    return Event::Connected(actual_peer_id);
                 }
                 libp2p::Event::Disconnected {
                     peer_id,
                     mut out_overlay_network_indices,
+                    user_data: peerset_connection_id,
                     ..
                 } => {
                     out_overlay_network_indices
@@ -598,6 +686,7 @@ where
                     for elem in &mut out_overlay_network_indices {
                         *elem /= NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     }
+                    // TODO: don't do it if connection remaining
                     return Event::Disconnected {
                         peer_id,
                         chain_indices: out_overlay_network_indices,
@@ -607,11 +696,18 @@ where
                     id,
                     substream_id,
                     protocol_index,
-                    peer_id,
+                    user_data: peerset_connection_id,
                     ..
                 } => {
                     // Only protocol 0 (identify) can receive requests at the moment.
                     debug_assert_eq!(protocol_index, 0);
+
+                    let peer_id = guarded
+                        .peerset
+                        .connection_mut(peerset_connection_id)
+                        .unwrap()
+                        .peer_id()
+                        .clone();
 
                     return Event::IdentifyRequestIn {
                         peer_id,
@@ -623,11 +719,19 @@ where
                     };
                 }
                 libp2p::Event::NotificationsOutAccept {
-                    peer_id,
+                    id: connection_id,
                     overlay_network_index,
                     remote_handshake,
+                    user_data: peerset_connection_id,
                     ..
                 } => {
+                    let peer_id = guarded
+                        .peerset
+                        .connection_mut(peerset_connection_id)
+                        .unwrap()
+                        .peer_id()
+                        .clone();
+
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         let remote_handshake =
@@ -674,7 +778,7 @@ where
                             });
                         let _ = self
                             .libp2p
-                            .queue_notification(&peer_id, overlay_network_index, packet)
+                            .queue_notification(connection_id, overlay_network_index, packet)
                             .await;
                     } else {
                         unreachable!()
@@ -686,10 +790,18 @@ where
                     // TODO:
                 }
                 libp2p::Event::NotificationsOutClose {
-                    peer_id,
+                    id,
                     overlay_network_index,
+                    user_data: peerset_connection_id,
                     ..
                 } => {
+                    let peer_id = guarded
+                        .peerset
+                        .connection_mut(peerset_connection_id)
+                        .unwrap()
+                        .peer_id()
+                        .clone();
+
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         return Event::ChainDisconnected {
@@ -703,10 +815,17 @@ where
                 }
                 libp2p::Event::NotificationsInOpen {
                     id,
-                    peer_id,
                     overlay_network_index,
                     remote_handshake,
+                    user_data: peerset_connection_id,
                 } => {
+                    let peer_id = guarded
+                        .peerset
+                        .connection_mut(peerset_connection_id)
+                        .unwrap()
+                        .peer_id()
+                        .clone();
+
                     if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
                         if let Err(err) =
                             protocol::decode_block_announces_handshake(&remote_handshake)
@@ -756,12 +875,19 @@ where
                     }
                 }
                 libp2p::Event::NotificationsIn {
-                    peer_id,
-                    has_symmetric_substream,
+                    id: connection_id,
                     overlay_network_index,
                     notification,
+                    user_data: peerset_connection_id,
                     ..
                 } => {
+                    let peer_id = guarded
+                        .peerset
+                        .connection_mut(peerset_connection_id)
+                        .unwrap()
+                        .peer_id()
+                        .clone();
+
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: think about possible race conditions regarding missing block
                     // announcements, as the remote will think we know it's at a certain block
@@ -1095,41 +1221,15 @@ where
     }
 
     /// Insert the results in the [`ChainNetwork`].
-    // TODO: futures cancellation concerns T_T
-    pub async fn insert(self, mut or_insert: impl FnMut(&peer_id::PeerId) -> TPeer) {
-        for (peer_id, addrs) in self.outcome {
-            self.service
-                .libp2p
-                .add_addresses(
-                    || or_insert(&peer_id),
-                    self.chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                    peer_id.clone(), // TODO: clone :(
-                    addrs.iter().cloned(),
-                )
-                .await;
-            self.service
-                .libp2p
-                .add_addresses(
-                    || or_insert(&peer_id),
-                    self.chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                    peer_id.clone(), // TODO: clone :(
-                    addrs.iter().cloned(),
-                )
-                .await;
+    pub async fn insert(self) {
+        let mut guarded = self.service.guarded.lock().await;
 
-            if self.service.chain_configs[self.chain_index]
-                .grandpa_protocol_config
-                .is_some()
-            {
-                self.service
-                    .libp2p
-                    .add_addresses(
-                        || or_insert(&peer_id),
-                        self.chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                        peer_id.clone(), // TODO: clone :(
-                        addrs,
-                    )
-                    .await;
+        for (peer_id, addrs) in self.outcome {
+            let mut peer = guarded.peerset.node_mut(peer_id.clone()).or_default();
+            // TODO: peer.add_to_overlay(self.chain_index);
+
+            for address in addrs {
+                peer.add_known_address(address);
             }
         }
     }
@@ -1170,7 +1270,7 @@ pub struct SubstreamOpen<'a, TNow> {
     overlay_network_index: usize,
 
     /// Same as [`ChainNetwork::libp2p`].
-    libp2p: &'a libp2p::Network<TNow>,
+    libp2p: &'a libp2p::Network<peerset::ConnectionId, TNow>,
 
     /// Same as [`ChainNetwork::chain_configs`].
     chain_configs: &'a Vec<ChainConfig>,
