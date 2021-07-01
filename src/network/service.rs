@@ -917,9 +917,7 @@ where
                     // while we ignored its announcement ; it isn't problematic as long as blocks
                     // are generated continuously, as announcements will be generated periodically
                     // as well and the state will no longer mismatch
-                    if !has_symmetric_substream {
-                        continue;
-                    }
+                    // TODO: restore ^
 
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
@@ -981,7 +979,7 @@ where
         };
 
         let request_data = kademlia::build_find_node_request(random_peer_id.as_bytes());
-        if let Some(target) = self.libp2p.peers_list_lock().await.next() {
+        /*if let Some(target) = self.libp2p.peers_list_lock().await.next() {
             // TODO: better peer selection
             let response = self
                 .libp2p
@@ -1000,16 +998,16 @@ where
                 outcome: decoded,
                 chain_index,
             })
-        } else {
+        } else {*/
             Err(DiscoveryError::NoPeer)
-        }
+        //}
     }
 
     /// Waits until a connection is in a state in which a substream can be opened.
     pub async fn next_substream<'a>(&'a self) -> SubstreamOpen<'a, TNow> {
         let mut guarded = self.guarded.lock().await;
 
-        for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
+        /*for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
             let peerset_id = self.overlay_networks[overlay_network_index].peerset_id;
 
             // Grab node for which we have an established outgoing connections but haven't yet
@@ -1024,9 +1022,9 @@ where
                     peerset_id,
                 });
             }
-        }
+        }*/
 
-        None
+        todo!()
     }
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
@@ -1035,14 +1033,15 @@ where
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded; // Solves borrow checker issues.
 
-        guarded
-            .peers_chain_memberships
-            .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()));
-
         // TODO: limit number of slots
 
+        for _ in guarded
+            .peers_chain_memberships
+            .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()))
+        {}
+
         // TODO: very wip
-        while let Some(mut node) = guarded.peerset.random_not_connected(
+        /*while let Some(mut node) = guarded.peerset.random_not_connected(
             self.overlay_networks[chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN].peerset_id,
         ) {
             let first_addr = node.known_addresses().cloned().next();
@@ -1054,7 +1053,7 @@ where
                     expected_peer_id: node.peer_id().clone(),
                 });
             }
-        }
+        }*/
 
         None
     }

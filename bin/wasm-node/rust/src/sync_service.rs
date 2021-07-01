@@ -718,10 +718,10 @@ async fn start_relay_chain(
                                 request_justification,
                             },
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let block_request = network_service.clone().blocks_request(
-                            peer_id.clone(),
+                            peer_id,
                             network_chain_index,
                             network::protocol::BlocksRequestConfig {
                                 start: match first_block {
@@ -763,10 +763,10 @@ async fn start_relay_chain(
                                 sync_start_block_hash,
                             },
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let grandpa_request = network_service.clone().grandpa_warp_sync_request(
-                            peer_id.clone(),
+                            peer_id,
                             network_chain_index,
                             sync_start_block_hash,
                         );
@@ -787,11 +787,11 @@ async fn start_relay_chain(
                                 keys,
                             },
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let storage_request = network_service.clone().storage_proof_request(
                             network_chain_index,
-                            peer_id.clone(),
+                            peer_id,
                             network::protocol::StorageProofRequestConfig {
                                 block_hash,
                                 keys: keys.clone().into_iter(),

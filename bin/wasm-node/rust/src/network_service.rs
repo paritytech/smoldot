@@ -95,7 +95,7 @@ pub struct NetworkService {
     guarded: Mutex<Guarded>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<ffi::Instant, (), ()>,
+    network: service::ChainNetwork<ffi::Instant>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -155,12 +155,7 @@ impl NetworkService {
                 role: protocol::Role::Light,
             });
 
-            known_nodes.extend(
-                chain
-                    .bootstrap_nodes
-                    .into_iter()
-                    .map(|(peer_id, addr)| ((), peer_id, addr)),
-            );
+            known_nodes.extend(chain.bootstrap_nodes);
         }
 
         let network_service = Arc::new(NetworkService {
@@ -170,7 +165,7 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 chains,
                 known_nodes,
-                listen_addresses: Vec::new(), // TODO:
+                peers_capacity: 100, // TODO: ?
                 noise_key: config.noise_key,
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 16
@@ -415,7 +410,7 @@ impl NetworkService {
                                         log::trace!(target: "connections", "Discovered {}", peer_id);
                                     }
 
-                                    insert.insert(|_| ()).await;
+                                    insert.insert().await;
                                 }
                                 Err(error) => {
                                     log::warn!(target: "connections", "Problem during discovery: {}", error);
@@ -462,7 +457,7 @@ impl NetworkService {
     // TODO: more docs
     pub async fn blocks_request(
         self: Arc<Self>,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of future longevity issue
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
@@ -470,7 +465,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .blocks_request(ffi::Instant::now(), target.clone(), chain_index, config)
+            .blocks_request(ffi::Instant::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -487,7 +482,7 @@ impl NetworkService {
     // TODO: more docs
     pub async fn grandpa_warp_sync_request(
         self: Arc<Self>,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of future longevity issue
         chain_index: usize,
         begin_hash: [u8; 32],
     ) -> Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError> {
@@ -498,7 +493,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .grandpa_warp_sync_request(ffi::Instant::now(), target.clone(), chain_index, begin_hash)
+            .grandpa_warp_sync_request(ffi::Instant::now(), &target, chain_index, begin_hash)
             .await;
 
         if let Ok(response) = result.as_ref() {
@@ -546,7 +541,7 @@ impl NetworkService {
     pub async fn storage_proof_request(
         self: Arc<Self>,
         chain_index: usize,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
         log::debug!(
@@ -559,7 +554,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .storage_proof_request(ffi::Instant::now(), target.clone(), chain_index, config)
+            .storage_proof_request(ffi::Instant::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -579,7 +574,7 @@ impl NetworkService {
     pub async fn call_proof_request<'a>(
         self: Arc<Self>,
         chain_index: usize,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, service::CallProofRequestError> {
         log::debug!(
@@ -592,7 +587,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .call_proof_request(ffi::Instant::now(), target.clone(), chain_index, config)
+            .call_proof_request(ffi::Instant::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -707,10 +702,7 @@ async fn connection_task(
         }
     };
 
-    let id = network_service
-        .network
-        .pending_outcome_ok(pending_id, ())
-        .await;
+    let id = network_service.network.pending_outcome_ok(pending_id).await;
 
     log::debug!(
         target: "connections",
