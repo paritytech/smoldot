@@ -113,7 +113,7 @@
 //
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
-use connection::established;
+use connection::{established, handshake};
 use core::{
     iter, mem,
     num::NonZeroUsize,
@@ -336,14 +336,17 @@ where
     }
 
     /// Adds a new connection to the collection.
-    pub async fn insert(&self, user_data: TConn) -> ConnectionId {
+    ///
+    /// `is_initiator` must be `true` if the connection has been initiated locally, or `false` if
+    /// it has been initiated by the remote.
+    pub async fn insert(&self, is_initiator: bool, user_data: TConn) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
 
         let connection_id = guarded.next_connection_id;
         guarded.next_connection_id.0 += 1;
 
         let connection_index = guarded.connections.insert(Arc::new(Mutex::new(Connection {
-            connection: todo!(),
+            connection: ConnectionInner::Handshake(handshake::HealthyHandshake::new(is_initiator)),
             id: connection_id,
             overlay_networks: self.overlay_networks.clone(),
             pending_event: None,
@@ -1147,6 +1150,7 @@ where
                             debug_assert!(self.pending_event.is_none());
                             self.pending_event =
                                 Some(PendingEvent::HandshakeFinished(remote_peer_id));
+                            // TODO: self.connection = ConnectionInner::Established(connection.into_connection(self.build_connection_config()));
                             break;
                         }
                         connection::handshake::Handshake::NoiseKeyRequired(key) => {

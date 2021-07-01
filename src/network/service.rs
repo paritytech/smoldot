@@ -656,7 +656,7 @@ where
         // only correctly if `reached` is `None`.
         assert!(connection.reached.is_none());
 
-        let inner_id = self.libp2p.insert(id.0).await;
+        let inner_id = self.libp2p.insert(true, id.0).await;
 
         connection.reached = Some(ConnectionReached { inner_id });
 
@@ -999,7 +999,7 @@ where
                 chain_index,
             })
         } else {*/
-            Err(DiscoveryError::NoPeer)
+        Err(DiscoveryError::NoPeer)
         //}
     }
 
@@ -1277,13 +1277,16 @@ where
                 }
             };
 
-            // TODO: add to overlay network
-
             let peer = &mut guarded.peers[peer_index];
             peer.known_addresses.reserve(addrs.len());
             for address in addrs {
                 peer.known_addresses.entry(address).or_insert(None);
             }
+
+            // Register membership of this peer on this chain.
+            guarded
+                .peers_chain_memberships
+                .insert((self.chain_index, peer_index));
         }
     }
 }
