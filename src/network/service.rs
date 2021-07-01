@@ -166,6 +166,10 @@ struct Guarded {
     /// index of a connection in [`Guarded::connections`].
     peers_connections: BTreeSet<(usize, usize)>,
 
+    /// Collection of (`chain_index`, `peer_index`).
+    // TODO: more doc
+    peers_chain_memberships: BTreeSet<(usize, usize)>,
+
     /// All connections, both pending and established.
     ///
     /// This list is a superset of the list in [`ChainNetwork::libp2p`].
@@ -182,7 +186,13 @@ struct Guarded {
 
 /// See [`Guarded::peers`].
 struct Peer {
-    /// List of addresses assumed to exist.
+    /// List of addresses that we assume could be dialed to reach the peer.
+    ///
+    /// If the value is `Some`, a connection using that address can be found at the given index
+    /// in [`Guarded::connections`].
+    ///
+    /// Does not include "dialing" addresses. For example, no address should contain an outgoing
+    /// TCP port.
     known_addresses: hashbrown::HashMap<multiaddr::Multiaddr, Option<usize>, ahash::RandomState>,
 }
 
@@ -193,6 +203,8 @@ struct Connection {
     peer_id: PeerId,
 
     /// Address on the other side of the connection.
+    ///
+    /// Will be found in [`Peer::known_addresses`] if and only if the connection is outbound.
     address: multiaddr::Multiaddr,
 
     /// `Some` if the connection with the remote has been reached. Contains extra fields.
@@ -342,6 +354,7 @@ where
                 peers: slab::Slab::with_capacity(config.peers_capacity),
                 peers_by_id,
                 peers_connections: BTreeSet::new(),
+                peers_chain_memberships: BTreeSet::new(),
                 connections: slab::Slab::with_capacity(0), // TODO:
                 pending_in_accept: None,
                 chain_grandpa_config,
@@ -373,10 +386,7 @@ where
         local_listen_address: &multiaddr::Multiaddr,
         remote_addr: multiaddr::Multiaddr,
     ) -> ConnectionId {
-        ConnectionId(
-            self.libp2p
-                .add_incoming_connection(local_listen_address, remote_addr),
-        )
+        todo!()
     }
 
     /// Update the state of the local node with regards to GrandPa rounds.
@@ -639,17 +649,16 @@ where
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
 
-        let removed = guarded.pending_connections.remove(id.0);
+        let mut connection = &mut guarded.connections[id.0];
 
-        // TODO: err....
-        let inner_id = self.libp2p.insert(todo!()).await;
+        // Must check that the connected referred to by `id` is indeed correct.
+        // Since `connections` shares both pending and established connections, the `PendingId` is
+        // only correctly if `reached` is `None`.
+        assert!(connection.reached.is_none());
 
-        let peerset_connection_id = guarded
-            .peerset
-            .pending_mut(removed.id)
-            .unwrap()
-            .into_established(|()| inner_id)
-            .id();
+        let inner_id = self.libp2p.insert(id.0).await;
+
+        connection.reached = Some(ConnectionReached { inner_id });
 
         ConnectionId(inner_id)
     }
@@ -666,13 +675,18 @@ where
     pub async fn pending_outcome_err(&self, id: PendingId) {
         let mut guarded = self.guarded.lock().await;
 
-        let removed = guarded.pending_connections.remove(id.0);
+        // Must check that the connected referred to by `id` is indeed correct.
+        // Since `connections` shares both pending and established connections, the `PendingId` is
+        // only correctly if `reached` is `None`.
+        assert!(guarded.connections[id.0].reached.is_none());
 
-        guarded
-            .peerset
-            .pending_mut(removed.id)
-            .unwrap()
-            .remove_and_purge_address();
+        // Kill that connection altogether.
+        let removed = guarded.connections.remove(id.0);
+
+        // TODO: finish
+        todo!()
+
+        //guarded.peers_connections.remove(removed.peer_id);
     }
 
     /// Returns the next event produced by the service.
@@ -712,13 +726,7 @@ where
                     peer_id: actual_peer_id,
                     user_data: peerset_connection_id,
                 } => {
-                    if *guarded
-                        .peerset
-                        .connection_mut(peerset_connection_id)
-                        .unwrap()
-                        .peer_id()
-                        != actual_peer_id
-                    {
+                    if *peer_id != actual_peer_id {
                         todo!() // TODO:
                     }
 
@@ -740,7 +748,7 @@ where
 
                     // TODO: don't do it if connection remaining
                     return Event::Disconnected {
-                        peer_id,
+                        peer_id: peer_id.clone(),
                         chain_indices: out_overlay_network_indices,
                     };
                 }
@@ -755,7 +763,7 @@ where
                     debug_assert_eq!(protocol_index, 0);
 
                     return Event::IdentifyRequestIn {
-                        peer_id,
+                        peer_id: peer_id.clone(),
                         request: IdentifyRequestIn {
                             service: self,
                             id,
@@ -778,7 +786,7 @@ where
                                 Err(err) => {
                                     // TODO: close the substream?
                                     return Event::ProtocolError {
-                                        peer_id,
+                                        peer_id: peer_id.clone(),
                                         error: ProtocolError::BadBlockAnnouncesHandshake(err),
                                     };
                                 }
@@ -786,7 +794,7 @@ where
 
                         // TODO: compare genesis hash with ours
                         return Event::ChainConnected {
-                            peer_id,
+                            peer_id: peer_id.clone(),
                             chain_index,
                             best_hash: *remote_handshake.best_hash,
                             best_number: remote_handshake.best_number,
@@ -797,11 +805,9 @@ where
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
                         // Grandpa notification has been opened. Send neighbor packet.
                         // TODO: below is not futures-cancellation-safe!
-                        let grandpa_config = self.chain_grandpa_config[chain_index]
+                        let grandpa_config = guarded.chain_grandpa_config[chain_index]
                             .as_ref()
                             .unwrap()
-                            .lock()
-                            .await
                             .clone();
                         let packet =
                             protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
@@ -836,7 +842,7 @@ where
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         return Event::ChainDisconnected {
-                            peer_id,
+                            peer_id: peer_id.clone(),
                             chain_index,
                         };
                     } else {
@@ -856,7 +862,7 @@ where
                         {
                             // TODO: self.libp2p.refuse_notifications_in(*id, *overlay_network_index);
                             return Event::ProtocolError {
-                                peer_id,
+                                peer_id: peer_id.clone(),
                                 error: ProtocolError::BadBlockAnnouncesHandshake(err),
                             };
                         }
@@ -919,14 +925,14 @@ where
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         if let Err(err) = protocol::decode_block_announce(&notification) {
                             return Event::ProtocolError {
-                                peer_id,
+                                peer_id: peer_id.clone(),
                                 error: ProtocolError::BadBlockAnnounce(err),
                             };
                         }
 
                         return Event::BlockAnnounce {
                             chain_index,
-                            peer_id,
+                            peer_id: peer_id.clone(),
                             announce: EncodedBlockAnnounce(notification),
                         };
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
@@ -937,7 +943,7 @@ where
                                 Ok(n) => n,
                                 Err(err) => {
                                     return Event::ProtocolError {
-                                        peer_id,
+                                        peer_id: peer_id.clone(),
                                         error: ProtocolError::BadGrandpaNotification(err),
                                     };
                                 }
@@ -1027,10 +1033,11 @@ where
     // TODO: give more control, with number of slots and node choice
     pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> Option<StartConnect> {
         let mut guarded = self.guarded.lock().await;
+        let guarded = &mut *guarded; // Solves borrow checker issues.
 
-        // Solves borrow checking errors regarding the borrow of multiple different fields at the
-        // same time.
-        let guarded = &mut *guarded;
+        guarded
+            .peers_chain_memberships
+            .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()));
 
         // TODO: limit number of slots
 
@@ -1247,13 +1254,36 @@ where
     /// Insert the results in the [`ChainNetwork`].
     pub async fn insert(self) {
         let mut guarded = self.service.guarded.lock().await;
+        let guarded = &mut *guarded; // Avoids borrow checker issues.
 
         for (peer_id, addrs) in self.outcome {
-            let mut peer = guarded.peerset.node_mut(peer_id.clone()).or_default();
-            // TODO: peer.add_to_overlay(self.chain_index);
+            let peer_index = match guarded.peers_by_id.entry(peer_id) {
+                hashbrown::hash_map::Entry::Occupied(entry) => *entry.get(),
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    let known_addresses = {
+                        let mut randomness = self.service.randomness.lock().await;
+                        let k0 = randomness.next_u64();
+                        let k1 = randomness.next_u64();
+                        let k2 = randomness.next_u64();
+                        let k3 = randomness.next_u64();
+                        hashbrown::HashMap::with_capacity_and_hasher(
+                            addrs.len(),
+                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                        )
+                    };
 
+                    let peer_index = guarded.peers.insert(Peer { known_addresses });
+                    entry.insert(peer_index);
+                    peer_index
+                }
+            };
+
+            // TODO: add to overlay network
+
+            let peer = &mut guarded.peers[peer_index];
+            peer.known_addresses.reserve(addrs.len());
             for address in addrs {
-                peer.add_known_address(address);
+                peer.known_addresses.entry(address).or_insert(None);
             }
         }
     }
