@@ -898,23 +898,19 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
+    /// A handshaking outbound substream has been accepted by the remote.
     NotificationsOutAccept {
         id: ConnectionId,
         // TODO: what if fallback?
         overlay_network_index: usize,
+        /// Handshake sent in return by the remote.
         remote_handshake: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
 
-    NotificationsOutReject {
-        id: ConnectionId,
-        // TODO: what if fallback?
-        overlay_network_index: usize,
-        /// Copy of the user data provided when creating the connection.
-        user_data: TConn,
-    },
-
+    /// A previously open outbound substream has been closed by the remote, or a handshaking
+    /// outbound substream has been denied by the remote.
     NotificationsOutClose {
         id: ConnectionId,
         overlay_network_index: usize,
@@ -931,6 +927,7 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
+    // TODO: needs a notifications in cancel event? tricky
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
         id: ConnectionId,
@@ -956,7 +953,6 @@ impl<TConn> Event<TConn> {
             Event::Shutdown { id, .. } => *id,
             Event::RequestIn { id, .. } => *id,
             Event::NotificationsOutAccept { id, .. } => *id,
-            Event::NotificationsOutReject { id, .. } => *id,
             Event::NotificationsOutClose { id, .. } => *id,
             Event::NotificationsInOpen { id, .. } => *id,
             Event::NotificationsIn { id, .. } => *id,
@@ -971,7 +967,6 @@ impl<TConn> Event<TConn> {
             Event::Shutdown { user_data, .. } => user_data,
             Event::RequestIn { user_data, .. } => user_data,
             Event::NotificationsOutAccept { user_data, .. } => user_data,
-            Event::NotificationsOutReject { user_data, .. } => user_data,
             Event::NotificationsOutClose { user_data, .. } => user_data,
             Event::NotificationsInOpen { user_data, .. } => user_data,
             Event::NotificationsIn { user_data, .. } => user_data,

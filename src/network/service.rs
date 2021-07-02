@@ -949,15 +949,13 @@ where
 
                     // TODO:
                 }
-                libp2p::Event::NotificationsOutReject { .. } => {
-                    // TODO:
-                }
                 libp2p::Event::NotificationsOutClose {
                     id,
                     overlay_network_index,
                     user_data: local_connection_index,
                     ..
                 } => {
+                    // TODO: no
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         return Event::ChainDisconnected {
