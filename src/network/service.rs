@@ -745,7 +745,7 @@ where
     /// produced, and calling this function multiple times is therefore discouraged.
     pub async fn next_event<'a>(&'a self) -> Event<'a, TNow> {
         loop {
-            // The objective of the block of code below is to retreive the next event that
+            // The objective of the block of code below is to retrieve the next event that
             // happened on the underlying libp2p state machine by calling
             // `self.libp2p.next_event()`.
             //
@@ -765,7 +765,7 @@ where
             // Additionally, `guarded` contains some fields, such as `pending_in_accept`, that
             // need to be processed ahead of events. Because processing these fields requires
             // using `await`, this processing can be interrupted by the user, and as such no event
-            // should be grabbed.
+            // should be grabbed in that situation.
             //
             // For all these reasons, the logic of the code below is as follows:
             //
@@ -824,7 +824,10 @@ where
             };
 
             // An event has been grabbed and is ready to be processed. `self.guarded` is still
-            // locked before the event has been grabbed.
+            // locked from before the event has been grabbed.
+            // In order to avoid futures cancellation issues, no `await` should be used below. If
+            // something requires asynchronous processing, it should instead be added as a field
+            // in `self.guarded`.
 
             // `PeerId` of the connection concerned by the event, or expected `PeerId` if the
             // connection hasn't yet finished its handshake.
@@ -838,12 +841,13 @@ where
                 libp2p::Event::HandshakeFinished {
                     id: connection_id,
                     peer_id: actual_peer_id,
-                    user_data: peerset_connection_id,
+                    user_data: local_connection_index,
                 } => {
                     if *peer_id != actual_peer_id {
                         todo!() // TODO:
                     }
 
+                    // TODO: no awaiting
                     let _ = self.substreams_open_tx.lock().await.try_send(());
                     // TODO: don't do it if already have a connection
                     return Event::Connected(actual_peer_id);
@@ -851,7 +855,7 @@ where
                 libp2p::Event::Disconnected {
                     id: connection_id,
                     mut out_overlay_network_indices,
-                    user_data: peerset_connection_id,
+                    user_data: local_connection_index,
                     ..
                 } => {
                     out_overlay_network_indices
@@ -870,7 +874,7 @@ where
                     id,
                     substream_id,
                     protocol_index,
-                    user_data: peerset_connection_id,
+                    user_data: local_connection_index,
                     ..
                 } => {
                     // Only protocol 0 (identify) can receive requests at the moment.
@@ -889,7 +893,7 @@ where
                     id: connection_id,
                     overlay_network_index,
                     remote_handshake,
-                    user_data: peerset_connection_id,
+                    user_data: local_connection_index,
                     ..
                 } => {
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
@@ -934,6 +938,7 @@ where
                                 a.extend_from_slice(b.as_ref());
                                 a
                             });
+                        // TODO: no await :-/
                         let _ = self
                             .libp2p
                             .queue_notification(connection_id, overlay_network_index, packet)
@@ -950,7 +955,7 @@ where
                 libp2p::Event::NotificationsOutClose {
                     id,
                     overlay_network_index,
-                    user_data: peerset_connection_id,
+                    user_data: local_connection_index,
                     ..
                 } => {
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
@@ -968,7 +973,7 @@ where
                     id,
                     overlay_network_index,
                     remote_handshake,
-                    user_data: peerset_connection_id,
+                    user_data: local_connection_index,
                 } => {
                     if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
                         if let Err(err) =
@@ -1022,7 +1027,7 @@ where
                     id: connection_id,
                     overlay_network_index,
                     notification,
-                    user_data: peerset_connection_id,
+                    user_data: local_connection_index,
                     ..
                 } => {
                     // Don't report events about nodes we don't have an outbound substream with.
@@ -1121,29 +1126,46 @@ where
 
     /// Waits until a connection is in a state in which a substream can be opened.
     pub async fn next_substream<'a>(&'a self) -> SubstreamOpen<'a, TNow> {
-        let mut guarded = self.guarded.lock().await;
+        let guarded = self.guarded.lock().await;
 
-        /*for overlay_network_index in 0..guarded.peerset.num_overlay_networks() {
-            let peerset_id = self.overlay_networks[overlay_network_index].peerset_id;
+        loop {
+            // TODO: O(n) :-/
+            for chain_index in 0..self.chain_configs.len() {
+                // Grab node for which we have an established outgoing connections but haven't yet
+                // opened a substream to.
+                for &(_, peer_index) in guarded
+                    .peers_chain_memberships
+                    .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()))
+                {
+                    for &(_, connection_index) in guarded
+                        .peers_connections
+                        .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
+                    {
+                        let connection = &guarded.connections[connection_index];
 
-            // Grab node for which we have an established outgoing connections but haven't yet
-            // opened a substream to.
-            if let Some(node) = guarded.peerset.random_connected_closed_node(peerset_id) {
-                let connection_id = node.connections().next().unwrap();
-                let mut peerset_entry = guarded.peerset.connection_mut(connection_id).unwrap();
-                return Some(SubstreamOpen {
-                    network: self,
-                    connection: peerset_entry.user_data_mut().clone(),
-                    overlay_network_index,
-                    peerset_id,
-                });
+                        let connection_id = match connection.reached.as_ref() {
+                            Some(r) => r.inner_id,
+                            None => continue,
+                        };
+
+                        // TODO: filter out if no substream yet
+
+                        return SubstreamOpen {
+                            libp2p: &self.libp2p,
+                            chain_configs: &self.chain_configs,
+                            connection_id,
+                            overlay_network_index: chain_index, // TODO: no
+                        };
+                    }
+                }
             }
-        }*/
 
-        todo!()
+            // TODO: wait
+        }
     }
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
+    // TODO: shouldn't return an `Option`? should instead just wait instead of returning `None`?
     // TODO: give more control, with number of slots and node choice
     pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> Option<StartConnect> {
         let mut guarded = self.guarded.lock().await;
@@ -1156,7 +1178,6 @@ where
             .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()))
         {
             if guarded.peers[peer_index].known_addresses.is_empty() {
-                panic!();
                 continue;
             }
 
@@ -1165,7 +1186,6 @@ where
                 .values()
                 .any(|a| a.is_some())
             {
-                panic!();
                 continue;
             }
 
