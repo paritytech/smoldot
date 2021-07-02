@@ -852,7 +852,7 @@ where
                     // TODO: don't do it if already have a connection
                     return Event::Connected(actual_peer_id);
                 }
-                libp2p::Event::Disconnected {
+                libp2p::Event::Shutdown {
                     id: connection_id,
                     mut out_overlay_network_indices,
                     user_data: local_connection_index,
@@ -1077,6 +1077,14 @@ where
                     } else {
                         unreachable!()
                     }
+                }
+                libp2p::Event::NotificationsInClose {
+                    id,
+                    overlay_network_index,
+                    user_data: local_connection_index,
+                    ..
+                } => {
+                    // TODO: ?
                 }
             }
         }

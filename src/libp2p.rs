@@ -867,8 +867,18 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
-    /// A transport-level connection (e.g. a TCP socket) has been closed.
-    Disconnected {
+    /// A transport-level connection (e.g. a TCP socket) is starting its shutdown.
+    ///
+    /// No further event related to this connection will be reported. This event is equivalent to
+    /// zero or more [`Event::NotificationsOutClose`] and [`Event::NotificationsInClose`] events
+    /// grouped into one.
+    ///
+    /// > **Note**: The [`Network::read_write`] method signals the end of the connection
+    /// >           orthogonally to this shutdown event. In other words, you must still continue
+    /// >           to call [`Network::read_write`] with that [`ConnectionId`] until it is no
+    /// >           longer necessary.
+    // TODO: add reason for shutdown
+    Shutdown {
         id: ConnectionId,
         out_overlay_network_indices: Vec<usize>,
         in_overlay_network_indices: Vec<usize>,
@@ -929,6 +939,13 @@ pub enum Event<TConn> {
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
+
+    NotificationsInClose {
+        id: ConnectionId,
+        overlay_network_index: usize,
+        /// Copy of the user data provided when creating the connection.
+        user_data: TConn,
+    },
 }
 
 impl<TConn> Event<TConn> {
@@ -936,13 +953,14 @@ impl<TConn> Event<TConn> {
     pub fn connection_id(&self) -> ConnectionId {
         match self {
             Event::HandshakeFinished { id, .. } => *id,
-            Event::Disconnected { id, .. } => *id,
+            Event::Shutdown { id, .. } => *id,
             Event::RequestIn { id, .. } => *id,
             Event::NotificationsOutAccept { id, .. } => *id,
             Event::NotificationsOutReject { id, .. } => *id,
             Event::NotificationsOutClose { id, .. } => *id,
             Event::NotificationsInOpen { id, .. } => *id,
             Event::NotificationsIn { id, .. } => *id,
+            Event::NotificationsInClose { id, .. } => *id,
         }
     }
 
@@ -950,13 +968,14 @@ impl<TConn> Event<TConn> {
     pub fn user_data(&self) -> &TConn {
         match self {
             Event::HandshakeFinished { user_data, .. } => user_data,
-            Event::Disconnected { user_data, .. } => user_data,
+            Event::Shutdown { user_data, .. } => user_data,
             Event::RequestIn { user_data, .. } => user_data,
             Event::NotificationsOutAccept { user_data, .. } => user_data,
             Event::NotificationsOutReject { user_data, .. } => user_data,
             Event::NotificationsOutClose { user_data, .. } => user_data,
             Event::NotificationsInOpen { user_data, .. } => user_data,
             Event::NotificationsIn { user_data, .. } => user_data,
+            Event::NotificationsInClose { user_data, .. } => user_data,
         }
     }
 }
@@ -1464,7 +1483,7 @@ where
 
                 guarded
                     .events_tx
-                    .try_send(Event::Disconnected {
+                    .try_send(Event::Shutdown {
                         id: self.id,
                         in_overlay_network_indices,
                         out_overlay_network_indices,
