@@ -25,13 +25,13 @@ use alloc::{
     collections::BTreeSet,
     format,
     string::{String, ToString as _},
-    sync::Arc,
     vec::Vec,
 };
 use core::{
     fmt, iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
+    task::Poll,
     time::Duration,
 };
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
@@ -59,6 +59,7 @@ pub struct Config {
     /// used later in order to refer to a specific chain.
     pub chains: Vec<ChainConfig>,
 
+    // TODO: what about letting API users insert nodes later?
     pub known_nodes: Vec<(peer_id::PeerId, multiaddr::Multiaddr)>,
 
     /// Key used for the encryption layer.
@@ -332,7 +333,7 @@ where
             .map(|chain| chain.grandpa_protocol_config)
             .collect();
 
-        let peers_by_id = {
+        let mut peers_by_id = {
             let k0 = randomness.next_u64();
             let k1 = randomness.next_u64();
             let k2 = randomness.next_u64();
@@ -342,6 +343,45 @@ where
                 ahash::RandomState::with_seeds(k0, k1, k2, k3),
             )
         };
+
+        let mut peers = slab::Slab::with_capacity(config.peers_capacity);
+        let mut peers_chain_memberships = BTreeSet::new();
+
+        for (peer_id, multiaddr) in config.known_nodes {
+            let peer_index = match peers_by_id.entry(peer_id) {
+                hashbrown::hash_map::Entry::Occupied(entry) => *entry.get(),
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    let known_addresses = {
+                        let k0 = randomness.next_u64();
+                        let k1 = randomness.next_u64();
+                        let k2 = randomness.next_u64();
+                        let k3 = randomness.next_u64();
+                        hashbrown::HashMap::with_capacity_and_hasher(
+                            0,
+                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                        )
+                    };
+
+                    let peer_index = peers.insert(Peer {
+                        peer_id: entry.key().clone(),
+                        known_addresses,
+                    });
+
+                    // Register membership of this peer on this chain.
+                    for chain_index in 0..config.chains.len() {
+                        peers_chain_memberships.insert((chain_index, peer_index));
+                    }
+
+                    entry.insert(peer_index);
+                    peer_index
+                }
+            };
+
+            peers[peer_index]
+                .known_addresses
+                .entry(multiaddr)
+                .or_insert(None);
+        }
 
         ChainNetwork {
             libp2p: libp2p::Network::new(libp2p::Config {
@@ -354,10 +394,10 @@ where
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
             }),
             guarded: Mutex::new(Guarded {
-                peers: slab::Slab::with_capacity(config.peers_capacity),
+                peers,
                 peers_by_id,
                 peers_connections: BTreeSet::new(),
-                peers_chain_memberships: BTreeSet::new(),
+                peers_chain_memberships,
                 connections: slab::Slab::with_capacity(0), // TODO:
                 pending_in_accept: None,
                 chain_grandpa_config,
@@ -704,19 +744,90 @@ where
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
     pub async fn next_event<'a>(&'a self) -> Event<'a, TNow> {
-        let mut guarded = self.guarded.lock().await;
-
         loop {
-            if let Some((id, overlay_network_index, handshake)) = guarded.pending_in_accept.take() {
-                self.libp2p
-                    .accept_notifications_in(id, overlay_network_index, handshake)
-                    .await;
-            }
+            // The objective of the block of code below is to retreive the next event that
+            // happened on the underlying libp2p state machine by calling
+            // `self.libp2p.next_event()`.
+            //
+            // After an event has been grabbed from `self.libp2p`, some modifications will need to
+            // be performed in `self.guarded`. Since it can take a lot of time to retrieve an
+            // event, and since other methods of `ChainNetwork` need to lock `self.guarded`, it
+            // is undesirable to keep `self.guarded` locked while waiting for the
+            // `self.libp2p.next_event()` future to finish.
+            //
+            // A naive solution would be to grab an event from `self.libp2p` then lock
+            // `self.guarded` immediately after. Unfortunately, the user can technically call
+            // `next_event` multiple times simultaneously. If that is done, we want to avoid a
+            // situation where task A retrieves an event, then task B retrieves an event, then
+            // task B locks `self.guarded` before task A could. Some kind of locking must be
+            // performed to prevent this.
+            //
+            // Additionally, `guarded` contains some fields, such as `pending_in_accept`, that
+            // need to be processed ahead of events. Because processing these fields requires
+            // using `await`, this processing can be interrupted by the user, and as such no event
+            // should be grabbed.
+            //
+            // For all these reasons, the logic of the code below is as follows:
+            //
+            // - First, asynchronously lock `self.guarded`.
+            // - After `self.guarded` is locked, if some of its fields require ahead-of-events
+            // processing, continue with `maybe_inner_event` equal to `None`.
+            // - Otherwise, and while `self.guarded` is still locked, try to immediately grab an
+            // event with `self.libp2p.next_event()`.
+            // - If no such event is immediately available, register the task waker and release
+            // the lock. Once the waker is invoked (meaning that an event should be available),
+            // go back to step 1 (locking `self.guarded`).
+            // - If an event is available, continue with `maybe_inner_event` equal to `Some`.
+            //
+            let (mut guarded, maybe_inner_event) = {
+                let next_event_future = self.libp2p.next_event();
+                futures::pin_mut!(next_event_future);
 
-            let inner_event = self.libp2p.next_event().await;
+                let mut lock_acq_future = self.guarded.lock();
+                future::poll_fn(move |cx| {
+                    let lock = match lock_acq_future.poll_unpin(cx) {
+                        Poll::Ready(l) => l,
+                        Poll::Pending => return Poll::Pending,
+                    };
 
-            // `PeerId` of this connection, or expected `PeerId` if the connection hasn't yet
-            // finished its handshake.
+                    if lock.pending_in_accept.is_some() {
+                        return Poll::Ready((lock, None));
+                    }
+
+                    match next_event_future.poll_unpin(cx) {
+                        Poll::Ready(event) => Poll::Ready((lock, Some(event))),
+                        Poll::Pending => {
+                            lock_acq_future = self.guarded.lock();
+                            Poll::Pending
+                        }
+                    }
+                })
+                .await
+            };
+
+            // If `maybe_inner_event` is `None`, that means some ahead-of-events processing needs
+            // to be performed. No event has been grabbed from `self.libp2p`.
+            let inner_event = match maybe_inner_event {
+                Some(ev) => ev,
+                None => {
+                    // We can't use `take()` because the call to `accept_notifications_in` might
+                    // be interrupted by the user. The field is set to `None` only after the call
+                    // has succeeded.
+                    let (id, overlay_network_index, handshake) =
+                        guarded.pending_in_accept.as_ref().unwrap();
+                    self.libp2p
+                        .accept_notifications_in(*id, *overlay_network_index, handshake.clone()) // TODO: clone? :-/
+                        .await;
+                    guarded.pending_in_accept = None;
+                    continue;
+                }
+            };
+
+            // An event has been grabbed and is ready to be processed. `self.guarded` is still
+            // locked before the event has been grabbed.
+
+            // `PeerId` of the connection concerned by the event, or expected `PeerId` if the
+            // connection hasn't yet finished its handshake.
             let peer_id = &guarded
                 .connections
                 .get(*inner_event.user_data())
@@ -981,6 +1092,8 @@ where
             peer_id::PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
         };
 
+        // Select a random peer to query.
+
         let request_data = kademlia::build_find_node_request(random_peer_id.as_bytes());
         /*if let Some(target) = self.libp2p.peers_list_lock().await.next() {
             // TODO: better peer selection
@@ -1043,6 +1156,7 @@ where
             .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()))
         {
             if guarded.peers[peer_index].known_addresses.is_empty() {
+                panic!();
                 continue;
             }
 
@@ -1051,6 +1165,7 @@ where
                 .values()
                 .any(|a| a.is_some())
             {
+                panic!();
                 continue;
             }
 
