@@ -943,6 +943,7 @@ where
                     id,
                     substream_id,
                     protocol_index,
+                    user_data: local_connection_index,
                     ..
                 } => {
                     // Only protocol 0 (identify) can receive requests at the moment.
@@ -953,6 +954,7 @@ where
                         request: IdentifyRequestIn {
                             service: self,
                             id,
+                            connection_index: local_connection_index,
                             substream_id,
                         },
                     };
@@ -1394,19 +1396,27 @@ pub enum Event<'a, TNow> {
         peer_id: peer_id::PeerId,
     },
 
+    /// Received a new block announce from a peer.
+    ///
+    /// Can only happen after a [`Event::ChainConnected`] with the given `PeerId` and chain index
+    /// combination has happened.
     BlockAnnounce {
-        chain_index: usize,
+        /// Identity of the sender of the block announce.
         peer_id: peer_id::PeerId,
+        /// Index of the chain the block relates to.
+        chain_index: usize,
         announce: EncodedBlockAnnounce,
     },
 
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
+        /// Index of the chain the commit message relates to.
         chain_index: usize,
         message: EncodedGrandpaCommitMessage,
     },
 
-    /// Error in the protocol, such as failure to decode a message.
+    /// Error in the protocol in a connection, such as failure to decode a message.
+    // TODO: explain consequences
     ProtocolError {
         /// Peer that has caused the protocol error.
         peer_id: peer_id::PeerId,
@@ -1636,6 +1646,7 @@ where
 #[must_use]
 pub struct IdentifyRequestIn<'a, TNow> {
     service: &'a ChainNetwork<TNow>,
+    connection_index: usize,
     id: libp2p::ConnectionId,
     substream_id: libp2p::connection::established::SubstreamId,
 }
@@ -1646,32 +1657,51 @@ where
 {
     /// Queue the response to send back. The future provided by [`ChainNetwork::read_write`] will
     /// automatically be woken up.
+    ///
+    /// Has no effect if the connection that sends the request no longer exists.
     pub async fn respond(self, agent_version: &str) {
-        let response = protocol::build_identify_response(protocol::IdentifyResponse {
-            protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
-            agent_version,
-            ed25519_public_key: self.service.libp2p.noise_key().libp2p_public_ed25519_key(),
-            listen_addrs: iter::empty(),                // TODO:
-            observed_addr: &libp2p::Multiaddr::empty(), // TODO:
-            protocols: self
-                .service
-                .libp2p
-                .request_response_protocols()
-                .filter(|p| p.inbound_allowed)
-                .map(|p| &p.name[..])
-                .chain(
-                    self.service
-                        .libp2p
-                        .overlay_networks()
-                        .map(|p| &p.protocol_name[..]),
-                ),
-        })
-        .fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        });
+        let response = {
+            let guarded = self.service.guarded.lock().await;
 
-        self.service
+            // The connection referred to by `self.id` might no longer exist anymore.
+            // `self.connection_index` might no longer exist anymore or correspond to a different
+            // connection. As such, if it exists, we need to compare its id with `self.id` to make
+            // sure it still matches.
+            let observed_addr = match guarded.connections.get(self.connection_index) {
+                Some(c) => match &c.reached {
+                    Some(r) if r.inner_id == self.id => &c.address,
+                    _ => return,
+                },
+                None => return,
+            };
+
+            protocol::build_identify_response(protocol::IdentifyResponse {
+                protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
+                agent_version,
+                ed25519_public_key: self.service.libp2p.noise_key().libp2p_public_ed25519_key(),
+                listen_addrs: iter::empty(), // TODO:
+                observed_addr,
+                protocols: self
+                    .service
+                    .libp2p
+                    .request_response_protocols()
+                    .filter(|p| p.inbound_allowed)
+                    .map(|p| &p.name[..])
+                    .chain(
+                        self.service
+                            .libp2p
+                            .overlay_networks()
+                            .map(|p| &p.protocol_name[..]),
+                    ),
+            })
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            })
+        };
+
+        let _ = self
+            .service
             .libp2p
             .respond_in_request(self.id, self.substream_id, Ok(response))
             .await;

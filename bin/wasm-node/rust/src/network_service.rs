@@ -165,7 +165,8 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 chains,
                 known_nodes,
-                peers_capacity: 100, // TODO: ?
+                connections_capacity: 100, // TODO: ?
+                peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 16
