@@ -91,11 +91,16 @@ const startInstance = async (config) => {
     Buffer.from(result.instance.exports.memory.buffer)
       .writeUInt32LE(chainSpecsPointersContent[idx], chainSpecsPointersPtr + idx * 4);
   }
+  // Start initialization of smoldot.
   result.instance.exports.init(
     chainSpecsPointersPtr, chainSpecsPointersContent.length * 4,
     config.maxLogLevel
   );
 
+  // Smoldot has finished initializing.
+  // Since this function is an asynchronous function, it is possible that messages have been
+  // received from the parent while it was executing. These messages are now handled.
+  // Note that this same code is duplicated below.
   state.forEach((message) => {
     if (message.ty == 'request') {
       const len = Buffer.byteLength(message.request, 'utf8');
@@ -115,10 +120,12 @@ const startInstance = async (config) => {
 
 // `compat.setOnMessage` is the same as `onmessage = ...`, but works across environments.
 compat.setOnMessage((message) => {
+  // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
   if (state == null) {
+    // First ever message received by the worker. Always contains the initial configuration.
     state = [];
-    startInstance(message)
+    startInstance(message) // Note that `startInstance` is `async`.
 
   } else if (Array.isArray(state)) {
     // A JSON-RPC request has been received while the Wasm VM is still initializing. Queue it
@@ -126,6 +133,8 @@ compat.setOnMessage((message) => {
     state.push(message);
 
   } else {
+    // Everything is already initialized. Process the message synchronously.
+    // Note that this same code is duplicated above.
     if (message.ty == 'request') {
       const len = Buffer.byteLength(message.request, 'utf8');
       const ptr = state.exports.alloc(len);
