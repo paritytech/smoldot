@@ -1406,7 +1406,7 @@ where
 
                 guarded
                     .events_tx
-                    .try_send(Event::NotificationsOutReject {
+                    .try_send(Event::NotificationsOutClose {
                         id: self.id,
                         overlay_network_index,
                         user_data: self.user_data.clone(),

@@ -176,13 +176,27 @@ struct Guarded {
     /// This list is a superset of the list in [`ChainNetwork::libp2p`].
     connections: slab::Slab<Connection>,
 
-    pending_in_accept: Option<(libp2p::ConnectionId, usize, Vec<u8>)>,
+    to_process_pre_event: Option<ToProcessPreEvent>,
 
     /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
     ///
     /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
     /// is `None` if the chain doesn't use the Grandpa protocol.
     chain_grandpa_config: Vec<Option<GrandpaState>>,
+}
+
+/// See [`Guarded::to_process_pre_event`]
+enum ToProcessPreEvent {
+    AcceptNotificationsIn {
+        connection_id: libp2p::ConnectionId,
+        overlay_network_index: usize,
+        handshake: Vec<u8>,
+    },
+    QueueNotification {
+        connection_id: libp2p::ConnectionId,
+        overlay_network_index: usize,
+        packet: Vec<u8>,
+    },
 }
 
 /// See [`Guarded::peers`].
@@ -399,7 +413,7 @@ where
                 peers_connections: BTreeSet::new(),
                 peers_chain_memberships,
                 connections: slab::Slab::with_capacity(0), // TODO:
-                pending_in_accept: None,
+                to_process_pre_event: None,
                 chain_grandpa_config,
             }),
             chain_configs: config.chains,
@@ -762,7 +776,7 @@ where
             // task B locks `self.guarded` before task A could. Some kind of locking must be
             // performed to prevent this.
             //
-            // Additionally, `guarded` contains some fields, such as `pending_in_accept`, that
+            // Additionally, `guarded` contains some fields, such as `to_process_pre_event`, that
             // need to be processed ahead of events. Because processing these fields requires
             // using `await`, this processing can be interrupted by the user, and as such no event
             // should be grabbed in that situation.
@@ -790,7 +804,7 @@ where
                         Poll::Pending => return Poll::Pending,
                     };
 
-                    if lock.pending_in_accept.is_some() {
+                    if lock.to_process_pre_event.is_some() {
                         return Poll::Ready((lock, None));
                     }
 
@@ -813,12 +827,37 @@ where
                     // We can't use `take()` because the call to `accept_notifications_in` might
                     // be interrupted by the user. The field is set to `None` only after the call
                     // has succeeded.
-                    let (id, overlay_network_index, handshake) =
-                        guarded.pending_in_accept.as_ref().unwrap();
-                    self.libp2p
-                        .accept_notifications_in(*id, *overlay_network_index, handshake.clone()) // TODO: clone? :-/
-                        .await;
-                    guarded.pending_in_accept = None;
+                    match guarded.to_process_pre_event.as_ref().unwrap() {
+                        ToProcessPreEvent::AcceptNotificationsIn {
+                            connection_id,
+                            overlay_network_index,
+                            handshake,
+                        } => {
+                            self.libp2p
+                                .accept_notifications_in(
+                                    *connection_id,
+                                    *overlay_network_index,
+                                    handshake.clone(), // TODO: clone? :-/
+                                )
+                                .await;
+                        }
+                        ToProcessPreEvent::QueueNotification {
+                            connection_id,
+                            overlay_network_index,
+                            packet,
+                        } => {
+                            let _ = self
+                                .libp2p
+                                .queue_notification(
+                                    *connection_id,
+                                    *overlay_network_index,
+                                    packet.clone(),
+                                ) // TODO: clone? :-/
+                                .await;
+                        }
+                    }
+
+                    guarded.to_process_pre_event = None;
                     continue;
                 }
             };
@@ -922,7 +961,6 @@ where
                         // Nothing to do.
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
                         // Grandpa notification has been opened. Send neighbor packet.
-                        // TODO: below is not futures-cancellation-safe!
                         let grandpa_config = guarded.chain_grandpa_config[chain_index]
                             .as_ref()
                             .unwrap()
@@ -938,11 +976,15 @@ where
                                 a.extend_from_slice(b.as_ref());
                                 a
                             });
-                        // TODO: no await :-/
-                        let _ = self
-                            .libp2p
-                            .queue_notification(connection_id, overlay_network_index, packet)
-                            .await;
+
+                        // Sending the notification isn't done immediately because of
+                        // futures-cancellation-related concerns.
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event = Some(ToProcessPreEvent::QueueNotification {
+                            connection_id,
+                            overlay_network_index,
+                            packet,
+                        });
                     } else {
                         unreachable!()
                     }
@@ -968,7 +1010,7 @@ where
                     // TODO:
                 }
                 libp2p::Event::NotificationsInOpen {
-                    id,
+                    id: connection_id,
                     overlay_network_index,
                     remote_handshake,
                     user_data: local_connection_index,
@@ -1002,11 +1044,23 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        guarded.pending_in_accept = Some((id, overlay_network_index, handshake));
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::AcceptNotificationsIn {
+                                connection_id,
+                                handshake,
+                                overlay_network_index,
+                            });
                     } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 {
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        guarded.pending_in_accept = Some((id, overlay_network_index, Vec::new()));
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::AcceptNotificationsIn {
+                                connection_id,
+                                handshake: Vec::new(),
+                                overlay_network_index,
+                            });
                     } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 {
                         // Grandpa substream.
                         let chain_config = &self.chain_configs
@@ -1016,7 +1070,13 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        guarded.pending_in_accept = Some((id, overlay_network_index, handshake));
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::AcceptNotificationsIn {
+                                connection_id,
+                                handshake,
+                                overlay_network_index,
+                            });
                     } else {
                         unreachable!()
                     }
