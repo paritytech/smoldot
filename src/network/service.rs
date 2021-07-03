@@ -247,6 +247,12 @@ struct ConnectionReached {
     inner_id: libp2p::ConnectionId,
 }
 
+enum SubstreamState {
+    Closed,
+    OpeningOut,
+    In,
+}
+
 // Update this when a new request response protocol is added.
 const REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN: usize = 4;
 // Update this when a new notifications protocol is added.
@@ -1054,6 +1060,10 @@ where
                     remote_handshake,
                     user_data: local_connection_index,
                 } => {
+                    // Remote requests to open a notifications substream.
+
+                    let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
                     if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
                         if let Err(err) =
                             protocol::decode_block_announces_handshake(&remote_handshake)
@@ -1065,9 +1075,7 @@ where
                             };
                         }
 
-                        let chain_config = &self.chain_configs
-                            [overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
-
+                        let chain_config = &self.chain_configs[chain_index];
                         let handshake = protocol::encode_block_announces_handshake(
                             protocol::BlockAnnouncesHandshakeRef {
                                 best_hash: &chain_config.best_hash,
@@ -1102,10 +1110,7 @@ where
                             });
                     } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 {
                         // Grandpa substream.
-                        let chain_config = &self.chain_configs
-                            [overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
-
-                        let handshake = chain_config.role.scale_encoding().to_vec();
+                        let handshake = self.chain_configs[chain_index].role.scale_encoding().to_vec();
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
