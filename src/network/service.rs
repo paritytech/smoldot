@@ -31,10 +31,10 @@ use core::{
     fmt, iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
-    task::Poll,
+    task::{Poll, Waker},
     time::Duration,
 };
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use futures::{lock::Mutex, prelude::*};
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
 /// Configuration for a [`ChainNetwork`].
@@ -148,9 +148,6 @@ pub struct ChainNetwork<TNow> {
     /// See [`Config::chains`].
     chain_configs: Vec<ChainConfig>,
 
-    substreams_open_tx: Mutex<mpsc::Sender<()>>,
-    substreams_open_rx: Mutex<mpsc::Receiver<()>>,
-
     /// Generator for randomness.
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
 }
@@ -193,6 +190,9 @@ struct Guarded {
     /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
     /// is `None` if the chain doesn't use the Grandpa protocol.
     chain_grandpa_config: Vec<Option<GrandpaState>>,
+
+    // TODO: doc
+    substream_open_waker: Option<Waker>,
 }
 
 /// See [`Guarded::to_process_pre_event`]
@@ -349,8 +349,6 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
         let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
 
-        let (substreams_open_tx, substreams_open_rx) = mpsc::channel(0);
-
         let chain_grandpa_config = config
             .chains
             .iter()
@@ -425,10 +423,9 @@ where
                 connections: slab::Slab::with_capacity(config.connections_capacity),
                 to_process_pre_event: None,
                 chain_grandpa_config,
+                substream_open_waker: None,
             }),
             chain_configs: config.chains,
-            substreams_open_tx: Mutex::new(substreams_open_tx),
-            substreams_open_rx: Mutex::new(substreams_open_rx),
             randomness: Mutex::new(randomness),
         }
     }
@@ -898,9 +895,10 @@ where
                         todo!() // TODO:
                     }
 
-                    // TODO: no awaiting
-                    let _ = self.substreams_open_tx.lock().await.try_send(());
-                    // TODO: don't do it if already have a connection
+                    if let Some(waker) = guarded.substream_open_waker.take() {
+                        waker.wake();
+                    }
+
                     return Event::Connected(actual_peer_id);
                 }
 
@@ -931,6 +929,10 @@ where
                         }
                         out_overlay_network_indices
                     };
+
+                    if let Some(waker) = guarded.substream_open_waker.take() {
+                        waker.wake();
+                    }
 
                     // TODO: don't do it if connection remaining
                     return Event::Disconnected {
@@ -1038,6 +1040,10 @@ where
                             chain_index,
                         };
                     } else {
+                    }
+
+                    if let Some(waker) = guarded.substream_open_waker.take() {
+                        waker.wake();
                     }
 
                     // TODO:
@@ -1179,6 +1185,10 @@ where
                     ..
                 } => {
                     // TODO: ?
+
+                    if let Some(waker) = guarded.substream_open_waker.take() {
+                        waker.wake();
+                    }
                 }
             }
         }
@@ -1228,9 +1238,9 @@ where
 
     /// Waits until a connection is in a state in which a substream can be opened.
     pub async fn next_substream<'a>(&'a self) -> SubstreamOpen<'a, TNow> {
-        let guarded = self.guarded.lock().await;
-
         loop {
+            let guarded = self.guarded.lock().await;
+
             // TODO: O(n) :-/
             for chain_index in 0..self.chain_configs.len() {
                 // Grab node for which we have an established outgoing connections but haven't yet
@@ -1262,7 +1272,18 @@ where
                 }
             }
 
-            // TODO: wait
+            // TODO: explain
+            // TODO: if `next_substream` is called multiple times simultaneously, all but the first will deadlock
+            let mut guarded = Some(guarded);
+            future::poll_fn(move |cx| {
+                if let Some(mut guarded) = guarded.take() {
+                    guarded.substream_open_waker = Some(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await;
         }
     }
 

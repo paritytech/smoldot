@@ -802,19 +802,14 @@ where
         // Update the waker.
         connection_lock.waker = Some(tx);
 
+        // TODO: not great to repeat it
         if connection_lock.pending_event.is_some() {
             let mut guarded = self.guarded.lock().await;
             connection_lock.propagate_pending_event(&mut guarded).await;
             debug_assert!(connection_lock.pending_event.is_none());
         }
 
-        connection_lock.read_write(
-            now,
-            &self.noise_key,
-            incoming_buffer,
-            outgoing_buffer,
-            &mut read_write,
-        )?;
+        connection_lock.read_write(now, self, incoming_buffer, outgoing_buffer, &mut read_write)?;
 
         if connection_lock.pending_event.is_some() {
             let mut guarded = self.guarded.lock().await;
@@ -825,8 +820,8 @@ where
         Ok(read_write)
     }
 
-    async fn build_connection_config(&self) -> established::Config {
-        let randomness_seed = self.randomness_seeds.lock().await.gen();
+    fn build_connection_config(&self) -> established::Config {
+        let randomness_seed = [0; 32]; // TODO: self.randomness_seeds.lock().await.gen(); annoying because of async and future cancellation stuff
         established::Config {
             notifications_protocols: self
                 .overlay_networks
@@ -1074,7 +1069,7 @@ where
     fn read_write<'a>(
         &mut self,
         now: TNow,
-        noise_key: &connection::NoiseKey,
+        parent: &Network<TConn, TNow>,
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         read_write: &mut ReadWrite<TNow>,
@@ -1125,7 +1120,7 @@ where
 
                 Ok(())
             }
-            ConnectionInner::Handshake(mut handshake) => {
+            ConnectionInner::Handshake(handshake) => {
                 let incoming_buffer = match incoming_buffer {
                     Some(b) => b,
                     None => {
@@ -1164,11 +1159,13 @@ where
                             debug_assert!(self.pending_event.is_none());
                             self.pending_event =
                                 Some(PendingEvent::HandshakeFinished(remote_peer_id));
-                            // TODO: self.connection = ConnectionInner::Established(connection.into_connection(self.build_connection_config()));
+                            self.connection = ConnectionInner::Established(
+                                connection.into_connection(parent.build_connection_config()),
+                            );
                             break;
                         }
                         connection::handshake::Handshake::NoiseKeyRequired(key) => {
-                            result = key.resume(noise_key).into();
+                            result = key.resume(&parent.noise_key).into();
                         }
                     }
                 }
