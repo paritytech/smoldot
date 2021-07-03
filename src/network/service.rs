@@ -39,6 +39,9 @@ use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
+    /// Capacity to initially reserve to the list of connections.
+    pub connections_capacity: usize,
+
     /// Capacity to initially reserve to the list of peers.
     pub peers_capacity: usize,
 
@@ -176,6 +179,13 @@ struct Guarded {
     /// This list is a superset of the list in [`ChainNetwork::libp2p`].
     connections: slab::Slab<Connection>,
 
+    /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
+    /// [`ChainNetwork::libp2p`]. This event might lead to some asynchronous post-processing
+    /// being needed. Because the user can interrupt the future returned by
+    /// [`ChainNetwork::next_event`] at any point in time, this post-processing cannot be
+    /// immediately performed, as the user could could interrupt the future and lose the event.
+    /// Instead, the necessary post-processing is stored in this field. This field is then
+    /// processed before the next event is pulled.
     to_process_pre_event: Option<ToProcessPreEvent>,
 
     /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
@@ -399,7 +409,7 @@ where
 
         ChainNetwork {
             libp2p: libp2p::Network::new(libp2p::Config {
-                capacity: 0, // TODO:
+                capacity: config.connections_capacity,
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: inner_randomness_seed,
@@ -412,7 +422,7 @@ where
                 peers_by_id,
                 peers_connections: BTreeSet::new(),
                 peers_chain_memberships,
-                connections: slab::Slab::with_capacity(0), // TODO:
+                connections: slab::Slab::with_capacity(config.connections_capacity),
                 to_process_pre_event: None,
                 chain_grandpa_config,
             }),
@@ -818,6 +828,7 @@ where
                 })
                 .await
             };
+            let mut guarded = &mut *guarded; // Avoid borrow checker issues.
 
             // If `maybe_inner_event` is `None`, that means some ahead-of-events processing needs
             // to be performed. No event has been grabbed from `self.libp2p`.
@@ -867,6 +878,7 @@ where
             // In order to avoid futures cancellation issues, no `await` should be used below. If
             // something requires asynchronous processing, it should instead be added as a field
             // in `self.guarded`.
+            debug_assert!(guarded.to_process_pre_event.is_none());
 
             // `PeerId` of the connection concerned by the event, or expected `PeerId` if the
             // connection hasn't yet finished its handshake.
@@ -891,29 +903,46 @@ where
                     // TODO: don't do it if already have a connection
                     return Event::Connected(actual_peer_id);
                 }
+
                 libp2p::Event::Shutdown {
                     id: connection_id,
                     mut out_overlay_network_indices,
                     user_data: local_connection_index,
                     ..
                 } => {
-                    out_overlay_network_indices
-                        .retain(|i| (i % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0);
-                    for elem in &mut out_overlay_network_indices {
-                        *elem /= NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                    }
+                    let peer_id = peer_id.clone();
+
+                    // Remove this connection from the local state in `guarded`.
+                    let _removed_connection = guarded.connections.remove(local_connection_index);
+                    debug_assert_eq!(_removed_connection.reached.unwrap().inner_id, connection_id);
+                    debug_assert_eq!(_removed_connection.peer_id, peer_id);
+                    let peer_index = *guarded.peers_by_id.get(&peer_id).unwrap();
+                    let _was_removed = guarded
+                        .peers_connections
+                        .remove(&(peer_index, local_connection_index));
+                    debug_assert!(_was_removed);
+
+                    // Adjust `out_overlay_network_indices` to become `chain_indices`.
+                    let chain_indices = {
+                        out_overlay_network_indices
+                            .retain(|i| (i % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0);
+                        for elem in &mut out_overlay_network_indices {
+                            *elem /= NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        }
+                        out_overlay_network_indices
+                    };
 
                     // TODO: don't do it if connection remaining
                     return Event::Disconnected {
-                        peer_id: peer_id.clone(),
-                        chain_indices: out_overlay_network_indices,
+                        peer_id,
+                        chain_indices,
                     };
                 }
+
                 libp2p::Event::RequestIn {
                     id,
                     substream_id,
                     protocol_index,
-                    user_data: local_connection_index,
                     ..
                 } => {
                     // Only protocol 0 (identify) can receive requests at the moment.
@@ -928,6 +957,7 @@ where
                         },
                     };
                 }
+
                 libp2p::Event::NotificationsOutAccept {
                     id: connection_id,
                     overlay_network_index,
@@ -991,6 +1021,7 @@ where
 
                     // TODO:
                 }
+
                 libp2p::Event::NotificationsOutClose {
                     id,
                     overlay_network_index,
@@ -1009,6 +1040,7 @@ where
 
                     // TODO:
                 }
+
                 libp2p::Event::NotificationsInOpen {
                     id: connection_id,
                     overlay_network_index,
@@ -1081,6 +1113,7 @@ where
                         unreachable!()
                     }
                 }
+
                 libp2p::Event::NotificationsIn {
                     id: connection_id,
                     overlay_network_index,
@@ -1136,6 +1169,7 @@ where
                         unreachable!()
                     }
                 }
+
                 libp2p::Event::NotificationsInClose {
                     id,
                     overlay_network_index,
