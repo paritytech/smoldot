@@ -115,7 +115,7 @@
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use connection::{established, handshake};
 use core::{
-    iter, mem,
+    cmp, iter, mem,
     num::NonZeroUsize,
     ops::{Add, Sub},
     pin::Pin,
@@ -868,6 +868,9 @@ pub enum Event<TConn> {
     /// zero or more [`Event::NotificationsOutClose`] and [`Event::NotificationsInClose`] events
     /// grouped into one.
     ///
+    /// Keep in mind that this event can happen for connections that haven't finished their
+    /// handshake.
+    ///
     /// > **Note**: The [`Network::read_write`] method signals the end of the connection
     /// >           orthogonally to this shutdown event. In other words, you must still continue
     /// >           to call [`Network::read_write`] with that [`ConnectionId`] until it is no
@@ -1024,6 +1027,7 @@ pub enum ConnectionError {
     #[display(fmt = "{}", _0)]
     Handshake(connection::handshake::HandshakeError),
     /// Mismatch between the actual [`PeerId`] and the [`PeerId`] expected by the local node.
+    // TODO: unused; move
     #[display(
         fmt = "Mismatch between the actual PeerId ({}) and PeerId expected by the local node",
         actual
@@ -1071,7 +1075,7 @@ where
         now: TNow,
         parent: &Network<TConn, TNow>,
         incoming_buffer: Option<&[u8]>,
-        outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
+        mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         read_write: &mut ReadWrite<TNow>,
     ) -> Result<(), ConnectionError> {
         debug_assert!(self.pending_event.is_none());
@@ -1120,37 +1124,55 @@ where
 
                 Ok(())
             }
-            ConnectionInner::Handshake(handshake) => {
-                let incoming_buffer = match incoming_buffer {
+
+            ConnectionInner::Handshake(mut handshake) => {
+                let mut incoming_buffer = match incoming_buffer {
                     Some(b) => b,
                     None => {
-                        todo!(); // TODO:
                         debug_assert_eq!(read_write.read_bytes, 0);
                         read_write.write_close = true;
+                        debug_assert!(self.pending_event.is_none());
+                        self.pending_event = Some(PendingEvent::Disconnect);
                         return Ok(());
                     }
                 };
 
                 // TODO: check timeout
 
-                let mut result = {
-                    let (result, num_read, num_written) =
-                        match handshake.read_write(incoming_buffer, outgoing_buffer) {
-                            Ok(rw) => rw,
-                            Err(err) => {
-                                return Err(ConnectionError::Handshake(err));
-                            }
-                        };
+                loop {
+                    let (result, num_read, num_written) = match handshake.read_write(
+                        incoming_buffer,
+                        (&mut outgoing_buffer.0, &mut outgoing_buffer.1),
+                    ) {
+                        Ok(rw) => rw,
+                        Err(err) => {
+                            return Err(ConnectionError::Handshake(err));
+                        }
+                    };
+
                     read_write.read_bytes += num_read;
                     read_write.written_bytes += num_written;
-                    result
-                };
 
-                loop {
+                    // TODO: dirty code
+                    incoming_buffer = &incoming_buffer[num_read..];
+                    let out_buf_0_len = outgoing_buffer.0.len();
+                    outgoing_buffer = (
+                        &mut outgoing_buffer.0[cmp::min(num_written, out_buf_0_len)..],
+                        &mut outgoing_buffer.1[num_written.saturating_sub(out_buf_0_len)..],
+                    );
+                    if outgoing_buffer.0.is_empty() {
+                        outgoing_buffer = (outgoing_buffer.1, outgoing_buffer.0);
+                    }
+
                     match result {
-                        connection::handshake::Handshake::Healthy(updated_handshake) => {
+                        connection::handshake::Handshake::Healthy(updated_handshake)
+                            if num_written == 0 && num_read == 0 =>
+                        {
                             self.connection = ConnectionInner::Handshake(updated_handshake);
                             break;
+                        }
+                        connection::handshake::Handshake::Healthy(updated_handshake) => {
+                            handshake = updated_handshake;
                         }
                         connection::handshake::Handshake::Success {
                             remote_peer_id,
@@ -1165,13 +1187,14 @@ where
                             break;
                         }
                         connection::handshake::Handshake::NoiseKeyRequired(key) => {
-                            result = key.resume(&parent.noise_key).into();
+                            handshake = key.resume(&parent.noise_key).into();
                         }
                     }
                 }
 
                 Ok(())
             }
+
             ConnectionInner::Errored(err) => return Err(err),
             ConnectionInner::Dead => panic!(),
             ConnectionInner::Poisoned => unreachable!(),

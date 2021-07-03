@@ -934,7 +934,6 @@ where
                         waker.wake();
                     }
 
-                    // TODO: don't do it if connection remaining
                     return Event::Disconnected {
                         peer_id,
                         chain_indices,
