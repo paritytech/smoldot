@@ -666,6 +666,7 @@ where
         Ok(())
     }
 
+    // TODO: user could be tricked into accepting the wrong inbound notification request at the moment; prevent remote from opening more substreams as long as the current inbound hasn't been either accepted or refused
     pub async fn accept_notifications_in(
         &self,
         connection: ConnectionId,
@@ -830,7 +831,6 @@ where
     /// Panics if `connection_id` isn't a valid connection.
     ///
     // TODO: document the `write_close` thing
-    // TODO: futures cancellation concerns
     pub async fn read_write<'a>(
         &self,
         connection_id: ConnectionId,
@@ -859,10 +859,9 @@ where
             write_close: false,
         };
 
-        // Update the waker.
         connection_lock.waker = Some(tx);
 
-        // TODO: not great to repeat it
+        // TODO: not great to have this exact block of code twice; also, should be a loop normally, but it's complicated because of having to advance buffers
         if connection_lock.pending_event.is_some() {
             let mut guarded = self.guarded.lock().await;
             connection_lock.propagate_pending_event(&mut guarded).await;
@@ -1102,9 +1101,16 @@ pub enum ConnectionError {
 #[derive(Debug, derive_more::Display)]
 pub enum OpenNotificationsSubstreamError {
     /// The demanded [`ConnectionId`] isn't or is no longer valid.
+    ///
+    /// Keep in mind that connections can be closed by the remote at any time. This error being
+    /// returned doesn't indicate a state mismatch, but rather usually that the connection has
+    /// just been closed, and that corresponding events have been queued but not necessarily
+    /// processed yet.
     BadConnection,
+
     /// The connection is still in its handshake phase.
     NotEstablished,
+
     /// An outgoing substream already exists on that connection and overlay network index.
     DuplicateSubstream,
 }
