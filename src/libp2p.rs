@@ -124,7 +124,7 @@ use core::{
 };
 use futures::{
     channel::{mpsc, oneshot},
-    lock::Mutex,
+    lock::{Mutex, MutexGuard},
     prelude::*,
 }; // TODO: no_std-ize
 use rand::Rng as _;
@@ -468,6 +468,7 @@ where
         }
 
         // Wait for the result of the request. Can take a long time (i.e. several seconds).
+        // TODO: cancel the request if the future is dropped?
         match receive_result.await {
             Ok(r) => r,
             Err(_) => Err(RequestError::ConnectionClosed),
@@ -481,36 +482,80 @@ where
         overlay_network_index: usize,
         now: TNow,
         handshake: impl Into<Vec<u8>>,
-    ) {
+    ) -> Result<(), OpenNotificationsSubstreamError> {
         // Because the user can cancel the future at any `await` point, all the asynchronous
         // operations are performed ahead of any state modification.
 
-        let mut guarded = self.guarded.lock().await;
-
         // Obtain the connect to use to send the request.
-        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
-            let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap(); // TODO: don't unwrap, return error
-            guarded.connections[connection_index].clone()
+        let (connection_index, connection_arc): (_, Arc<Mutex<Connection<_, _>>>) = {
+            let guarded = self.guarded.lock().await;
+            let connection_index = *match guarded.connections_by_id.get(&connection_id) {
+                Some(idx) => idx,
+                None => return Err(OpenNotificationsSubstreamError::BadConnection),
+            };
+
+            (
+                connection_index,
+                guarded.connections[connection_index].clone(),
+            )
         };
 
+        // As explained in the implementation notes at the top, `guarded` must always be locked
+        // after the connection.
         let mut connection_lock = connection_arc.lock().await;
+        let mut guarded = self.guarded.lock().await;
+
+        // Verify that the connection is still the same as was found before `guarded` got unlocked
+        // and locked again.
+        match guarded.connections.get_mut(connection_index) {
+            Some(c) if Arc::ptr_eq(c, &connection_arc) => {}
+            _ => return Err(OpenNotificationsSubstreamError::BadConnection),
+        }
 
         // In order to guarantee a proper ordering of events, any pending event must first be
         // delivered.
         connection_lock.propagate_pending_event(&mut guarded).await;
         debug_assert!(connection_lock.pending_event.is_none());
 
-        let substream_id = if let Some(established) = connection_lock.connection.as_established() {
-            established.open_notifications_substream(
+        // Verify that the connection doesn't already already have a substream with the same
+        // overlay network index.
+        if guarded
+            .connection_overlays
+            .range(
+                (
+                    connection_index,
+                    overlay_network_index,
+                    SubstreamDirection::Out,
+                    SubstreamState::min_value(),
+                )
+                    ..=(
+                        connection_index,
+                        overlay_network_index,
+                        SubstreamDirection::Out,
+                        SubstreamState::max_value(),
+                    ),
+            )
+            .count()
+            != 0
+        {
+            return Err(OpenNotificationsSubstreamError::DuplicateSubstream);
+        }
+
+        // Update the state of the inner connection state machine with the new substream.
+        let substream_id = match &mut connection_lock.connection {
+            ConnectionInner::Established(established) => established.open_notifications_substream(
                 now,
                 overlay_network_index,
                 handshake.into(),
                 overlay_network_index,
-            )
-        } else {
-            // The connection no longer exists. This state mismatch is a normal situation. See
-            // the implementations notes at the top of the file for more information.
-            return;
+            ),
+            ConnectionInner::Handshake(_) => {
+                return Err(OpenNotificationsSubstreamError::NotEstablished)
+            }
+            ConnectionInner::Errored(_) | ConnectionInner::Dead => {
+                return Err(OpenNotificationsSubstreamError::BadConnection)
+            }
+            ConnectionInner::Poisoned => unreachable!(),
         };
 
         // Wake up the task dedicated to this connection in order for the substream to start
@@ -518,6 +563,21 @@ where
         if let Some(waker) = connection_lock.waker.take() {
             let _ = waker.send(());
         }
+        drop::<MutexGuard<_>>(connection_lock);
+
+        // Update the state of `guarded`.
+        let _prev_value = guarded.connection_overlays.insert(
+            (
+                connection_index,
+                overlay_network_index,
+                SubstreamDirection::Out,
+                SubstreamState::Pending,
+            ),
+            substream_id,
+        );
+        debug_assert!(_prev_value.is_none());
+
+        Ok(())
     }
 
     /// Adds a notification to the queue of notifications to send to the given peer.
@@ -1036,6 +1096,17 @@ pub enum ConnectionError {
         /// Actual [`PeerId`] that the remote reports.
         actual: PeerId,
     },
+}
+
+/// See [`Network::open_notifications_substream`].
+#[derive(Debug, derive_more::Display)]
+pub enum OpenNotificationsSubstreamError {
+    /// The demanded [`ConnectionId`] isn't or is no longer valid.
+    BadConnection,
+    /// The connection is still in its handshake phase.
+    NotEstablished,
+    /// An outgoing substream already exists on that connection and overlay network index.
+    DuplicateSubstream,
 }
 
 /// Data structure holding the state of a single established (i.e. post-handshake) connection.

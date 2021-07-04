@@ -451,12 +451,35 @@ where
         self.chain_configs.len()
     }
 
-    pub fn add_incoming_connection(
+    /// Adds an incoming connection to the state machine.
+    ///
+    /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
+    /// yet.
+    ///
+    /// After this function has returned, you must process the connection with
+    /// [`ChainNetwork::read_write`].
+    #[must_use]
+    pub async fn add_incoming_connection(
         &self,
         local_listen_address: &multiaddr::Multiaddr,
         remote_addr: multiaddr::Multiaddr,
     ) -> ConnectionId {
-        todo!()
+        let mut guarded = self.guarded.lock().await;
+
+        let local_connections_entry = guarded.connections.vacant_entry();
+
+        let inner_id = self
+            .libp2p
+            .insert(false, local_connections_entry.key())
+            .await;
+
+        local_connections_entry.insert(Connection {
+            address: remote_addr,
+            peer_id: todo!(), // TODO: `None` or something
+            reached: Some(ConnectionReached { inner_id }),
+        });
+
+        ConnectionId(inner_id)
     }
 
     /// Update the state of the local node with regards to GrandPa rounds.
@@ -712,10 +735,14 @@ where
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
+    /// After this function has returned, you must process the connection with
+    /// [`ChainNetwork::read_write`].
+    ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
+    #[must_use]
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
 
@@ -900,6 +927,8 @@ where
                     if *peer_id != actual_peer_id {
                         todo!() // TODO:
                     }
+
+                    // TODO: need to handle incoming connections properly here
 
                     if let Some(waker) = guarded.substream_open_waker.take() {
                         waker.wake();
@@ -1110,7 +1139,10 @@ where
                             });
                     } else if (overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 {
                         // Grandpa substream.
-                        let handshake = self.chain_configs[chain_index].role.scale_encoding().to_vec();
+                        let handshake = self.chain_configs[chain_index]
+                            .role
+                            .scale_encoding()
+                            .to_vec();
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
@@ -1401,6 +1433,10 @@ pub enum Event<'a, TNow> {
     Connected(peer_id::PeerId),
 
     /// A transport-level connection (e.g. a TCP socket) has been closed.
+    ///
+    /// This event is called unconditionally when a connection with the given peer has been
+    /// closed. If `chain_indices` isn't empty, this event is also equivalent to one or more
+    /// [`Event::ChainDisconnected`] events.
     Disconnected {
         peer_id: peer_id::PeerId,
         chain_indices: Vec<usize>,
@@ -1417,8 +1453,8 @@ pub enum Event<'a, TNow> {
         best_hash: [u8; 32],
     },
     ChainDisconnected {
-        chain_index: usize,
         peer_id: peer_id::PeerId,
+        chain_index: usize,
     },
 
     /// Received a new block announce from a peer.
