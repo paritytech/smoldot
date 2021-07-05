@@ -77,10 +77,6 @@ pub struct ConfigParachain {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService>,
 
-    /// Index in the network service of [`Config::network_service`] of the relay chain of this
-    /// parachain.
-    pub relay_network_chain_index: usize,
-
     /// Id of the parachain within the relay chain.
     ///
     /// This is an arbitrary number used to identify the parachain within the storage of the

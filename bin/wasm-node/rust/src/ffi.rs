@@ -22,7 +22,7 @@ use core::{
     convert::TryFrom as _,
     fmt,
     future::Future,
-    marker,
+    marker, mem,
     ops::{Add, Sub},
     pin::Pin,
     slice, str,
@@ -65,7 +65,7 @@ pub(crate) fn unix_time() -> Duration {
 }
 
 /// Spawn a background task that runs forever.
-fn spawn_task(future: impl Future<Output = ()> + Send + 'static) {
+pub fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
     struct Waker {
         done: atomic::AtomicBool,
         wake_up_registered: atomic::AtomicBool,
@@ -448,7 +448,18 @@ fn alloc(len: u32) -> u32 {
     u32::try_from(ptr as *mut u8 as usize).unwrap()
 }
 
-fn init(chain_specs_pointers_ptr: u32, chain_specs_pointers_len: u32, max_log_level: u32) {
+fn init(max_log_level: u32) {
+    let max_log_level = match max_log_level {
+        0 => log::LevelFilter::Off,
+        1 => log::LevelFilter::Error,
+        2 => log::LevelFilter::Warn,
+        3 => log::LevelFilter::Info,
+        4 => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Trace,
+    };
+
+    let mut client = super::Client::new(max_log_level);
+
     let chain_specs_pointers_ptr = usize::try_from(chain_specs_pointers_ptr).unwrap();
     let chain_specs_pointers_len = usize::try_from(chain_specs_pointers_len).unwrap();
 
@@ -484,7 +495,7 @@ fn init(chain_specs_pointers_ptr: u32, chain_specs_pointers_len: u32, max_log_le
 
         let chain_spec = String::from_utf8(Vec::from(chain_spec)).expect("non-utf8 chain spec");
 
-        chain_specs.push(super::ChainConfig {
+        client.add_chain(super::AddChainConfig {
             specification: chain_spec,
             json_rpc_running: true,
         });
@@ -492,16 +503,7 @@ fn init(chain_specs_pointers_ptr: u32, chain_specs_pointers_len: u32, max_log_le
 
     debug_assert_eq!(chain_specs.len(), chain_specs.capacity());
 
-    let max_log_level = match max_log_level {
-        0 => log::LevelFilter::Off,
-        1 => log::LevelFilter::Error,
-        2 => log::LevelFilter::Warn,
-        3 => log::LevelFilter::Info,
-        4 => log::LevelFilter::Debug,
-        _ => log::LevelFilter::Trace,
-    };
-
-    spawn_task(super::start_client(chain_specs.into_iter(), max_log_level));
+    mem::forget(client); // TODO:
 }
 
 pub(crate) enum JsonRpcMessage {

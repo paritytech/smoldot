@@ -72,9 +72,9 @@ extern "C" {
     /// Also used to send subscriptions notifications.
     ///
     /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
-    /// virtual machine at offset `ptr` and with length `len`. `chain_index` is the chain
-    /// that the request was made to. `user_data` is the value that was passed to [`json_rpc_send`].
-    pub fn json_rpc_respond(ptr: u32, len: u32, chain_index: u32, user_data: u32);
+    /// virtual machine at offset `ptr` and with length `len`. `chain_id` is the chain
+    /// that the request was made to.
+    pub fn json_rpc_respond(ptr: u32, len: u32, chain_id: u32);
 
     /// Client is emitting a log entry.
     ///
@@ -193,33 +193,20 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 
 /// Initializes the client.
 ///
-/// Use [`alloc`] to allocate one buffer for each spec of each chain that needs to be started.
-/// The buffers **must** have been allocated with [`alloc`]. They are freed when this function is
-/// called.
-/// Write the chain specs in these buffers.
-///
-/// Then, use [`alloc`] to allocate one additional buffer containing a list of pairs of
-/// little-endian u32s. Each pair must be a pointer and a length to the buffers allocated in the
-/// previous step.
-///
-/// Then, pass the pointer and length (in bytes) of this last buffer to this function.
-///
-/// > **Note**: This API is similar to the one of `writev(2)`, which you might be familiar with.
-///
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
 #[no_mangle]
-pub extern "C" fn init(
-    chain_specs_pointers_ptr: u32,
-    chain_specs_pointers_len: u32,
-    max_log_level: u32,
-) {
-    super::init(
-        chain_specs_pointers_ptr,
-        chain_specs_pointers_len,
-        max_log_level,
-    )
+pub extern "C" fn init(max_log_level: u32) {
+    super::init(max_log_level)
 }
+
+/// Use [`alloc`] to allocate a buffer for the spec of the chain that needs to be started.
+/// This buffer **must** have been allocated with [`alloc`]. It is freed when this function is
+/// called.
+///
+/// Write the chain spec in this buffer. Then, pass the pointer and length (in bytes) as parameter
+/// to this function.
+pub extern "C" fn add_chain(chain_spec_pointer: u32, chain_spec_len: u32) {}
 
 /// Emit a JSON-RPC request. If the initialization (see [`init`]) hasn't been started or hasn't
 /// finished yet, the request will still be queued.
@@ -237,8 +224,8 @@ pub extern "C" fn init(
 ///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_index: u32, user_data: u32) {
-    super::json_rpc_send(text_ptr, text_len, chain_index, user_data)
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
+    super::json_rpc_send(text_ptr, text_len, chain_id)
 }
 
 /// Unsubscribe all the JSON-RPC subscriptions for a source. Should be called when disconnecting from

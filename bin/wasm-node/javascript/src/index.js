@@ -57,7 +57,7 @@ export async function start(config) {
   // sent to it an `unsubscribeAll`. It is also what makes it possible for `cancelAll` to cancel
   // requests that are not subscription notifications, even while the worker only supports
   // cancelling subscriptions.
-  let pendingCancelConfirmations = [];
+  let pendingConfirmations = [];
 
   // Build a promise that will be resolved or rejected after the initalization (that happens in
   // the worker) has finished.
@@ -79,12 +79,37 @@ export async function start(config) {
         initPromiseReject = null;
         initPromiseResolve = null;
       } else if (config.jsonRpcCallback) {
-        if (pendingCancelConfirmations.findIndex(elem => elem == message.userData) === -1)
+        if (pendingConfirmations.findIndex(elem => elem == message.userData) === -1)
           config.jsonRpcCallback(message.data, message.chainIndex, message.userData);
       }
 
+    } else if (message.kind = 'chainAddedOk') {
+      const expected = pendingConfirmations.pop();
+      worker.postMessage({
+        ty: 'request',
+        request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
+        chainId: message.chainId,
+      });
+
+      expected.resolve({
+        sendJsonRpc: (request) => {
+          if (workerError)
+            throw workerError;
+          worker.postMessage({ ty: 'request', request, chainIndex, userData: userData || 0 });
+        },
+        remove: () => {
+          if (workerError)
+            throw workerError;
+          worker.postMessage({ ty: 'request', request, chainIndex, userData: userData || 0 });
+        }
+      });
+
+    } else if (message.kind = 'chainAddedErr') {
+      const expected = pendingConfirmations.pop();
+      expected.reject(message.error);
+
     } else if (message.kind == 'unsubscribeAllConfirmation') {
-      const expected = pendingCancelConfirmations.pop();
+      const expected = pendingConfirmations.pop();
       if (expected != message.userData)
         throw 'Unexpected unsubscribeAllConfirmation';
 
@@ -97,24 +122,14 @@ export async function start(config) {
   });
 
   workerOnError(worker, (error) => {
-    // A problem happened in the worker or the smoldot Wasm VM.
-    // We might still be initializing.
-    if (initPromiseReject) {
-      initPromiseReject(error);
-      initPromiseReject = null;
-      initPromiseResolve = null;
-    } else {
-      // This situation should only happen in case of a critical error as the result of a bug
-      // somewhere. Consequently, nothing is in place to cleanly report the error if we are no
-      // longer initializing.
-      console.error(error);
-      workerError = error;
-    }
+    // A worker error should only happen in case of a critical error as the result of a bug
+    // somewhere. Consequently, nothing is really in place to cleanly report the error.
+    console.error(error);
+    workerError = error;
   });
 
   // The first message expected by the worker contains the configuration.
   worker.postMessage({
-    chainSpecs: config.chainSpecs,
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: config.maxLogLevel || 3,
@@ -137,7 +152,7 @@ export async function start(config) {
     chainIndex: 0,
     userData: 0,
   });
-  pendingCancelConfirmations.push(0);
+  pendingConfirmations.push(0);
   worker.postMessage({ ty: 'unsubscribeAll', userData: 0 });
 
   // Now blocking until the worker sends back the response.
@@ -145,20 +160,26 @@ export async function start(config) {
   await initPromise;
 
   return {
-    sendJsonRpc: (request, chainIndex, userData) => {
-      if (!workerError) {
-        worker.postMessage({ ty: 'request', request, chainIndex, userData: userData || 0 });
-      } else {
-        throw workerError;
-      }
-    },
-    cancelAll: (userData) => {
-      if (!workerError) {
-        pendingCancelConfirmations.push(userData);
-        worker.postMessage({ ty: 'unsubscribeAll', userData });
-      } else {
-        throw workerError;
-      }
+    addChain: (chainSpec, jsonRpcCallback) => {
+      worker.postMessage({
+        ty: 'add-chain',
+        chainSpec,
+      });
+
+      // Build a promise that will be resolved or rejected after the chain has been added.
+      let chainAddedPromiseResolve;
+      let chainAddedPromiseReject;
+      const chainAddedPromise = new Promise((resolve, reject) => {
+        chainAddedPromiseResolve = resolve;
+        chainAddedPromiseReject = reject;
+      });
+
+      pendingConfirmations.push({
+        reject: chainAddedPromiseResolve,
+        resolve: chainAddedPromiseReject,
+      });
+
+      return chainAddedPromise;
     },
     terminate: () => {
       worker.terminate();
