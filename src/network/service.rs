@@ -171,6 +171,12 @@ struct Guarded {
     // TODO: more doc
     peers_chain_memberships: BTreeSet<(usize, usize)>,
 
+    /// Collection of `(peer_index, chain_index)`.
+    peers_open_chains: BTreeSet<(usize, usize)>,
+
+    /// Collection of `(peer_index, overlay_network_index)`.
+    peers_missing_out_substreams: BTreeSet<(usize, usize)>,
+
     /// All connections, both pending and established.
     ///
     /// This list is a superset of the list in [`ChainNetwork::libp2p`].
@@ -425,6 +431,8 @@ where
                 peers,
                 peers_by_id,
                 peers_connections: BTreeSet::new(),
+                peers_open_chains: BTreeSet::new(),
+                peers_missing_out_substreams: BTreeSet::new(),
                 peers_chain_memberships,
                 connections: slab::Slab::with_capacity(config.connections_capacity),
                 to_process_pre_event: None,
@@ -965,6 +973,10 @@ where
                         out_overlay_network_indices
                     };
 
+                    for chain_index in &chain_indices {
+                        // TODO: use guarded.peers_chain_memberships
+                    }
+
                     if let Some(waker) = guarded.substream_open_waker.take() {
                         waker.wake();
                     }
@@ -1018,13 +1030,30 @@ where
                             };
 
                         // TODO: compare genesis hash with ours
-                        return Event::ChainConnected {
-                            peer_id: peer_id.clone(),
-                            chain_index,
-                            best_hash: *remote_handshake.best_hash,
-                            best_number: remote_handshake.best_number,
-                            role: remote_handshake.role,
-                        };
+
+                        let peer_index = *guarded.peers_by_id.get(peer_id).unwrap();
+                        if guarded
+                            .peers_connections
+                            .insert((peer_index, local_connection_index))
+                        {
+                            for other_overlay_network_index in (1
+                                ..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+                                .map(|n| chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + n)
+                            {
+                                let _was_inserted = guarded
+                                    .peers_missing_out_substreams
+                                    .insert((peer_index, other_overlay_network_index));
+                                debug_assert!(_was_inserted);
+                            }
+
+                            return Event::ChainConnected {
+                                peer_id: peer_id.clone(),
+                                chain_index,
+                                best_hash: *remote_handshake.best_hash,
+                                best_number: remote_handshake.best_number,
+                                role: remote_handshake.role,
+                            };
+                        }
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
                         // Nothing to do.
                     } else if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
@@ -1061,26 +1090,46 @@ where
                 }
 
                 libp2p::Event::NotificationsOutClose {
-                    id,
                     overlay_network_index,
                     user_data: local_connection_index,
                     ..
                 } => {
-                    // TODO: no
                     let chain_index = overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    let peer_index = *guarded.peers_by_id.get(peer_id).unwrap();
+
                     if overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
+                        let _was_removed = guarded
+                            .peers_connections
+                            .remove(&(peer_index, local_connection_index));
+                        debug_assert!(_was_removed);
+
+                        for other_overlay_network_index in (1..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+                            .map(|n| chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + n)
+                        {
+                            guarded
+                                .peers_missing_out_substreams
+                                .remove(&(peer_index, other_overlay_network_index));
+                        }
+
                         return Event::ChainDisconnected {
                             peer_id: peer_id.clone(),
                             chain_index,
                         };
                     } else {
+                        if guarded
+                            .peers_connections
+                            .contains(&(peer_index, local_connection_index))
+                        {
+                            let _was_inserted = guarded
+                                .peers_missing_out_substreams
+                                .insert((peer_index, overlay_network_index));
+                            debug_assert!(_was_inserted);
+                        }
                     }
 
                     if let Some(waker) = guarded.substream_open_waker.take() {
                         waker.wake();
                     }
-
-                    // TODO:
                 }
 
                 libp2p::Event::NotificationsInOpen {
@@ -1344,6 +1393,13 @@ where
                 .known_addresses
                 .values()
                 .any(|a| a.is_some())
+            {
+                continue;
+            }
+
+            if guarded
+                .peers_open_chains
+                .contains(&(peer_index, chain_index))
             {
                 continue;
             }
