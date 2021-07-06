@@ -87,6 +87,9 @@ export async function start(config) {
             throw workerError;
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
+          // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
+          // response concerning that `chainId` to arrive after the `remove` function has
+          // returned. We solve that by removing the callback immediately.
           delete chainsJsonRpcCallbacks[message.chainId];
         },
         __internal_smoldot_id: () => chainId,

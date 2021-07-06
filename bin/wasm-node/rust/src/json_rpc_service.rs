@@ -179,6 +179,7 @@ struct PerUserDataSubscriptions {
     runtime_specs: Mutex<HashMap<String, oneshot::Sender<String>>>,
 }
 
+// TODO: destroying the JsonRpcService should stop all subscriptions
 pub struct JsonRpcService {
     /// See [`Config::tasks_executor`].
     tasks_executor: Mutex<Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
@@ -843,13 +844,6 @@ impl JsonRpcService {
                 ));
             }
         }
-    }
-
-    async fn handle_unsubscribe_all(self: Arc<JsonRpcService>, user_data: u32) {
-        self.per_userdata_subscriptions
-            .lock()
-            .await
-            .remove(&user_data);
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].

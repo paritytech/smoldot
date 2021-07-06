@@ -70,7 +70,7 @@ const injectMessage = (instance, message) => {
     }
 
   } else if (message.ty == 'removeChain') {
-    instance.exports.removeChain(message.chainId);
+    instance.exports.remove_chain(message.chainId);
     // `compat.postMessage` is the same as `postMessage`, but works across environments.
     compat.postMessage({ kind: 'chainRemoved' });
 
@@ -90,9 +90,9 @@ const startInstance = async (config) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'log', level, target, message });
     },
-    jsonRpcCallback: (data, chainIndex, userData) => {
+    jsonRpcCallback: (data, chainId) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'jsonrpc', data, chainIndex, userData });
+      compat.postMessage({ kind: 'jsonrpc', data, chainId });
     },
     forbidTcp: config.forbidTcp,
     forbidWs: config.forbidWs,

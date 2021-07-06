@@ -24,7 +24,7 @@
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
-    chain, chain_spec, header,
+    chain, chain_spec,
     json_rpc::{self, methods},
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -383,6 +383,7 @@ impl Client {
 
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
     /// JSON-RPC requests and subscriptions.
+    // TODO: not the case ^
     ///
     /// Be aware that the [`ChainId`] might be reused if [`Client::add_chain`] is called again
     /// later.
@@ -405,20 +406,74 @@ impl Client {
     }
 
     pub fn json_rpc_request(&mut self, json_rpc_request: Box<[u8]>, chain_id: ChainId) {
-        /*match self.public_api_chains.get(chain_id.0) {
-            Some(public_chain) => {
-                if let Some(json_rpc_service) = public_chain.json_rpc_service.as_ref() {
-                    let mut json_rpc_service = match json_rpc_service {
-                        future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                        future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                        future::MaybeDone::Gone => unreachable!(),
+        fn parse_call_and_log(
+            json_rpc_request: &Box<[u8]>,
+            chain_id: ChainId,
+        ) -> Option<(&str, methods::MethodCall)> {
+            let request_str = match str::from_utf8(&*json_rpc_request) {
+                Ok(s) => s,
+                Err(error) => {
+                    log::warn!(
+                        target: "json-rpc",
+                        "Failed to parse JSON-RPC query as UTF-8 (chain_id: {:?}): {}",
+                        chain_id, error
+                    );
+                    return None;
+                }
+            };
+
+            log::debug!(
+                target: "json-rpc",
+                "JSON-RPC => {:?}{}",
+                if request_str.len() > 100 { &request_str[..100] } else { &request_str[..] },
+                if request_str.len() > 100 { "…" } else { "" }
+            );
+
+            match methods::parse_json_call(request_str) {
+                Ok(rq) => Some(rq),
+                Err(methods::ParseError::Method { request_id, error }) => {
+                    log::warn!(
+                        target: "json-rpc",
+                        "Error in JSON-RPC method call: {}", error
+                    );
+                    json_rpc_service::send_back(&error.to_json_error(request_id), chain_id);
+                    return None;
+                }
+                Err(error) => {
+                    log::warn!(
+                        target: "json-rpc",
+                        "Ignoring malformed JSON-RPC call: {}", error
+                    );
+                    return None;
+                }
+            }
+        }
+
+        if let Some(public_chain) = self.public_api_chains.get(chain_id.0) {
+            if let Some(json_rpc_service) = public_chain.json_rpc_service.as_ref() {
+                let mut json_rpc_service = match json_rpc_service {
+                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+                    future::MaybeDone::Gone => unreachable!(),
+                };
+
+                let future = async move {
+                    let (request_id, call) = match parse_call_and_log(&json_rpc_request, chain_id) {
+                        Some(v) => v,
+                        None => return,
                     };
 
                     (&mut json_rpc_service).await;
-                    let json_rpc_service =
-                        Pin::new(&mut json_rpc_service).take_output().unwrap();
+                    let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
                     json_rpc_service.handle_rpc(request_id, call).await;
-                } else {
+                };
+
+                // TODO: properly spread resources usage instead of spawning new tasks all the time
+                self.new_task_tx
+                    .unbounded_send(("json-rpc-request".to_owned(), future.boxed()))
+                    .unwrap();
+            } else {
+                if let Some((request_id, _)) = parse_call_and_log(&json_rpc_request, chain_id) {
                     json_rpc_service::send_back(
                         &json_rpc::parse::build_error_response(
                             request_id,
@@ -433,10 +488,10 @@ impl Client {
                         ),
                         chain_id,
                     );
-                    return;
                 }
             }
-            None => {
+        } else {
+            if let Some((request_id, _)) = parse_call_and_log(&json_rpc_request, chain_id) {
                 json_rpc_service::send_back(
                     &json_rpc::parse::build_error_response(
                         request_id,
@@ -448,65 +503,9 @@ impl Client {
                     ),
                     chain_id,
                 );
-                return;
             }
         }
-
-        let future = async move {
-            let request_str = match str::from_utf8(&*json_rpc_request) {
-                Ok(s) => s,
-                Err(error) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Failed to parse JSON-RPC query as UTF-8 (chain_id: {:?}): {}",
-                        chain_id, error
-                    );
-                    return;
-                }
-            };
-
-            log::debug!(
-                target: "json-rpc",
-                "JSON-RPC => {:?}{}",
-                if request_str.len() > 100 { &request_str[..100] } else { &request_str[..] },
-                if request_str.len() > 100 { "…" } else { "" }
-            );
-
-            let (request_id, call) = match methods::parse_json_call(request_str) {
-                Ok(rq) => rq,
-                Err(methods::ParseError::Method { request_id, error }) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Error in JSON-RPC method call: {}", error
-                    );
-                    json_rpc_service::send_back(&error.to_json_error(request_id), chain_id);
-                    return;
-                }
-                Err(error) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Ignoring malformed JSON-RPC call: {}", error
-                    );
-                    return;
-                }
-            };
-
-        };
-
-        self.new_task_tx
-            .unbounded_send(("json-rpc-request".to_owned(), future.boxed()))
-            .unwrap();*/
     }
-}
-
-/// Identifies a chain, so that multiple identical chains are de-duplicated.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ChainKey {
-    /// Hash of the genesis block of the chain.
-    genesis_block_hash: [u8; 32],
-    /// If the chain is a parachain, contains the relay chain and the "para ID" on this relay
-    /// chain.
-    relay_chain: Option<(Box<ChainKey>, u32)>,
 }
 
 struct PublicApiChain {
@@ -518,6 +517,23 @@ struct PublicApiChain {
             future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>>>,
         >,
     >,
+}
+
+/// Identifies a chain, so that multiple identical chains are de-duplicated.
+///
+/// This struct serves as the key in a `HashMap<ChainKey, RunningChain>`. It must contain all the
+/// values that are important to the logic of the fields that are contained in [`RunningChain`].
+/// Failing to include a field in this struct could lead to two different chains using the same
+/// [`RunningChain`], which has security consequences.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChainKey {
+    /// Hash of the genesis block of the chain.
+    genesis_block_hash: [u8; 32],
+    // TODO: what about light checkpoints?
+    // TODO: must also contain protocolId, forkBlocks, and badBlocks fields
+    /// If the chain is a parachain, contains the relay chain and the "para ID" on this relay
+    /// chain.
+    relay_chain: Option<(Box<ChainKey>, u32)>,
 }
 
 #[derive(Clone)]

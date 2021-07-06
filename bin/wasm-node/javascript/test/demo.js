@@ -56,14 +56,14 @@ wsServer.on('request', function (request) {
     console.log((new Date()) + ' Connection accepted.');
 
     const chain = client.then(client => {
-        client.addChain({
+        return client.addChain({
             chainSpec,
             jsonRpcCallback: (resp) => {
                 connection.sendUTF(resp);
             },
         })
             .catch((error) => {
-                console.error(error);
+                console.error("Error while adding chain: " + error);
                 process.exit(1);
             })
     });
@@ -78,6 +78,6 @@ wsServer.on('request', function (request) {
 
     connection.on('close', function (reasonCode, description) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
-        chain.remove();
+        chain.then(chain => chain.remove());
     });
 });
