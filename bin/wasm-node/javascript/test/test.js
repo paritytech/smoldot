@@ -30,31 +30,35 @@ const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
 (async () => {
   // Test that invalid chain specs errors are properly caught.
   await client
-    .start({
-      chainSpecs: ["invalid chain spec"],
-    })
-    .then(() => {
-      console.error("Client loaded successfully despite invalid chain spec");
+    .start({})
+    .then(client => client.addChain({
+      chainSpec: "invalid chain spec",
+    }))
+    .then((chain) => {
+      console.error("Chain loaded successfully despite invalid chain spec");
       process.exit(1);
     })
     .catch(() => { });
 
   // Basic `system_name` test.
   client
-    .start({
-      chainSpecs: [westendSpec],
-      jsonRpcCallback: (resp, chainIndex, userData) => {
-        if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-js"}') {
-          // Test successful
-          process.exit(0)
-        } else {
-          console.warn(resp);
-          process.exit(1);
+    .start({})
+    .then(client => {
+      return client.addChain({
+        chainSpec: westendSpec,
+        jsonRpcCallback: (resp) => {
+          if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-js"}') {
+            // Test successful
+            process.exit(0)
+          } else {
+            console.warn(resp);
+            process.exit(1);
+          }
         }
-      }
+      });
     })
-    .then((client) => {
-      client.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
+    .then((chain) => {
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
     })
     .catch((err) => process.exit(1));
 })();

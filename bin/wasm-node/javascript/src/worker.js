@@ -61,7 +61,7 @@ const injectMessage = (instance, message) => {
       potentialRelayChainsPtr, potentialRelayChainsLen
     );
 
-    if (result >= 0x80000000) { // TODO: really crappy error code handling
+    if (result >= 0x80000000 || result < 0) { // TODO: really crappy error code handling
       // TODO: better error message
       // Note that `add_chain` properly de-allocates buffers even if it failed.
       compat.postMessage({ kind: 'chainAddedErr', error: new Error('Failed to initialize chain') });
