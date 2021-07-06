@@ -70,10 +70,12 @@ export async function start(config) {
       const expected = pendingConfirmations.pop();
       const chainId = message.chainId;
 
-      if (!!chainsJsonRpcCallbacks[chainId])
+      if (!!chainsJsonRpcCallbacks[chainId]) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
       chainsJsonRpcCallbacks[chainId] = expected.jsonRpcCallback;
 
+      // `expected` was pushed by the `addChain` method.
+      // Resolve the promise that `addChain` returned to the user.
       expected.resolve({
         sendJsonRpc: (request) => {
           if (workerError)
@@ -92,11 +94,15 @@ export async function start(config) {
           // returned. We solve that by removing the callback immediately.
           delete chainsJsonRpcCallbacks[message.chainId];
         },
+        // Hacky internal method that later lets us access the `chainId` of this chain for
+        // implementation reasons.
         __internal_smoldot_id: () => chainId,
       });
 
     } else if (message.kind == 'chainAddedErr') {
       const expected = pendingConfirmations.pop();
+      // `expected` was pushed by the `addChain` method.
+      // Reject the promise that `addChain` returned to the user.
       expected.reject(message.error);
 
     } else if (message.kind == 'chainRemoved') {
@@ -132,8 +138,10 @@ export async function start(config) {
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {
         for (var chain in options.potentialRelayChains) {
+          // The content of `options.potentialRelayChains` are supposed to be chains earlier
+          // returned by `addChain`. The hacky `__internal_smoldot_id` method lets us obtain the
+          // internal ID of these chains.
           const id = chain.__internal_smoldot_id();
-          // TODO: check type?
           potentialRelayChainsIds.push(id);
         }
       }
