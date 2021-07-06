@@ -79,7 +79,7 @@ pub struct Config {
 
     /// The id of the chain that this service is handling requests for. Used only for the FFI layer.
     // TODO: a bit spaghetti
-    chain_id: super::ChainId,
+    pub chain_id: super::ChainId,
 }
 
 /// Initializes the JSON-RPC service with the given configuration.
@@ -301,25 +301,21 @@ impl JsonRpcService {
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                let invalid = if let Some(subs) = self
-                    .per_userdata_subscriptions
-                    .lock()
-                    .await
-                    .get_mut(&user_data)
-                {
-                    if let Some(cancel_tx) =
-                        subs.transactions.lock().await.remove(&subscription[..])
-                    {
-                        // `cancel_tx` might have been closed if the channel from the transactions
-                        // service has been closed too. This is not an error.
-                        let _ = cancel_tx.send(request_id.to_owned());
-                        false
+                let invalid =
+                    if let Some(subs) = self.per_userdata_subscriptions.lock().await.get_mut(&0) {
+                        if let Some(cancel_tx) =
+                            subs.transactions.lock().await.remove(&subscription[..])
+                        {
+                            // `cancel_tx` might have been closed if the channel from the transactions
+                            // service has been closed too. This is not an error.
+                            let _ = cancel_tx.send(request_id.to_owned());
+                            false
+                        } else {
+                            true
+                        }
                     } else {
                         true
-                    }
-                } else {
-                    true
-                };
+                    };
 
                 if invalid {
                     self.send_back(
@@ -422,11 +418,8 @@ impl JsonRpcService {
                 self.subscribe_finalized_heads(request_id).await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                let invalid = if let Some(subs) = self
-                    .per_userdata_subscriptions
-                    .lock()
-                    .await
-                    .get_mut(&user_data)
+                let invalid = if let Some(subs) =
+                    self.per_userdata_subscriptions.lock().await.get_mut(&0)
                 {
                     if let Some(cancel_tx) = subs.finalized_heads.lock().await.remove(&subscription)
                     {
@@ -596,7 +589,7 @@ impl JsonRpcService {
                     .per_userdata_subscriptions
                     .lock()
                     .await
-                    .entry(user_data)
+                    .entry(0)
                     .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
                     .clone();
                 reference_arc
@@ -669,7 +662,7 @@ impl JsonRpcService {
                                         client.per_userdata_subscriptions.lock().await;
 
                                     if per_source_subscriptions
-                                        .get(&user_data)
+                                        .get(&0)
                                         .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
                                     {
                                         client.send_back(
@@ -700,11 +693,8 @@ impl JsonRpcService {
                 self.subscribe_storage(request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                let invalid = if let Some(subs) = self
-                    .per_userdata_subscriptions
-                    .lock()
-                    .await
-                    .get_mut(&user_data)
+                let invalid = if let Some(subs) =
+                    self.per_userdata_subscriptions.lock().await.get_mut(&0)
                 {
                     if let Some(cancel_tx) = subs.storage.lock().await.remove(&subscription[..]) {
                         cancel_tx.send(request_id.to_owned()).is_err()
@@ -883,7 +873,7 @@ impl JsonRpcService {
             .per_userdata_subscriptions
             .lock()
             .await
-            .entry(user_data)
+            .entry(0)
             .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
             .clone();
         reference_arc
@@ -934,7 +924,7 @@ impl JsonRpcService {
                                 client.per_userdata_subscriptions.lock().await;
 
                             if per_source_subscriptions
-                                .get(&user_data)
+                                .get(&0)
                                 .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
                             {
                                 client.send_back(
@@ -1025,7 +1015,7 @@ impl JsonRpcService {
             .per_userdata_subscriptions
             .lock()
             .await
-            .entry(user_data)
+            .entry(0)
             .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
             .clone();
         reference_arc
@@ -1069,7 +1059,7 @@ impl JsonRpcService {
                                 client.per_userdata_subscriptions.lock().await;
 
                             if per_source_subscriptions
-                                .get(&user_data)
+                                .get(&0)
                                 .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
                             {
                                 client.send_back(
@@ -1108,7 +1098,7 @@ impl JsonRpcService {
             .per_userdata_subscriptions
             .lock()
             .await
-            .entry(user_data)
+            .entry(0)
             .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
             .clone();
         reference_arc
@@ -1148,7 +1138,7 @@ impl JsonRpcService {
                                 client.per_userdata_subscriptions.lock().await;
 
                             if per_source_subscriptions
-                                .get(&user_data)
+                                .get(&0)
                                 .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
                             {
                                 client.send_back(
@@ -1187,7 +1177,7 @@ impl JsonRpcService {
             .per_userdata_subscriptions
             .lock()
             .await
-            .entry(user_data)
+            .entry(0)
             .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
             .clone();
         reference_arc
@@ -1228,7 +1218,7 @@ impl JsonRpcService {
                                 client.per_userdata_subscriptions.lock().await;
 
                             if per_source_subscriptions
-                                .get(&user_data)
+                                .get(&0)
                                 .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
                             {
                                 client.send_back(
@@ -1272,7 +1262,7 @@ impl JsonRpcService {
             .per_userdata_subscriptions
             .lock()
             .await
-            .entry(user_data)
+            .entry(0)
             .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
             .clone();
         reference_arc
@@ -1369,7 +1359,7 @@ impl JsonRpcService {
                                 client.per_userdata_subscriptions.lock().await;
 
                             if per_source_subscriptions
-                                .get(&user_data)
+                                .get(&0)
                                 .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
                             {
                                 client.send_back(

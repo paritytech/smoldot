@@ -446,7 +446,7 @@ fn alloc(len: u32) -> u32 {
 }
 
 fn init(max_log_level: u32) {
-    let mut client = super::Client::new(match max_log_level {
+    let client = super::Client::new(match max_log_level {
         0 => log::LevelFilter::Off,
         1 => log::LevelFilter::Error,
         2 => log::LevelFilter::Warn,
@@ -455,7 +455,7 @@ fn init(max_log_level: u32) {
         _ => log::LevelFilter::Trace,
     });
 
-    let client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
     *client_lock = Some(client);
 }
@@ -496,7 +496,7 @@ fn add_chain(
             .collect()
     };
 
-    let client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock().unwrap();
 
     let result = client_lock
         .as_mut()
@@ -518,7 +518,7 @@ fn add_chain(
 }
 
 fn remove_chain(chain_id: u32) {
-    let client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock().unwrap();
     client_lock
         .as_mut()
         .unwrap()
@@ -538,7 +538,7 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) }
     };
 
-    let client_lock = CLIENT.lock().unwrap();
+    let mut client_lock = CLIENT.lock().unwrap();
     client_lock
         .as_mut()
         .unwrap()
