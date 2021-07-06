@@ -62,3 +62,8 @@ If the request is a subscription, the notifications will also be sent back using
 
 If no `jsonRpcCallback` was passed to `addChain`, then this chain won't be capable of serving
 any JSON-RPC request at all. This can be used to save resources.
+
+If the chain specification passed to `addChain` is a parachain, then the list of potential relay
+chains must be passed as parameter to `addChain` as well. For security reasons, it is important
+to not establish a parachain-relay-chain link between two chains that weren't created by the same
+user.
