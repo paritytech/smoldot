@@ -137,7 +137,7 @@ export async function start(config) {
     addChain: (options) => {
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {
-        for (var chain in options.potentialRelayChains) {
+        for (var chain of options.potentialRelayChains) {
           // The content of `options.potentialRelayChains` are supposed to be chains earlier
           // returned by `addChain`. The hacky `__internal_smoldot_id` method lets us obtain the
           // internal ID of these chains.
