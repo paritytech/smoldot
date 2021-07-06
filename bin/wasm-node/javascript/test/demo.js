@@ -24,30 +24,17 @@ import * as process from 'process';
 // Adjust these chain specs for the chain you want to connect to.
 import * as fs from 'fs';
 
-let client = null;
-var unsentQueue = [];
-let wsConnections = {};
-let nextWsConnectionId = 0xaaa;
+const chainSpec = fs.readFileSync('../../westend.json', 'utf8');
 
-smoldot.start({
-    chainSpecs: [fs.readFileSync('../../westend.json', 'utf8')],
+const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
-    jsonRpcCallback: (resp, chainIndex, connectionId) => {
-        wsConnections[connectionId].sendUTF(resp);
-    },
     forbidTcp: false,
     forbidWs: false,
     forbidWss: false,
-})
-    .then((c) => {
-        client = c;
-        unsentQueue.forEach((m) => client.sendJsonRpc(m.message, 0, m.connectionId));
-        unsentQueue = [];
-    })
-    .catch((error) => {
-        console.error(error);
-        process.exit(1);
-    });
+});
+
+// Pre-load smoldot with the chain spec.
+client.then(client => client.addChain({ chainSpec }));
 
 let server = http.createServer(function (request, response) {
     response.writeHead(404);
@@ -66,19 +53,24 @@ let wsServer = new websocket.server({
 
 wsServer.on('request', function (request) {
     const connection = request.accept(request.requestedProtocols[0], request.origin);
-    const connectionId = nextWsConnectionId;
-    nextWsConnectionId += 1;
-
     console.log((new Date()) + ' Connection accepted.');
-    wsConnections[connectionId] = connection;
+
+    const chain = client.then(client => {
+        client.addChain({
+            chainSpec,
+            jsonRpcCallback: (resp) => {
+                connection.sendUTF(resp);
+            },
+        })
+            .catch((error) => {
+                console.error(error);
+                process.exit(1);
+            })
+    });
 
     connection.on('message', function (message) {
         if (message.type === 'utf8') {
-            if (client) {
-                client.sendJsonRpc(message.utf8Data, 0, connectionId);
-            } else {
-                unsentQueue.push({ message: message.utf8Data, connectionId });
-            }
+            chain.then(chain => chain.sendJsonRpc(message.utf8Data));
         } else {
             throw "Unsupported type: " + message.type;
         }
@@ -86,8 +78,6 @@ wsServer.on('request', function (request) {
 
     connection.on('close', function (reasonCode, description) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
-        if (client)
-            client.cancelAll(connectionId);
-        wsConnections[connectionId] = undefined;
+        chain.remove();
     });
 });

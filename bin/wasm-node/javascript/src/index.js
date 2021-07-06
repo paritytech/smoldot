@@ -24,9 +24,6 @@ export class SmoldotError extends Error {
 }
 
 export async function start(config) {
-  if (!Array.isArray(config.chainSpecs))
-    throw new SmoldotError('config must include a field `chainSpecs` of type Array');
-
   const logCallback = config.logCallback || ((level, target, message) => {
     if (level <= 1) {
       console.error("[" + target + "]", message);
@@ -69,7 +66,7 @@ export async function start(config) {
       const cb = chainsJsonRpcCallbacks[message.chainId];
       if (cb) cb(message.data);
 
-    } else if (message.kind = 'chainAddedOk') {
+    } else if (message.kind == 'chainAddedOk') {
       const expected = pendingConfirmations.pop();
       const chainId = message.chainId;
 
@@ -88,13 +85,14 @@ export async function start(config) {
         remove: () => {
           if (workerError)
             throw workerError;
-          worker.postMessage({ ty: 'removeChain', chainId });
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
+          worker.postMessage({ ty: 'removeChain', chainId });
+          delete chainsJsonRpcCallbacks[message.chainId];
         },
         __internal_smoldot_id: () => chainId,
       });
 
-    } else if (message.kind = 'chainAddedErr') {
+    } else if (message.kind == 'chainAddedErr') {
       const expected = pendingConfirmations.pop();
       expected.reject(message.error);
 
@@ -137,13 +135,6 @@ export async function start(config) {
         }
       }
 
-      worker.postMessage({
-        ty: 'addChain',
-        chainSpec: options.chainSpec,
-        potentialRelayChains: potentialRelayChainsIds,
-        jsonRpcRunning: !!options.jsonRpcCallback,
-      });
-
       // Build a promise that will be resolved or rejected after the chain has been added.
       let chainAddedPromiseResolve;
       let chainAddedPromiseReject;
@@ -154,9 +145,16 @@ export async function start(config) {
 
       pendingConfirmations.push({
         ty: 'chainAdded',
-        reject: chainAddedPromiseResolve,
-        resolve: chainAddedPromiseReject,
+        reject: chainAddedPromiseReject,
+        resolve: chainAddedPromiseResolve,
         jsonRpcCallback: options.jsonRpcCallback,
+      });
+
+      worker.postMessage({
+        ty: 'addChain',
+        chainSpec: options.chainSpec,
+        potentialRelayChains: potentialRelayChainsIds,
+        jsonRpcRunning: !!options.jsonRpcCallback,
       });
 
       return chainAddedPromise;

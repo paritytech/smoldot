@@ -176,29 +176,15 @@ impl Client {
                 }
             }
 
-            // Since `all_tasks` is initially empty, polling it would produce `None` and
-            // immediately interrupt the processing.
-            // As such, we start by filling it with the initial content of the `new_task` channel.
-            while let Some(Some((task_name, task))) = new_task_rx.next().now_or_never() {
-                all_tasks.push(FutureAdapter {
-                    name: task_name,
-                    future: task,
-                });
-            }
-
             loop {
-                match future::select(new_task_rx.select_next_some(), all_tasks.next()).await {
-                    future::Either::Left(((new_task_name, new_task), _)) => {
+                futures::select! {
+                    (new_task_name, new_task) = new_task_rx.select_next_some() => {
                         all_tasks.push(FutureAdapter {
                             name: new_task_name,
                             future: new_task,
                         });
-                    }
-                    future::Either::Right((Some(()), _)) => {}
-                    future::Either::Right((None, _)) => {
-                        log::info!("All tasks complete. Stopping client.");
-                        break;
-                    }
+                    },
+                    () = all_tasks.select_next_some() => {},
                 }
             }
         });

@@ -228,6 +228,7 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// - Any other value to indicate success. This value is an identifier that will be used to refer
 /// to this chain.
 ///
+#[no_mangle]
 // TODO: clean up the returned error code system; maybe return an error string as well; difficulty is how to deal with the FFI boundary
 pub extern "C" fn add_chain(
     chain_spec_pointer: u32,

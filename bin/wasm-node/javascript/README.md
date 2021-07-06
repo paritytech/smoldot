@@ -14,7 +14,7 @@ the full nodes of the network.
 import * as smoldot from 'smoldot';
 
 // Load a string chain specification.
-const chainSpec = Buffer.from(fs.readFileSync('./westend.json')).toString('utf8');
+const chainSpec = fs.readFileSync('./westend.json', 'utf8');
 
 // A single client can be used to initialize multiple chains.
 const client = await smoldot.start({});
@@ -29,6 +29,9 @@ const chain = await client.addChain({
 });
 
 chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
+
+// Later:
+// chain.remove();
 ```
 
 ## Usage
