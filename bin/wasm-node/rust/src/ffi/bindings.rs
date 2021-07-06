@@ -211,7 +211,7 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// Write the chain spec in this buffer as UTF-8. Then, pass the pointer and length (in bytes)
 /// as parameter to this function.
 ///
-/// Similarly, use [`allow`] to allocate a buffer containing a list of 32-bits-little-endian chain
+/// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain
 /// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this
 /// function. If the chain specification refer to a parachain, these chain ids are the ones that
 /// will be looked up to find the corresponding relay chain.

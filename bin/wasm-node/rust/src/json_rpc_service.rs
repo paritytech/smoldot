@@ -207,10 +207,6 @@ pub struct JsonRpcService {
 
     /// For each value of `user_data` passed when a JSON-RPC request is received, the list of
     /// active subscriptions.
-    ///
-    /// In order to properly implement [`ffi::JsonRpcMessage::UnsubscribeAll`], "destroying" a
-    /// "user data" must be performed instantaneously, and each "user data" must refer to a unique
-    /// `Arc`.
     per_userdata_subscriptions: Mutex<HashMap<u32, Arc<PerUserDataSubscriptions>>>,
 
     /// The id of the chain that this service is handling requests for.
