@@ -34,6 +34,10 @@ const client = smoldot.start({
 });
 
 // Pre-load smoldot with the chain spec.
+// We call `addChain` again with the same chain spec again every time a new WebSocket connection
+// is established, but smoldot will de-duplicate them and only connect to the chain once.
+// By calling it now, we let smoldot start syncing that chain in the background even before a
+// WebSocket connection has been established.
 client.then(client => client.addChain({ chainSpec }));
 
 let server = http.createServer(function (request, response) {
