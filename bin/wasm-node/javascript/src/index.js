@@ -67,7 +67,7 @@ export async function start(config) {
   workerOnMessage(worker, (message) => {
     if (message.kind == 'jsonrpc') {
       const cb = chainsJsonRpcCallbacks[message.chainId];
-      if (cb) cb(message.data, message.chainId);
+      if (cb) cb(message.data);
 
     } else if (message.kind = 'chainAddedOk') {
       const expected = pendingConfirmations.pop();
@@ -88,7 +88,8 @@ export async function start(config) {
             throw workerError;
           worker.postMessage({ ty: 'removeChain', chainId });
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
-        }
+        },
+        __internal_smoldot_id: () => chainId,
       });
 
     } else if (message.kind = 'chainAddedErr') {
@@ -125,10 +126,17 @@ export async function start(config) {
 
   return {
     addChain: (chainSpec, potentialRelayChains, jsonRpcCallback) => {
+      let potentialRelayChainsIds = [];
+      for (var chain in potentialRelayChains) {
+        const id = chain.__internal_smoldot_id();
+        // TODO: check type?
+        potentialRelayChainsIds.push(id);
+      }
+
       worker.postMessage({
         ty: 'addChain',
         chainSpec,
-        potentialRelayChains,
+        potentialRelayChains: potentialRelayChainsIds,
         jsonRpcRunning: !!jsonRpcCallback,
       });
 

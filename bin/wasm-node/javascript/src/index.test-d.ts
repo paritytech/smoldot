@@ -4,13 +4,11 @@ import smoldot, { Smoldot, SmoldotClient } from 'smoldot';
 
 // smoldot;  // $ExpectType Smoldot
 
-// Test when suppliying all options and all params to json_rpc_callback
+// Test when supplying all options and all params to logCallback
 
 // $ExpectType Promise<SmoldotClient>
 let sp = smoldot.start({
   maxLogLevel: 3,
-  chainSpecs: [''],
-  jsonRpcCallback: (resp, chainIndex, userData) => { },
   logCallback: (level, target, message) => { },
   forbidTcp: false,
   forbidWs: false,
@@ -20,16 +18,19 @@ let sp = smoldot.start({
 // Test when not supplying optional options and optional params
 
 // $ExpectType Promise<SmoldotClient>
-sp = smoldot.start({
-  chainSpecs: [''],
-  jsonRpcCallback: (resp) => { },
-});
+sp = smoldot.start({});
 
-sp.then(sm => {
+sp.then(async (sm) => {
+  // $ExpectType Promise<SmoldotChain>
+  let chain1 = sm.addChain('', [], (resp) => { });
+  // $ExpectType Promise<SmoldotChain>
+  let chain2Promise = sm.addChain('', [await chain1], (resp) => { });
+  // $ExpectType SmoldotChain
+  let chain2 = await chain2Promise;
   // $ExpectType void
-  sm.sendJsonRpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}', 0, 0);
+  chain2.sendJsonRpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}');
   // $ExpectType void
-  sm.cancelAll(0);
+  chain2.remove();
   // $ExpectType void
   sm.terminate();
 });
