@@ -204,10 +204,7 @@ impl Client {
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
     #[must_use]
-    pub fn add_chain(
-        &mut self,
-        config: AddChainConfig<'_>,
-    ) -> Result<ChainId, AddChainError> {
+    pub fn add_chain(&mut self, config: AddChainConfig<'_>) -> Result<ChainId, AddChainError> {
         // Decode the chain specification.
         let chain_spec = chain_spec::ChainSpec::from_json_bytes(&config.specification)
             .map_err(AddChainError::InvalidChainSpec)?;
@@ -346,8 +343,8 @@ impl Client {
             Err(error) => {
                 log::warn!(
                     target: "json-rpc",
-                    "Failed to parse JSON-RPC query as UTF-8 (chain_index: {}): {}",
-                    chain_index, error
+                    "Failed to parse JSON-RPC query as UTF-8 (chain_id: {:?}): {}",
+                    chain_id, error
                 );
                 return;
             }
@@ -367,7 +364,7 @@ impl Client {
                     target: "json-rpc",
                     "Error in JSON-RPC method call: {}", error
                 );
-                send_back(&error.to_json_error(request_id), chain_index, user_data);
+                json_rpc_service::send_back(&error.to_json_error(request_id), chain_id);
                 return;
             }
             Err(error) => {
@@ -379,28 +376,40 @@ impl Client {
             }
         };
 
-        match self.public_api_chains.get(&chain_id.0) {
+        match self.public_api_chains.get(chain_id.0) {
             Some(public_chain) => {
-                public_chain
-                    .json_rpc_service
-                    .handle_rpc(user_data, request_id, call)
-                    .await
+                if let Some(json_rpc_service) = public_chain.json_rpc_service.as_ref() {
+                    json_rpc_service
+                        .handle_rpc(user_data, request_id, call)
+                        .await
+                } else {
+                    json_rpc_service::send_back(
+                        &json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ApplicationDefined(
+                                -33000,
+                                &format!(
+                                    "A JSON-RPC service has not been started for chain id {:?}",
+                                    chain_id
+                                ),
+                            ),
+                            None,
+                        ),
+                        chain_id,
+                    );
+                }
             }
             None => {
-                send_back(
+                json_rpc_service::send_back(
                     &json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ApplicationDefined(
                             -33000,
-                            &format!(
-                                "A JSON-RPC service has not been started for chain index {}",
-                                chain_index
-                            ),
+                            &format!("Invalid chain id {:?}", chain_id),
                         ),
                         None,
                     ),
-                    chain_index,
-                    user_data,
+                    chain_id,
                 );
             }
         }

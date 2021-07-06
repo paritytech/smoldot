@@ -16,13 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Background JSON-RPC service.
-//!
-//! The [`start`] function returns a future whose role is to pull events using
-//! [`ffi::next_json_rpc`] and send back answers using [`ffi::emit_json_rpc_response`].
-//!
-//! > **Note**: Because of the racy nature of these two functions, it is strongly discouraged to
-//! >           spawn multiple JSON-RPC services, especially if they don't use the same
-//! >           [`sync_service::SyncService`].
 
 // TODO: doc
 // TODO: re-review this once finished
@@ -46,40 +39,6 @@ use std::{
     str,
     sync::{atomic, Arc},
 };
-
-/// Spawns a task to handle incoming JSON-RPC requests.
-///
-/// The task queries incoming requests and dispatches them to the JSON-RPC
-/// services passed as parameter.
-pub async fn spawn_request_handling_task(
-    tasks_executor: Arc<
-        Mutex<Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
-    >,
-    json_rpc_services: HashMap<usize, Arc<JsonRpcService>>,
-) {
-    let json_rpc_services = Arc::new(json_rpc_services);
-
-    (tasks_executor.clone().lock().await)(
-        "jsonrpc-requests-handling".into(),
-        Box::pin(async move {
-            loop {
-                match ffi::next_json_rpc().await {
-                    ffi::JsonRpcMessage::Request {
-                        json_rpc_request,
-                        chain_index,
-                        user_data,
-                    } => {
-                    }
-                    ffi::JsonRpcMessage::UnsubscribeAll { user_data } => {
-                        for service in json_rpc_services.values().cloned() {
-                            service.handle_unsubscribe_all(user_data).await;
-                        }
-                    }
-                }
-            }
-        }),
-    );
-}
 
 /// Configuration for a JSON-RPC service.
 pub struct Config {
@@ -252,8 +211,9 @@ pub struct JsonRpcService {
     /// `Arc`.
     per_userdata_subscriptions: Mutex<HashMap<u32, Arc<PerUserDataSubscriptions>>>,
 
-    /// The index of the chain that this service is handling requests for.
-    chain_index: usize,
+    /// The id of the chain that this service is handling requests for.
+    // TODO: a bit spaghetti
+    chain_id: super::ChainId,
 }
 
 struct Blocks {
@@ -273,7 +233,8 @@ struct Blocks {
 ///
 /// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
 /// >           in order to print a log message.
-fn send_back(message: &str, chain_index: usize, user_data: u32) {
+// TODO: a bit spaghetti
+pub fn send_back(message: &str, chain_id: super::ChainId) {
     log::debug!(
         target: "json-rpc",
         "JSON-RPC <= {}{}",
@@ -281,13 +242,13 @@ fn send_back(message: &str, chain_index: usize, user_data: u32) {
         if message.len() > 100 { "…" } else { "" }
     );
 
-    ffi::emit_json_rpc_response(message, chain_index, user_data);
+    ffi::emit_json_rpc_response(message, chain_id);
 }
 
 impl JsonRpcService {
     /// Send back a response or a notification to the JSON-RPC client.
-    fn send_back(&self, message: &str, user_data: u32) {
-        send_back(message, self.chain_index, user_data)
+    fn send_back(&self, message: &str) {
+        send_back(message, self.chain_id)
     }
 
     /// Analyzes the given JSON-RPC call and processes it.
@@ -296,7 +257,7 @@ impl JsonRpcService {
     /// spawns a background task for further processing.
     pub async fn handle_rpc<'a>(
         self: Arc<JsonRpcService>,
-        user_data: u32,
+
         request_id: &'a str,
         call: MethodCall<'a>,
     ) {
@@ -308,7 +269,6 @@ impl JsonRpcService {
                 self.send_back(
                     &methods::Response::author_pendingExtrinsics(Vec::new())
                         .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
@@ -333,11 +293,10 @@ impl JsonRpcService {
                         transaction_hash,
                     ))
                     .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
-                self.submit_and_watch_extrinsic(user_data, request_id, transaction)
+                self.submit_and_watch_extrinsic(request_id, transaction)
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
@@ -365,7 +324,6 @@ impl JsonRpcService {
                     self.send_back(
                         &methods::Response::author_unwatchExtrinsic(false)
                             .to_json_response(request_id),
-                        user_data,
                     );
                 } else {
                 }
@@ -394,30 +352,25 @@ impl JsonRpcService {
                 // The `block_query` function guarantees that the header and body are present and
                 // are correct.
 
-                self.send_back(
-                    &if let Ok(block) = result {
-                        methods::Response::chain_getBlock(methods::Block {
-                            extrinsics: block
-                                .body
-                                .unwrap()
-                                .into_iter()
-                                .map(methods::Extrinsic)
-                                .collect(),
-                            header: methods::Header::from_scale_encoded_header(
-                                &block.header.unwrap(),
-                            )
+                self.send_back(&if let Ok(block) = result {
+                    methods::Response::chain_getBlock(methods::Block {
+                        extrinsics: block
+                            .body
+                            .unwrap()
+                            .into_iter()
+                            .map(methods::Extrinsic)
+                            .collect(),
+                        header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
                             .unwrap(),
-                            justification: block.justification.map(methods::HexString),
-                        })
-                        .to_json_response(request_id)
-                    } else {
-                        json_rpc::parse::build_success_response(request_id, "null")
-                    },
-                    user_data,
-                );
+                        justification: block.justification.map(methods::HexString),
+                    })
+                    .to_json_response(request_id)
+                } else {
+                    json_rpc::parse::build_success_response(request_id, "null")
+                });
             }
             methods::MethodCall::chain_getBlockHash { height } => {
-                self.get_block_hash(user_data, request_id, height).await;
+                self.get_block_hash(request_id, height).await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
                 self.send_back(
@@ -425,7 +378,6 @@ impl JsonRpcService {
                         self.blocks.lock().await.finalized_block,
                     ))
                     .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::chain_getHeader { hash } => {
@@ -434,42 +386,39 @@ impl JsonRpcService {
                     None => self.blocks.lock().await.best_block,
                 };
 
-                self.send_back(
-                    &match self.header_query(&hash).await {
-                        Ok(header) => {
-                            // In the case of a parachain, it is possible for the header to be in
-                            // a format that smoldot isn't capable of parsing. In that situation,
-                            // we take of liberty of returning a JSON-RPC error.
-                            match methods::Header::from_scale_encoded_header(&header) {
-                                Ok(decoded) => methods::Response::chain_getHeader(decoded)
-                                    .to_json_response(request_id),
-                                Err(error) => json_rpc::parse::build_error_response(
-                                    request_id,
-                                    json_rpc::parse::ErrorResponse::ServerError(
-                                        -32000,
-                                        &format!("Failed to decode header: {}", error),
-                                    ),
-                                    None,
+                self.send_back(&match self.header_query(&hash).await {
+                    Ok(header) => {
+                        // In the case of a parachain, it is possible for the header to be in
+                        // a format that smoldot isn't capable of parsing. In that situation,
+                        // we take of liberty of returning a JSON-RPC error.
+                        match methods::Header::from_scale_encoded_header(&header) {
+                            Ok(decoded) => methods::Response::chain_getHeader(decoded)
+                                .to_json_response(request_id),
+                            Err(error) => json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    &format!("Failed to decode header: {}", error),
                                 ),
-                            }
+                                None,
+                            ),
                         }
-                        Err(()) => {
-                            // Failed to retreive the header.
-                            // TODO: error or null?
-                            json_rpc::parse::build_success_response(request_id, "null")
-                        }
-                    },
-                    user_data,
-                );
+                    }
+                    Err(()) => {
+                        // Failed to retreive the header.
+                        // TODO: error or null?
+                        json_rpc::parse::build_success_response(request_id, "null")
+                    }
+                });
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.subscribe_all_heads(user_data, request_id).await;
+                self.subscribe_all_heads(request_id).await;
             }
             methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.subscribe_new_heads(user_data, request_id).await;
+                self.subscribe_new_heads(request_id).await;
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(user_data, request_id).await;
+                self.subscribe_finalized_heads(request_id).await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
                 let invalid = if let Some(subs) = self
@@ -492,7 +441,6 @@ impl JsonRpcService {
                     self.send_back(
                         &methods::Response::chain_unsubscribeFinalizedHeads(false)
                             .to_json_response(request_id),
-                        user_data,
                     );
                 } else {
                 }
@@ -507,7 +455,6 @@ impl JsonRpcService {
                         partial_fee: 15600000001,              // TODO: no
                     })
                     .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::rpc_methods {} => {
@@ -519,7 +466,6 @@ impl JsonRpcService {
                             .collect(),
                     })
                     .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::state_getKeysPaged {
@@ -550,26 +496,23 @@ impl JsonRpcService {
                     )
                     .await;
 
-                self.send_back(
-                    &match outcome {
-                        Ok(keys) => {
-                            // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
-                            let out = keys
-                                .into_iter()
-                                .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
-                                .map(methods::HexString)
-                                .take(usize::try_from(count).unwrap_or(usize::max_value()))
-                                .collect::<Vec<_>>();
-                            methods::Response::state_getKeysPaged(out).to_json_response(request_id)
-                        }
-                        Err(error) => json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        ),
-                    },
-                    user_data,
-                );
+                self.send_back(&match outcome {
+                    Ok(keys) => {
+                        // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
+                        let out = keys
+                            .into_iter()
+                            .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                            .map(methods::HexString)
+                            .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                            .collect::<Vec<_>>();
+                        methods::Response::state_getKeysPaged(out).to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                });
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
                 let blocks = self.blocks.lock().await;
@@ -594,7 +537,6 @@ impl JsonRpcService {
                 self.send_back(
                     &methods::Response::state_queryStorageAt(vec![out])
                         .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::state_getMetadata {} => {
@@ -618,7 +560,7 @@ impl JsonRpcService {
                     }
                 };
 
-                self.send_back(&response, user_data);
+                self.send_back(&response);
             }
             methods::MethodCall::state_getStorage { key, hash } => {
                 let hash = hash
@@ -626,23 +568,18 @@ impl JsonRpcService {
                     .map(|h| h.0)
                     .unwrap_or(self.blocks.lock().await.best_block);
 
-                self.send_back(
-                    &match self.storage_query(&key.0, &hash).await {
-                        Ok(Some(value)) => {
-                            methods::Response::state_getStorage(methods::HexString(
-                                value.to_owned(),
-                            )) // TODO: overhead
+                self.send_back(&match self.storage_query(&key.0, &hash).await {
+                    Ok(Some(value)) => {
+                        methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
                             .to_json_response(request_id)
-                        }
-                        Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
-                        Err(error) => json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        ),
-                    },
-                    user_data,
-                );
+                    }
+                    Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                });
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
                 let subscription = self
@@ -670,7 +607,6 @@ impl JsonRpcService {
                 self.send_back(
                     &methods::Response::state_subscribeRuntimeVersion(&subscription)
                         .to_json_response(request_id),
-                    user_data,
                 );
 
                 let notification = if let Ok(runtime_spec) = current_specs {
@@ -689,14 +625,11 @@ impl JsonRpcService {
                     "null".to_string()
                 };
 
-                self.send_back(
-                    &smoldot::json_rpc::parse::build_subscription_event(
-                        "state_runtimeVersion",
-                        &subscription,
-                        &notification,
-                    ),
-                    user_data,
-                );
+                self.send_back(&smoldot::json_rpc::parse::build_subscription_event(
+                    "state_runtimeVersion",
+                    &subscription,
+                    &notification,
+                ));
 
                 let client = self.clone();
                 (self.tasks_executor.lock().await)(
@@ -744,7 +677,6 @@ impl JsonRpcService {
                                                 &subscription,
                                                 &notification_body,
                                             ),
-                                            user_data,
                                         );
                                     } else {
                                         break;
@@ -754,7 +686,7 @@ impl JsonRpcService {
                                     let response =
                                         methods::Response::state_unsubscribeRuntimeVersion(true)
                                             .to_json_response(&unsub_request_id);
-                                    client.send_back(&response, user_data);
+                                    client.send_back(&response);
                                     break;
                                 }
                                 future::Either::Right((Err(_), _)) => break,
@@ -764,7 +696,7 @@ impl JsonRpcService {
                 );
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                self.subscribe_storage(user_data, request_id, list).await;
+                self.subscribe_storage(request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 let invalid = if let Some(subs) = self
@@ -786,7 +718,6 @@ impl JsonRpcService {
                     self.send_back(
                         &methods::Response::state_unsubscribeStorage(false)
                             .to_json_response(request_id),
-                        user_data,
                     );
                 }
             }
@@ -800,31 +731,26 @@ impl JsonRpcService {
                         .map_err(runtime_service::RuntimeVersionOfBlockError::InvalidRuntime)
                 };
 
-                self.send_back(
-                    &match runtime_spec {
-                        Ok(runtime_spec) => {
-                            let runtime_spec = runtime_spec.decode();
-                            methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                                spec_name: runtime_spec.spec_name.into(),
-                                impl_name: runtime_spec.impl_name.into(),
-                                authoring_version: u64::from(runtime_spec.authoring_version),
-                                spec_version: u64::from(runtime_spec.spec_version),
-                                impl_version: u64::from(runtime_spec.impl_version),
-                                transaction_version: runtime_spec
-                                    .transaction_version
-                                    .map(u64::from),
-                                apis: runtime_spec.apis,
-                            })
-                            .to_json_response(request_id)
-                        }
-                        Err(error) => json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        ),
-                    },
-                    user_data,
-                );
+                self.send_back(&match runtime_spec {
+                    Ok(runtime_spec) => {
+                        let runtime_spec = runtime_spec.decode();
+                        methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
+                            spec_name: runtime_spec.spec_name.into(),
+                            impl_name: runtime_spec.impl_name.into(),
+                            authoring_version: u64::from(runtime_spec.authoring_version),
+                            spec_version: u64::from(runtime_spec.spec_version),
+                            impl_version: u64::from(runtime_spec.impl_version),
+                            transaction_version: runtime_spec.transaction_version.map(u64::from),
+                            apis: runtime_spec.apis,
+                        })
+                        .to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                });
             }
             methods::MethodCall::system_accountNextIndex { account } => {
                 let response = match account_nonce(&self.runtime_service, account).await {
@@ -842,20 +768,18 @@ impl JsonRpcService {
                     ),
                 };
 
-                self.send_back(&response, user_data);
+                self.send_back(&response);
             }
             methods::MethodCall::system_chain {} => {
                 self.send_back(
                     &methods::Response::system_chain(self.chain_spec.name())
                         .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::system_chainType {} => {
                 self.send_back(
                     &methods::Response::system_chainType(self.chain_spec.chain_type())
                         .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::system_health {} => {
@@ -870,7 +794,6 @@ impl JsonRpcService {
                         should_have_peers: self.chain_spec.has_live_network(),
                     })
                     .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::system_localListenAddresses {} => {
@@ -878,14 +801,12 @@ impl JsonRpcService {
                 self.send_back(
                     &methods::Response::system_localListenAddresses(Vec::new())
                         .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::system_name {} => {
                 self.send_back(
                     &methods::Response::system_name(env!("CARGO_PKG_NAME"))
                         .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::system_peers {} => {
@@ -903,7 +824,6 @@ impl JsonRpcService {
                             .collect(),
                     )
                     .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::system_properties {} => {
@@ -912,29 +832,24 @@ impl JsonRpcService {
                         serde_json::from_str(self.chain_spec.properties()).unwrap(),
                     )
                     .to_json_response(request_id),
-                    user_data,
                 );
             }
             methods::MethodCall::system_version {} => {
                 self.send_back(
                     &methods::Response::system_version(env!("CARGO_PKG_VERSION"))
                         .to_json_response(request_id),
-                    user_data,
                 );
             }
             _method => {
                 log::error!(target: "json-rpc", "JSON-RPC call not supported yet: {:?}", _method);
-                self.send_back(
-                    &json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(
-                            -32000,
-                            "Not implemented in smoldot yet",
-                        ),
-                        None,
+                self.send_back(&json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        "Not implemented in smoldot yet",
                     ),
-                    user_data,
-                );
+                    None,
+                ));
             }
         }
     }
@@ -949,7 +864,6 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
     async fn submit_and_watch_extrinsic(
         self: Arc<JsonRpcService>,
-        user_data: u32,
         request_id: &str,
         transaction: methods::HexString,
     ) {
@@ -986,7 +900,7 @@ impl JsonRpcService {
             "jsonrpc-subscription-transaction".into(),
             Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation, user_data);
+                client.send_back(&confirmation);
 
                 loop {
                     // Wait for either a status update block, or for the subscription to
@@ -1028,7 +942,6 @@ impl JsonRpcService {
                                         &subscription,
                                         &serde_json::to_string(&update).unwrap(),
                                     ),
-                                    user_data,
                                 );
                             } else {
                                 break;
@@ -1037,7 +950,7 @@ impl JsonRpcService {
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeNewHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            client.send_back(&response, user_data);
+                            client.send_back(&response);
                             break;
                         }
                         future::Either::Left((None, _)) => {
@@ -1056,59 +969,51 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
-    async fn get_block_hash(
-        self: Arc<JsonRpcService>,
-        user_data: u32,
-        request_id: &str,
-        height: Option<u64>,
-    ) {
+    async fn get_block_hash(self: Arc<JsonRpcService>, request_id: &str, height: Option<u64>) {
         let mut blocks = self.blocks.lock().await;
         let blocks = &mut *blocks;
 
-        self.send_back(
-            &match height {
-                Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
-                    self.genesis_block,
-                ))
-                .to_json_response(request_id),
-                None => {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
-                        .to_json_response(request_id)
-                }
-                Some(n)
-                    if blocks
-                        .known_blocks
-                        .get(&blocks.best_block)
-                        .map_or(false, |h| h.number == n) =>
-                {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
-                        .to_json_response(request_id)
-                }
-                Some(n)
-                    if blocks
-                        .known_blocks
-                        .get(&blocks.finalized_block)
-                        .map_or(false, |h| h.number == n) =>
-                {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(
-                        blocks.finalized_block,
-                    ))
+        self.send_back(&match height {
+            Some(0) => {
+                methods::Response::chain_getBlockHash(methods::HashHexString(self.genesis_block))
                     .to_json_response(request_id)
-                }
-                Some(_) => {
-                    // While the block could be found in `known_blocks`, there is no guarantee
-                    // that blocks in `known_blocks` are canonical, and we have no choice but to
-                    // return null.
-                    // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
-                    json_rpc::parse::build_success_response(request_id, "null")
-                }
-            },
-            user_data,
-        );
+            }
+            None => {
+                methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
+                    .to_json_response(request_id)
+            }
+            Some(n)
+                if blocks
+                    .known_blocks
+                    .get(&blocks.best_block)
+                    .map_or(false, |h| h.number == n) =>
+            {
+                methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
+                    .to_json_response(request_id)
+            }
+            Some(n)
+                if blocks
+                    .known_blocks
+                    .get(&blocks.finalized_block)
+                    .map_or(false, |h| h.number == n) =>
+            {
+                methods::Response::chain_getBlockHash(methods::HashHexString(
+                    blocks.finalized_block,
+                ))
+                .to_json_response(request_id)
+            }
+            Some(_) => {
+                // While the block could be found in `known_blocks`, there is no guarantee
+                // that blocks in `known_blocks` are canonical, and we have no choice but to
+                // return null.
+                // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
+                json_rpc::parse::build_success_response(request_id, "null")
+            }
+        });
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(self: Arc<JsonRpcService>, user_data: u32, request_id: &str) {
+    async fn subscribe_all_heads(self: Arc<JsonRpcService>, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1146,7 +1051,7 @@ impl JsonRpcService {
             "jsonrpc-subscription-all-heads".into(),
             Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation, user_data);
+                client.send_back(&confirmation);
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -1172,7 +1077,6 @@ impl JsonRpcService {
                                         &subscription,
                                         &serde_json::to_string(&header).unwrap(),
                                     ),
-                                    user_data,
                                 );
                             } else {
                                 break;
@@ -1181,7 +1085,7 @@ impl JsonRpcService {
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeAllHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            client.send_back(&response, user_data);
+                            client.send_back(&response);
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
@@ -1192,7 +1096,7 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(self: Arc<JsonRpcService>, user_data: u32, request_id: &str) {
+    async fn subscribe_new_heads(self: Arc<JsonRpcService>, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1227,7 +1131,7 @@ impl JsonRpcService {
             "jsonrpc-subscription-new-heads".into(),
             Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation, user_data);
+                client.send_back(&confirmation);
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -1252,7 +1156,6 @@ impl JsonRpcService {
                                         &subscription,
                                         &serde_json::to_string(&header).unwrap(),
                                     ),
-                                    user_data,
                                 );
                             } else {
                                 break;
@@ -1261,7 +1164,7 @@ impl JsonRpcService {
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeNewHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            client.send_back(&response, user_data);
+                            client.send_back(&response);
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
@@ -1272,11 +1175,7 @@ impl JsonRpcService {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
-    async fn subscribe_finalized_heads(
-        self: Arc<JsonRpcService>,
-        user_data: u32,
-        request_id: &str,
-    ) {
+    async fn subscribe_finalized_heads(self: Arc<JsonRpcService>, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1312,7 +1211,7 @@ impl JsonRpcService {
             "jsonrpc-subscription-finalized-heads".into(),
             Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation, user_data);
+                client.send_back(&confirmation);
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -1337,7 +1236,6 @@ impl JsonRpcService {
                                         &subscription,
                                         &serde_json::to_string(&header).unwrap(),
                                     ),
-                                    user_data,
                                 );
                             } else {
                                 break;
@@ -1346,7 +1244,7 @@ impl JsonRpcService {
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            client.send_back(&response, user_data);
+                            client.send_back(&response);
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
@@ -1359,7 +1257,7 @@ impl JsonRpcService {
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
     async fn subscribe_storage(
         self: Arc<JsonRpcService>,
-        user_data: u32,
+
         request_id: &str,
         list: Vec<methods::HexString>,
     ) {
@@ -1458,7 +1356,7 @@ impl JsonRpcService {
                 futures::pin_mut!(storage_updates);
 
                 // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation, user_data);
+                client.send_back(&confirmation);
 
                 loop {
                     // Wait for either a new storage update, or for the subscription to be canceled.
@@ -1479,7 +1377,6 @@ impl JsonRpcService {
                                         &subscription,
                                         &serde_json::to_string(&changes).unwrap(),
                                     ),
-                                    user_data,
                                 );
                             } else {
                                 break;
@@ -1488,7 +1385,7 @@ impl JsonRpcService {
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::state_unsubscribeStorage(true)
                                 .to_json_response(&unsub_request_id);
-                            client.send_back(&response, user_data);
+                            client.send_back(&response);
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,

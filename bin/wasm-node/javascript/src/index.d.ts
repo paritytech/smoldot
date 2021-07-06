@@ -20,7 +20,7 @@ declare class SmoldotError extends Error {
 }
 
 export interface SmoldotClient {
-  addChain(chainSpec: string, potentialRelayChains: SmoldotChain[], jsonRpcCallback: SmoldotJsonRpcCallback): Promise<SmoldotChain>;
+  addChain(options: SmoldotAddChainOptions): Promise<SmoldotChain>;
   terminate(): void;
 }
 
@@ -38,6 +38,12 @@ export interface SmoldotOptions {
   forbidTcp?: boolean;
   forbidWs?: boolean;
   forbidWss?: boolean;
+}
+
+export interface SmoldotAddChainOptions {
+  chainSpec: string,
+  potentialRelayChains?: SmoldotChain[],
+  jsonRpcCallback?: SmoldotJsonRpcCallback,
 }
 
 export interface Smoldot {

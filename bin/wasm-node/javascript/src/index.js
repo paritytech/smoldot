@@ -81,6 +81,8 @@ export async function start(config) {
         sendJsonRpc: (request) => {
           if (workerError)
             throw workerError;
+          if (!chainsJsonRpcCallbacks[message.chainId])
+            throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
           worker.postMessage({ ty: 'request', request, chainId });
         },
         remove: () => {
@@ -125,19 +127,21 @@ export async function start(config) {
   });
 
   return {
-    addChain: (chainSpec, potentialRelayChains, jsonRpcCallback) => {
+    addChain: (options) => {
       let potentialRelayChainsIds = [];
-      for (var chain in potentialRelayChains) {
-        const id = chain.__internal_smoldot_id();
-        // TODO: check type?
-        potentialRelayChainsIds.push(id);
+      if (!!options.potentialRelayChains) {
+        for (var chain in options.potentialRelayChains) {
+          const id = chain.__internal_smoldot_id();
+          // TODO: check type?
+          potentialRelayChainsIds.push(id);
+        }
       }
 
       worker.postMessage({
         ty: 'addChain',
-        chainSpec,
+        chainSpec: options.chainSpec,
         potentialRelayChains: potentialRelayChainsIds,
-        jsonRpcRunning: !!jsonRpcCallback,
+        jsonRpcRunning: !!options.jsonRpcCallback,
       });
 
       // Build a promise that will be resolved or rejected after the chain has been added.
@@ -152,7 +156,7 @@ export async function start(config) {
         ty: 'chainAdded',
         reject: chainAddedPromiseResolve,
         resolve: chainAddedPromiseReject,
-        jsonRpcCallback,
+        jsonRpcCallback: options.jsonRpcCallback,
       });
 
       return chainAddedPromise;
