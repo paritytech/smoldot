@@ -41,9 +41,9 @@ export interface SmoldotOptions {
 }
 
 export interface SmoldotAddChainOptions {
-  chainSpec: string,
-  potentialRelayChains?: SmoldotChain[],
-  jsonRpcCallback?: SmoldotJsonRpcCallback,
+  chainSpec: string;
+  potentialRelayChains?: SmoldotChain[];
+  jsonRpcCallback?: SmoldotJsonRpcCallback;
 }
 
 export interface Smoldot {

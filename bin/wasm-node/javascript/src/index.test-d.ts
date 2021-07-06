@@ -22,11 +22,11 @@ sp = smoldot.start({});
 
 sp.then(async (sm) => {
   // $ExpectType Promise<SmoldotChain>
-  let chain1 = sm.addChain({ chainSpec: '' });
+  const chain1 = sm.addChain({ chainSpec: '' });
   // $ExpectType Promise<SmoldotChain>
-  let chain2Promise = sm.addChain({ chainSpec: '', potentialRelayChains: [await chain1], jsonRpcCallback: (resp) => { } });
+  const chain2Promise = sm.addChain({ chainSpec: '', potentialRelayChains: [await chain1], jsonRpcCallback: (resp) => { } });
   // $ExpectType SmoldotChain
-  let chain2 = await chain2Promise;
+  const chain2 = await chain2Promise;
   // $ExpectType void
   chain2.sendJsonRpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}');
   // $ExpectType void
