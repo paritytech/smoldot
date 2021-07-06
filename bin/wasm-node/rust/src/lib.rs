@@ -22,7 +22,11 @@
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+    prelude::*,
+};
 use smoldot::{
     chain, chain_spec,
     informant::HashDisplay,
@@ -116,7 +120,16 @@ pub struct Client {
     ///
     /// For each key, contains the services running for this chain plus the number of public API
     /// chains that correspond to it.
-    chains_by_key: HashMap<ChainKey, (RunningChain, NonZeroU32)>,
+    ///
+    /// The [`RunningChain`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
+    /// initialization is still in progress.
+    chains_by_key: HashMap<
+        ChainKey,
+        (
+            future::MaybeDone<future::RemoteHandle<RunningChain>>,
+            NonZeroU32,
+        ),
+    >,
 }
 
 impl Client {
@@ -269,12 +282,12 @@ impl Client {
                         .into_peer_id()
                 );
 
-                // The code below consists in spawning various services one by one. Services must be
-                // created in a specific order, because some services must be passed an `Arc` to others.
-                // One thing to be aware of, is that in order to start, a service might perform a request
-                // on the other service(s) passed as parameter. These requests in turn depend on background
-                // task being spawned.
-                let running_chain = start_services(
+                // The code below consists in spawning various services one by one. Services must
+                // be created in a specific order, because some services must be passed an `Arc`
+                // to others. One thing to be aware of, is that in order to start, a service might
+                // perform a request on the other service(s) passed as parameter. These requests
+                // in turn depend on background task being spawned.
+                let running_chain_init_future = start_services(
                     self.new_task_tx.clone(),
                     chain_information,
                     genesis_chain_information,
@@ -282,8 +295,17 @@ impl Client {
                     relay_chain.map(|relay_chain| &self.chains_by_key.get(relay_chain).unwrap().0),
                     network_noise_key,
                     config.json_rpc_running,
-                )
-                .await;
+                );
+
+                let (drive_init, running_chain_init_future) =
+                    running_chain_init_future.remote_handle();
+                self.new_task_tx
+                    .unbounded_send(("services-initialization".to_owned(), drive_init.boxed()))
+                    .unwrap();
+                entry.insert(future::maybe_done(
+                    running_chain_init_future,
+                    NonZeroU32::new(1).unwrap(),
+                ));
             }
         }
 
@@ -428,6 +450,7 @@ struct ChainKey {
 
 struct PublicApiChain {
     key: ChainKey,
+    // TODO: actually a bit overkill to spawn one separate service per chain
     json_rpc_service: Option<Arc<json_rpc_service::JsonRpcService>>,
 }
 

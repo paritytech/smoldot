@@ -77,8 +77,9 @@ pub struct Config {
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 
-    /// The index of the chain that this service is handling requests for. Used only for the FFI layer.
-    pub chain_index: usize,
+    /// The id of the chain that this service is handling requests for. Used only for the FFI layer.
+    // TODO: a bit spaghetti
+    chain_id: super::ChainId,
 }
 
 /// Initializes the JSON-RPC service with the given configuration.
@@ -110,7 +111,7 @@ pub async fn start(config: Config) -> Arc<JsonRpcService> {
         genesis_block: config.genesis_block_hash,
         next_subscription: atomic::AtomicU64::new(0),
         per_userdata_subscriptions: Default::default(),
-        chain_index: config.chain_index,
+        chain_id: config.chain_id,
     });
 
     // Spawns a task whose role is to update `blocks` with the new best and finalized blocks.
