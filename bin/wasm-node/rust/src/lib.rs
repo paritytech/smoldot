@@ -31,6 +31,7 @@ use smoldot::{
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
+    convert::TryFrom as _,
     num::NonZeroU32,
     pin::Pin,
     str,
@@ -58,9 +59,9 @@ static ALLOC: std::alloc::System = std::alloc::System;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
-pub struct AddChainConfig {
+pub struct AddChainConfig<'a> {
     /// JSON text containing the specification of the chain (the so-called "chain spec").
-    pub specification: String,
+    pub specification: &'a str,
 
     /// If [`AddChainConfig`] defines a parachain, contains the list of relay chains to choose
     /// from.
@@ -73,6 +74,7 @@ pub struct AddChainConfig {
     /// For example: if user A adds a chain named "kusama", then user B adds a different chain
     /// also named "kusama", then user B adds a parachain whose relay chain is "kusama", it would
     /// be wrong to connect to the "kusama" created by user A.
+    // TODO: pass as iterator
     pub potential_relay_chains: Vec<ChainId>,
 
     /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
@@ -86,6 +88,20 @@ pub struct AddChainConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChainId(usize);
 
+impl From<u32> for ChainId {
+    fn from(n: u32) -> ChainId {
+        // Assume that we are always on a 32bits or more platform.
+        ChainId(usize::try_from(n).unwrap())
+    }
+}
+
+impl From<ChainId> for u32 {
+    fn from(n: ChainId) -> u32 {
+        // Assume that no `ChainId` above `u32::max_value()` is ever generated.
+        u32::try_from(n.0).unwrap()
+    }
+}
+
 pub struct Client {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
@@ -94,7 +110,7 @@ pub struct Client {
     /// List of chains currently running according to the public API. Indices in this container
     /// are reported through the public API. The values are keys found in
     /// [`Client::chains_by_key`].
-    public_api_chains: slab::Slab<ChainKey>,
+    public_api_chains: slab::Slab<PublicApiChain>,
 
     /// De-duplicated list of chains that are *actually* running.
     ///
@@ -188,7 +204,10 @@ impl Client {
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
     #[must_use]
-    pub async fn add_chain(&mut self, config: AddChainConfig) -> Result<ChainId, AddChainError> {
+    pub fn add_chain(
+        &mut self,
+        config: AddChainConfig<'_>,
+    ) -> Result<ChainId, AddChainError> {
         // Decode the chain specification.
         let chain_spec = chain_spec::ChainSpec::from_json_bytes(&config.specification)
             .map_err(AddChainError::InvalidChainSpec)?;
@@ -211,7 +230,7 @@ impl Client {
                 .potential_relay_chains
                 .iter()
                 .filter_map(|c| self.public_api_chains.get(c.0))
-                .filter(|c| self.chains_by_key.get(c).unwrap().0.chain_id == relay_chain_id);
+                .filter(|c| self.chains_by_key.get(&c.key).unwrap().0.chain_id == relay_chain_id);
 
             let found_relay_chain = valid_relay_chains_iter
                 .next()
@@ -229,13 +248,18 @@ impl Client {
                 .as_ref()
                 .finalized_block_header
                 .hash(),
-            relay_chain: relay_chain
-                .clone()
-                .map(|ck| (Box::new(ck.clone()), chain_spec.relay_chain().unwrap().1)),
+            relay_chain: relay_chain.clone().map(|ck| {
+                (
+                    Box::new(ck.key.clone()),
+                    chain_spec.relay_chain().unwrap().1,
+                )
+            }),
         };
 
         match self.chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
+                // TODO: /!\ must start a fresh json-rpc service anyway
+                // TODO: must add bootnodes to the existing network service
                 entry.get_mut().1 = NonZeroU32::new(entry.get_mut().1.get() + 1).unwrap();
             }
             Entry::Vacant(entry) => {
@@ -266,8 +290,35 @@ impl Client {
             }
         }
 
+        let json_rpc_service = if config.json_rpc_running {
+            let finalized_header = genesis_chain_information.as_ref().finalized_block_header;
+            Some(
+                json_rpc_service::start(json_rpc_service::Config {
+                    tasks_executor: Box::new({
+                        let new_task_tx = new_task_tx.clone();
+                        move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+                    }),
+                    network_service: (network_service.clone(), 0),
+                    sync_service,
+                    transactions_service,
+                    runtime_service,
+                    chain_spec,
+                    genesis_block_hash: finalized_header.hash(),
+                    genesis_block_state_root: *finalized_header.state_root,
+                    chain_index,
+                })
+                .await,
+            )
+        } else {
+            None
+        };
+
         // Everything went ok. Generate a `ChainId` for that chain.
-        let chain_id = self.public_api_chains.insert(new_chain_key);
+        let chain_id = self.public_api_chains.insert(PublicApiChain {
+            key: new_chain_key,
+            json_rpc_service,
+        });
+
         Ok(ChainId(chain_id))
     }
 
@@ -289,12 +340,7 @@ impl Client {
         }*/
     }
 
-    pub fn json_rpc_request(
-        &mut self,
-        json_rpc_request: Box<[u8]>,
-        chain_index: u32,
-        user_data: u32,
-    ) {
+    pub fn json_rpc_request(&mut self, json_rpc_request: Box<[u8]>, chain_id: ChainId) {
         let request_str = match str::from_utf8(&*json_rpc_request) {
             Ok(s) => s,
             Err(error) => {
@@ -333,9 +379,9 @@ impl Client {
             }
         };
 
-        match self.public_api_chains.get(&chain_index) {
-            Some(services) => {
-                services
+        match self.public_api_chains.get(&chain_id.0) {
+            Some(public_chain) => {
+                public_chain
                     .json_rpc_service
                     .handle_rpc(user_data, request_id, call)
                     .await
@@ -371,11 +417,16 @@ struct ChainKey {
     relay_chain: Option<(Box<ChainKey>, u32)>,
 }
 
+struct PublicApiChain {
+    key: ChainKey,
+    json_rpc_service: Option<Arc<json_rpc_service::JsonRpcService>>,
+}
+
 struct RunningChain {
     chain_id: String,
     sync_service: Arc<sync_service::SyncService>,
     runtime_service: Arc<runtime_service::RuntimeService>,
-    json_rpc_service: Option<Arc<json_rpc_service::JsonRpcService>>,
+    transactions_service: Arc<transactions_service::TransactionsService>,
 }
 
 /// See [`Client::add_chain`].
@@ -390,8 +441,8 @@ pub enum AddChainError {
 
 /// Starts all the services of the client.
 ///
-/// Returns a JSON-RPC service. If this service gets shut down, all the other services will later
-/// shut down as well.
+/// Returns some of the services that have been started. If these service get shut down, all the
+/// other services will later shut down as well.
 async fn start_services(
     new_task_tx: mpsc::UnboundedSender<(
         String,
@@ -523,52 +574,31 @@ async fn start_services(
         (sync_service, runtime_service)
     };
 
+    // The transactions service lets one send transactions to the peer-to-peer network and watch
+    // them being included in the chain.
+    let transactions_service = Arc::new(
+        transactions_service::TransactionsService::new(transactions_service::Config {
+            tasks_executor: Box::new({
+                let new_task_tx = new_task_tx.clone();
+                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+            }),
+            sync_service: sync_service.clone(),
+            runtime_service: runtime_service.clone(),
+            network_service: (network_service.clone(), 0),
+            max_pending_transactions: NonZeroU32::new(64).unwrap(),
+            max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
+            max_concurrent_validations: NonZeroU32::new(2).unwrap(),
+        })
+        .await,
+    );
+
     let chain_id = chain_spec.id().to_owned();
-
-    let json_rpc_service = if json_rpc_running {
-        let finalized_header = genesis_chain_information.as_ref().finalized_block_header;
-        let transactions_service = Arc::new(
-            transactions_service::TransactionsService::new(transactions_service::Config {
-                tasks_executor: Box::new({
-                    let new_task_tx = new_task_tx.clone();
-                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
-                }),
-                sync_service: sync_service.clone(),
-                runtime_service: runtime_service.clone(),
-                network_service: (network_service.clone(), 0),
-                max_pending_transactions: NonZeroU32::new(64).unwrap(),
-                max_concurrent_downloads: NonZeroU32::new(3).unwrap(),
-                max_concurrent_validations: NonZeroU32::new(2).unwrap(),
-            })
-            .await,
-        );
-
-        Some(
-            json_rpc_service::start(json_rpc_service::Config {
-                tasks_executor: Box::new({
-                    let new_task_tx = new_task_tx.clone();
-                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
-                }),
-                network_service: (network_service.clone(), 0),
-                sync_service,
-                transactions_service,
-                runtime_service,
-                chain_spec,
-                genesis_block_hash: finalized_header.hash(),
-                genesis_block_state_root: *finalized_header.state_root,
-                chain_index,
-            })
-            .await,
-        )
-    } else {
-        None
-    };
 
     RunningChain {
         chain_id,
-        json_rpc_service,
         runtime_service,
         sync_service,
+        transactions_service,
     }
 }
 

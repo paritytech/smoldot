@@ -22,17 +22,14 @@ use core::{
     convert::TryFrom as _,
     fmt,
     future::Future,
-    marker, mem,
+    marker,
     ops::{Add, Sub},
     pin::Pin,
     slice, str,
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    prelude::*,
-};
+use futures::{channel::oneshot, prelude::*};
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
@@ -449,119 +446,113 @@ fn alloc(len: u32) -> u32 {
 }
 
 fn init(max_log_level: u32) {
-    let max_log_level = match max_log_level {
+    let mut client = super::Client::new(match max_log_level {
         0 => log::LevelFilter::Off,
         1 => log::LevelFilter::Error,
         2 => log::LevelFilter::Warn,
         3 => log::LevelFilter::Info,
         4 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
-    };
+    });
 
-    let mut client = super::Client::new(max_log_level);
-
-    let chain_specs_pointers_ptr = usize::try_from(chain_specs_pointers_ptr).unwrap();
-    let chain_specs_pointers_len = usize::try_from(chain_specs_pointers_len).unwrap();
-
-    let chain_specs_pointers: Box<[u8]> = unsafe {
-        Box::from_raw(slice::from_raw_parts_mut(
-            chain_specs_pointers_ptr as *mut u8,
-            chain_specs_pointers_len,
-        ))
-    };
-
-    assert_eq!(chain_specs_pointers.len() % 8, 0);
-    let mut chain_specs = Vec::with_capacity(chain_specs_pointers.len() / 8);
-
-    for chain_spec_index in 0..(chain_specs.capacity()) {
-        let spec_pointer = {
-            let val = <[u8; 4]>::try_from(
-                &chain_specs_pointers[(chain_spec_index * 8)..(chain_spec_index * 8 + 4)],
-            )
-            .unwrap();
-            usize::try_from(u32::from_le_bytes(val)).unwrap()
-        };
-
-        let spec_len = {
-            let val = <[u8; 4]>::try_from(
-                &chain_specs_pointers[(chain_spec_index * 8 + 4)..(chain_spec_index * 8 + 8)],
-            )
-            .unwrap();
-            usize::try_from(u32::from_le_bytes(val)).unwrap()
-        };
-
-        let chain_spec: Box<[u8]> =
-            unsafe { Box::from_raw(slice::from_raw_parts_mut(spec_pointer as *mut u8, spec_len)) };
-
-        let chain_spec = String::from_utf8(Vec::from(chain_spec)).expect("non-utf8 chain spec");
-
-        client.add_chain(super::AddChainConfig {
-            specification: chain_spec,
-            json_rpc_running: true,
-        });
-    }
-
-    debug_assert_eq!(chain_specs.len(), chain_specs.capacity());
-
-    mem::forget(client); // TODO:
+    let client_lock = CLIENT.lock().unwrap();
+    assert!(client_lock.is_none());
+    *client_lock = Some(client);
 }
 
-pub(crate) enum JsonRpcMessage {
-    Request {
-        json_rpc_request: Box<[u8]>,
-        chain_index: usize,
-        user_data: u32,
-    },
-    UnsubscribeAll {
-        user_data: u32,
-    },
+fn add_chain(
+    chain_spec_pointer: u32,
+    chain_spec_len: u32,
+    json_rpc_running: u32,
+    potential_relay_chains_ptr: u32,
+    potential_relay_chains_len: u32,
+) -> u32 {
+    let chain_spec: Box<[u8]> = {
+        let chain_spec_pointer = usize::try_from(chain_spec_pointer).unwrap();
+        let chain_spec_len = usize::try_from(chain_spec_len).unwrap();
+        unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                chain_spec_pointer as *mut u8,
+                chain_spec_len,
+            ))
+        }
+    };
+
+    let potential_relay_chains: Vec<_> = {
+        let allowed_relay_chains_ptr = usize::try_from(potential_relay_chains_ptr).unwrap();
+        let allowed_relay_chains_len = usize::try_from(potential_relay_chains_len).unwrap();
+
+        let raw_data = unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                allowed_relay_chains_ptr as *mut u8,
+                allowed_relay_chains_len * 4,
+            ))
+        };
+
+        raw_data
+            .chunks(4)
+            .map(|c| u32::from_le_bytes(<[u8; 4]>::try_from(c).unwrap()))
+            .map(super::ChainId::from)
+            .collect()
+    };
+
+    let client_lock = CLIENT.lock().unwrap();
+
+    let result = client_lock
+        .as_mut()
+        .unwrap()
+        .add_chain(super::AddChainConfig {
+            specification: str::from_utf8(&chain_spec).unwrap(),
+            json_rpc_running: json_rpc_running != 0,
+            potential_relay_chains,
+        });
+
+    match result {
+        Ok(chain_id) => {
+            let chain_id: u32 = chain_id.into();
+            assert_ne!(chain_id, u32::max_value());
+            chain_id
+        }
+        Err(_) => u32::max_value(),
+    }
+}
+
+fn remove_chain(chain_id: u32) {
+    let client_lock = CLIENT.lock().unwrap();
+    client_lock
+        .as_mut()
+        .unwrap()
+        .remove_chain(super::ChainId::from(chain_id))
 }
 
 lazy_static::lazy_static! {
-    static ref JSON_RPC_CHANNEL: (mpsc::UnboundedSender<JsonRpcMessage>, futures::lock::Mutex<mpsc::UnboundedReceiver<JsonRpcMessage>>) = {
-        let (tx, rx) = mpsc::unbounded();
-        (tx, futures::lock::Mutex::new(rx))
+    static ref CLIENT: Mutex<Option<super::Client>> = Mutex::new(None);
+}
+
+fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
+    let chain_id = super::ChainId::from(chain_id);
+
+    let json_rpc_request: Box<[u8]> = {
+        let ptr = usize::try_from(ptr).unwrap();
+        let len = usize::try_from(len).unwrap();
+        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) }
     };
-}
 
-fn json_rpc_send(ptr: u32, len: u32, chain_index: u32, user_data: u32) {
-    let ptr = usize::try_from(ptr).unwrap();
-    let len = usize::try_from(len).unwrap();
-    let chain_index = usize::try_from(chain_index).unwrap();
-
-    let json_rpc_request: Box<[u8]> =
-        unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
-    let message = JsonRpcMessage::Request {
-        json_rpc_request,
-        chain_index,
-        user_data,
-    };
-    JSON_RPC_CHANNEL.0.unbounded_send(message).unwrap();
-}
-
-fn json_rpc_unsubscribe_all(user_data: u32) {
-    JSON_RPC_CHANNEL
-        .0
-        .unbounded_send(JsonRpcMessage::UnsubscribeAll { user_data })
-        .unwrap();
-}
-
-/// Waits for the next JSON-RPC request coming from the JavaScript side.
-// TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) async fn next_json_rpc() -> JsonRpcMessage {
-    let mut lock = JSON_RPC_CHANNEL.1.lock().await;
-    lock.next().await.unwrap()
+    let client_lock = CLIENT.lock().unwrap();
+    client_lock
+        .as_mut()
+        .unwrap()
+        .json_rpc_request(json_rpc_request, chain_id);
 }
 
 /// Emit a JSON-RPC response or subscription notification in destination to the JavaScript side.
 // TODO: maybe tie the JSON-RPC system to a certain "client", instead of being global?
-pub(crate) fn emit_json_rpc_response(rpc: &str, chain_index: usize, user_data: u32) {
+pub(crate) fn emit_json_rpc_response(rpc: &str, chain_id: super::ChainId) {
     unsafe {
         bindings::json_rpc_respond(
             u32::try_from(rpc.as_bytes().as_ptr() as usize).unwrap(),
             u32::try_from(rpc.as_bytes().len()).unwrap(),
-            u32::try_from(chain_index).unwrap(),
-            user_data,
+            u32::from(chain_id),
         );
     }
 }

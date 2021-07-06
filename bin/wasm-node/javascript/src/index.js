@@ -50,57 +50,44 @@ export async function start(config) {
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
-  // Whenever an `unsubscribeAll` is sent to the worker, the corresponding user data is pushed on
-  // this array. The worker needs to send back a confirmation, which pops the first element of
-  // this array. JSON-RPC responses whose user data is found in this array are silently discarded.
-  // This avoids a race condition where the worker emits a JSON-RPC response while we have already
-  // sent to it an `unsubscribeAll`. It is also what makes it possible for `cancelAll` to cancel
-  // requests that are not subscription notifications, even while the worker only supports
-  // cancelling subscriptions.
+  // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
+  // is pushed to this array. The worker needs to send back a confirmation, which pops the first
+  // element of this array. In the case of `addChain`, additional fields are stored in this array
+  // to finish the initialization of the chain.
   let pendingConfirmations = [];
 
-  // Build a promise that will be resolved or rejected after the initalization (that happens in
-  // the worker) has finished.
-  let initPromiseResolve;
-  let initPromiseReject;
-  const initPromise = new Promise((resolve, reject) => {
-    initPromiseResolve = resolve;
-    initPromiseReject = reject;
-  });
+  // For each chain that is currently running, contains the callback to use to send back JSON-RPC
+  // responses corresponding to this chain.
+  // Entries are instantly removed when the user desires to remove a chain even before the worker
+  // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
+  // JSON-RPC response even though we've already sent a `removeChain` message to it.
+  let chainsJsonRpcCallbacks = {};
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
     if (message.kind == 'jsonrpc') {
-      // If `initPromiseResolve` is non-null, then this is the initial dummy JSON-RPC request
-      // that is used to determine when initialization is over. See below. It is intentionally not
-      // reported with the callback.
-      if (initPromiseResolve) {
-        initPromiseResolve();
-        initPromiseReject = null;
-        initPromiseResolve = null;
-      } else if (config.jsonRpcCallback) {
-        if (pendingConfirmations.findIndex(elem => elem == message.userData) === -1)
-          config.jsonRpcCallback(message.data, message.chainIndex, message.userData);
-      }
+      const cb = chainsJsonRpcCallbacks[message.chainId];
+      if (cb) cb(message.data, message.chainId);
 
     } else if (message.kind = 'chainAddedOk') {
       const expected = pendingConfirmations.pop();
-      worker.postMessage({
-        ty: 'request',
-        request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
-        chainId: message.chainId,
-      });
+      const chainId = message.chainId;
+
+      if (!!chainsJsonRpcCallbacks[chainId])
+        throw 'Unexpected reuse of a chain ID';
+      chainsJsonRpcCallbacks[chainId] = expected.jsonRpcCallback;
 
       expected.resolve({
         sendJsonRpc: (request) => {
           if (workerError)
             throw workerError;
-          worker.postMessage({ ty: 'request', request, chainIndex, userData: userData || 0 });
+          worker.postMessage({ ty: 'request', request, chainId });
         },
         remove: () => {
           if (workerError)
             throw workerError;
-          worker.postMessage({ ty: 'request', request, chainIndex, userData: userData || 0 });
+          worker.postMessage({ ty: 'removeChain', chainId });
+          pendingConfirmations.push({ ty: 'chainRemoved', chainId });
         }
       });
 
@@ -108,10 +95,8 @@ export async function start(config) {
       const expected = pendingConfirmations.pop();
       expected.reject(message.error);
 
-    } else if (message.kind == 'unsubscribeAllConfirmation') {
-      const expected = pendingConfirmations.pop();
-      if (expected != message.userData)
-        throw 'Unexpected unsubscribeAllConfirmation';
+    } else if (message.kind == 'chainRemoved') {
+      pendingConfirmations.pop();
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
@@ -138,32 +123,13 @@ export async function start(config) {
     forbidWss: config.forbidWss,
   });
 
-  // Initialization happens asynchronous, both because we have a worker, but also asynchronously
-  // within the worker. In order to detect when initialization was successful, we perform a dummy
-  // JSON-RPC request and wait for the response. While this might seem like an unnecessary
-  // overhead, it is the most straight-forward solution. Any alternative with a lower overhead
-  // would have a higher complexity.
-  //
-  // Note that using `0` for `chainIndex` means that an error will be returned if the list of
-  // chain specs is empty. This is fine.
-  worker.postMessage({
-    ty: 'request',
-    request: '{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}',
-    chainIndex: 0,
-    userData: 0,
-  });
-  pendingConfirmations.push(0);
-  worker.postMessage({ ty: 'unsubscribeAll', userData: 0 });
-
-  // Now blocking until the worker sends back the response.
-  // This will throw if the initialization has failed.
-  await initPromise;
-
   return {
-    addChain: (chainSpec, jsonRpcCallback) => {
+    addChain: (chainSpec, potentialRelayChains, jsonRpcCallback) => {
       worker.postMessage({
-        ty: 'add-chain',
+        ty: 'addChain',
         chainSpec,
+        potentialRelayChains,
+        jsonRpcRunning: !!jsonRpcCallback,
       });
 
       // Build a promise that will be resolved or rejected after the chain has been added.
@@ -175,8 +141,10 @@ export async function start(config) {
       });
 
       pendingConfirmations.push({
+        ty: 'chainAdded',
         reject: chainAddedPromiseResolve,
         resolve: chainAddedPromiseReject,
+        jsonRpcCallback,
       });
 
       return chainAddedPromise;

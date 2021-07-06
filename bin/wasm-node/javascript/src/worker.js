@@ -32,6 +32,51 @@ import { default as wasm_base64 } from './autogen/wasm.js';
 //
 let state = null;
 
+// Inject a message coming from `index.js` to a running Wasm VM.
+const injectMessage = (instance, message) => {
+  if (message.ty == 'request') {
+    const len = Buffer.byteLength(message.request, 'utf8');
+    const ptr = instance.exports.alloc(len);
+    Buffer.from(instance.exports.memory.buffer).write(message.request, ptr);
+    instance.exports.json_rpc_send(ptr, len, message.chainId);
+
+  } else if (message.ty == 'addChain') {
+    // Write the chain specification into memory.
+    const chainSpecLen = Buffer.byteLength(message.chainSpec, 'utf8');
+    const chainSpecPtr = instance.exports.alloc(chainSpecLen);
+    Buffer.from(instance.exports.memory.buffer)
+      .write(message.chainSpec, chainSpecPtr);
+
+    // Write the potential relay chains into memory.
+    const potentialRelayChainsLen = message.potentialRelayChains.length;
+    const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4);
+    for (let idx in message.potentialRelayChains) {
+      Buffer.from(instance.exports.memory.buffer)
+        .writeUInt32LE(message.potentialRelayChains[idx], potentialRelayChainsPtr + idx * 4);
+    }
+
+    const result = instance.exports.add_chain(
+      chainSpecPtr, chainSpecLen,
+      message.jsonRpcRunning,
+      potentialRelayChainsPtr, potentialRelayChainsLen
+    );
+
+    if (result >= (1 << 32) - 1) {
+      // TODO: better error message
+      compat.postMessage({ kind: 'chainAddedErr', error: new Error('Failed to initialize chain') });
+    } else {
+      compat.postMessage({ kind: 'chainAddedOk', chainId: result });
+    }
+
+  } else if (message.ty == 'removeChain') {
+    instance.exports.removeChain(message.chainId);
+    // `compat.postMessage` is the same as `postMessage`, but works across environments.
+    compat.postMessage({ kind: 'chainRemoved' });
+
+  } else
+    throw new Error('unrecognized message type');
+};
+
 const startInstance = async (config) => {
   // The actual Wasm bytecode is base64-decoded from a constant found in a different file.
   // This is suboptimal compared to using `instantiateStreaming`, but it is the most
@@ -71,48 +116,14 @@ const startInstance = async (config) => {
   smoldotJsConfig.instance = result.instance;
   wasiConfig.instance = result.instance;
 
-  // Write the chain specifications into memory and call `init`.
-  // The logic below is a bit complicated due to the necessity to pass a list of strings through
-  // the FFI layer. See the documentation of `init` in the Rust code.
-  let chainSpecsPointersContent = [];
-  for (let chainSpec of config.chainSpecs) {
-    if (Object.prototype.toString.call(chainSpec) !== '[object String]')
-      throw new SmoldotError('chain spec must be a string');
-
-    const chainSpecLen = Buffer.byteLength(chainSpec, 'utf8');
-    const chainSpecPtr = result.instance.exports.alloc(chainSpecLen);
-    Buffer.from(result.instance.exports.memory.buffer)
-      .write(chainSpec, chainSpecPtr);
-    chainSpecsPointersContent.push(chainSpecPtr);
-    chainSpecsPointersContent.push(chainSpecLen);
-  }
-  const chainSpecsPointersPtr = result.instance.exports.alloc(chainSpecsPointersContent.length * 4);
-  for (let idx in chainSpecsPointersContent) {
-    Buffer.from(result.instance.exports.memory.buffer)
-      .writeUInt32LE(chainSpecsPointersContent[idx], chainSpecsPointersPtr + idx * 4);
-  }
   // Start initialization of smoldot.
-  result.instance.exports.init(
-    chainSpecsPointersPtr, chainSpecsPointersContent.length * 4,
-    config.maxLogLevel
-  );
+  result.instance.exports.init(config.maxLogLevel);
 
   // Smoldot has finished initializing.
   // Since this function is an asynchronous function, it is possible that messages have been
   // received from the parent while it was executing. These messages are now handled.
-  // Note that this same code is duplicated below.
   state.forEach((message) => {
-    if (message.ty == 'request') {
-      const len = Buffer.byteLength(message.request, 'utf8');
-      const ptr = result.instance.exports.alloc(len);
-      Buffer.from(result.instance.exports.memory.buffer).write(message.request, ptr);
-      result.instance.exports.json_rpc_send(ptr, len, message.chainIndex, message.userData);
-    } else if (message.ty == 'unsubscribeAll') {
-      result.instance.exports.json_rpc_unsubscribe_all(message.userData);
-      // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'unsubscribeAllConfirmation', userData: message.userData });
-    } else
-      throw new Error('unrecognized message type');
+    injectMessage(result.instance, message);
   });
 
   state = result.instance;
@@ -134,17 +145,6 @@ compat.setOnMessage((message) => {
 
   } else {
     // Everything is already initialized. Process the message synchronously.
-    // Note that this same code is duplicated above.
-    if (message.ty == 'request') {
-      const len = Buffer.byteLength(message.request, 'utf8');
-      const ptr = state.exports.alloc(len);
-      Buffer.from(state.exports.memory.buffer).write(message.request, ptr);
-      state.exports.json_rpc_send(ptr, len, message.chainIndex, message.userData);
-    } else if (message.ty == 'unsubscribeAll') {
-      state.exports.json_rpc_unsubscribe_all(message.userData);
-      // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'unsubscribeAllConfirmation', userData: message.userData });
-    } else
-      throw new Error('unrecognized message type');
+    injectMessage(state, message);
   }
 });
