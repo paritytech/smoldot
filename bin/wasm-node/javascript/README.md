@@ -21,7 +21,7 @@ const client = await smoldot.start({});
 
 const chain = await client.addChain({
   chainSpec,
-  jsonRpcCallback: (jsonRpcResponse, chainIndex, connectionId) => {
+  jsonRpcCallback: (jsonRpcResponse) => {
       // Called whenever the client emits a response to a JSON-RPC request,
       // or a JSON-RPC pub-sub notification.
       console.log(jsonRpcResponse)
