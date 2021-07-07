@@ -123,10 +123,16 @@ pub enum CoreVersionError {
     /// Error while decoding the output.
     Decode,
     /// Error while starting the execution of the `Core_version` function.
-    #[display(fmt = "Error while starting the execution of the `Core_version` function: {}", _0)]
+    #[display(
+        fmt = "Error while starting the execution of the `Core_version` function: {}",
+        _0
+    )]
     Start(host::StartErr),
     /// Error during the execution of the `Core_version` function.
-    #[display(fmt = "Error during the execution of the `Core_version` function: {}", _0)]
+    #[display(
+        fmt = "Error during the execution of the `Core_version` function: {}",
+        _0
+    )]
     Run(host::Error),
     /// `Core_version` used a host function that is forbidden in this context.
     ForbiddenHostFunction,
