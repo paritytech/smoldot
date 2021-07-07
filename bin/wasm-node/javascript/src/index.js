@@ -121,6 +121,13 @@ export async function start(config) {
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     console.error(error);
     workerError = error;
+
+    // Reject all promises returned by `addChain`.
+    for (var pending of pendingConfirmations) {
+      if (pending.ty == 'chainAdded')
+        pending.reject(error);
+    }
+    pendingConfirmations = [];
   });
 
   // The first message expected by the worker contains the configuration.
