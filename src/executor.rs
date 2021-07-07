@@ -76,34 +76,66 @@ pub enum InvalidHeapPagesError {
 /// Runs the `Core_version` function using the given virtual machine prototype, and returns
 /// the output.
 ///
-/// All externalities are forbidden.
-// TODO: proper error
+/// All host functions are forbidden.
 pub fn core_version(
     vm_proto: host::HostVmPrototype,
-) -> Result<(CoreVersion, host::HostVmPrototype), ()> {
-    // TODO: is there maybe a better way to handle that?
-    let mut vm: host::HostVm = vm_proto
-        .run_no_param("Core_version")
-        .map_err(|_| ())?
-        .into();
+) -> (Result<CoreVersion, CoreVersionError>, host::HostVmPrototype) {
+    let mut vm: host::HostVm = match vm_proto.run_no_param("Core_version") {
+        Ok(vm) => vm.into(),
+        Err((err, prototype)) => return (Err(CoreVersionError::Start(err)), prototype),
+    };
 
     loop {
         match vm {
             host::HostVm::ReadyToRun(r) => vm = r.run(),
             host::HostVm::Finished(finished) => {
-                let _ = decode(&finished.value().as_ref())?;
+                if decode(&finished.value().as_ref()).is_err() {
+                    return (Err(CoreVersionError::Decode), finished.into_prototype());
+                }
+
                 let version = finished.value().as_ref().to_vec();
-                return Ok((CoreVersion(version), finished.into_prototype()));
+                return (Ok(CoreVersion(version)), finished.into_prototype());
             }
-            host::HostVm::Error { .. } => return Err(()),
+
+            // Emitted log lines are ignored.
             host::HostVm::LogEmit(log) => vm = log.resume(),
+
+            host::HostVm::Error { prototype, error } => {
+                return (Err(CoreVersionError::Run(error)), prototype)
+            }
 
             // Since there are potential ambiguities we don't allow any storage access
             // or anything similar. The last thing we want is to have an infinite
             // recursion of runtime calls.
-            _ => return Err(()),
+            other => {
+                return (
+                    Err(CoreVersionError::ForbiddenHostFunction),
+                    other.into_prototype(),
+                )
+            }
         }
     }
+}
+
+/// Error while executing [`core_version`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum CoreVersionError {
+    /// Error while decoding the output.
+    Decode,
+    /// Error while starting the execution of the `Core_version` function.
+    #[display(
+        fmt = "Error while starting the execution of the `Core_version` function: {}",
+        _0
+    )]
+    Start(host::StartErr),
+    /// Error during the execution of the `Core_version` function.
+    #[display(
+        fmt = "Error during the execution of the `Core_version` function: {}",
+        _0
+    )]
+    Run(host::Error),
+    /// `Core_version` used a host function that is forbidden in this context.
+    ForbiddenHostFunction,
 }
 
 /// Buffer storing the SCALE-encoded core version.
