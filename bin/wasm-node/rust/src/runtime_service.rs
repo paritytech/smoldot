@@ -596,7 +596,7 @@ pub enum RuntimeError {
     /// Error while compiling the runtime.
     Build(executor::host::NewErr),
     /// Error when determining the runtime specification.
-    CoreVersion, // TODO: precise error
+    CoreVersion(executor::CoreVersionError),
 }
 
 /// Error that can happen when calling a runtime function.
@@ -737,13 +737,14 @@ impl SuccessfulRuntime {
         };
 
         let (runtime_spec, vm) = match executor::core_version(vm) {
-            Ok(v) => v,
-            Err(_error) => {
+            (Ok(spec), vm) => (spec, vm),
+            (Err(error), _) => {
                 log::warn!(
                     target: "runtime",
-                    "Failed to call Core_version on new runtime",  // TODO: print error message as well ; at the moment the type of the error is `()`
+                    "Failed to call Core_version on runtime: {}",
+                    error
                 );
-                return Err(RuntimeError::CoreVersion); // TODO: more precise error
+                return Err(RuntimeError::CoreVersion(error));
             }
         };
 
