@@ -44,7 +44,7 @@ pub struct Config<'a> {
 pub enum ConfigConsensus<'a> {
     /// Any node on the chain is allowed to produce blocks.
     ///
-    /// No seal must be present in the header.  // TODO: is this true?
+    /// No seal must be present in the header.
     ///
     /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
     /// >           be produced. If this variant is used, the user is encouraged to limit, through
@@ -160,6 +160,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
 
     match config.consensus {
         ConfigConsensus::AllAuthorized => {
+            // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
             if config.block_header.digest.has_any_aura()
                 || config.block_header.digest.has_any_babe()
             {
