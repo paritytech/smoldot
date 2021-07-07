@@ -199,7 +199,7 @@ pub fn verify(
             }
 
             SuccessConsensus::AllAuthorized
-        },
+        }
         ConfigConsensus::Aura {
             current_authorities,
             slot_duration,
