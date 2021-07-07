@@ -23,7 +23,7 @@
 //! and `goaway` frames, belong to a specific substream. In other words, the data transmitted
 //! over the substreams is interleaved.
 //!
-//! Specification available at https://github.com/hashicorp/yamux/blob/master/spec.md
+//! Specification available at <https://github.com/hashicorp/yamux/blob/master/spec.md>
 //!
 //! # Usage
 //!
