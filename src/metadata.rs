@@ -41,7 +41,7 @@
 //! changes.
 //!
 //! See also:
-//! - https://substrate.dev/docs/en/knowledgebase/runtime/metadata
+//! - <https://substrate.dev/docs/en/knowledgebase/runtime/metadata>
 //!
 
 pub mod decode;
