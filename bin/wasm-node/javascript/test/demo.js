@@ -38,7 +38,12 @@ const client = smoldot.start({
 // is established, but smoldot will de-duplicate them and only connect to the chain once.
 // By calling it now, we let smoldot start syncing that chain in the background even before a
 // WebSocket connection has been established.
-client.then(client => client.addChain({ chainSpec }));
+client
+    .then(client => client.addChain({ chainSpec }))
+    .catch((error) => {
+        console.error("Error while adding chain: " + error);
+        process.exit(1);
+    });
 
 let server = http.createServer(function (request, response) {
     response.writeHead(404);
@@ -74,7 +79,12 @@ wsServer.on('request', function (request) {
 
     connection.on('message', function (message) {
         if (message.type === 'utf8') {
-            chain.then(chain => chain.sendJsonRpc(message.utf8Data));
+            chain
+                .then(chain => chain.sendJsonRpc(message.utf8Data))
+                .catch((error) => {
+                    console.error("Error during JSON-RPC request: " + error);
+                    process.exit(1);
+                });
         } else {
             throw "Unsupported type: " + message.type;
         }
@@ -82,6 +92,6 @@ wsServer.on('request', function (request) {
 
     connection.on('close', function (reasonCode, description) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
-        chain.then(chain => chain.remove());
+        chain.then(chain => chain.remove()).catch(() => {});
     });
 });
