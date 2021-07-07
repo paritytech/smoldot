@@ -142,6 +142,9 @@ export async function start(config) {
 
   return {
     addChain: (options) => {
+      if (workerError)
+        throw workerError;
+
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {
         for (var chain of options.potentialRelayChains) {
