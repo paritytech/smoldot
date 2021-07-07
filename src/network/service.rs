@@ -18,7 +18,7 @@
 use crate::libp2p::{
     self, connection, discovery::kademlia, multiaddr, peer_id, PeerId, QueueNotificationError,
 };
-use crate::network::protocol;
+use crate::network::{peerset, protocol};
 use crate::util;
 
 use alloc::{
@@ -153,34 +153,7 @@ pub struct ChainNetwork<TNow> {
 }
 
 struct Guarded {
-    /// Mapping of index within [`Guarded::peers`] by network identity.
-    ///
-    /// Because the `PeerId`s are "untrusted input", a randomized hasher is used to avoid
-    /// potential hashmap collision attacks.
-    peers_by_id: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
-
-    /// List of all members of the peer-to-peer network that are known.
-    peers: slab::Slab<Peer>,
-
-    /// Collection of (`peer_index`, `connection_index`), where `peer_index` and
-    /// `connection_index` are respectively the index of a peer in [`Guarded::peers`] and the
-    /// index of a connection in [`Guarded::connections`].
-    peers_connections: BTreeSet<(usize, usize)>,
-
-    /// Collection of (`chain_index`, `peer_index`).
-    // TODO: more doc
-    peers_chain_memberships: BTreeSet<(usize, usize)>,
-
-    /// Collection of `(peer_index, chain_index)`.
-    peers_open_chains: BTreeSet<(usize, usize)>,
-
-    /// Collection of `(peer_index, overlay_network_index)`.
-    peers_missing_out_substreams: BTreeSet<(usize, usize)>,
-
-    /// All connections, both pending and established.
-    ///
-    /// This list is a superset of the list in [`ChainNetwork::libp2p`].
-    connections: slab::Slab<Connection>,
+    peerset: peerset::Peerset,
 
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
     /// [`ChainNetwork::libp2p`]. This event might lead to some asynchronous post-processing
@@ -428,13 +401,7 @@ where
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
             }),
             guarded: Mutex::new(Guarded {
-                peers,
-                peers_by_id,
-                peers_connections: BTreeSet::new(),
-                peers_open_chains: BTreeSet::new(),
-                peers_missing_out_substreams: BTreeSet::new(),
-                peers_chain_memberships,
-                connections: slab::Slab::with_capacity(config.connections_capacity),
+                peerset: peerset::Peerset::new(),
                 to_process_pre_event: None,
                 chain_grandpa_config,
                 substream_open_waker: None,
@@ -548,24 +515,7 @@ where
         target: &peer_id::PeerId,
     ) -> Option<libp2p::ConnectionId> {
         let guarded = self.guarded.lock().await;
-
-        let peer_index = *guarded.peers_by_id.get(&target)?;
-
-        let inner_id = guarded
-            .peers_connections
-            .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
-            .filter_map(|(_, connection_index)| {
-                guarded
-                    .connections
-                    .get(*connection_index)
-                    .unwrap()
-                    .reached
-                    .as_ref()
-            })
-            .next()?
-            .inner_id;
-
-        Some(inner_id)
+        guarded.peerset.peer_main_established(&target)
     }
 
     /// Sends a blocks request to the given peer.
