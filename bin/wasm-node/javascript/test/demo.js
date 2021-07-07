@@ -92,6 +92,6 @@ wsServer.on('request', function (request) {
 
     connection.on('close', function (reasonCode, description) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
-        chain.then(chain => chain.remove());
+        chain.then(chain => chain.remove()).catch(() => {});
     });
 });
