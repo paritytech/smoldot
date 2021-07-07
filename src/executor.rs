@@ -29,7 +29,7 @@
 //! sub-module is [`runtime_host`].
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, str};
+use core::{convert::TryFrom as _, fmt, str};
 
 mod allocator; // TODO: make public after refactoring
 pub mod host;
@@ -123,6 +123,7 @@ impl AsRef<[u8]> for CoreVersion {
 }
 
 /// Runtime specification, once decoded.
+// TODO: explain these fields
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreVersionRef<'a> {
     pub spec_name: &'a str,
@@ -130,10 +131,83 @@ pub struct CoreVersionRef<'a> {
     pub authoring_version: u32,
     pub spec_version: u32,
     pub impl_version: u32,
-    // TODO: stronger typing, and don't use a Vec
-    pub apis: Vec<([u8; 8], u32)>,
-    /// `None` if the field is missing.
+
+    /// List of "API"s that the runtime supports.
+    ///
+    /// Each API corresponds to a certain list of runtime entry points.
+    ///
+    /// This field can thus be used in order to determine which runtime entry points are
+    /// available.
+    pub apis: CoreVersionApisRefIter<'a>,
+
+    /// Arbitrary version number corresponding to the transactions encoding version.
+    ///
+    /// Whenever this version number changes, all transactions encoding generated earlier are
+    /// invalidated and should be regenerated.
+    ///
+    /// Older versions of Substrate didn't provide this field. `None` if the field is missing.
     pub transaction_version: Option<u32>,
+}
+
+/// Iterator to a list of APIs. See [`CoreVersionRef::apis`].
+#[derive(Clone)]
+pub struct CoreVersionApisRefIter<'a> {
+    inner: &'a [u8],
+}
+
+impl<'a> Iterator for CoreVersionApisRefIter<'a> {
+    type Item = CoreVersionApi;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.inner.is_empty() {
+            return None;
+        }
+
+        match core_version_api::<nom::error::Error<&[u8]>>(self.inner) {
+            Ok((rest, item)) => {
+                self.inner = rest;
+                Some(item)
+            }
+
+            // The content is always checked to be valid before creating a
+            // `CoreVersionApisRefIter`.
+            Err(_) => unreachable!(),
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for CoreVersionApisRefIter<'a> {}
+
+impl<'a> PartialEq for CoreVersionApisRefIter<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        let mut a = self.clone();
+        let mut b = other.clone();
+        loop {
+            match (a.next(), b.next()) {
+                (Some(a), Some(b)) if a == b => {}
+                (None, None) => return true,
+                _ => return false,
+            }
+        }
+    }
+}
+
+impl<'a> Eq for CoreVersionApisRefIter<'a> {}
+
+impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
+
+/// One API that the runtime supports.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CoreVersionApi {
+    /// Name of the API.
+    // TODO: explain what it means exactly
+    pub name: [u8; 8],
+    /// Version of the module. Typical values are `1`, `2`, `3`, ...
+    pub version: u32,
 }
 
 fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
@@ -144,19 +218,18 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
             nom::number::complete::le_u32,
             nom::number::complete::le_u32,
             nom::number::complete::le_u32,
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                nom::multi::many_m_n(
-                    num_elems,
-                    num_elems,
-                    nom::combinator::map(
-                        nom::sequence::tuple((
-                            nom::bytes::complete::take(8u32),
-                            nom::number::complete::le_u32,
-                        )),
-                        move |(hash, version)| (<[u8; 8]>::try_from(hash).unwrap(), version),
-                    ),
-                )
-            }),
+            nom::combinator::map(
+                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+                    nom::combinator::recognize(nom::multi::fold_many_m_n(
+                        num_elems,
+                        num_elems,
+                        core_version_api,
+                        (),
+                        |(), _| (),
+                    ))
+                }),
+                |inner| CoreVersionApisRefIter { inner },
+            ),
             nom::branch::alt((
                 nom::combinator::map(nom::number::complete::le_u32, Some),
                 nom::combinator::map(nom::combinator::eof, |_| None),
@@ -186,4 +259,19 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
         Err(nom::Err::Error(_)) | Err(nom::Err::Failure(_)) => Err(()),
         Err(_) => unreachable!(),
     }
+}
+
+fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], CoreVersionApi, E> {
+    nom::combinator::map(
+        nom::sequence::tuple((
+            nom::bytes::complete::take(8u32),
+            nom::number::complete::le_u32,
+        )),
+        move |(name, version)| CoreVersionApi {
+            name: <[u8; 8]>::try_from(name).unwrap(),
+            version,
+        },
+    )(bytes)
 }
