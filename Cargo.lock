@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-js"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "blake2-rfc",
  "derive_more",
@@ -2380,6 +2380,7 @@ dependencies = [
  "pin-project",
  "rand 0.8.3",
  "serde_json",
+ "slab",
  "smoldot",
 ]
 

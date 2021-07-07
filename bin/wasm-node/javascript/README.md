@@ -14,62 +14,59 @@ the full nodes of the network.
 import * as smoldot from 'smoldot';
 
 // Load a string chain specification.
-const chainSpec = Buffer.from(fs.readFileSync('./westend.json')).toString('utf8');
+const chainSpec = fs.readFileSync('./westend.json', 'utf8');
 
-smoldot
-  .start({
-    chainSpecs: [chainSpec],
-    jsonRpcCallback: (jsonRpcResponse, chainIndex, connectionId) => {
-        // Called whenever the client emits a response to a JSON-RPC request,
-        // or a JSON-RPC pub-sub notification.
-        console.log(jsonRpcResponse)
-    }
-  })
-  .then((client) => {
-    client.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
-  })
+// A single client can be used to initialize multiple chains.
+const client = await smoldot.start({});
+
+const chain = await client.addChain({
+  chainSpec,
+  jsonRpcCallback: (jsonRpcResponse) => {
+      // Called whenever the client emits a response to a JSON-RPC request,
+      // or a JSON-RPC pub-sub notification.
+      console.log(jsonRpcResponse)
+  }
+});
+
+chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
+
+// Later:
+// chain.remove();
 ```
 
 ## Usage
 
-When initializing the client with the `start` function, one must pass a list of chain
-specifications corresponding to the various chains the client should try to be connected to.
+The first thing to do is to initialize the client with the `start` function.
 
-The `start` function returns a `Promise` that yield a client once the chain specifications have
+Once initialized, the client can be used to connect to one or more chains. Use `addChain` to add
+a new chain that the client must be connected to. `addChain` must be passed the specification of
+the chain (commonly known as "chain spec").
+
+The `addChain` function returns a `Promise` that yields a chain once the chain specification has
 been successfully parsed and basic initialization is finished, but before Internet connections
 are opened towards the chains.
 
-In order to de-initialize a client, call `client.terminate()`. Any function called afterwards
-will throw an exception.
+In order to de-initialize a chain, call `chain.remove()`. Any function called afterwards on this
+chain will throw an exception.
+In order to de-initialize a client, call `client.terminate()`. Any function called afterwards on
+any of the chains of the client will throw an exception.
 
-After having obtained a client, use `sendJsonRpc` to send a JSON-RPC request towards the node.
-The function accepts three parameters:
-
-- A string request. See [the specification of the JSON-RPC protocol](https://www.jsonrpc.org/specification),
+After having obtained a chain, use `sendJsonRpc` to send a JSON-RPC request towards the node.
+The function accepts as parameter a string request. See
+[the specification of the JSON-RPC protocol](https://www.jsonrpc.org/specification),
 and [the list of requests that smoldot is capable of serving](https://polkadot.js.org/docs/substrate/rpc/).
-- The index of the chain within `chainSpecs`, the list of chains passed at initialization. The
-request will be performed in the context of the chosen chain.
-- A `userDataId` which can be used. More information below.
 
 If the request is well formatted, the client will send a response using the `jsonRpcCallback`
-callback that was passed at initialization. This callback takes as parameter the string JSON-RPC
-response, the `chainIndex`, and the `userDataId`. The `chainIndex` and `userDataId` are always
-equal to the values that were passinged to `sendJsonRpc`.
+callback that was passed to `addChain`. This callback takes as parameter the string JSON-RPC
+response.
 
 If the request is a subscription, the notifications will also be sent back using the same
 `jsonRpcCallback`.
 
-All the pending requests and active subscriptions corresponding to a given `userDataId` can be
-instantly cancelled by calling `client.cancelAll(userDataId)`.
+If no `jsonRpcCallback` was passed to `addChain`, then this chain won't be capable of serving
+any JSON-RPC request at all. This can be used to save resources.
 
-The `userDataId` is opaque from the point of view of smoldot, but can be used in order to match
-requests with responses. Smoldot will also attempt to distribute resources allocated to processing
-JSON-RPC requests equally based on the value of `userDataId`.
-
-## Future changes
-
-The API described above is mostly stable. It is planned, however, in the future, to give the
-possibility to add and remove chains while the client is running instead of passing a list at
-initialization.
-
-See https://github.com/paritytech/smoldot/issues/501.
+If the chain specification passed to `addChain` is a parachain, then the list of potential relay
+chains must be passed as parameter to `addChain` as well. For security reasons, it is important
+to not establish a parachain-relay-chain link between two chains that weren't created by the same
+user.
