@@ -20,7 +20,7 @@
 //! The LEB128 encoding is used throughout the networking code. This module provides utilities for
 //! encoding/decoding this format.
 //!
-//! See [https://en.wikipedia.org/wiki/LEB128].
+//! See <https://en.wikipedia.org/wiki/LEB128>.
 
 use alloc::vec::Vec;
 use core::{cmp, convert::TryFrom as _, mem};

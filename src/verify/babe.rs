@@ -25,7 +25,7 @@
 //!
 //! References:
 //!
-//! - https://research.web3.foundation/en/latest/polkadot/BABE/Babe.html
+//! - <https://research.web3.foundation/en/latest/polkadot/BABE/Babe.html>
 //!
 //! # Overview of BABE
 //!
