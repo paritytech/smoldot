@@ -309,14 +309,29 @@ impl PrefixKeys {
         }
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(mut self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> RuntimeHostVm {
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(
+        mut self,
+        keys: impl Iterator<Item = impl AsRef<[u8]>>,
+    ) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalStorageClearPrefix(req) => {
                 // TODO: use prefix_remove_update once optimized
                 //top_trie_root_calculation_cache.prefix_remove_update(storage_key);
 
+                // Grab the maximum number of keys to remove, and initialize a counter for the
+                // number of keys removed so far.
+                // While doing `keys.take(...)` would be more simple, we avoid doing so in order
+                // to avoid converting the `u32` to a `usize`.
+                let max_keys_to_remove = req.max_keys_to_remove();
+                let mut keys_removed_so_far = 0u32;
+
                 for key in keys {
+                    // Enforce the maximum number of keys to remove.
+                    if max_keys_to_remove.map_or(false, |max| keys_removed_so_far >= max) {
+                        break;
+                    }
+
                     self.inner
                         .top_trie_root_calculation_cache
                         .as_mut()
@@ -337,6 +352,11 @@ impl PrefixKeys {
                             entry.insert(previous_value);
                         }
                     }
+
+                    // `wrapping_add` is used because the only way `keys_removed_so_far` can be
+                    // equal to `u32::max_value()` at this point is when `max_keys_to_remove`
+                    // is `None`.
+                    keys_removed_so_far = keys_removed_so_far.wrapping_add(1);
                 }
 
                 // TODO: O(n) complexity here

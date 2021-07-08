@@ -925,10 +925,10 @@ async fn validate_transaction(
                 // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
                 let rq_prefix = prefix.prefix().as_ref().to_owned();
                 let result = runtime_call_lock
-                    .storage_prefix_keys(&rq_prefix)
+                    .storage_prefix_keys_ordered(&rq_prefix)
                     .map(|i| i.map(|v| v.as_ref().to_owned()).collect::<Vec<_>>());
                 match result {
-                    Ok(v) => validation_in_progress = prefix.inject_keys(v.into_iter()),
+                    Ok(v) => validation_in_progress = prefix.inject_keys_ordered(v.into_iter()),
                     Err(err) => {
                         runtime_call_lock
                             .unlock(validate::Query::PrefixKeys(prefix).into_prototype());

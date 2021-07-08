@@ -1244,8 +1244,8 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
         self.inner.prefix()
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(
         self,
         keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
@@ -1270,7 +1270,7 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
             }
         }
 
-        let inner = self.inner.inject_keys(keys.iter());
+        let inner = self.inner.inject_keys_ordered(keys.iter());
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
