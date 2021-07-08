@@ -691,9 +691,9 @@ impl PrefixKeys {
         self.0.prefix()
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BlockBuild {
-        BlockBuild::from_inner(self.0.inject_keys(keys), self.1)
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BlockBuild {
+        BlockBuild::from_inner(self.0.inject_keys_ordered(keys), self.1)
     }
 }
 

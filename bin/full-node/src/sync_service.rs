@@ -407,7 +407,7 @@ fn start_sync(
                                         .range(req.prefix().as_ref().to_vec()..)
                                         .take_while(|(k, _)| k.starts_with(&prefix))
                                         .map(|(k, _)| k);
-                                    verify = req.inject_keys(keys);
+                                    verify = req.inject_keys_ordered(keys);
                                 }
                             }
                         }

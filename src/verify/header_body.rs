@@ -435,10 +435,10 @@ impl StoragePrefixKeys {
         self.inner.prefix()
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
         VerifyInner {
-            inner: self.inner.inject_keys(keys),
+            inner: self.inner.inject_keys_ordered(keys),
             consensus_success: self.consensus_success,
         }
         .run()

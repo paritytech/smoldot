@@ -514,8 +514,10 @@ impl<'a> RuntimeCallLock<'a> {
     ///
     /// Returns an error if not all the keys could be found in the proof, meaning that the proof
     /// is invalid.
+    ///
+    /// The keys returned are ordered lexicographically.
     // TODO: if proof is invalid, we should give the option to fetch another call proof
-    pub fn storage_prefix_keys(
+    pub fn storage_prefix_keys_ordered(
         &'_ self,
         prefix: &[u8],
     ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
@@ -557,6 +559,8 @@ impl<'a> RuntimeCallLock<'a> {
             }
         }
 
+        // TODO: maybe we could iterate over the proof in an ordered way rather than sorting at the end
+        output.sort();
         Ok(output.into_iter())
     }
 
