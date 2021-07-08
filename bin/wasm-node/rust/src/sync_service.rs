@@ -145,6 +145,9 @@ impl SyncService {
     ///
     /// If you have subscribed to new blocks, the finalized blocks reported in this channel are
     /// guaranteed to have earlier been reported as new blocks.
+    ///
+    /// If you have subscribed to best blocks, the finalized blocks reported in this channel are
+    /// guaranteed to be ancestors of the latest reported best block.
     // TODO: is this last paragraph true for parachains?
     pub async fn subscribe_finalized(&self) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
         let (send_back, rx) = oneshot::channel();
