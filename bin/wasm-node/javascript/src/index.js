@@ -24,6 +24,8 @@ export class SmoldotError extends Error {
 }
 
 export async function start(config) {
+  config = config || {};
+
   const logCallback = config.logCallback || ((level, target, message) => {
     if (level <= 1) {
       console.error("[" + target + "]", message);

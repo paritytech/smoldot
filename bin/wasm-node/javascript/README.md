@@ -17,7 +17,7 @@ import * as smoldot from 'smoldot';
 const chainSpec = fs.readFileSync('./westend.json', 'utf8');
 
 // A single client can be used to initialize multiple chains.
-const client = await smoldot.start({});
+const client = await smoldot.start();
 
 const chain = await client.addChain({
   chainSpec,
