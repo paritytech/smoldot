@@ -22,6 +22,10 @@
 #![deny(broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
+// The `libsecp256k1` library is depended upon only to activate a Cargo feature. See the `Cargo.toml` file.
+// TODO: remove that when not necessary anymore
+use libsecp256k1 as _;
+
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
     chain, chain_spec,
