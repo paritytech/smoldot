@@ -278,6 +278,7 @@ async fn background_task(
                 stream::iter(subscribe_all.non_finalized_blocks).chain(subscribe_all.new_blocks),
             )
         };
+        let (_, mut best_block_receiver) = worker.sync_service.subscribe_best().await;
         let (_, mut finalized_block_receiver) = worker.sync_service.subscribe_finalized().await;
         let current_finalized_block_hash =
             header::hash_from_scale_encoded_header(&current_finalized_block_header);
@@ -451,14 +452,16 @@ async fn background_task(
                     // channel is notified first. In order to fulfill the guarantee that all finalized
                     // blocks must have earlier been reported as new blocks, we first empty the new
                     // blocks receiver.
+                    // TODO: really rethink the order of polling here in order to simplify it
+                    while let Some(new_best_block) = best_block_receiver.next().now_or_never() {
+                        let new_best_block = new_best_block.unwrap();
+                        let hash = header::hash_from_scale_encoded_header(&new_best_block);
+                        worker.set_best_block(&hash).await;
+                    }
                     // TODO: DRY
                     while let Some(new_block) = new_blocks_receiver.next().now_or_never() {
                         if let Some(new_block) = new_block {
-                            let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
                             worker.new_block(&new_block.scale_encoded_header, &new_block.parent_hash);
-                            if new_block.is_new_best {
-                                worker.set_best_block(&hash).await;
-                            }
                         } else {
                             continue 'channels_rebuild;
                         }
@@ -925,10 +928,10 @@ async fn validate_transaction(
                 // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
                 let rq_prefix = prefix.prefix().as_ref().to_owned();
                 let result = runtime_call_lock
-                    .storage_prefix_keys(&rq_prefix)
+                    .storage_prefix_keys_ordered(&rq_prefix)
                     .map(|i| i.map(|v| v.as_ref().to_owned()).collect::<Vec<_>>());
                 match result {
-                    Ok(v) => validation_in_progress = prefix.inject_keys(v.into_iter()),
+                    Ok(v) => validation_in_progress = prefix.inject_keys_ordered(v.into_iter()),
                     Err(err) => {
                         runtime_call_lock
                             .unlock(validate::Query::PrefixKeys(prefix).into_prototype());

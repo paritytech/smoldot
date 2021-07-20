@@ -60,7 +60,7 @@ pub struct Config<'a, TBody> {
 pub enum ConfigConsensus<'a> {
     /// Any node on the chain is allowed to produce blocks.
     ///
-    /// No seal must be present in the header.  // TODO: is this true?
+    /// No seal must be present in the header.
     ///
     /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
     /// >           be produced. If this variant is used, the user is encouraged to limit, through
@@ -187,7 +187,19 @@ pub fn verify(
 ) -> Verify {
     // Start the consensus engine verification process.
     let consensus_success = match config.consensus {
-        ConfigConsensus::AllAuthorized => SuccessConsensus::AllAuthorized,
+        ConfigConsensus::AllAuthorized => {
+            // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
+            if config.block_header.digest.has_any_aura()
+                || config.block_header.digest.has_any_babe()
+            {
+                return Verify::Finished(Err((
+                    Error::MultipleConsensusEngines,
+                    config.parent_runtime,
+                )));
+            }
+
+            SuccessConsensus::AllAuthorized
+        }
         ConfigConsensus::Aura {
             current_authorities,
             slot_duration,
@@ -423,10 +435,10 @@ impl StoragePrefixKeys {
         self.inner.prefix()
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Verify {
         VerifyInner {
-            inner: self.inner.inject_keys(keys),
+            inner: self.inner.inject_keys_ordered(keys),
             consensus_success: self.consensus_success,
         }
         .run()

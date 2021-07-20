@@ -184,6 +184,16 @@ impl<T> NonFinalizedTreeInner<T> {
                 finalized_scheduled_change,
                 finalized_triggered_authorities,
             } => {
+                if target_number == self.finalized_block_header.number {
+                    if *target_hash == self.finalized_block_hash {
+                        return Err(FinalityVerifyError::EqualToFinalized);
+                    } else {
+                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash);
+                    }
+                } else if target_number < self.finalized_block_header.number {
+                    return Err(FinalityVerifyError::BelowFinalized);
+                }
+
                 // Find in the list of non-finalized blocks the one targeted by the justification.
                 let block_index = match self.blocks.find(|b| b.hash == *target_hash) {
                     Some(idx) => idx,
@@ -602,7 +612,7 @@ pub enum JustificationVerifyError {
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
     VerificationFailed(justification::verify::Error),
-    /// Error while verifying the finality.
+    /// Error while verifying the finality in the context of the chain.
     FinalityVerify(FinalityVerifyError),
 }
 
@@ -613,7 +623,7 @@ pub enum CommitVerifyError {
     NotGrandpa,
     /// Error while decoding the commit.
     InvalidCommit,
-    /// Error while verifying the finality.
+    /// Error while verifying the finality in the context of the chain.
     FinalityVerify(FinalityVerifyError),
     /// Not enough blocks are known by the tree to verify this commit.
     ///
@@ -627,6 +637,14 @@ pub enum CommitVerifyError {
 /// Error that can happen when verifying a proof of finality.
 #[derive(Debug, derive_more::Display)]
 pub enum FinalityVerifyError {
+    /// The target block height and hash are the same as the block that is already finalized.
+    /// While the proof couldn't be verified, nothing could be gained from actually verifying it.
+    EqualToFinalized,
+    /// The target block height is the same as the finalized block, but its hash is different.
+    /// This means that the proof can't possibly be correct.
+    EqualFinalizedHeightButInequalHash,
+    /// The target block height is strictly inferior to the finalized block height.
+    BelowFinalized,
     /// Finality proof targets a block that isn't in the chain.
     #[display(
         fmt = "Justification targets a block (#{}) that isn't in the chain.",

@@ -144,11 +144,17 @@ pub struct InvalidParameterError(serde_json::Error);
 
 /// Generates the [`MethodCall`] and [`Response`] enums based on the list of supported requests.
 macro_rules! define_methods {
-    ($($name:ident($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty $([$($alias:ident),*])*,)*) => {
+    ($(
+        $(#[$attrs:meta])*
+        $name:ident ($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty
+            $([$($alias:ident),*])*
+        ,
+    )*) => {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone)]
         pub enum MethodCall<'a> {
             $(
+                $(#[$attrs])*
                 $name {
                     $($p_name: $p_ty),*
                 },
@@ -297,6 +303,7 @@ define_methods! {
     offchain_localStorageGet() -> (), // TODO:
     offchain_localStorageSet() -> (), // TODO:
     payment_queryInfo(extrinsic: HexString, hash: Option<HashHexString>) -> RuntimeDispatchInfo,
+    /// Returns a list of all JSON-RPC methods that are available.
     rpc_methods() -> RpcMethods,
     state_call() -> () [state_callAt], // TODO:
     state_getKeys() -> (), // TODO:
@@ -322,12 +329,14 @@ define_methods! {
     system_health() -> SystemHealth,
     system_localListenAddresses() -> Vec<String>,
     system_localPeerId() -> &'a str,
+    /// Returns, as an opaque string, the name of the client serving these JSON-RPC requests.
     system_name() -> &'a str,
     system_networkState() -> (), // TODO:
     system_nodeRoles() -> (), // TODO:
     system_peers() -> Vec<SystemPeer>,
     system_properties() -> Box<serde_json::value::RawValue>,
     system_removeReservedPeer() -> (), // TODO:
+    /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> &'a str,
 }
 

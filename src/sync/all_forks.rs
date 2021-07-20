@@ -633,11 +633,25 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &mut self,
         scale_encoded_message: &[u8],
     ) -> Result<(), blocks_tree::CommitVerifyError> {
-        // TODO: must handle the `NotEnoughBlocks` error separately
-        self.chain
-            .verify_grandpa_commit_message(scale_encoded_message)?
-            .apply();
-        Ok(())
+        // TODO: must also handle the `NotEnoughBlocks` error separately
+        match self
+            .chain
+            .verify_grandpa_commit_message(scale_encoded_message)
+        {
+            Ok(apply) => {
+                apply.apply();
+                Ok(())
+            }
+            // In case where the commit message concerns a block older or equal to the finalized
+            // block, the operation is silently considered successful.
+            Err(blocks_tree::CommitVerifyError::FinalityVerify(
+                blocks_tree::FinalityVerifyError::EqualToFinalized,
+            ))
+            | Err(blocks_tree::CommitVerifyError::FinalityVerify(
+                blocks_tree::FinalityVerifyError::BelowFinalized,
+            )) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Process the next block in the queue of verification.

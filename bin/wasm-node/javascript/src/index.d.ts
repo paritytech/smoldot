@@ -47,7 +47,7 @@ export interface SmoldotAddChainOptions {
 }
 
 export interface Smoldot {
-  start(options: SmoldotOptions): Promise<SmoldotClient>;
+  start(options?: SmoldotOptions): Promise<SmoldotClient>;
 }
 
 export const smoldot: Smoldot;

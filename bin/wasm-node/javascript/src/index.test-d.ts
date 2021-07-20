@@ -18,7 +18,7 @@ let sp = smoldot.start({
 // Test when not supplying optional options and optional params
 
 // $ExpectType Promise<SmoldotClient>
-sp = smoldot.start({});
+sp = smoldot.start();
 
 sp.then(async (sm) => {
   // $ExpectType Promise<SmoldotChain>

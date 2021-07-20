@@ -853,9 +853,12 @@ impl<T> StoragePrefixKeys<T> {
         .unwrap()
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BodyVerifyStep2<T> {
-        let inner = self.inner.inject_keys(keys);
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(
+        self,
+        keys: impl Iterator<Item = impl AsRef<[u8]>>,
+    ) -> BodyVerifyStep2<T> {
+        let inner = self.inner.inject_keys_ordered(keys);
         self.context.with_body_verify(inner)
     }
 }

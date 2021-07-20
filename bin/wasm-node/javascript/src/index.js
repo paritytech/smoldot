@@ -24,6 +24,8 @@ export class SmoldotError extends Error {
 }
 
 export async function start(config) {
+  config = config || {};
+
   const logCallback = config.logCallback || ((level, target, message) => {
     if (level <= 1) {
       console.error("[" + target + "]", message);
@@ -121,6 +123,13 @@ export async function start(config) {
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     console.error(error);
     workerError = error;
+
+    // Reject all promises returned by `addChain`.
+    for (var pending of pendingConfirmations) {
+      if (pending.ty == 'chainAdded')
+        pending.reject(error);
+    }
+    pendingConfirmations = [];
   });
 
   // The first message expected by the worker contains the configuration.
@@ -135,6 +144,9 @@ export async function start(config) {
 
   return {
     addChain: (options) => {
+      if (workerError)
+        throw workerError;
+
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {
         for (var chain of options.potentialRelayChains) {

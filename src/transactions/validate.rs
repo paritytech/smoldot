@@ -549,14 +549,14 @@ impl PrefixKeys {
         }
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Query {
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> Query {
         match self.0 {
             PrefixKeysInner::Stage1(inner, stage1) => {
-                Query::from_step1(inner.inject_keys(keys), stage1)
+                Query::from_step1(inner.inject_keys_ordered(keys), stage1)
             }
             PrefixKeysInner::Stage2(inner, stage2) => {
-                Query::from_step2(inner.inject_keys(keys), stage2)
+                Query::from_step2(inner.inject_keys_ordered(keys), stage2)
             }
         }
     }

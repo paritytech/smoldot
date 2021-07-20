@@ -580,6 +580,7 @@ impl ReadyToRun {
                 HostFunction::ext_storage_clear_version_1 => 1,
                 HostFunction::ext_storage_exists_version_1 => 1,
                 HostFunction::ext_storage_clear_prefix_version_1 => 1,
+                HostFunction::ext_storage_clear_prefix_version_2 => 2,
                 HostFunction::ext_storage_root_version_1 => 0,
                 HostFunction::ext_storage_changes_root_version_1 => 1,
                 HostFunction::ext_storage_next_key_version_1 => 1,
@@ -871,6 +872,28 @@ impl ReadyToRun {
                         prefix_ptr,
                         prefix_size,
                         inner: self.inner,
+                        max_keys_to_remove: None,
+                    });
+                }
+                HostFunction::ext_storage_clear_prefix_version_2 => {
+                    let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
+                    let limit_encoded = expect_pointer_size!(1);
+
+                    let max_keys_to_remove = match Option::<u32>::decode_all(&limit_encoded) {
+                        Ok(l) => l,
+                        Err(err) => {
+                            return HostVm::Error {
+                                error: Error::ParamDecodeError(err),
+                                prototype: self.inner.into_prototype(),
+                            };
+                        }
+                    };
+
+                    return HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                        prefix_ptr,
+                        prefix_size,
+                        inner: self.inner,
+                        max_keys_to_remove,
                     });
                 }
                 HostFunction::ext_storage_root_version_1 => {
@@ -1043,16 +1066,16 @@ impl ReadyToRun {
                     let msg = expect_pointer_constant_size!(1, 32);
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
-                        let rs = secp256k1::Signature::parse_slice(&sig[0..64])
+                        let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
                             .map_err(|_| EcdsaVerifyError::RsError)?;
-                        let v = secp256k1::RecoveryId::parse(if sig[64] > 26 {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
                             sig[64] - 27
                         } else {
                             sig[64]
                         } as u8)
                         .map_err(|_| EcdsaVerifyError::VError)?;
-                        let pubkey = secp256k1::recover(
-                            &secp256k1::Message::parse_slice(&msg).unwrap(),
+                        let pubkey = libsecp256k1::recover(
+                            &libsecp256k1::Message::parse_slice(&msg).unwrap(),
                             &rs,
                             &v,
                         )
@@ -1084,16 +1107,16 @@ impl ReadyToRun {
                     let msg = expect_pointer_constant_size!(1, 32);
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
-                        let rs = secp256k1::Signature::parse_slice(&sig[0..64])
+                        let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
                             .map_err(|_| EcdsaVerifyError::RsError)?;
-                        let v = secp256k1::RecoveryId::parse(if sig[64] > 26 {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
                             sig[64] - 27
                         } else {
                             sig[64]
                         } as u8)
                         .map_err(|_| EcdsaVerifyError::VError)?;
-                        let pubkey = secp256k1::recover(
-                            &secp256k1::Message::parse_slice(&msg).unwrap(),
+                        let pubkey = libsecp256k1::recover(
+                            &libsecp256k1::Message::parse_slice(&msg).unwrap(),
                             &rs,
                             &v,
                         )
@@ -1809,7 +1832,9 @@ impl fmt::Debug for ExternalStorageAppend {
     }
 }
 
-/// Must remove from the storage all keys which start with a certain prefix.
+/// Must remove from the storage keys which start with a certain prefix. Use
+/// [`ExternalStorageClearPrefix::max_keys_to_remove`] to determine the maximum number of keys
+/// to remove.
 pub struct ExternalStorageClearPrefix {
     inner: Inner,
 
@@ -1817,6 +1842,9 @@ pub struct ExternalStorageClearPrefix {
     prefix_ptr: u32,
     /// Size of the prefix to remove. Guaranteed to be in range.
     prefix_size: u32,
+
+    /// Maximum number of keys to remove.
+    max_keys_to_remove: Option<u32>,
 }
 
 impl ExternalStorageClearPrefix {
@@ -1828,7 +1856,12 @@ impl ExternalStorageClearPrefix {
             .unwrap()
     }
 
-    /// Resumes execution after having set the value.
+    /// Returns the maximum number of keys to remove. `None` means "infinity".
+    pub fn max_keys_to_remove(&self) -> Option<u32> {
+        self.max_keys_to_remove
+    }
+
+    /// Resumes execution after having cleared the values.
     pub fn resume(self) -> HostVm {
         HostVm::ReadyToRun(ReadyToRun {
             inner: self.inner,
@@ -2437,6 +2470,7 @@ externalities! {
     ext_storage_clear_version_1,
     ext_storage_exists_version_1,
     ext_storage_clear_prefix_version_1,
+    ext_storage_clear_prefix_version_2,
     ext_storage_root_version_1,
     ext_storage_changes_root_version_1,
     ext_storage_next_key_version_1,
