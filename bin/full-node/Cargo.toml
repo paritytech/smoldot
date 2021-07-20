@@ -25,9 +25,6 @@ futures = { version = "0.3.15", default-features = false, features = ["std", "th
 futures-timer = "3.0"
 hashbrown = { version = "0.11.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }
-# Due to poor design in the `libsecp256k1` library, we can enable only either `static-context` or `lazy-static-context`, but not both. For this reason, this is done at the top-most level.
-# TODO: solve that upstream
-libsecp256k1 = { version = "0.6.0", default-features = false, features = ["static-context"] }
 parking_lot = { version = "0.11.1" }
 rand = "0.8.3"
 smoldot = { version = "0.1.0", path = "../..", default-features = false, features = ["database-sqlite", "std"] }
