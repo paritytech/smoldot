@@ -426,7 +426,7 @@ impl<T> WsServer<T> {
                         let mut send_rx = self.connections[connection_id.0].send_rx.take().unwrap();
                         Box::pin(async move {
                             while let Some(message) = send_rx.next().await {
-                                match sender.send_text(&message).await {
+                                match sender.send_text_owned(message).await {
                                     Ok(()) => {}
                                     Err(_) => break,
                                 }
