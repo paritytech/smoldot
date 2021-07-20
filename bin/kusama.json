@@ -2,6 +2,14 @@
   "name": "Kusama",
   "id": "ksmcc3",
   "bootNodes": [
+    "/dns/kusama-connect-0.parity.io/tcp/443/wss/p2p/12D3KooWBjxpFhVNM9poSsMEfdnXJaSWSZQ7otK9aV1SPA9zJp5W",
+    "/dns/kusama-connect-1.parity.io/tcp/443/wss/p2p/12D3KooWAJRVca93jLm4zft4rtTLLxNV4ZrHPMBkbGy5XkXooBFt",
+    "/dns/kusama-connect-2.parity.io/tcp/443/wss/p2p/12D3KooWLn22TSPR3HXMRSSmWoK4pkDtspdCVi5j86QyyUNViDeL",
+    "/dns/kusama-connect-3.parity.io/tcp/443/wss/p2p/12D3KooWSwnJSP3QJ6cnFCTpcXq4EEFotVEiQuCWVprzCnWj5e4G",
+    "/dns/kusama-connect-4.parity.io/tcp/443/wss/p2p/12D3KooWHi7zHUev7n1zs9kSQwh4KMPJcS8Jky2JN58cNabcXGvK",
+    "/dns/kusama-connect-5.parity.io/tcp/443/wss/p2p/12D3KooWMBF6DXADrNLg6kNt1A1zmKzw478gJw79NmTQhSDxuZvR",
+    "/dns/kusama-connect-6.parity.io/tcp/443/wss/p2p/12D3KooWNnG7YqYB9eEoACRuSEax8qhuPQzRn878AWKN4vUUtQXd",
+    "/dns/kusama-connect-7.parity.io/tcp/443/wss/p2p/12D3KooWMmtoLnkVCGyuCpsWw4zoNtWPH4nsVLn92mutvjQknEqR",
     "/dns/p2p.cc3-0.kusama.network/tcp/30100/p2p/12D3KooWDgtynm4S9M3m6ZZhXYu2RrWKdvkCSScc25xKDVSg1Sjd",
     "/dns/p2p.cc3-1.kusama.network/tcp/30100/p2p/12D3KooWNpGriWPmf621Lza9UWU9eLLBdCFaErf6d4HSK7Bcqnv4",
     "/dns/p2p.cc3-2.kusama.network/tcp/30100/p2p/12D3KooWLmLiB4AenmN2g2mHbhNXbUcNiGi99sAkSk1kAQedp8uE",
@@ -10,8 +18,7 @@
     "/dns/p2p.cc3-5.kusama.network/tcp/30100/p2p/12D3KooWDiwMeqzvgWNreS9sV1HW3pZv1PA7QGA7HUCo7FzN5gcA",
     "/dns/kusama-bootnode-0.paritytech.net/tcp/30333/p2p/12D3KooWSueCPH3puP2PcvqPJdNaDNF3jMZjtJtDiSy35pWrbt5h",
     "/dns/kusama-bootnode-0.paritytech.net/tcp/30334/ws/p2p/12D3KooWSueCPH3puP2PcvqPJdNaDNF3jMZjtJtDiSy35pWrbt5h",
-    "/dns/kusama-bootnode-1.paritytech.net/tcp/30333/p2p/12D3KooWQKqane1SqWJNWMQkbia9qiMWXkcHtAdfW5eVF8hbwEDw",
-    "/dns/kusama-connect-0.parity.io/tcp/443/wss/p2p/12D3KooWBNDUxpWVqDfq7qzEoY2NYEG1nKcQ9AJd4hqG1iYZkzWL"
+    "/dns/kusama-bootnode-1.paritytech.net/tcp/30333/p2p/12D3KooWQKqane1SqWJNWMQkbia9qiMWXkcHtAdfW5eVF8hbwEDw"
   ],
   "telemetryEndpoints": [
     [
