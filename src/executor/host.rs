@@ -1066,16 +1066,16 @@ impl ReadyToRun {
                     let msg = expect_pointer_constant_size!(1, 32);
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
-                        let rs = secp256k1::Signature::parse_slice(&sig[0..64])
+                        let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
                             .map_err(|_| EcdsaVerifyError::RsError)?;
-                        let v = secp256k1::RecoveryId::parse(if sig[64] > 26 {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
                             sig[64] - 27
                         } else {
                             sig[64]
                         } as u8)
                         .map_err(|_| EcdsaVerifyError::VError)?;
-                        let pubkey = secp256k1::recover(
-                            &secp256k1::Message::parse_slice(&msg).unwrap(),
+                        let pubkey = libsecp256k1::recover(
+                            &libsecp256k1::Message::parse_slice(&msg).unwrap(),
                             &rs,
                             &v,
                         )
@@ -1107,16 +1107,16 @@ impl ReadyToRun {
                     let msg = expect_pointer_constant_size!(1, 32);
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
-                        let rs = secp256k1::Signature::parse_slice(&sig[0..64])
+                        let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
                             .map_err(|_| EcdsaVerifyError::RsError)?;
-                        let v = secp256k1::RecoveryId::parse(if sig[64] > 26 {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
                             sig[64] - 27
                         } else {
                             sig[64]
                         } as u8)
                         .map_err(|_| EcdsaVerifyError::VError)?;
-                        let pubkey = secp256k1::recover(
-                            &secp256k1::Message::parse_slice(&msg).unwrap(),
+                        let pubkey = libsecp256k1::recover(
+                            &libsecp256k1::Message::parse_slice(&msg).unwrap(),
                             &rs,
                             &v,
                         )
