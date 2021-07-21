@@ -56,14 +56,14 @@ export async function start(config) {
   // is pushed to this array. The worker needs to send back a confirmation, which pops the first
   // element of this array. In the case of `addChain`, additional fields are stored in this array
   // to finish the initialization of the chain.
-  let pendingConfirmations = [];
+  const pendingConfirmations = [];
 
   // For each chain that is currently running, contains the callback to use to send back JSON-RPC
   // responses corresponding to this chain.
   // Entries are instantly removed when the user desires to remove a chain even before the worker
   // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
   // JSON-RPC response even though we've already sent a `removeChain` message to it.
-  let chainsJsonRpcCallbacks = {};
+  const chainsJsonRpcCallbacks = {};
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
