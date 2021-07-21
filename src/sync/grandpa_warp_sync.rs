@@ -599,6 +599,15 @@ impl<TSrc> Verifier<TSrc> {
         }
     }
 
+    /// Returns the identifier and user data of the source that has sent the fragment that is to
+    /// be verified.
+    pub fn proof_sender(&self) -> (SourceId, &TSrc) {
+        (
+            self.warp_sync_source_id,
+            &self.sources[self.warp_sync_source_id.0].user_data,
+        )
+    }
+
     /// Verifies the next warp sync fragment in queue.
     pub fn next(self) -> (InProgressGrandpaWarpSync<TSrc>, Result<(), FragmentError>) {
         match self.verifier.next() {
