@@ -1,0 +1,155 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/verify.rs`."><meta name="keywords" content="rust, rustlang, rust-lang"><title>verify.rs - source</title><link rel="stylesheet" type="text/css" href="../../normalize.css"><link rel="stylesheet" type="text/css" href="../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../ayu.css" disabled ><script id="default-settings"></script><script src="../../storage.js"></script><script src="../../crates.js"></script><noscript><link rel="stylesheet" href="../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../down-arrow.svg");}</style></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../rust-logo.png' alt='logo'></div></a></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../settings.html"><img src="../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><pre class="line-numbers"><span id="1"> 1</span>
+<span id="2"> 2</span>
+<span id="3"> 3</span>
+<span id="4"> 4</span>
+<span id="5"> 5</span>
+<span id="6"> 6</span>
+<span id="7"> 7</span>
+<span id="8"> 8</span>
+<span id="9"> 9</span>
+<span id="10">10</span>
+<span id="11">11</span>
+<span id="12">12</span>
+<span id="13">13</span>
+<span id="14">14</span>
+<span id="15">15</span>
+<span id="16">16</span>
+<span id="17">17</span>
+<span id="18">18</span>
+<span id="19">19</span>
+<span id="20">20</span>
+<span id="21">21</span>
+<span id="22">22</span>
+<span id="23">23</span>
+<span id="24">24</span>
+<span id="25">25</span>
+<span id="26">26</span>
+<span id="27">27</span>
+<span id="28">28</span>
+<span id="29">29</span>
+<span id="30">30</span>
+<span id="31">31</span>
+<span id="32">32</span>
+<span id="33">33</span>
+<span id="34">34</span>
+<span id="35">35</span>
+<span id="36">36</span>
+<span id="37">37</span>
+<span id="38">38</span>
+<span id="39">39</span>
+<span id="40">40</span>
+<span id="41">41</span>
+<span id="42">42</span>
+<span id="43">43</span>
+<span id="44">44</span>
+<span id="45">45</span>
+<span id="46">46</span>
+<span id="47">47</span>
+<span id="48">48</span>
+<span id="49">49</span>
+<span id="50">50</span>
+<span id="51">51</span>
+<span id="52">52</span>
+<span id="53">53</span>
+<span id="54">54</span>
+<span id="55">55</span>
+<span id="56">56</span>
+<span id="57">57</span>
+<span id="58">58</span>
+<span id="59">59</span>
+<span id="60">60</span>
+<span id="61">61</span>
+<span id="62">62</span>
+<span id="63">63</span>
+<span id="64">64</span>
+<span id="65">65</span>
+<span id="66">66</span>
+<span id="67">67</span>
+<span id="68">68</span>
+<span id="69">69</span>
+<span id="70">70</span>
+<span id="71">71</span>
+<span id="72">72</span>
+<span id="73">73</span>
+<span id="74">74</span>
+</pre><div class="example-wrap"><pre class="rust ">
+<span class="comment">// Smoldot</span>
+<span class="comment">// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.</span>
+<span class="comment">// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0</span>
+
+<span class="comment">// This program is free software: you can redistribute it and/or modify</span>
+<span class="comment">// it under the terms of the GNU General Public License as published by</span>
+<span class="comment">// the Free Software Foundation, either version 3 of the License, or</span>
+<span class="comment">// (at your option) any later version.</span>
+
+<span class="comment">// This program is distributed in the hope that it will be useful,</span>
+<span class="comment">// but WITHOUT ANY WARRANTY; without even the implied warranty of</span>
+<span class="comment">// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</span>
+<span class="comment">// GNU General Public License for more details.</span>
+
+<span class="comment">// You should have received a copy of the GNU General Public License</span>
+<span class="comment">// along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</span>
+
+<span class="doccomment">//! Methods that verify whether a block is correct.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! # Description</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! When a block is received from the network (or any other untrusted source), this block should</span>
+<span class="doccomment">//! first be verified.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! Two possibilities are offered:</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! - Verifying the authenticity of the block, using only its header and the ancestor blocks&#39;</span>
+<span class="doccomment">//! headers.</span>
+<span class="doccomment">//! - Verifying both the validity and authenticity of the block, using.the block&#39;s header and</span>
+<span class="doccomment">//! body, the headers of the ancestors, and storage of its parent.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! &gt; **Note**: The body of a block consists in the list of its extrinsics. An extrinsic is</span>
+<span class="doccomment">//! &gt;           either an intrinsic (added by the block&#39;s author) or a transaction.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! &gt; **Note**: The option of verifying only the authenticity of a block, and not its validity,</span>
+<span class="doccomment">//! &gt;           is normally for situations where a block&#39;s body or the parent block&#39;s storage is</span>
+<span class="doccomment">//! &gt;           not known. If the parent storage and the block&#39;s body are known, it is encouraged</span>
+<span class="doccomment">//! &gt;           that the block&#39;s validity be checked as well.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! Verifying the authenticity of a block consists in verifying the consensus digest logs found</span>
+<span class="doccomment">//! in its header in order to make sure that the author of the block was authorized to produce it.</span>
+<span class="doccomment">//! Whether the block has been correctly crafted isn&#39;t and cannot be verified with only the</span>
+<span class="doccomment">//! header.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! Verifying the block&#39;s validity consists, in addition to verifying its header, in *executing*</span>
+<span class="doccomment">//! the block. This involves calling the `Core_execute_block` runtime function, passing as</span>
+<span class="doccomment">//! parameter the header and body of the block, and providing access to the storage of the parent</span>
+<span class="doccomment">//! block. The runtime verifies that the header and body are correct.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! # Trust</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! Verifying only the authenticity of a block, and not its validity, means that the author of</span>
+<span class="doccomment">//! the block is trusted to have generated a correct block.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! Situations where the block author had the right to generate a block but created an invalid</span>
+<span class="doccomment">//! block would result in a loss of money for this author, and are therefore most likely the</span>
+<span class="doccomment">//! consequence of a bug (either on the side of the block author or on the side of the local</span>
+<span class="doccomment">//! verification code).</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! However, if the blocks&#39; validity isn&#39;t verified, it is possible for a block author to target</span>
+<span class="doccomment">//! a weak implementation by directly connecting to it and announcing invalid blocks directly</span>
+<span class="doccomment">//! to it. Consequently, if blocks are for example used to verify whether a payment has gone</span>
+<span class="doccomment">//! through, it is preferable to wait for blocks to have been finalized.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! No matter the validity of a block, keep in mind that a reorg (a &quot;reorganization&quot;) might</span>
+<span class="doccomment">//! happen, and many valid blocks don&#39;t get finalized.</span>
+<span class="doccomment">//!</span>
+
+<span class="kw">mod</span> <span class="ident">execute_block</span>;
+
+<span class="kw">pub</span> <span class="kw">mod</span> <span class="ident">aura</span>;
+<span class="kw">pub</span> <span class="kw">mod</span> <span class="ident">babe</span>;
+<span class="kw">pub</span> <span class="kw">mod</span> <span class="ident">header_body</span>;
+<span class="kw">pub</span> <span class="kw">mod</span> <span class="ident">header_only</span>;
+</pre></div>
+</section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../" data-current-crate="smoldot" data-search-index-js="../../search-index.js" data-search-js="../../search.js"></div>
+    <script src="../../main.js"></script><script src="../../source-script.js"></script><script src="../../source-files.js"></script></body></html>

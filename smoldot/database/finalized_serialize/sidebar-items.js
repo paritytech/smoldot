@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["decode_chain","Deserializes the information about the chain."],["encode_chain","Serializes the given chain information as a string."],["encode_chain_storage","Serializes the given chain information and finalized block storage as a string."]],"struct":[["CorruptedError","Opaque error indicating a corruption in the data stored in the local storage."]]});

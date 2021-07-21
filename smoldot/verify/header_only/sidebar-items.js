@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["ConfigConsensus","Extra items of [`Config`] that are dependant on the consensus engine of the chain."],["Error","Error that can happen during the verification."],["Success","Block successfully verified."]],"fn":[["verify","Verifies whether a block is valid."]],"struct":[["Config","Configuration for a block verification."]]});

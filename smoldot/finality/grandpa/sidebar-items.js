@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["chain_config",""],["commit","GrandPa commits contain a proof of the finality of a block."],["warp_sync",""]]});

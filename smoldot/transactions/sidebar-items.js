@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["light_pool","Transactions pool specialized for light clients usage."],["pool","General-purpose transactions pool."],["validate","Runtime call to obtain the transactions validity status."]]});

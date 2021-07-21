@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Verification of a trie proof."><meta name="keywords" content="rust, rustlang, rust-lang, proof_verify"><title>smoldot::trie::proof_verify - Rust</title><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled ><script id="default-settings"></script><script src="../../../storage.js"></script><script src="../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../../down-arrow.svg");}</style></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../../rust-logo.png' alt='logo'></div></a><p class="location">Module proof_verify</p><div class="sidebar-elems"><div class="block items"><ul><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li><li><a href="#functions">Functions</a></li></ul></div><p class="location"><a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">trie</a></p><div id="sidebar-vars" data-name="proof_verify" data-ty="mod" data-relpath="../"></div><script defer src="../sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../../settings.html"><img src="../../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Module <a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">trie</a>::<wbr><a class="mod" href="">proof_verify</a><button id="copy-path" onclick="copy_path(this)">⎘</button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../../src/smoldot/trie/proof_verify.rs.html#18-518" title="goto source code">[src]</a></span></h1><div class="docblock"><p>Verification of a trie proof.</p>
+<p>A trie proof is a proof that a certain key in the trie has a certain storage value (or lacks
+a storage value). The proof can be verified by knowing only the Merkle value of the root node.</p>
+<h1 id="details" class="section-header"><a href="#details">Details</a></h1>
+<blockquote>
+<p><strong>Note</strong>: For reminder, the Merkle value of a node is the hash of its node value, or the
+node value directly if its length is smaller than 32 bytes.</p>
+</blockquote>
+<p>A trie proof consists in a list of node values of nodes in the trie. For the proof to be valid,
+the hash of one of these node values must match the expected trie root node value. Since a
+node value contains the Merkle values of the children of the node, it is possible to iterate
+down the hierarchy of nodes until the one closest to the desired key is found.</p>
+<h1 id="multiple-proofs-merged-into-one" class="section-header"><a href="#multiple-proofs-merged-into-one">Multiple proofs merged into one</a></h1>
+<p>Considering that a trie proof consists in a list of node values, it is possible to reduce the
+space occupied by multiple trie proofs built from the same trie by merging them into a single
+list and removing duplicate elements.</p>
+<p>In order to support this use case, the <a href="fn.verify_proof.html" title="verify_proof"><code>verify_proof</code></a> function intentionally doesn’t return
+an error if some elements in the proof are unused, as it might be that these elements are part
+of a different proof that has been merged with the one that is relevant.</p>
+<blockquote>
+<p><strong>Note</strong>: The main use case for merging multiple proofs into one is when a machine that has
+access to the storage of a block sends to a machine that doesn’t all the proofs
+corresponding to the storage entries necessary for a certain runtime call.</p>
+</blockquote>
+</div><h2 id="structs" class="section-header"><a href="#structs">Structs</a></h2>
+<table><tr class="module-item"><td><a class="struct" href="struct.TrieNodeInfo.html" title="smoldot::trie::proof_verify::TrieNodeInfo struct">TrieNodeInfo</a></td><td class="docblock-short"><p>Information about a node of the trie.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.TrieNodeInfoConfig.html" title="smoldot::trie::proof_verify::TrieNodeInfoConfig struct">TrieNodeInfoConfig</a></td><td class="docblock-short"><p>Configuration to pass to <a href="fn.trie_node_info.html" title="trie_node_info"><code>trie_node_info</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.VerifyProofConfig.html" title="smoldot::trie::proof_verify::VerifyProofConfig struct">VerifyProofConfig</a></td><td class="docblock-short"><p>Configuration to pass to <a href="fn.verify_proof.html" title="verify_proof"><code>verify_proof</code></a>.</p>
+</td></tr></table><h2 id="enums" class="section-header"><a href="#enums">Enums</a></h2>
+<table><tr class="module-item"><td><a class="enum" href="enum.Children.html" title="smoldot::trie::proof_verify::Children enum">Children</a></td><td class="docblock-short"><p>See <a href="struct.TrieNodeInfo.html#structfield.children" title="TrieNodeInfo::children"><code>TrieNodeInfo::children</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.Error.html" title="smoldot::trie::proof_verify::Error enum">Error</a></td><td class="docblock-short"><p>Possible error returned by <a href="fn.verify_proof.html" title="verify_proof"><code>verify_proof</code></a></p>
+</td></tr></table><h2 id="functions" class="section-header"><a href="#functions">Functions</a></h2>
+<table><tr class="module-item"><td><a class="fn" href="fn.trie_node_info.html" title="smoldot::trie::proof_verify::trie_node_info fn">trie_node_info</a></td><td class="docblock-short"><p>Find information about the node whose key is requested by
+<a href="struct.TrieNodeInfoConfig.html#structfield.requested_key" title="TrieNodeInfoConfig::requested_key"><code>TrieNodeInfoConfig::requested_key</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="fn" href="fn.verify_proof.html" title="smoldot::trie::proof_verify::verify_proof fn">verify_proof</a></td><td class="docblock-short"><p>Find the storage value of the requested key (as designated by
+<a href="struct.VerifyProofConfig.html#structfield.requested_key" title="VerifyProofConfig::requested_key"><code>VerifyProofConfig::requested_key</code></a>).</p>
+</td></tr></table></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="smoldot" data-search-index-js="../../../search-index.js" data-search-js="../../../search.js"></div>
+    <script src="../../../main.js"></script></body></html>

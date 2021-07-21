@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["Config","Configuration of a multistream-select protocol."],["Error","Error that can happen during the negotiation."],["MessageOut","Message on the multistream-select protocol."],["Negotiation","Current state of a multistream-select negotiation."]],"struct":[["InProgress","Negotiation in progress."]]});

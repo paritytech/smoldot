@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["blocks_tree","Finalized block header, plus tree of authenticated non-finalized block headers."],["chain_information","Data structures containing the finalized state of the chain, except for its storage."],["fork_tree","Data structure containing trees of nodes."]]});

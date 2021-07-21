@@ -1,0 +1,633 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `bin/wasm-node/rust/src/ffi/bindings.rs`."><meta name="keywords" content="rust, rustlang, rust-lang"><title>bindings.rs - source</title><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled ><script id="default-settings"></script><script src="../../../storage.js"></script><script src="../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../../down-arrow.svg");}</style></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../smoldot_js/index.html'><div class='logo-container rust-logo'><img src='../../../rust-logo.png' alt='logo'></div></a></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../../settings.html"><img src="../../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><pre class="line-numbers"><span id="1">  1</span>
+<span id="2">  2</span>
+<span id="3">  3</span>
+<span id="4">  4</span>
+<span id="5">  5</span>
+<span id="6">  6</span>
+<span id="7">  7</span>
+<span id="8">  8</span>
+<span id="9">  9</span>
+<span id="10"> 10</span>
+<span id="11"> 11</span>
+<span id="12"> 12</span>
+<span id="13"> 13</span>
+<span id="14"> 14</span>
+<span id="15"> 15</span>
+<span id="16"> 16</span>
+<span id="17"> 17</span>
+<span id="18"> 18</span>
+<span id="19"> 19</span>
+<span id="20"> 20</span>
+<span id="21"> 21</span>
+<span id="22"> 22</span>
+<span id="23"> 23</span>
+<span id="24"> 24</span>
+<span id="25"> 25</span>
+<span id="26"> 26</span>
+<span id="27"> 27</span>
+<span id="28"> 28</span>
+<span id="29"> 29</span>
+<span id="30"> 30</span>
+<span id="31"> 31</span>
+<span id="32"> 32</span>
+<span id="33"> 33</span>
+<span id="34"> 34</span>
+<span id="35"> 35</span>
+<span id="36"> 36</span>
+<span id="37"> 37</span>
+<span id="38"> 38</span>
+<span id="39"> 39</span>
+<span id="40"> 40</span>
+<span id="41"> 41</span>
+<span id="42"> 42</span>
+<span id="43"> 43</span>
+<span id="44"> 44</span>
+<span id="45"> 45</span>
+<span id="46"> 46</span>
+<span id="47"> 47</span>
+<span id="48"> 48</span>
+<span id="49"> 49</span>
+<span id="50"> 50</span>
+<span id="51"> 51</span>
+<span id="52"> 52</span>
+<span id="53"> 53</span>
+<span id="54"> 54</span>
+<span id="55"> 55</span>
+<span id="56"> 56</span>
+<span id="57"> 57</span>
+<span id="58"> 58</span>
+<span id="59"> 59</span>
+<span id="60"> 60</span>
+<span id="61"> 61</span>
+<span id="62"> 62</span>
+<span id="63"> 63</span>
+<span id="64"> 64</span>
+<span id="65"> 65</span>
+<span id="66"> 66</span>
+<span id="67"> 67</span>
+<span id="68"> 68</span>
+<span id="69"> 69</span>
+<span id="70"> 70</span>
+<span id="71"> 71</span>
+<span id="72"> 72</span>
+<span id="73"> 73</span>
+<span id="74"> 74</span>
+<span id="75"> 75</span>
+<span id="76"> 76</span>
+<span id="77"> 77</span>
+<span id="78"> 78</span>
+<span id="79"> 79</span>
+<span id="80"> 80</span>
+<span id="81"> 81</span>
+<span id="82"> 82</span>
+<span id="83"> 83</span>
+<span id="84"> 84</span>
+<span id="85"> 85</span>
+<span id="86"> 86</span>
+<span id="87"> 87</span>
+<span id="88"> 88</span>
+<span id="89"> 89</span>
+<span id="90"> 90</span>
+<span id="91"> 91</span>
+<span id="92"> 92</span>
+<span id="93"> 93</span>
+<span id="94"> 94</span>
+<span id="95"> 95</span>
+<span id="96"> 96</span>
+<span id="97"> 97</span>
+<span id="98"> 98</span>
+<span id="99"> 99</span>
+<span id="100">100</span>
+<span id="101">101</span>
+<span id="102">102</span>
+<span id="103">103</span>
+<span id="104">104</span>
+<span id="105">105</span>
+<span id="106">106</span>
+<span id="107">107</span>
+<span id="108">108</span>
+<span id="109">109</span>
+<span id="110">110</span>
+<span id="111">111</span>
+<span id="112">112</span>
+<span id="113">113</span>
+<span id="114">114</span>
+<span id="115">115</span>
+<span id="116">116</span>
+<span id="117">117</span>
+<span id="118">118</span>
+<span id="119">119</span>
+<span id="120">120</span>
+<span id="121">121</span>
+<span id="122">122</span>
+<span id="123">123</span>
+<span id="124">124</span>
+<span id="125">125</span>
+<span id="126">126</span>
+<span id="127">127</span>
+<span id="128">128</span>
+<span id="129">129</span>
+<span id="130">130</span>
+<span id="131">131</span>
+<span id="132">132</span>
+<span id="133">133</span>
+<span id="134">134</span>
+<span id="135">135</span>
+<span id="136">136</span>
+<span id="137">137</span>
+<span id="138">138</span>
+<span id="139">139</span>
+<span id="140">140</span>
+<span id="141">141</span>
+<span id="142">142</span>
+<span id="143">143</span>
+<span id="144">144</span>
+<span id="145">145</span>
+<span id="146">146</span>
+<span id="147">147</span>
+<span id="148">148</span>
+<span id="149">149</span>
+<span id="150">150</span>
+<span id="151">151</span>
+<span id="152">152</span>
+<span id="153">153</span>
+<span id="154">154</span>
+<span id="155">155</span>
+<span id="156">156</span>
+<span id="157">157</span>
+<span id="158">158</span>
+<span id="159">159</span>
+<span id="160">160</span>
+<span id="161">161</span>
+<span id="162">162</span>
+<span id="163">163</span>
+<span id="164">164</span>
+<span id="165">165</span>
+<span id="166">166</span>
+<span id="167">167</span>
+<span id="168">168</span>
+<span id="169">169</span>
+<span id="170">170</span>
+<span id="171">171</span>
+<span id="172">172</span>
+<span id="173">173</span>
+<span id="174">174</span>
+<span id="175">175</span>
+<span id="176">176</span>
+<span id="177">177</span>
+<span id="178">178</span>
+<span id="179">179</span>
+<span id="180">180</span>
+<span id="181">181</span>
+<span id="182">182</span>
+<span id="183">183</span>
+<span id="184">184</span>
+<span id="185">185</span>
+<span id="186">186</span>
+<span id="187">187</span>
+<span id="188">188</span>
+<span id="189">189</span>
+<span id="190">190</span>
+<span id="191">191</span>
+<span id="192">192</span>
+<span id="193">193</span>
+<span id="194">194</span>
+<span id="195">195</span>
+<span id="196">196</span>
+<span id="197">197</span>
+<span id="198">198</span>
+<span id="199">199</span>
+<span id="200">200</span>
+<span id="201">201</span>
+<span id="202">202</span>
+<span id="203">203</span>
+<span id="204">204</span>
+<span id="205">205</span>
+<span id="206">206</span>
+<span id="207">207</span>
+<span id="208">208</span>
+<span id="209">209</span>
+<span id="210">210</span>
+<span id="211">211</span>
+<span id="212">212</span>
+<span id="213">213</span>
+<span id="214">214</span>
+<span id="215">215</span>
+<span id="216">216</span>
+<span id="217">217</span>
+<span id="218">218</span>
+<span id="219">219</span>
+<span id="220">220</span>
+<span id="221">221</span>
+<span id="222">222</span>
+<span id="223">223</span>
+<span id="224">224</span>
+<span id="225">225</span>
+<span id="226">226</span>
+<span id="227">227</span>
+<span id="228">228</span>
+<span id="229">229</span>
+<span id="230">230</span>
+<span id="231">231</span>
+<span id="232">232</span>
+<span id="233">233</span>
+<span id="234">234</span>
+<span id="235">235</span>
+<span id="236">236</span>
+<span id="237">237</span>
+<span id="238">238</span>
+<span id="239">239</span>
+<span id="240">240</span>
+<span id="241">241</span>
+<span id="242">242</span>
+<span id="243">243</span>
+<span id="244">244</span>
+<span id="245">245</span>
+<span id="246">246</span>
+<span id="247">247</span>
+<span id="248">248</span>
+<span id="249">249</span>
+<span id="250">250</span>
+<span id="251">251</span>
+<span id="252">252</span>
+<span id="253">253</span>
+<span id="254">254</span>
+<span id="255">255</span>
+<span id="256">256</span>
+<span id="257">257</span>
+<span id="258">258</span>
+<span id="259">259</span>
+<span id="260">260</span>
+<span id="261">261</span>
+<span id="262">262</span>
+<span id="263">263</span>
+<span id="264">264</span>
+<span id="265">265</span>
+<span id="266">266</span>
+<span id="267">267</span>
+<span id="268">268</span>
+<span id="269">269</span>
+<span id="270">270</span>
+<span id="271">271</span>
+<span id="272">272</span>
+<span id="273">273</span>
+<span id="274">274</span>
+<span id="275">275</span>
+<span id="276">276</span>
+<span id="277">277</span>
+<span id="278">278</span>
+<span id="279">279</span>
+<span id="280">280</span>
+<span id="281">281</span>
+<span id="282">282</span>
+<span id="283">283</span>
+<span id="284">284</span>
+<span id="285">285</span>
+<span id="286">286</span>
+<span id="287">287</span>
+<span id="288">288</span>
+<span id="289">289</span>
+<span id="290">290</span>
+<span id="291">291</span>
+<span id="292">292</span>
+<span id="293">293</span>
+<span id="294">294</span>
+<span id="295">295</span>
+<span id="296">296</span>
+<span id="297">297</span>
+<span id="298">298</span>
+<span id="299">299</span>
+<span id="300">300</span>
+<span id="301">301</span>
+<span id="302">302</span>
+<span id="303">303</span>
+<span id="304">304</span>
+<span id="305">305</span>
+<span id="306">306</span>
+<span id="307">307</span>
+<span id="308">308</span>
+<span id="309">309</span>
+<span id="310">310</span>
+<span id="311">311</span>
+<span id="312">312</span>
+<span id="313">313</span>
+</pre><div class="example-wrap"><pre class="rust ">
+<span class="comment">// Smoldot</span>
+<span class="comment">// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.</span>
+<span class="comment">// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0</span>
+
+<span class="comment">// This program is free software: you can redistribute it and/or modify</span>
+<span class="comment">// it under the terms of the GNU General Public License as published by</span>
+<span class="comment">// the Free Software Foundation, either version 3 of the License, or</span>
+<span class="comment">// (at your option) any later version.</span>
+
+<span class="comment">// This program is distributed in the hope that it will be useful,</span>
+<span class="comment">// but WITHOUT ANY WARRANTY; without even the implied warranty of</span>
+<span class="comment">// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</span>
+<span class="comment">// GNU General Public License for more details.</span>
+
+<span class="comment">// You should have received a copy of the GNU General Public License</span>
+<span class="comment">// along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</span>
+
+<span class="doccomment">//! Imports and exports of the WebAssembly module.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! This module contains all the functions that tie together the Rust code and its host (i.e.</span>
+<span class="doccomment">//! the JavaScript code, normally).</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! The functions found in the `extern` block are the functions that the Rust code *imports*, and</span>
+<span class="doccomment">//! need to be implemented on the host side and provided to the WebAssembly virtual machine. The</span>
+<span class="doccomment">//! other functions are functions that the Rust code *exports*, and can be called by the host.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! # About wasi</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! The Rust code is expected to be compiled for the `wasm32-wasi` target, and not just</span>
+<span class="doccomment">//! `wasm32-unknown-unknown`. The `wasi` platform is used in order for example to obtain a source</span>
+<span class="doccomment">//! of randomness.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! &gt; **Note**: While wasi could theoretically also be used in order to obtain the current time,</span>
+<span class="doccomment">//! &gt;           the Wasi syscall cannot be implemented in pure JavaScript code at the moment, due</span>
+<span class="doccomment">//! &gt;           to `u64`s being unusable in Javascript. As such, alternatives are present in the</span>
+<span class="doccomment">//! &gt;           `extern` block below.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! Consequently, the exports found in the `extern` block below are not the only functions that</span>
+<span class="doccomment">//! must be implemented. Several functions required by the Wasi ABI are also used. The best place</span>
+<span class="doccomment">//! to find documentation at the moment is &lt;https://docs.rs/wasi&gt;.</span>
+<span class="doccomment">//!</span>
+
+<span class="attribute">#[<span class="ident">link</span>(<span class="ident">wasm_import_module</span> <span class="op">=</span> <span class="string">&quot;smoldot&quot;</span>)]</span>
+<span class="kw">extern</span> <span class="string">&quot;C&quot;</span> {
+    <span class="doccomment">/// Must throw an exception. The message is a UTF-8 string found in the memory of the</span>
+    <span class="doccomment">/// WebAssembly at offset `message_ptr` and with length `message_len`.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// After this function has been called, no further Wasm functions must be called again on</span>
+    <span class="doccomment">/// this Wasm virtual machine. Explanation below.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// # About throwing and safety</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// Rust programs can be configured in two panicking modes: `abort`, or `unwind`. Safe or</span>
+    <span class="doccomment">/// unsafe Rust code must be written by keeping in mind that the execution of a function can</span>
+    <span class="doccomment">/// be suddenly interrupted by a panic, but can rely on the fact that this panic will either</span>
+    <span class="doccomment">/// completely abort the program, or unwind the stack. In the latter case, they can rely on</span>
+    <span class="doccomment">/// the fact that `std::panic::catch_unwind` will catch this unwinding and let them perform</span>
+    <span class="doccomment">/// some additional clean-ups.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// Calling `throw` is neither `abort`, because the JavaScript could call into the Wasm again</span>
+    <span class="doccomment">/// later, nor `unwind`, because it isn&#39;t caught by `std::panic::catch_unwind`. By being</span>
+    <span class="doccomment">/// neither of the two, it breaks the assumptions that some Rust codes might rely on for</span>
+    <span class="doccomment">/// either correctness or safety.</span>
+    <span class="doccomment">/// In order to solve this problem, we enforce that `throw` must behave like `abort`, and</span>
+    <span class="doccomment">/// forbid calling into the Wasm virtual machine again.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// Beyond the `throw` function itself, any other FFI function that throws must similarly</span>
+    <span class="doccomment">/// behave like `abort` and prevent any further execution.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">throw</span>(<span class="ident">message_ptr</span>: <span class="ident">u32</span>, <span class="ident">message_len</span>: <span class="ident">u32</span>);
+
+    <span class="doccomment">/// Client is emitting a response to a previous JSON-RPC request sent using [`json_rpc_send`].</span>
+    <span class="doccomment">/// Also used to send subscriptions notifications.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The response or notification is a UTF-8 string found in the memory of the WebAssembly</span>
+    <span class="doccomment">/// virtual machine at offset `ptr` and with length `len`. `chain_id` is the chain</span>
+    <span class="doccomment">/// that the request was made to.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">json_rpc_respond</span>(<span class="ident">ptr</span>: <span class="ident">u32</span>, <span class="ident">len</span>: <span class="ident">u32</span>, <span class="ident">chain_id</span>: <span class="ident">u32</span>);
+
+    <span class="doccomment">/// Client is emitting a log entry.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// Each log entry is made of a log level (1 = Error, 2 = Warn, 3 = Info, 4 = Debug,</span>
+    <span class="doccomment">/// 5 = Trace), a log target (e.g. &quot;network&quot;), and a log message.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The log target and message is a UTF-8 string found in the memory of the WebAssembly</span>
+    <span class="doccomment">/// virtual machine at offset `ptr` and with length `len`.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">log</span>(<span class="ident">level</span>: <span class="ident">u32</span>, <span class="ident">target_ptr</span>: <span class="ident">u32</span>, <span class="ident">target_len</span>: <span class="ident">u32</span>, <span class="ident">message_ptr</span>: <span class="ident">u32</span>, <span class="ident">message_len</span>: <span class="ident">u32</span>);
+
+    <span class="doccomment">/// Must return the number of milliseconds that have passed since the UNIX epoch, ignoring</span>
+    <span class="doccomment">/// leap seconds.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// This is typically implemented by calling `Date.now()`.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// &gt; **Note**: Ideally this function isn&#39;t needed. The wasi target supports clocks through</span>
+    <span class="doccomment">/// &gt;           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and</span>
+    <span class="doccomment">/// &gt;           browsers don&#39;t support u64s, using it causes an unbypassable exception. See</span>
+    <span class="doccomment">/// &gt;           also &lt;https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370&gt;.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">unix_time_ms</span>() <span class="op">-</span><span class="op">&gt;</span> <span class="ident">f64</span>;
+
+    <span class="doccomment">/// Must return the number of milliseconds that have passed since an arbitrary point in time.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// Contrary to [`unix_time_ms`], the returned value must never be inferior to a value</span>
+    <span class="doccomment">/// previously returned. Consequently, this must not be implemented using `Date.now()`, whose</span>
+    <span class="doccomment">/// value can decrease if the user adjusts their machine&#39;s clock, but rather with</span>
+    <span class="doccomment">/// `Performance.now()` or similar.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// See https://developer.mozilla.org/fr/docs/Web/API/Performance/now</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// &gt; **Note**: Ideally this function isn&#39;t needed. The wasi target supports clocks through</span>
+    <span class="doccomment">/// &gt;           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and</span>
+    <span class="doccomment">/// &gt;           browsers don&#39;t support u64s, using it causes an unbypassable exception. See</span>
+    <span class="doccomment">/// &gt;           also &lt;https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370&gt;.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">monotonic_clock_ms</span>() <span class="op">-</span><span class="op">&gt;</span> <span class="ident">f64</span>;
+
+    <span class="doccomment">/// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with</span>
+    <span class="doccomment">/// the `id` passed as parameter.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// When [`timer_finished`] is called, the value of [`monotonic_clock_ms`] must have increased</span>
+    <span class="doccomment">/// by at least the given number of `milliseconds`.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// If `milliseconds` is 0, [`timer_finished`] should be called as soon as possible.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">start_timer</span>(<span class="ident">id</span>: <span class="ident">u32</span>, <span class="ident">milliseconds</span>: <span class="ident">f64</span>);
+
+    <span class="doccomment">/// Must initialize a new connection that tries to connect to the given multiaddress.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The multiaddress is a UTF-8 string found in the WebAssembly memory at offset `addr_ptr`</span>
+    <span class="doccomment">/// and with `addr_len` bytes. The string is a multiaddres such as `/ip4/1.2.3.4/tcp/5/ws`.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It</span>
+    <span class="doccomment">/// must be passed on every interaction with this connection.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// Returns 0 to indicate success, or 1 to indicate that an error happened. If an error is</span>
+    <span class="doccomment">/// returned, the `id` doesn&#39;t correspond to anything.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// &gt; **Note**: If you implement this function using for example `new WebSocket()`, please</span>
+    <span class="doccomment">/// &gt;           keep in mind that exceptions should be caught and turned into an error code.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The `error_ptr_ptr` parameter should be treated as a pointer to two consecutive</span>
+    <span class="doccomment">/// little-endian 32-bits unsigned numbers. If an error happened, call [`alloc`] to allocate</span>
+    <span class="doccomment">/// memory, write a UTF-8 error message in that given location, then write that location at</span>
+    <span class="doccomment">/// the location indicated by `error_ptr_ptr` and the length of that string at the location</span>
+    <span class="doccomment">/// `error_ptr_ptr + 4`. The buffer is then de-allocated by the client. If no error happens,</span>
+    <span class="doccomment">/// nothing should be written to `error_ptr_ptr`.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// At any time, a connection can be in one of the three following states:</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// - `Opening` (initial state)</span>
+    <span class="doccomment">/// - `Open`</span>
+    <span class="doccomment">/// - `Closed`</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// When in the `Opening` or `Open` state, the connection can transition to the `Closed` state</span>
+    <span class="doccomment">/// if the remote closes the connection or refuses the connection altogether. When that</span>
+    <span class="doccomment">/// happens, [`connection_closed`] must be called. Once in the `Closed` state, the connection</span>
+    <span class="doccomment">/// cannot transition back to another state.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// Initially in the `Opening` state, the connection can transition to the `Open` state if the</span>
+    <span class="doccomment">/// remote accepts the connection. When that happens, [`connection_open`] must be called.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// When in the `Open` state, the connection can receive messages. When a message is received,</span>
+    <span class="doccomment">/// [`alloc`] must be called in order to allocate memory for this message, then</span>
+    <span class="doccomment">/// [`connection_message`] must be called with the pointer returned by [`alloc`].</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">connection_new</span>(<span class="ident">id</span>: <span class="ident">u32</span>, <span class="ident">addr_ptr</span>: <span class="ident">u32</span>, <span class="ident">addr_len</span>: <span class="ident">u32</span>, <span class="ident">error_ptr_ptr</span>: <span class="ident">u32</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">u32</span>;
+
+    <span class="doccomment">/// Close a connection previously initialized with [`connection_new`].</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// This destroys the identifier passed as parameter. This identifier must never be passed</span>
+    <span class="doccomment">/// through the FFI boundary, unless the same identifier is later allocated again with</span>
+    <span class="doccomment">/// [`connection_new`].</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The connection must be closed in the background. The Rust code isn&#39;t interested in incoming</span>
+    <span class="doccomment">/// messages from this connection anymore.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// &gt; **Note**: In JavaScript, remember to unregister event handlers before calling for</span>
+    <span class="doccomment">/// &gt;           example `WebSocket.close()`.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">connection_close</span>(<span class="ident">id</span>: <span class="ident">u32</span>);
+
+    <span class="doccomment">/// Queues data on the given connection. The data is found in the memory of the WebAssembly</span>
+    <span class="doccomment">/// virtual machine, at the given pointer. The data must be sent as a binary frame.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The connection must currently be in the `Open` state. See the documentation of</span>
+    <span class="doccomment">/// [`connection_new`] for details.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">connection_send</span>(<span class="ident">id</span>: <span class="ident">u32</span>, <span class="ident">ptr</span>: <span class="ident">u32</span>, <span class="ident">len</span>: <span class="ident">u32</span>);
+}
+
+<span class="doccomment">/// Initializes the client.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// This is the first function that must be called. Failure to do so before calling another</span>
+<span class="doccomment">/// method will lead to a Rust panic. Calling this function multiple times will also lead to a</span>
+<span class="doccomment">/// panic.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// The client will emit log messages by calling the [`log()`] function, provided the log level is</span>
+<span class="doccomment">/// inferior or equal to the value of `max_log_level` passed here.</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">init</span>(<span class="ident">max_log_level</span>: <span class="ident">u32</span>) {
+    <span class="kw">super</span><span class="ident">::init</span>(<span class="ident">max_log_level</span>)
+}
+
+<span class="doccomment">/// Allocates a buffer of the given length, with an alignment of 1.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// This must be used in the context of [`add_chain`] and other functions that similarly require</span>
+<span class="doccomment">/// passing data of variable length.</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">alloc</span>(<span class="ident">len</span>: <span class="ident">u32</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">u32</span> {
+    <span class="kw">super</span><span class="ident">::alloc</span>(<span class="ident">len</span>)
+}
+
+<span class="doccomment">/// Adds a chain to the client. The client will try to stay connected and synchronize this chain.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Use [`alloc`] to allocate a buffer for the spec of the chain that needs to be started.</span>
+<span class="doccomment">/// Write the chain spec in this buffer as UTF-8. Then, pass the pointer and length (in bytes)</span>
+<span class="doccomment">/// as parameter to this function.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain</span>
+<span class="doccomment">/// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this</span>
+<span class="doccomment">/// function. If the chain specification refer to a parachain, these chain ids are the ones that</span>
+<span class="doccomment">/// will be looked up to find the corresponding relay chain.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// These two buffers **must** have been allocated with [`alloc`]. They are freed when this</span>
+<span class="doccomment">/// function is called, even if an error code is returned.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// If `json_rpc_running` is 0, then no JSON-RPC service will be started and all JSON-RPC requests</span>
+<span class="doccomment">/// targeting this chain will return an error. This can be used to save up resources.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Returns:</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// - (2^32-1) if an error happened.</span>
+<span class="doccomment">/// - Any other value to indicate success. This value is an identifier that will be used to refer</span>
+<span class="doccomment">/// to this chain.</span>
+<span class="doccomment">///</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="comment">// TODO: clean up the returned error code system; maybe return an error string as well; difficulty is how to deal with the FFI boundary</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">add_chain</span>(
+    <span class="ident">chain_spec_pointer</span>: <span class="ident">u32</span>,
+    <span class="ident">chain_spec_len</span>: <span class="ident">u32</span>,
+    <span class="ident">json_rpc_running</span>: <span class="ident">u32</span>,
+    <span class="ident">potential_relay_chains_ptr</span>: <span class="ident">u32</span>,
+    <span class="ident">potential_relay_chains_len</span>: <span class="ident">u32</span>,
+) <span class="op">-</span><span class="op">&gt;</span> <span class="ident">u32</span> {
+    <span class="kw">super</span><span class="ident">::add_chain</span>(
+        <span class="ident">chain_spec_pointer</span>,
+        <span class="ident">chain_spec_len</span>,
+        <span class="ident">json_rpc_running</span>,
+        <span class="ident">potential_relay_chains_ptr</span>,
+        <span class="ident">potential_relay_chains_len</span>,
+    )
+}
+
+<span class="doccomment">/// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC</span>
+<span class="doccomment">/// subscriptions and cancels all in-progress requests corresponding to that chain.</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">remove_chain</span>(<span class="ident">chain_id</span>: <span class="ident">u32</span>) {
+    <span class="kw">super</span><span class="ident">::remove_chain</span>(<span class="ident">chain_id</span>)
+}
+
+<span class="doccomment">/// Emit a JSON-RPC request towards the given chain previously added using [`add_chain`].</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// A buffer containing a UTF-8 JSON-RPC request must be passed as parameter. The format of the</span>
+<span class="doccomment">/// JSON-RPC requests is described in</span>
+<span class="doccomment">/// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification). A pub-sub</span>
+<span class="doccomment">/// extension is supported.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when</span>
+<span class="doccomment">/// this function is called.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">json_rpc_send</span>(<span class="ident">text_ptr</span>: <span class="ident">u32</span>, <span class="ident">text_len</span>: <span class="ident">u32</span>, <span class="ident">chain_id</span>: <span class="ident">u32</span>) {
+    <span class="kw">super</span><span class="ident">::json_rpc_send</span>(<span class="ident">text_ptr</span>, <span class="ident">text_len</span>, <span class="ident">chain_id</span>)
+}
+
+<span class="doccomment">/// Must be called in response to [`start_timer`] after the given duration has passed.</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">timer_finished</span>(<span class="ident">timer_id</span>: <span class="ident">u32</span>) {
+    <span class="kw">super</span><span class="ident">::timer_finished</span>(<span class="ident">timer_id</span>);
+}
+
+<span class="doccomment">/// Called by the JavaScript code if the connection switches to the `Open` state. The connection</span>
+<span class="doccomment">/// must be in the `Opening` state.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Must only be called once per connection object.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// See also [`connection_open`].</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">connection_open</span>(<span class="ident">id</span>: <span class="ident">u32</span>) {
+    <span class="kw">super</span><span class="ident">::connection_open</span>(<span class="ident">id</span>);
+}
+
+<span class="doccomment">/// Notify of a message being received on the connection. The connection must be in the `Open`</span>
+<span class="doccomment">/// state.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// See also [`connection_open`].</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// The buffer **must** have been allocated with [`alloc`]. It is freed when this function is</span>
+<span class="doccomment">/// called.</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">connection_message</span>(<span class="ident">id</span>: <span class="ident">u32</span>, <span class="ident">ptr</span>: <span class="ident">u32</span>, <span class="ident">len</span>: <span class="ident">u32</span>) {
+    <span class="kw">super</span><span class="ident">::connection_message</span>(<span class="ident">id</span>, <span class="ident">ptr</span>, <span class="ident">len</span>)
+}
+
+<span class="doccomment">/// Can be called at any point by the JavaScript code if the connection switches to the `Closed`</span>
+<span class="doccomment">/// state.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Must only be called once per connection object.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Must be passed a UTF-8 string indicating the reason for closing. The buffer **must** have</span>
+<span class="doccomment">/// been allocated with [`alloc`]. It is freed when this function is called.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// See also [`connection_open`].</span>
+<span class="attribute">#[<span class="ident">no_mangle</span>]</span>
+<span class="kw">pub</span> <span class="kw">extern</span> <span class="string">&quot;C&quot;</span> <span class="kw">fn</span> <span class="ident">connection_closed</span>(<span class="ident">id</span>: <span class="ident">u32</span>, <span class="ident">ptr</span>: <span class="ident">u32</span>, <span class="ident">len</span>: <span class="ident">u32</span>) {
+    <span class="kw">super</span><span class="ident">::connection_closed</span>(<span class="ident">id</span>, <span class="ident">ptr</span>, <span class="ident">len</span>)
+}
+</pre></div>
+</section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="smoldot_js" data-search-index-js="../../../search-index.js" data-search-js="../../../search.js"></div>
+    <script src="../../../main.js"></script><script src="../../../source-script.js"></script><script src="../../../source-files.js"></script></body></html>

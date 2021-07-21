@@ -1,0 +1,83 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="General-purpose WebAssembly virtual machine."><meta name="keywords" content="rust, rustlang, rust-lang, vm"><title>smoldot::executor::vm - Rust</title><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled ><script id="default-settings"></script><script src="../../../storage.js"></script><script src="../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../../down-arrow.svg");}</style></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../../rust-logo.png' alt='logo'></div></a><p class="location">Module vm</p><div class="sidebar-elems"><div class="block items"><ul><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li></ul></div><p class="location"><a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">executor</a></p><div id="sidebar-vars" data-name="vm" data-ty="mod" data-relpath="../"></div><script defer src="../sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../../settings.html"><img src="../../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Module <a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">executor</a>::<wbr><a class="mod" href="">vm</a><button id="copy-path" onclick="copy_path(this)">⎘</button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../../src/smoldot/executor/vm.rs.html#18-695" title="goto source code">[src]</a></span></h1><div class="docblock"><p>General-purpose WebAssembly virtual machine.</p>
+<p>Contains code related to running a WebAssembly virtual machine. Contrary to
+(<code>HostVm</code>)<a href="../host/enum.HostVm.html" title="super::host::HostVm">super::host::HostVm</a>, this module isn’t aware of any of the host
+functions available to Substrate runtimes. It only contains the code required to run a virtual
+machine, with some adjustments explained below.</p>
+<h1 id="usage" class="section-header"><a href="#usage">Usage</a></h1>
+<p>Call <a href="struct.VirtualMachinePrototype.html#method.new" title="VirtualMachinePrototype::new"><code>VirtualMachinePrototype::new</code></a> in order to parse and/or compile some WebAssembly code.
+One of the parameters of this function is a function that is passed the name of functions
+imported by the Wasm code, and must return an opaque <code>usize</code>. This <code>usize</code> doesn’t have any
+meaning, but will later be passed back to the user through <a href="enum.ExecOutcome.html#variant.Interrupted.field.id" title="ExecOutcome::Interrupted::id"><code>ExecOutcome::Interrupted::id</code></a>
+when the corresponding function is called.</p>
+<p>The WebAssembly code can export functions in two different ways:</p>
+<ul>
+<li>Some functions are exported through an <code>(export)</code> statement.
+See <a href="https://webassembly.github.io/spec/core/bikeshed/#export-section%E2%91%A0">https://webassembly.github.io/spec/core/bikeshed/#export-section%E2%91%A0</a>.</li>
+<li>Some functions are stored in a global table called <code>__indirect_function_table</code>, and are
+later referred to by their index in this table. This is how the concept of “function
+pointers” commonly found in low-level programming languages is translated in WebAssembly.</li>
+</ul>
+<blockquote>
+<p><strong>Note</strong>: At the time of writing, it isn’t possible to call the second type of functions yet.</p>
+</blockquote>
+<p>Use <a href="struct.VirtualMachinePrototype.html#method.start" title="VirtualMachinePrototype::start"><code>VirtualMachinePrototype::start</code></a> in order to start executing a function exported through
+an <code>(export)</code> statement.</p>
+<p>Call <a href="struct.VirtualMachine.html#method.run" title="VirtualMachine::run"><code>VirtualMachine::run</code></a> on the <a href="struct.VirtualMachine.html" title="VirtualMachine"><code>VirtualMachine</code></a> returned by <code>start</code> in order to run the
+WebAssembly code. The <code>run</code> method returns either if the function being called returns, or if
+the WebAssembly code calls a host function. In the latter case, <a href="enum.ExecOutcome.html#variant.Interrupted" title="ExecOutcome::Interrupted"><code>ExecOutcome::Interrupted</code></a>
+is returned and the virtual machine is now paused. Once the logic of the host function has
+been executed, call <code>run</code> again, passing the return value of that host function.</p>
+<h1 id="about-heap-pages" class="section-header"><a href="#about-heap-pages">About heap pages</a></h1>
+<p>In the WebAssembly specification, the memory available in the WebAssembly virtual machine has
+an initial size and a maximum size. One of the instructions available in WebAssembly code is
+<a href="https://webassembly.github.io/spec/core/bikeshed/#-hrefsyntax-instr-memorymathsfmemorygrow">the <code>memory.grow</code> instruction</a>,
+which allows increasing the size of the memory.</p>
+<p>The Substrate/Polkadot runtime environment, however, differs. Rather than having a resizable
+memory, memory has a fixed size that consists of its initial size plus a number of pages equal
+to the value of <code>heap_pages</code> passed as parameter. It is forbidden for the WebAssembly code
+to use <code>memory.grow</code>.</p>
+<p>See also the [<code>../externals</code>] module for more information about how memory works in the
+context of the Substrate/Polkadot runtime.</p>
+<h1 id="about-__indirect_function_table" class="section-header"><a href="#about-__indirect_function_table">About <code>__indirect_function_table</code></a></h1>
+<p>At initialization, the virtual machine will look for a table named <code>__indirect_function_table</code>.
+If present, this table is expected to contain functions. These functions can then be referred
+to by their index in this table. This is how the concept of “function pointers” commonly found
+in programming languages is translated in WebAssembly.</p>
+<blockquote>
+<p><strong>Note</strong>: When compiling C, C++, Rust, or similar languages to WebAssembly, one must pass
+the <code>--export-table</code> option to the LLVM linker in order for this symbol to be
+exported.</p>
+</blockquote>
+<h1 id="about-imported-vs-exported-memory" class="section-header"><a href="#about-imported-vs-exported-memory">About imported vs exported memory</a></h1>
+<p>WebAssembly supports, in theory, addressing multiple different memory objects. The WebAssembly
+module can declare memory in two ways:</p>
+<ul>
+<li>Either by exporting a memory object in the <code>(export)</code> section under the name <code>memory</code>.</li>
+<li>Or by importing a memory object in its <code>(import)</code> section.</li>
+</ul>
+<p>The virtual machine in this module supports both variants. However, no more than one memory
+object can be exported or imported.</p>
+<p>The first variant used to be the default model when compiling to WebAssembly, but the second
+variant (importing memory objects) is preferred nowadays.</p>
+</div><h2 id="structs" class="section-header"><a href="#structs">Structs</a></h2>
+<table><tr class="module-item"><td><a class="struct" href="struct.HeapPages.html" title="smoldot::executor::vm::HeapPages struct">HeapPages</a></td><td class="docblock-short"><p>Number of heap pages available to the Wasm code.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.Module.html" title="smoldot::executor::vm::Module struct">Module</a></td><td class="docblock-short"><p>Compiled Wasm code.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.ModuleError.html" title="smoldot::executor::vm::ModuleError struct">ModuleError</a></td><td class="docblock-short"><p>Opaque error indicating an error while parsing or compiling the WebAssembly code.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.OutOfBoundsError.html" title="smoldot::executor::vm::OutOfBoundsError struct">OutOfBoundsError</a></td><td class="docblock-short"><p>Error while reading memory.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.Signature.html" title="smoldot::executor::vm::Signature struct">Signature</a></td><td class="docblock-short"><p>Low-level Wasm function signature.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.Trap.html" title="smoldot::executor::vm::Trap struct">Trap</a></td><td class="docblock-short"><p>Opaque error that happened during execution, such as an <code>unreachable</code> instruction.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.UnsupportedTypeError.html" title="smoldot::executor::vm::UnsupportedTypeError struct">UnsupportedTypeError</a></td><td class="docblock-short"><p>Error used in the conversions between VM implementation and the public API.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.VirtualMachine.html" title="smoldot::executor::vm::VirtualMachine struct">VirtualMachine</a></td><td class="docblock-short"></td></tr><tr class="module-item"><td><a class="struct" href="struct.VirtualMachinePrototype.html" title="smoldot::executor::vm::VirtualMachinePrototype struct">VirtualMachinePrototype</a></td><td class="docblock-short"></td></tr></table><h2 id="enums" class="section-header"><a href="#enums">Enums</a></h2>
+<table><tr class="module-item"><td><a class="enum" href="enum.ExecHint.html" title="smoldot::executor::vm::ExecHint enum">ExecHint</a></td><td class="docblock-short"><p>Hint used by the implementation to decide which kind of virtual machine to use.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.ExecOutcome.html" title="smoldot::executor::vm::ExecOutcome enum">ExecOutcome</a></td><td class="docblock-short"><p>Outcome of the <a href="struct.VirtualMachine.html#method.run"><code>run</code></a> function.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.GlobalValueErr.html" title="smoldot::executor::vm::GlobalValueErr enum">GlobalValueErr</a></td><td class="docblock-short"><p>Error that can happen when calling <a href="struct.VirtualMachinePrototype.html#method.global_value" title="VirtualMachinePrototype::global_value"><code>VirtualMachinePrototype::global_value</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.NewErr.html" title="smoldot::executor::vm::NewErr enum">NewErr</a></td><td class="docblock-short"><p>Error that can happen when initializing a <a href="struct.VirtualMachinePrototype.html" title="VirtualMachinePrototype"><code>VirtualMachinePrototype</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.RunErr.html" title="smoldot::executor::vm::RunErr enum">RunErr</a></td><td class="docblock-short"><p>Error that can happen when resuming the execution of a function.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.StartErr.html" title="smoldot::executor::vm::StartErr enum">StartErr</a></td><td class="docblock-short"><p>Error that can happen when calling <a href="struct.VirtualMachinePrototype.html#method.start" title="VirtualMachinePrototype::start"><code>VirtualMachinePrototype::start</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.ValueType.html" title="smoldot::executor::vm::ValueType enum">ValueType</a></td><td class="docblock-short"><p>Type of a value passed as parameter or returned by a function.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.WasmValue.html" title="smoldot::executor::vm::WasmValue enum">WasmValue</a></td><td class="docblock-short"><p>Value that a Wasm function can accept or produce.</p>
+</td></tr></table></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="smoldot" data-search-index-js="../../../search-index.js" data-search-js="../../../search.js"></div>
+    <script src="../../../main.js"></script></body></html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Methods that verify whether a block is correct."><meta name="keywords" content="rust, rustlang, rust-lang, verify"><title>smoldot::verify - Rust</title><link rel="stylesheet" type="text/css" href="../../normalize.css"><link rel="stylesheet" type="text/css" href="../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../ayu.css" disabled ><script id="default-settings"></script><script src="../../storage.js"></script><script src="../../crates.js"></script><noscript><link rel="stylesheet" href="../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../down-arrow.svg");}</style></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../rust-logo.png' alt='logo'></div></a><p class="location">Module verify</p><div class="sidebar-elems"><div class="block items"><ul><li><a href="#modules">Modules</a></li></ul></div><p class="location"><a href="../index.html">smoldot</a></p><div id="sidebar-vars" data-name="verify" data-ty="mod" data-relpath="../"></div><script defer src="../sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../settings.html"><img src="../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Module <a href="../index.html">smoldot</a>::<wbr><a class="mod" href="">verify</a><button id="copy-path" onclick="copy_path(this)">⎘</button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../src/smoldot/verify.rs.html#18-74" title="goto source code">[src]</a></span></h1><div class="docblock"><p>Methods that verify whether a block is correct.</p>
+<h1 id="description" class="section-header"><a href="#description">Description</a></h1>
+<p>When a block is received from the network (or any other untrusted source), this block should
+first be verified.</p>
+<p>Two possibilities are offered:</p>
+<ul>
+<li>Verifying the authenticity of the block, using only its header and the ancestor blocks’
+headers.</li>
+<li>Verifying both the validity and authenticity of the block, using.the block’s header and
+body, the headers of the ancestors, and storage of its parent.</li>
+</ul>
+<blockquote>
+<p><strong>Note</strong>: The body of a block consists in the list of its extrinsics. An extrinsic is
+either an intrinsic (added by the block’s author) or a transaction.</p>
+</blockquote>
+<blockquote>
+<p><strong>Note</strong>: The option of verifying only the authenticity of a block, and not its validity,
+is normally for situations where a block’s body or the parent block’s storage is
+not known. If the parent storage and the block’s body are known, it is encouraged
+that the block’s validity be checked as well.</p>
+</blockquote>
+<p>Verifying the authenticity of a block consists in verifying the consensus digest logs found
+in its header in order to make sure that the author of the block was authorized to produce it.
+Whether the block has been correctly crafted isn’t and cannot be verified with only the
+header.</p>
+<p>Verifying the block’s validity consists, in addition to verifying its header, in <em>executing</em>
+the block. This involves calling the <code>Core_execute_block</code> runtime function, passing as
+parameter the header and body of the block, and providing access to the storage of the parent
+block. The runtime verifies that the header and body are correct.</p>
+<h1 id="trust" class="section-header"><a href="#trust">Trust</a></h1>
+<p>Verifying only the authenticity of a block, and not its validity, means that the author of
+the block is trusted to have generated a correct block.</p>
+<p>Situations where the block author had the right to generate a block but created an invalid
+block would result in a loss of money for this author, and are therefore most likely the
+consequence of a bug (either on the side of the block author or on the side of the local
+verification code).</p>
+<p>However, if the blocks’ validity isn’t verified, it is possible for a block author to target
+a weak implementation by directly connecting to it and announcing invalid blocks directly
+to it. Consequently, if blocks are for example used to verify whether a payment has gone
+through, it is preferable to wait for blocks to have been finalized.</p>
+<p>No matter the validity of a block, keep in mind that a reorg (a “reorganization”) might
+happen, and many valid blocks don’t get finalized.</p>
+</div><h2 id="modules" class="section-header"><a href="#modules">Modules</a></h2>
+<table><tr class="module-item"><td><a class="mod" href="aura/index.html" title="smoldot::verify::aura mod">aura</a></td><td class="docblock-short"><p>AURA consensus.</p>
+</td></tr><tr class="module-item"><td><a class="mod" href="babe/index.html" title="smoldot::verify::babe mod">babe</a></td><td class="docblock-short"><p>BABE consensus.</p>
+</td></tr><tr class="module-item"><td><a class="mod" href="header_body/index.html" title="smoldot::verify::header_body mod">header_body</a></td><td class="docblock-short"></td></tr><tr class="module-item"><td><a class="mod" href="header_only/index.html" title="smoldot::verify::header_only mod">header_only</a></td><td class="docblock-short"></td></tr></table></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../" data-current-crate="smoldot" data-search-index-js="../../search-index.js" data-search-js="../../search.js"></div>
+    <script src="../../main.js"></script></body></html>

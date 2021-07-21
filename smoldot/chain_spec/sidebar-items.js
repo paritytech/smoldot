@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["ChainSpec","A configuration of a chain. Can be used to build a genesis block."],["LightSyncState",""],["ParseError","Error that can happen when parsing a chain spec JSON."]]});

@@ -1,0 +1,57 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Events retrieval and decoding."><meta name="keywords" content="rust, rustlang, rust-lang, events"><title>smoldot::metadata::events - Rust</title><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled ><script id="default-settings"></script><script src="../../../storage.js"></script><script src="../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../../down-arrow.svg");}</style></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../../rust-logo.png' alt='logo'></div></a><p class="location">Module events</p><div class="sidebar-elems"><div class="block items"><ul><li><a href="#enums">Enums</a></li><li><a href="#functions">Functions</a></li></ul></div><p class="location"><a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">metadata</a></p><div id="sidebar-vars" data-name="events" data-ty="mod" data-relpath="../"></div><script defer src="../sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../../settings.html"><img src="../../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Module <a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">metadata</a>::<wbr><a class="mod" href="">events</a><button id="copy-path" onclick="copy_path(this)">⎘</button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../../src/smoldot/metadata/events.rs.html#18-140" title="goto source code">[src]</a></span></h1><div class="docblock"><p>Events retrieval and decoding.</p>
+<h1 id="overview" class="section-header"><a href="#overview">Overview</a></h1>
+<p>While this behaviour is not part of the specification and is thus not a strict requirement,
+Substrate-compatible blockchains built using the Substrate framework provide a storage item
+(in other words, an entry in the storage, with a specific key) containing a list of so-called
+<em>events</em>. This storage item is updated at each block with the events that have happened in
+the latest block.</p>
+<blockquote>
+<p><strong>Note</strong>: Events include, for example, a transfer between two accounts, a change in the
+validators nominated by a nominator, the beginning of a referundum, etc.</p>
+</blockquote>
+<p>This module provides the tooling necessary to help retrieve said events.</p>
+<p>In order to determine which storage key holds the list of events, one needs to provide the
+<em>metadata</em>. See the <a href="../index.html">metadata</a> module for information about what the metadata
+is and how to obtain it.</p>
+<h1 id="usage" class="section-header"><a href="#usage">Usage</a></h1>
+<p>In order to know the events that have happened during a specific block:</p>
+<ul>
+<li>Obtain the <em>metadata</em> of the runtime used by the desired block. This is out of scope of this
+module. See the <a href="../index.html">metadata</a> module for more information.</li>
+<li>Call <a href="fn.events_storage_key.html" title="events_storage_key"><code>events_storage_key</code></a> in order to obtain a key where to find the list of events in the
+storage. If <a href="fn.events_storage_key.html" title="events_storage_key"><code>events_storage_key</code></a> returns an error, the runtime most likely doesn’t support
+events.</li>
+<li>Obtain the storage value corresponding to the key obtained at the previous step. This is out
+of scope of this module. If there is no storage value at this key, this most likely indicates
+a bug somewhere, either in substrate-lite or in the runtime.</li>
+<li>Decode the events. This isn’t implemented in this module yet. See the next section.</li>
+</ul>
+<h1 id="flaw-in-the-design" class="section-header"><a href="#flaw-in-the-design">Flaw in the design</a></h1>
+<p>In the SCALE codec, each field is put one behind the other in an unstructured way. The start
+of a new field is known by adding the length of all the preceding fields, and the length of
+a field depends on the type of data it contains. The type of data is not explicitly laid out
+and is only known through context.</p>
+<p>The list of events (encoded using SCALE) contains, amongst other things, the values of the
+parameters of said event. In order to be able decode this list of events, one has to know the
+types of these parameter values. This information is found in the metadata, in the form of a
+string representing the type as written out in the original Rust source code. This type could
+be anything, from a primitive type (e.g. <code>u32</code>) to a type alias (<code>type Foo = ...;</code>), or a
+locally-defined struct.</p>
+<p>In order to properly decode events, one has to parse these strings representing Rust types
+and hard-code a list of types known to be used in the runtime code. This ranges from <code>u32</code> to
+for example <code>EthereumAddress</code>.</p>
+<p>Runtime upgrades can introduce new types and (albeit unlikely) modify the definition of
+existing types. As such, a function that decodes events can stop working after any runtime
+upgrade. For this reason, smoldot doesn’t provide any such function.</p>
+<p>In the future, it is planned to add, in Substrate, runtime type information to the metadata,
+thus allowing a proper decoding function to be implemented. When that is done, smoldot can be
+updated to support decoding events.</p>
+</div><h2 id="enums" class="section-header"><a href="#enums">Enums</a></h2>
+<table><tr class="module-item"><td><a class="enum" href="enum.EventsStorageKeyError.html" title="smoldot::metadata::events::EventsStorageKeyError enum">EventsStorageKeyError</a></td><td class="docblock-short"><p>Error potentially returned by <a href="fn.events_storage_key.html" title="events_storage_key"><code>events_storage_key</code></a>.</p>
+</td></tr></table><h2 id="functions" class="section-header"><a href="#functions">Functions</a></h2>
+<table><tr class="module-item"><td><a class="fn" href="fn.events_storage_key.html" title="smoldot::metadata::events::events_storage_key fn">events_storage_key</a></td><td class="docblock-short"><p>Returns the key in the storage at which events can be found.</p>
+</td></tr></table></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="smoldot" data-search-index-js="../../../search-index.js" data-search-js="../../../search.js"></div>
+    <script src="../../../main.js"></script></body></html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="General-purpose transactions pool."><meta name="keywords" content="rust, rustlang, rust-lang, pool"><title>smoldot::transactions::pool - Rust</title><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled ><script id="default-settings"></script><script src="../../../storage.js"></script><script src="../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../../down-arrow.svg");}</style></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../../rust-logo.png' alt='logo'></div></a><p class="location">Module pool</p><div class="sidebar-elems"><div class="block items"><ul><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li></ul></div><p class="location"><a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">transactions</a></p><div id="sidebar-vars" data-name="pool" data-ty="mod" data-relpath="../"></div><script defer src="../sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../../settings.html"><img src="../../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Module <a href="../../index.html">smoldot</a>::<wbr><a href="../index.html">transactions</a>::<wbr><a class="mod" href="">pool</a><button id="copy-path" onclick="copy_path(this)">⎘</button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../../src/smoldot/transactions/pool.rs.html#18-660" title="goto source code">[src]</a></span></h1><div class="docblock"><p>General-purpose transactions pool.</p>
+<p>The transactions pool is a complex data structure that holds a list of pending transactions,
+in other words transactions that should later be included in blocks, and a list of
+transactions that have been included in non-finalized blocks.</p>
+<p>See the <a href="..">parent module’s documentation</a> for an overview of transactions.</p>
+<h1 id="overview" class="section-header"><a href="#overview">Overview</a></h1>
+<p>The transactions pool stores a list of transactions that the local node desires to include in
+blocks, and a list of transactions that have already been included in blocks. Each of these
+transactions is either validated or not. A transaction in a block is assumed to always succeed
+validation. A validated transaction that isn’t present in any block is a transaction that is
+assumed to be includable in a block in the future.</p>
+<p>The order in which transactions can be included in a block follows a complex system of
+“provided” and “required” tags. A transaction that <em>requires</em> some tags can only be included
+after all these tags have been <em>provided</em> by transactions earlier in the chain.</p>
+<p>The transactions pool isn’t only about deciding which transactions to include in a block when
+authoring, but also about tracking the status of interesting transactions between the moment
+they become interesting and the moment the block they are included in becomes finalized. This
+is relevant both if the local node can potentially author blocks or not.</p>
+<p>The transactions pool tracks the height of the <em>best</em> chain, and only of the best chain. More
+precisely, it is aware of the height of the current best block. Forks are tracked.</p>
+<h1 id="usage" class="section-header"><a href="#usage">Usage</a></h1>
+<p>A <a href="struct.Pool.html" title="Pool"><code>Pool</code></a> is a collection of transactions. Each transaction in the pool exposes three
+properties:</p>
+<ul>
+<li>Whether or not it has been validated, and if yes, the block against which it has been
+validated and the characteristics of the transaction (as provided by the runtime): the tags it
+provides and requires, its longevity, and its priority. See <a href="../validate">the <code>validate</code> module</a>
+for more information.</li>
+<li>The height of the block, if any, in which the transaction has been included.</li>
+<li>A so-called user data, an opaque field controller by the API user.</li>
+</ul>
+<p>Use <a href="struct.Pool.html#method.add_unvalidated" title="Pool::add_unvalidated"><code>Pool::add_unvalidated</code></a> to add to the pool a transaction that should be included in a
+block at a later point in time.</p>
+<p>Use <a href="struct.Pool.html#method.append_block" title="Pool::append_block"><code>Pool::append_block</code></a> and <a href="struct.Pool.html#method.retract_blocks" title="Pool::retract_blocks"><code>Pool::retract_blocks</code></a> when a new block is considered as
+best in order to let the <a href="struct.Pool.html" title="Pool"><code>Pool</code></a> track the state of the best block of the chain. The
+block bodies that are passed to <a href="struct.Pool.html#method.append_block" title="Pool::append_block"><code>Pool::append_block</code></a> are added to the pool.</p>
+<p>Use <a href="struct.Pool.html#method.unvalidated_transactions" title="Pool::unvalidated_transactions"><code>Pool::unvalidated_transactions</code></a> to obtain the list of transactions that should be
+validated. Validation should be performed using the <a href="../validate"><code>validate</code></a> module, and
+the result reported with <a href="struct.Pool.html#method.set_validation_result" title="Pool::set_validation_result"><code>Pool::set_validation_result</code></a>.</p>
+<p>Use <a href="struct.Pool.html#method.remove_included" title="Pool::remove_included"><code>Pool::remove_included</code></a> when a block has been finalized to remove from the pool the
+transactions that are present in the finalized block and below.</p>
+<h1 id="out-of-scope" class="section-header"><a href="#out-of-scope">Out of scope</a></h1>
+<p>The following are examples of things that are related transactions pool to but out of scope of
+this data structure:</p>
+<ul>
+<li>Watching the state of transactions.</li>
+<li>Sending transactions to other peers.</li>
+</ul>
+</div><h2 id="structs" class="section-header"><a href="#structs">Structs</a></h2>
+<table><tr class="module-item"><td><a class="struct" href="struct.AppendBlock.html" title="smoldot::transactions::pool::AppendBlock struct">AppendBlock</a></td><td class="docblock-short"><p>Wraps around <a href="struct.Pool.html" title="Pool"><code>Pool</code></a> while a new best block is being inserted. See <a href="struct.Pool.html#method.append_block" title="Pool::append_block"><code>Pool::append_block</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.Config.html" title="smoldot::transactions::pool::Config struct">Config</a></td><td class="docblock-short"><p>Configuration for <a href="struct.Pool.html#method.new" title="Pool::new"><code>Pool::new</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.Pool.html" title="smoldot::transactions::pool::Pool struct">Pool</a></td><td class="docblock-short"><p>Data structure containing transactions. See the module-level documentation for more info.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.TransactionId.html" title="smoldot::transactions::pool::TransactionId struct">TransactionId</a></td><td class="docblock-short"><p>Identifier of a transaction stored within the <a href="struct.Pool.html" title="Pool"><code>Pool</code></a>.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.Vacant.html" title="smoldot::transactions::pool::Vacant struct">Vacant</a></td><td class="docblock-short"><p>See <a href="enum.AppendBlockTransaction.html#variant.Unknown" title="AppendBlockTransaction::Unknown"><code>AppendBlockTransaction::Unknown</code></a>.</p>
+</td></tr></table><h2 id="enums" class="section-header"><a href="#enums">Enums</a></h2>
+<table><tr class="module-item"><td><a class="enum" href="enum.AppendBlockTransaction.html" title="smoldot::transactions::pool::AppendBlockTransaction enum">AppendBlockTransaction</a></td><td class="docblock-short"><p>See <a href="struct.AppendBlock.html#method.block_transaction" title="AppendBlock::block_transaction"><code>AppendBlock::block_transaction</code></a>.</p>
+</td></tr></table></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="smoldot" data-search-index-js="../../../search-index.js" data-search-js="../../../search.js"></div>
+    <script src="../../../main.js"></script></body></html>

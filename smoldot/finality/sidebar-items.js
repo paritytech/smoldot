@@ -1,0 +1,1 @@
+initSidebarItems({"mod":[["grandpa",""],["justification","Justifications contain a proof of the finality of a block."]]});

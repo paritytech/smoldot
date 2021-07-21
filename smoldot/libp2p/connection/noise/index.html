@@ -1,0 +1,54 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Noise protocol libp2p layer."><meta name="keywords" content="rust, rustlang, rust-lang, noise"><title>smoldot::libp2p::connection::noise - Rust</title><link rel="stylesheet" type="text/css" href="../../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../../ayu.css" disabled ><script id="default-settings"></script><script src="../../../../storage.js"></script><script src="../../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../../../down-arrow.svg");}</style></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../../../rust-logo.png' alt='logo'></div></a><p class="location">Module noise</p><div class="sidebar-elems"><div class="block items"><ul><li><a href="#structs">Structs</a></li><li><a href="#enums">Enums</a></li><li><a href="#constants">Constants</a></li></ul></div><p class="location"><a href="../../../index.html">smoldot</a>::<wbr><a href="../../index.html">libp2p</a>::<wbr><a href="../index.html">connection</a></p><div id="sidebar-vars" data-name="noise" data-ty="mod" data-relpath="../"></div><script defer src="../sidebar-items.js"></script></div></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../../../settings.html"><img src="../../../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><h1 class="fqn"><span class="in-band">Module <a href="../../../index.html">smoldot</a>::<wbr><a href="../../index.html">libp2p</a>::<wbr><a href="../index.html">connection</a>::<wbr><a class="mod" href="">noise</a><button id="copy-path" onclick="copy_path(this)">⎘</button></span><span class="out-of-band"><span id="render-detail"><a id="toggle-all-docs" href="javascript:void(0)" title="collapse all docs">[<span class="inner">&#x2212;</span>]</a></span><a class="srclink" href="../../../../src/smoldot/libp2p/connection/noise.rs.html#18-892" title="goto source code">[src]</a></span></h1><div class="docblock"><p>Noise protocol libp2p layer.</p>
+<p>The <a href="https://noiseprotocol.org/">noise protocol</a> is a standard framework for building
+cryptographic protocols. Libp2p uses the noise protocol to provide an encryption layer on
+top of which data is exchanged.</p>
+<h1 id="protocol-details" class="section-header"><a href="#protocol-details">Protocol details</a></h1>
+<p>Libp2p uses <a href="https://noiseexplorer.com/patterns/XX/">the XX pattern</a>. The handshake consists
+of three packets:</p>
+<ul>
+<li>The initiator generates an ephemeral keypair and sends the public key to the responder.</li>
+<li>The responder generates its own ephemeral keypair and sends the public key to the
+initiator. Afterwards, the responder derives a shared secret and uses it to encrypt all
+further communications. Now encrypted, the responder also sends back its static noise public
+key (represented with the <a href="struct.NoiseKey.html" title="NoiseKey"><code>NoiseKey</code></a> type of this module), its libp2p public key, and a
+signature of the static noise public key made using its libp2p private key.</li>
+<li>The initiator, after having received the ephemeral key from the remote, derives the same
+shared secret. It sends its own static noise public key, libp2p public key, and signature.</li>
+</ul>
+<p>After these three packets, the initiator and responder derive another shared secret using
+both the static and ephemeral keys, which is then used to encrypt communications. Note that
+the libp2p key isn’t used in the key derivation.</p>
+<h1 id="usage" class="section-header"><a href="#usage">Usage</a></h1>
+<p>While this is out of scope of this module, the noise protocol must typically first be
+negotiated using the <em>multistream-select</em> protocol. The name of the protocol is given by
+the <a href="constant.PROTOCOL_NAME.html" title="PROTOCOL_NAME"><code>PROTOCOL_NAME</code></a> constant.</p>
+<p>In order to use noise on top of a connection which has agreed to use noise, create a
+<a href="struct.HandshakeInProgress.html" title="HandshakeInProgress"><code>HandshakeInProgress</code></a>, passing a <a href="struct.NoiseKey.html" title="NoiseKey"><code>NoiseKey</code></a>. This <a href="struct.NoiseKey.html" title="NoiseKey"><code>NoiseKey</code></a> is typically generated at
+startup and doesn’t need to be persisted after a restart.</p>
+<p>Use <a href="struct.HandshakeInProgress.html#method.read_write" title="HandshakeInProgress::read_write"><code>HandshakeInProgress::read_write</code></a> when data is received from the wire or when the remote
+is ready to receive more data. At every call, a <a href="enum.NoiseHandshake.html" title="NoiseHandshake"><code>NoiseHandshake</code></a> is returned, potentially
+indicating the end of the handshake.</p>
+<p>If the handshake is finished, a <a href="enum.NoiseHandshake.html#variant.Success" title="NoiseHandshake::Success"><code>NoiseHandshake::Success</code></a> is returned, containing the
+<a href="../../peer_id/struct.PeerId.html" title="PeerId"><code>PeerId</code></a> of the remote, which is known to be legitimate, and a <a href="struct.Noise.html" title="Noise"><code>Noise</code></a> object through
+which all further communications should go through.</p>
+<p>Use <a href="struct.Noise.html#method.encrypt" title="Noise::encrypt"><code>Noise::encrypt</code></a> in order to send out data to the remote, and
+<a href="struct.Noise.html#method.inject_inbound_data" title="Noise::inject_inbound_data"><code>Noise::inject_inbound_data</code></a> when data is received.</p>
+</div><h2 id="structs" class="section-header"><a href="#structs">Structs</a></h2>
+<table><tr class="module-item"><td><a class="struct" href="struct.CipherError.html" title="smoldot::libp2p::connection::noise::CipherError struct">CipherError</a></td><td class="docblock-short"><p>Error while decoding data.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.HandshakeInProgress.html" title="smoldot::libp2p::connection::noise::HandshakeInProgress struct">HandshakeInProgress</a></td><td class="docblock-short"><p>Handshake still in progress. More data needs to be sent or received.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.Noise.html" title="smoldot::libp2p::connection::noise::Noise struct">Noise</a></td><td class="docblock-short"><p>State of the noise encryption/decryption cipher.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.NoiseKey.html" title="smoldot::libp2p::connection::noise::NoiseKey struct">NoiseKey</a></td><td class="docblock-short"><p>The noise key is the key exchanged during the noise handshake. It is <strong>not</strong> the same as the
+libp2p key. The libp2p key is used only to sign the noise public key, while the ECDH is
+performed with the noise key.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.PayloadDecodeError.html" title="smoldot::libp2p::connection::noise::PayloadDecodeError struct">PayloadDecodeError</a></td><td class="docblock-short"><p>Error while decoding the handshake.</p>
+</td></tr><tr class="module-item"><td><a class="struct" href="struct.UnsignedNoiseKey.html" title="smoldot::libp2p::connection::noise::UnsignedNoiseKey struct">UnsignedNoiseKey</a></td><td class="docblock-short"><p>Prototype for a <a href="struct.NoiseKey.html" title="NoiseKey"><code>NoiseKey</code></a>.</p>
+</td></tr></table><h2 id="enums" class="section-header"><a href="#enums">Enums</a></h2>
+<table><tr class="module-item"><td><a class="enum" href="enum.HandshakeError.html" title="smoldot::libp2p::connection::noise::HandshakeError enum">HandshakeError</a></td><td class="docblock-short"><p>Potential error during the noise handshake.</p>
+</td></tr><tr class="module-item"><td><a class="enum" href="enum.NoiseHandshake.html" title="smoldot::libp2p::connection::noise::NoiseHandshake enum">NoiseHandshake</a></td><td class="docblock-short"><p>State of a Noise handshake.</p>
+</td></tr></table><h2 id="constants" class="section-header"><a href="#constants">Constants</a></h2>
+<table><tr class="module-item"><td><a class="constant" href="constant.PROTOCOL_NAME.html" title="smoldot::libp2p::connection::noise::PROTOCOL_NAME constant">PROTOCOL_NAME</a></td><td class="docblock-short"><p>Name of the protocol, typically used when negotiated it using <em>multistream-select</em>.</p>
+</td></tr></table></section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../../" data-current-crate="smoldot" data-search-index-js="../../../../search-index.js" data-search-js="../../../../search.js"></div>
+    <script src="../../../../main.js"></script></body></html>

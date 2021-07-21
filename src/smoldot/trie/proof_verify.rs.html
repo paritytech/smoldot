@@ -1,0 +1,1043 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/trie/proof_verify.rs`."><meta name="keywords" content="rust, rustlang, rust-lang"><title>proof_verify.rs - source</title><link rel="stylesheet" type="text/css" href="../../../normalize.css"><link rel="stylesheet" type="text/css" href="../../../rustdoc.css" id="mainThemeStyle"><link rel="stylesheet" type="text/css" href="../../../light.css"  id="themeStyle"><link rel="stylesheet" type="text/css" href="../../../dark.css" disabled ><link rel="stylesheet" type="text/css" href="../../../ayu.css" disabled ><script id="default-settings"></script><script src="../../../storage.js"></script><script src="../../../crates.js"></script><noscript><link rel="stylesheet" href="../../../noscript.css"></noscript><link rel="icon" type="image/svg+xml" href="../../../favicon.svg">
+<link rel="alternate icon" type="image/png" href="../../../favicon-16x16.png">
+<link rel="alternate icon" type="image/png" href="../../../favicon-32x32.png"><style type="text/css">#crate-search{background-image:url("../../../down-arrow.svg");}</style></head><body class="rustdoc source"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="sidebar-menu" role="button">&#9776;</div><a href='../../../smoldot/index.html'><div class='logo-container rust-logo'><img src='../../../rust-logo.png' alt='logo'></div></a></nav><div class="theme-picker"><button id="theme-picker" aria-label="Pick another theme!" aria-haspopup="menu"><img src="../../../brush.svg" width="18" height="18" alt="Pick another theme!"></button><div id="theme-choices" role="menu"></div></div><nav class="sub"><form class="search-form"><div class="search-container"><div><select id="crate-search"><option value="All crates">All crates</option></select><input class="search-input" name="search" disabled autocomplete="off" spellcheck="false" placeholder="Click or press ‘S’ to search, ‘?’ for more options…" type="search"></div><button type="button" class="help-button">?</button>
+                <a id="settings-menu" href="../../../settings.html"><img src="../../../wheel.svg" width="18" height="18" alt="Change settings"></a></div></form></nav><section id="main" class="content"><pre class="line-numbers"><span id="1">  1</span>
+<span id="2">  2</span>
+<span id="3">  3</span>
+<span id="4">  4</span>
+<span id="5">  5</span>
+<span id="6">  6</span>
+<span id="7">  7</span>
+<span id="8">  8</span>
+<span id="9">  9</span>
+<span id="10"> 10</span>
+<span id="11"> 11</span>
+<span id="12"> 12</span>
+<span id="13"> 13</span>
+<span id="14"> 14</span>
+<span id="15"> 15</span>
+<span id="16"> 16</span>
+<span id="17"> 17</span>
+<span id="18"> 18</span>
+<span id="19"> 19</span>
+<span id="20"> 20</span>
+<span id="21"> 21</span>
+<span id="22"> 22</span>
+<span id="23"> 23</span>
+<span id="24"> 24</span>
+<span id="25"> 25</span>
+<span id="26"> 26</span>
+<span id="27"> 27</span>
+<span id="28"> 28</span>
+<span id="29"> 29</span>
+<span id="30"> 30</span>
+<span id="31"> 31</span>
+<span id="32"> 32</span>
+<span id="33"> 33</span>
+<span id="34"> 34</span>
+<span id="35"> 35</span>
+<span id="36"> 36</span>
+<span id="37"> 37</span>
+<span id="38"> 38</span>
+<span id="39"> 39</span>
+<span id="40"> 40</span>
+<span id="41"> 41</span>
+<span id="42"> 42</span>
+<span id="43"> 43</span>
+<span id="44"> 44</span>
+<span id="45"> 45</span>
+<span id="46"> 46</span>
+<span id="47"> 47</span>
+<span id="48"> 48</span>
+<span id="49"> 49</span>
+<span id="50"> 50</span>
+<span id="51"> 51</span>
+<span id="52"> 52</span>
+<span id="53"> 53</span>
+<span id="54"> 54</span>
+<span id="55"> 55</span>
+<span id="56"> 56</span>
+<span id="57"> 57</span>
+<span id="58"> 58</span>
+<span id="59"> 59</span>
+<span id="60"> 60</span>
+<span id="61"> 61</span>
+<span id="62"> 62</span>
+<span id="63"> 63</span>
+<span id="64"> 64</span>
+<span id="65"> 65</span>
+<span id="66"> 66</span>
+<span id="67"> 67</span>
+<span id="68"> 68</span>
+<span id="69"> 69</span>
+<span id="70"> 70</span>
+<span id="71"> 71</span>
+<span id="72"> 72</span>
+<span id="73"> 73</span>
+<span id="74"> 74</span>
+<span id="75"> 75</span>
+<span id="76"> 76</span>
+<span id="77"> 77</span>
+<span id="78"> 78</span>
+<span id="79"> 79</span>
+<span id="80"> 80</span>
+<span id="81"> 81</span>
+<span id="82"> 82</span>
+<span id="83"> 83</span>
+<span id="84"> 84</span>
+<span id="85"> 85</span>
+<span id="86"> 86</span>
+<span id="87"> 87</span>
+<span id="88"> 88</span>
+<span id="89"> 89</span>
+<span id="90"> 90</span>
+<span id="91"> 91</span>
+<span id="92"> 92</span>
+<span id="93"> 93</span>
+<span id="94"> 94</span>
+<span id="95"> 95</span>
+<span id="96"> 96</span>
+<span id="97"> 97</span>
+<span id="98"> 98</span>
+<span id="99"> 99</span>
+<span id="100">100</span>
+<span id="101">101</span>
+<span id="102">102</span>
+<span id="103">103</span>
+<span id="104">104</span>
+<span id="105">105</span>
+<span id="106">106</span>
+<span id="107">107</span>
+<span id="108">108</span>
+<span id="109">109</span>
+<span id="110">110</span>
+<span id="111">111</span>
+<span id="112">112</span>
+<span id="113">113</span>
+<span id="114">114</span>
+<span id="115">115</span>
+<span id="116">116</span>
+<span id="117">117</span>
+<span id="118">118</span>
+<span id="119">119</span>
+<span id="120">120</span>
+<span id="121">121</span>
+<span id="122">122</span>
+<span id="123">123</span>
+<span id="124">124</span>
+<span id="125">125</span>
+<span id="126">126</span>
+<span id="127">127</span>
+<span id="128">128</span>
+<span id="129">129</span>
+<span id="130">130</span>
+<span id="131">131</span>
+<span id="132">132</span>
+<span id="133">133</span>
+<span id="134">134</span>
+<span id="135">135</span>
+<span id="136">136</span>
+<span id="137">137</span>
+<span id="138">138</span>
+<span id="139">139</span>
+<span id="140">140</span>
+<span id="141">141</span>
+<span id="142">142</span>
+<span id="143">143</span>
+<span id="144">144</span>
+<span id="145">145</span>
+<span id="146">146</span>
+<span id="147">147</span>
+<span id="148">148</span>
+<span id="149">149</span>
+<span id="150">150</span>
+<span id="151">151</span>
+<span id="152">152</span>
+<span id="153">153</span>
+<span id="154">154</span>
+<span id="155">155</span>
+<span id="156">156</span>
+<span id="157">157</span>
+<span id="158">158</span>
+<span id="159">159</span>
+<span id="160">160</span>
+<span id="161">161</span>
+<span id="162">162</span>
+<span id="163">163</span>
+<span id="164">164</span>
+<span id="165">165</span>
+<span id="166">166</span>
+<span id="167">167</span>
+<span id="168">168</span>
+<span id="169">169</span>
+<span id="170">170</span>
+<span id="171">171</span>
+<span id="172">172</span>
+<span id="173">173</span>
+<span id="174">174</span>
+<span id="175">175</span>
+<span id="176">176</span>
+<span id="177">177</span>
+<span id="178">178</span>
+<span id="179">179</span>
+<span id="180">180</span>
+<span id="181">181</span>
+<span id="182">182</span>
+<span id="183">183</span>
+<span id="184">184</span>
+<span id="185">185</span>
+<span id="186">186</span>
+<span id="187">187</span>
+<span id="188">188</span>
+<span id="189">189</span>
+<span id="190">190</span>
+<span id="191">191</span>
+<span id="192">192</span>
+<span id="193">193</span>
+<span id="194">194</span>
+<span id="195">195</span>
+<span id="196">196</span>
+<span id="197">197</span>
+<span id="198">198</span>
+<span id="199">199</span>
+<span id="200">200</span>
+<span id="201">201</span>
+<span id="202">202</span>
+<span id="203">203</span>
+<span id="204">204</span>
+<span id="205">205</span>
+<span id="206">206</span>
+<span id="207">207</span>
+<span id="208">208</span>
+<span id="209">209</span>
+<span id="210">210</span>
+<span id="211">211</span>
+<span id="212">212</span>
+<span id="213">213</span>
+<span id="214">214</span>
+<span id="215">215</span>
+<span id="216">216</span>
+<span id="217">217</span>
+<span id="218">218</span>
+<span id="219">219</span>
+<span id="220">220</span>
+<span id="221">221</span>
+<span id="222">222</span>
+<span id="223">223</span>
+<span id="224">224</span>
+<span id="225">225</span>
+<span id="226">226</span>
+<span id="227">227</span>
+<span id="228">228</span>
+<span id="229">229</span>
+<span id="230">230</span>
+<span id="231">231</span>
+<span id="232">232</span>
+<span id="233">233</span>
+<span id="234">234</span>
+<span id="235">235</span>
+<span id="236">236</span>
+<span id="237">237</span>
+<span id="238">238</span>
+<span id="239">239</span>
+<span id="240">240</span>
+<span id="241">241</span>
+<span id="242">242</span>
+<span id="243">243</span>
+<span id="244">244</span>
+<span id="245">245</span>
+<span id="246">246</span>
+<span id="247">247</span>
+<span id="248">248</span>
+<span id="249">249</span>
+<span id="250">250</span>
+<span id="251">251</span>
+<span id="252">252</span>
+<span id="253">253</span>
+<span id="254">254</span>
+<span id="255">255</span>
+<span id="256">256</span>
+<span id="257">257</span>
+<span id="258">258</span>
+<span id="259">259</span>
+<span id="260">260</span>
+<span id="261">261</span>
+<span id="262">262</span>
+<span id="263">263</span>
+<span id="264">264</span>
+<span id="265">265</span>
+<span id="266">266</span>
+<span id="267">267</span>
+<span id="268">268</span>
+<span id="269">269</span>
+<span id="270">270</span>
+<span id="271">271</span>
+<span id="272">272</span>
+<span id="273">273</span>
+<span id="274">274</span>
+<span id="275">275</span>
+<span id="276">276</span>
+<span id="277">277</span>
+<span id="278">278</span>
+<span id="279">279</span>
+<span id="280">280</span>
+<span id="281">281</span>
+<span id="282">282</span>
+<span id="283">283</span>
+<span id="284">284</span>
+<span id="285">285</span>
+<span id="286">286</span>
+<span id="287">287</span>
+<span id="288">288</span>
+<span id="289">289</span>
+<span id="290">290</span>
+<span id="291">291</span>
+<span id="292">292</span>
+<span id="293">293</span>
+<span id="294">294</span>
+<span id="295">295</span>
+<span id="296">296</span>
+<span id="297">297</span>
+<span id="298">298</span>
+<span id="299">299</span>
+<span id="300">300</span>
+<span id="301">301</span>
+<span id="302">302</span>
+<span id="303">303</span>
+<span id="304">304</span>
+<span id="305">305</span>
+<span id="306">306</span>
+<span id="307">307</span>
+<span id="308">308</span>
+<span id="309">309</span>
+<span id="310">310</span>
+<span id="311">311</span>
+<span id="312">312</span>
+<span id="313">313</span>
+<span id="314">314</span>
+<span id="315">315</span>
+<span id="316">316</span>
+<span id="317">317</span>
+<span id="318">318</span>
+<span id="319">319</span>
+<span id="320">320</span>
+<span id="321">321</span>
+<span id="322">322</span>
+<span id="323">323</span>
+<span id="324">324</span>
+<span id="325">325</span>
+<span id="326">326</span>
+<span id="327">327</span>
+<span id="328">328</span>
+<span id="329">329</span>
+<span id="330">330</span>
+<span id="331">331</span>
+<span id="332">332</span>
+<span id="333">333</span>
+<span id="334">334</span>
+<span id="335">335</span>
+<span id="336">336</span>
+<span id="337">337</span>
+<span id="338">338</span>
+<span id="339">339</span>
+<span id="340">340</span>
+<span id="341">341</span>
+<span id="342">342</span>
+<span id="343">343</span>
+<span id="344">344</span>
+<span id="345">345</span>
+<span id="346">346</span>
+<span id="347">347</span>
+<span id="348">348</span>
+<span id="349">349</span>
+<span id="350">350</span>
+<span id="351">351</span>
+<span id="352">352</span>
+<span id="353">353</span>
+<span id="354">354</span>
+<span id="355">355</span>
+<span id="356">356</span>
+<span id="357">357</span>
+<span id="358">358</span>
+<span id="359">359</span>
+<span id="360">360</span>
+<span id="361">361</span>
+<span id="362">362</span>
+<span id="363">363</span>
+<span id="364">364</span>
+<span id="365">365</span>
+<span id="366">366</span>
+<span id="367">367</span>
+<span id="368">368</span>
+<span id="369">369</span>
+<span id="370">370</span>
+<span id="371">371</span>
+<span id="372">372</span>
+<span id="373">373</span>
+<span id="374">374</span>
+<span id="375">375</span>
+<span id="376">376</span>
+<span id="377">377</span>
+<span id="378">378</span>
+<span id="379">379</span>
+<span id="380">380</span>
+<span id="381">381</span>
+<span id="382">382</span>
+<span id="383">383</span>
+<span id="384">384</span>
+<span id="385">385</span>
+<span id="386">386</span>
+<span id="387">387</span>
+<span id="388">388</span>
+<span id="389">389</span>
+<span id="390">390</span>
+<span id="391">391</span>
+<span id="392">392</span>
+<span id="393">393</span>
+<span id="394">394</span>
+<span id="395">395</span>
+<span id="396">396</span>
+<span id="397">397</span>
+<span id="398">398</span>
+<span id="399">399</span>
+<span id="400">400</span>
+<span id="401">401</span>
+<span id="402">402</span>
+<span id="403">403</span>
+<span id="404">404</span>
+<span id="405">405</span>
+<span id="406">406</span>
+<span id="407">407</span>
+<span id="408">408</span>
+<span id="409">409</span>
+<span id="410">410</span>
+<span id="411">411</span>
+<span id="412">412</span>
+<span id="413">413</span>
+<span id="414">414</span>
+<span id="415">415</span>
+<span id="416">416</span>
+<span id="417">417</span>
+<span id="418">418</span>
+<span id="419">419</span>
+<span id="420">420</span>
+<span id="421">421</span>
+<span id="422">422</span>
+<span id="423">423</span>
+<span id="424">424</span>
+<span id="425">425</span>
+<span id="426">426</span>
+<span id="427">427</span>
+<span id="428">428</span>
+<span id="429">429</span>
+<span id="430">430</span>
+<span id="431">431</span>
+<span id="432">432</span>
+<span id="433">433</span>
+<span id="434">434</span>
+<span id="435">435</span>
+<span id="436">436</span>
+<span id="437">437</span>
+<span id="438">438</span>
+<span id="439">439</span>
+<span id="440">440</span>
+<span id="441">441</span>
+<span id="442">442</span>
+<span id="443">443</span>
+<span id="444">444</span>
+<span id="445">445</span>
+<span id="446">446</span>
+<span id="447">447</span>
+<span id="448">448</span>
+<span id="449">449</span>
+<span id="450">450</span>
+<span id="451">451</span>
+<span id="452">452</span>
+<span id="453">453</span>
+<span id="454">454</span>
+<span id="455">455</span>
+<span id="456">456</span>
+<span id="457">457</span>
+<span id="458">458</span>
+<span id="459">459</span>
+<span id="460">460</span>
+<span id="461">461</span>
+<span id="462">462</span>
+<span id="463">463</span>
+<span id="464">464</span>
+<span id="465">465</span>
+<span id="466">466</span>
+<span id="467">467</span>
+<span id="468">468</span>
+<span id="469">469</span>
+<span id="470">470</span>
+<span id="471">471</span>
+<span id="472">472</span>
+<span id="473">473</span>
+<span id="474">474</span>
+<span id="475">475</span>
+<span id="476">476</span>
+<span id="477">477</span>
+<span id="478">478</span>
+<span id="479">479</span>
+<span id="480">480</span>
+<span id="481">481</span>
+<span id="482">482</span>
+<span id="483">483</span>
+<span id="484">484</span>
+<span id="485">485</span>
+<span id="486">486</span>
+<span id="487">487</span>
+<span id="488">488</span>
+<span id="489">489</span>
+<span id="490">490</span>
+<span id="491">491</span>
+<span id="492">492</span>
+<span id="493">493</span>
+<span id="494">494</span>
+<span id="495">495</span>
+<span id="496">496</span>
+<span id="497">497</span>
+<span id="498">498</span>
+<span id="499">499</span>
+<span id="500">500</span>
+<span id="501">501</span>
+<span id="502">502</span>
+<span id="503">503</span>
+<span id="504">504</span>
+<span id="505">505</span>
+<span id="506">506</span>
+<span id="507">507</span>
+<span id="508">508</span>
+<span id="509">509</span>
+<span id="510">510</span>
+<span id="511">511</span>
+<span id="512">512</span>
+<span id="513">513</span>
+<span id="514">514</span>
+<span id="515">515</span>
+<span id="516">516</span>
+<span id="517">517</span>
+<span id="518">518</span>
+</pre><div class="example-wrap"><pre class="rust ">
+<span class="comment">// Smoldot</span>
+<span class="comment">// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.</span>
+<span class="comment">// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0</span>
+
+<span class="comment">// This program is free software: you can redistribute it and/or modify</span>
+<span class="comment">// it under the terms of the GNU General Public License as published by</span>
+<span class="comment">// the Free Software Foundation, either version 3 of the License, or</span>
+<span class="comment">// (at your option) any later version.</span>
+
+<span class="comment">// This program is distributed in the hope that it will be useful,</span>
+<span class="comment">// but WITHOUT ANY WARRANTY; without even the implied warranty of</span>
+<span class="comment">// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the</span>
+<span class="comment">// GNU General Public License for more details.</span>
+
+<span class="comment">// You should have received a copy of the GNU General Public License</span>
+<span class="comment">// along with this program.  If not, see &lt;http://www.gnu.org/licenses/&gt;.</span>
+
+<span class="doccomment">//! Verification of a trie proof.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! A trie proof is a proof that a certain key in the trie has a certain storage value (or lacks</span>
+<span class="doccomment">//! a storage value). The proof can be verified by knowing only the Merkle value of the root node.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! # Details</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! &gt; **Note**: For reminder, the Merkle value of a node is the hash of its node value, or the</span>
+<span class="doccomment">//! &gt;           node value directly if its length is smaller than 32 bytes.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! A trie proof consists in a list of node values of nodes in the trie. For the proof to be valid,</span>
+<span class="doccomment">//! the hash of one of these node values must match the expected trie root node value. Since a</span>
+<span class="doccomment">//! node value contains the Merkle values of the children of the node, it is possible to iterate</span>
+<span class="doccomment">//! down the hierarchy of nodes until the one closest to the desired key is found.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! # Multiple proofs merged into one</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! Considering that a trie proof consists in a list of node values, it is possible to reduce the</span>
+<span class="doccomment">//! space occupied by multiple trie proofs built from the same trie by merging them into a single</span>
+<span class="doccomment">//! list and removing duplicate elements.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! In order to support this use case, the [`verify_proof`] function intentionally doesn&#39;t return</span>
+<span class="doccomment">//! an error if some elements in the proof are unused, as it might be that these elements are part</span>
+<span class="doccomment">//! of a different proof that has been merged with the one that is relevant.</span>
+<span class="doccomment">//!</span>
+<span class="doccomment">//! &gt; **Note**: The main use case for merging multiple proofs into one is when a machine that has</span>
+<span class="doccomment">//! &gt;           access to the storage of a block sends to a machine that doesn&#39;t all the proofs</span>
+<span class="doccomment">//! &gt;           corresponding to the storage entries necessary for a certain runtime call.</span>
+<span class="doccomment">//!</span>
+
+<span class="kw">use</span> <span class="kw">super</span><span class="ident">::nibble</span>;
+
+<span class="kw">use</span> <span class="ident">alloc::vec::Vec</span>;
+<span class="kw">use</span> <span class="ident">core</span>::{<span class="ident">convert::TryFrom</span> <span class="kw">as</span> <span class="kw">_</span>, <span class="ident">iter</span>};
+
+<span class="doccomment">/// Configuration to pass to [`verify_proof`].</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">VerifyProofConfig</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">I</span><span class="op">&gt;</span> {
+    <span class="doccomment">/// Key whose storage value needs to be found.</span>
+    <span class="kw">pub</span> <span class="ident">requested_key</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> [<span class="ident">u8</span>],
+
+    <span class="doccomment">/// Merkle value (or node value) of the root node of the trie.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// &gt; **Note**: The Merkle value and node value are always the same for the root node.</span>
+    <span class="kw">pub</span> <span class="ident">trie_root_hash</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> [<span class="ident">u8</span>; <span class="number">32</span>],
+
+    <span class="doccomment">/// List of node values of nodes found in the trie. No specific order is required. All the</span>
+    <span class="doccomment">/// values between the root node and the node closest to the requested key have to be included</span>
+    <span class="doccomment">/// in the list in order for the verification to be able to succeed.</span>
+    <span class="kw">pub</span> <span class="ident">proof</span>: <span class="ident">I</span>,
+}
+
+<span class="doccomment">/// Find the storage value of the requested key (as designated by</span>
+<span class="doccomment">/// [`VerifyProofConfig::requested_key`]).</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Returns an error if the proof couldn&#39;t be verified.</span>
+<span class="doccomment">/// If the proof could be verified and the key has an associated storage value, `Ok(Some(_))` is</span>
+<span class="doccomment">/// returned, containining that storage value.</span>
+<span class="doccomment">/// If the proof could be verified but the key does not have an associated storage value,</span>
+<span class="doccomment">/// `Ok(None)` is returned.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// &gt; **Note**: This does not fully verify the correctness of the node values provided by `proof`.</span>
+<span class="doccomment">/// &gt;           Only the minimum amount of information required is fetched from `proof`, and an</span>
+<span class="doccomment">/// &gt;           error is returned if a problem happens during this process.</span>
+<span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">verify_proof</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="lifetime">&#39;b</span><span class="op">&gt;</span>(
+    <span class="ident">config</span>: <span class="ident">VerifyProofConfig</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="kw">impl</span> <span class="ident">Iterator</span><span class="op">&lt;</span><span class="ident">Item</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="lifetime">&#39;b</span> [<span class="ident">u8</span>]<span class="op">&gt;</span> <span class="op">+</span> <span class="ident">Clone</span><span class="op">&gt;</span>,
+) <span class="op">-</span><span class="op">&gt;</span> <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="kw-2">&amp;</span><span class="lifetime">&#39;b</span> [<span class="ident">u8</span>]<span class="op">&gt;</span>, <span class="ident">Error</span><span class="op">&gt;</span> {
+    <span class="prelude-val">Ok</span>(<span class="ident">trie_node_info</span>(<span class="ident">TrieNodeInfoConfig</span> {
+        <span class="ident">requested_key</span>: <span class="ident">nibble::bytes_to_nibbles</span>(<span class="ident">config</span>.<span class="ident">requested_key</span>.<span class="ident">iter</span>().<span class="ident">cloned</span>()),
+        <span class="ident">trie_root_hash</span>: <span class="ident">config</span>.<span class="ident">trie_root_hash</span>,
+        <span class="ident">proof</span>: <span class="ident">config</span>.<span class="ident">proof</span>,
+    })<span class="question-mark">?</span>
+    .<span class="ident">node_value</span>)
+}
+
+<span class="doccomment">/// Configuration to pass to [`trie_node_info`].</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">TrieNodeInfoConfig</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="ident">K</span>, <span class="ident">I</span><span class="op">&gt;</span> {
+    <span class="doccomment">/// Key whose storage value needs to be found.</span>
+    <span class="kw">pub</span> <span class="ident">requested_key</span>: <span class="ident">K</span>,
+
+    <span class="doccomment">/// Merkle value (or node value) of the root node of the trie.</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// &gt; **Note**: The Merkle value and node value are always the same for the root node.</span>
+    <span class="kw">pub</span> <span class="ident">trie_root_hash</span>: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> [<span class="ident">u8</span>; <span class="number">32</span>],
+
+    <span class="doccomment">/// List of node values of nodes found in the trie. No specific order is required. All the</span>
+    <span class="doccomment">/// values between the root node and the node closest to the requested key have to be included</span>
+    <span class="doccomment">/// in the list in order for the verification to be able to succeed.</span>
+    <span class="kw">pub</span> <span class="ident">proof</span>: <span class="ident">I</span>,
+}
+
+<span class="doccomment">/// Find information about the node whose key is requested by</span>
+<span class="doccomment">/// [`TrieNodeInfoConfig::requested_key`].</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// The node in question doesn&#39;t necessarily have to exist. Nodes that don&#39;t exist still return</span>
+<span class="doccomment">/// `Ok` but have no storage value and no children.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// Returns an error if the proof couldn&#39;t be verified.</span>
+<span class="doccomment">///</span>
+<span class="doccomment">/// &gt; **Note**: This does not fully verify the correctness of the node values provided by `proof`.</span>
+<span class="doccomment">/// &gt;           Only the minimum amount of information required is fetched from `proof`, and an</span>
+<span class="doccomment">/// &gt;           error is returned if a problem happens during this process.</span>
+<span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">trie_node_info</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span>, <span class="lifetime">&#39;b</span><span class="op">&gt;</span>(
+    <span class="ident">config</span>: <span class="ident">TrieNodeInfoConfig</span><span class="op">&lt;</span>
+        <span class="lifetime">&#39;a</span>,
+        <span class="kw">impl</span> <span class="ident">Iterator</span><span class="op">&lt;</span><span class="ident">Item</span> <span class="op">=</span> <span class="ident">nibble::Nibble</span><span class="op">&gt;</span>,
+        <span class="kw">impl</span> <span class="ident">Iterator</span><span class="op">&lt;</span><span class="ident">Item</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="lifetime">&#39;b</span> [<span class="ident">u8</span>]<span class="op">&gt;</span> <span class="op">+</span> <span class="ident">Clone</span>,
+    <span class="op">&gt;</span>,
+) <span class="op">-</span><span class="op">&gt;</span> <span class="prelude-ty">Result</span><span class="op">&lt;</span><span class="ident">TrieNodeInfo</span><span class="op">&lt;</span><span class="lifetime">&#39;b</span><span class="op">&gt;</span>, <span class="ident">Error</span><span class="op">&gt;</span> {
+    <span class="comment">// The proof contains node values, while Merkle values will be needed. Create a list of</span>
+    <span class="comment">// Merkle values, one per entry in `config.proof`.</span>
+    <span class="kw">let</span> <span class="ident">merkle_values</span> <span class="op">=</span> <span class="ident">config</span>
+        .<span class="ident">proof</span>
+        .<span class="ident">clone</span>()
+        .<span class="ident">map</span>(<span class="op">|</span><span class="ident">proof_entry</span><span class="op">|</span> <span class="op">-</span><span class="op">&gt;</span> <span class="ident">arrayvec::ArrayVec</span><span class="op">&lt;</span><span class="ident">u8</span>, <span class="number">32</span><span class="op">&gt;</span> {
+            <span class="kw">if</span> <span class="ident">proof_entry</span>.<span class="ident">len</span>() <span class="op">&gt;</span><span class="op">=</span> <span class="number">32</span> {
+                <span class="ident">blake2_rfc::blake2b::blake2b</span>(<span class="number">32</span>, <span class="kw-2">&amp;</span>[], <span class="ident">proof_entry</span>)
+                    .<span class="ident">as_bytes</span>()
+                    .<span class="ident">iter</span>()
+                    .<span class="ident">cloned</span>()
+                    .<span class="ident">collect</span>()
+            } <span class="kw">else</span> {
+                <span class="ident">proof_entry</span>.<span class="ident">iter</span>().<span class="ident">cloned</span>().<span class="ident">collect</span>()
+            }
+        })
+        .<span class="ident">collect</span>::<span class="op">&lt;</span><span class="ident">Vec</span><span class="op">&lt;</span><span class="kw">_</span><span class="op">&gt;</span><span class="op">&gt;</span>();
+
+    <span class="comment">// Find the expected trie root in the proof and put it in `node_value`. This is the start</span>
+    <span class="comment">// point of the verification.</span>
+    <span class="comment">// `node_value` is updated as the decoding progresses.</span>
+    <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">node_value</span> <span class="op">=</span> {
+        <span class="kw">let</span> <span class="ident">proof_iter</span> <span class="op">=</span> <span class="ident">merkle_values</span>
+            .<span class="ident">iter</span>()
+            .<span class="ident">position</span>(<span class="op">|</span><span class="ident">v</span><span class="op">|</span> <span class="ident">v</span>[..] <span class="op">=</span><span class="op">=</span> <span class="ident">config</span>.<span class="ident">trie_root_hash</span>[..])
+            .<span class="ident">ok_or</span>(<span class="ident">Error::TrieRootNotFound</span>)<span class="question-mark">?</span>;
+        <span class="ident">config</span>.<span class="ident">proof</span>.<span class="ident">clone</span>().<span class="ident">nth</span>(<span class="ident">proof_iter</span>).<span class="ident">unwrap</span>()
+    };
+
+    <span class="comment">// Number of nibbles that have been found during the iteration below.</span>
+    <span class="comment">// Used only for debugging purposes.</span>
+    <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">iter_nibbles</span> <span class="op">=</span> <span class="number">0usize</span>;
+
+    <span class="comment">// The verification consists in iterating using `expected_nibbles_iter` and `node_value`.</span>
+    <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">expected_nibbles_iter</span> <span class="op">=</span> <span class="ident">config</span>.<span class="ident">requested_key</span>;
+    <span class="kw">loop</span> {
+        <span class="kw">if</span> <span class="ident">node_value</span>.<span class="ident">is_empty</span>() {
+            <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">Error::InvalidNodeValue</span> {
+                <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+            });
+        }
+
+        <span class="kw">let</span> <span class="ident">has_children</span> <span class="op">=</span> (<span class="ident">node_value</span>[<span class="number">0</span>] <span class="op">&amp;</span> <span class="number">0x80</span>) <span class="op">!</span><span class="op">=</span> <span class="number">0</span>;
+        <span class="kw">let</span> <span class="ident">has_storage_value</span> <span class="op">=</span> (<span class="ident">node_value</span>[<span class="number">0</span>] <span class="op">&amp;</span> <span class="number">0x40</span>) <span class="op">!</span><span class="op">=</span> <span class="number">0</span>;
+
+        <span class="comment">// Iterator to the partial key found in the node value of `proof_iter`.</span>
+        <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">partial_key</span> <span class="op">=</span> {
+            <span class="comment">// Length of the partial key, in nibbles.</span>
+            <span class="kw">let</span> <span class="ident">pk_len</span> <span class="op">=</span> {
+                <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">accumulator</span> <span class="op">=</span> <span class="ident">usize::from</span>(<span class="ident">node_value</span>[<span class="number">0</span>] <span class="op">&amp;</span> <span class="number">0x3f</span>);
+                <span class="ident">node_value</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="ident">node_value</span>[<span class="number">1</span>..];
+                <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">continue_iter</span> <span class="op">=</span> <span class="ident">accumulator</span> <span class="op">=</span><span class="op">=</span> <span class="number">63</span>;
+                <span class="kw">while</span> <span class="ident">continue_iter</span> {
+                    <span class="kw">if</span> <span class="ident">node_value</span>.<span class="ident">is_empty</span>() {
+                        <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">Error::InvalidNodeValue</span> {
+                            <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                        });
+                    }
+                    <span class="ident">continue_iter</span> <span class="op">=</span> <span class="ident">node_value</span>[<span class="number">0</span>] <span class="op">=</span><span class="op">=</span> <span class="number">255</span>;
+                    <span class="ident">accumulator</span> <span class="op">=</span> <span class="ident">accumulator</span>.<span class="ident">checked_add</span>(<span class="ident">usize::from</span>(<span class="ident">node_value</span>[<span class="number">0</span>])).<span class="ident">ok_or</span>(
+                        <span class="ident">Error::InvalidNodeValue</span> {
+                            <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                        },
+                    )<span class="question-mark">?</span>;
+                    <span class="ident">node_value</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="ident">node_value</span>[<span class="number">1</span>..];
+                }
+                <span class="ident">accumulator</span>
+            };
+
+            <span class="comment">// Length of the partial key, in bytes.</span>
+            <span class="kw">let</span> <span class="ident">pk_len_bytes</span> <span class="op">=</span> <span class="kw">if</span> <span class="ident">pk_len</span> <span class="op">=</span><span class="op">=</span> <span class="number">0</span> {
+                <span class="number">0</span>
+            } <span class="kw">else</span> {
+                <span class="number">1</span> <span class="op">+</span> ((<span class="ident">pk_len</span> <span class="op">-</span> <span class="number">1</span>) <span class="op">/</span> <span class="number">2</span>)
+            };
+            <span class="kw">if</span> <span class="ident">node_value</span>.<span class="ident">len</span>() <span class="op">&lt;</span> <span class="ident">pk_len_bytes</span> {
+                <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">Error::InvalidNodeValue</span> {
+                    <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                });
+            }
+
+            <span class="kw">let</span> <span class="ident">pk_nibbles_iter</span> <span class="op">=</span> <span class="ident">node_value</span>
+                .<span class="ident">iter</span>()
+                .<span class="ident">take</span>(<span class="ident">pk_len_bytes</span>)
+                .<span class="ident">flat_map</span>(<span class="op">|</span><span class="ident">byte</span><span class="op">|</span> <span class="ident">nibble::bytes_to_nibbles</span>(<span class="ident">iter::once</span>(<span class="kw-2">*</span><span class="ident">byte</span>)))
+                .<span class="ident">skip</span>(<span class="ident">pk_len</span> <span class="op">%</span> <span class="number">2</span>);
+            <span class="ident">node_value</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="ident">node_value</span>[<span class="ident">pk_len_bytes</span>..];
+            <span class="ident">pk_nibbles_iter</span>
+        };
+
+        <span class="comment">// Iterating over this partial key, checking if it matches `expected_nibbles_iter`.</span>
+        <span class="kw">while</span> <span class="kw">let</span> <span class="prelude-val">Some</span>(<span class="ident">nibble</span>) <span class="op">=</span> <span class="ident">partial_key</span>.<span class="ident">next</span>() {
+            <span class="kw">match</span> <span class="ident">expected_nibbles_iter</span>.<span class="ident">next</span>() {
+                <span class="prelude-val">None</span> <span class="op">=</span><span class="op">&gt;</span> {
+                    <span class="kw">return</span> <span class="prelude-val">Ok</span>(<span class="ident">TrieNodeInfo</span> {
+                        <span class="ident">node_value</span>: <span class="prelude-val">None</span>,
+                        <span class="ident">children</span>: <span class="ident">Children::One</span>(<span class="ident">nibble</span>),
+                    });
+                }
+                <span class="prelude-val">Some</span>(<span class="ident">n</span>) <span class="kw">if</span> <span class="ident">n</span> <span class="op">!</span><span class="op">=</span> <span class="ident">nibble</span> <span class="op">=</span><span class="op">&gt;</span> {
+                    <span class="kw">return</span> <span class="prelude-val">Ok</span>(<span class="ident">TrieNodeInfo</span> {
+                        <span class="ident">node_value</span>: <span class="prelude-val">None</span>,
+                        <span class="ident">children</span>: <span class="ident">Children::None</span>,
+                    });
+                }
+                <span class="prelude-val">Some</span>(<span class="kw">_</span>) <span class="op">=</span><span class="op">&gt;</span> {
+                    <span class="ident">iter_nibbles</span> <span class="op">+</span><span class="op">=</span> <span class="number">1</span>;
+                }
+            }
+        }
+
+        <span class="comment">// After the partial key, the node value optionally contains a bitfield of child nodes.</span>
+        <span class="kw">let</span> <span class="ident">children_bitmap</span> <span class="op">=</span> <span class="kw">if</span> <span class="ident">has_children</span> {
+            <span class="kw">if</span> <span class="ident">node_value</span>.<span class="ident">len</span>() <span class="op">&lt;</span> <span class="number">2</span> {
+                <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">Error::InvalidNodeValue</span> {
+                    <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                });
+            }
+            <span class="kw">let</span> <span class="ident">val</span> <span class="op">=</span> <span class="ident">u16::from_le_bytes</span>(<span class="op">&lt;</span>[<span class="ident">u8</span>; <span class="number">2</span>]<span class="op">&gt;</span><span class="ident">::try_from</span>(<span class="kw-2">&amp;</span><span class="ident">node_value</span>[..<span class="number">2</span>]).<span class="ident">unwrap</span>());
+            <span class="ident">node_value</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="ident">node_value</span>[<span class="number">2</span>..];
+            <span class="ident">val</span>
+        } <span class="kw">else</span> {
+            <span class="number">0</span>
+        };
+
+        <span class="kw">if</span> <span class="kw">let</span> <span class="prelude-val">Some</span>(<span class="ident">expected_nibble</span>) <span class="op">=</span> <span class="ident">expected_nibbles_iter</span>.<span class="ident">next</span>() {
+            <span class="comment">// The iteration needs to continue with another node.</span>
+            <span class="comment">// Update `proof_iter` to the point to the child whose index matches next nibble that</span>
+            <span class="comment">// was just pulled from `expected_nibbles_iter`.</span>
+
+            <span class="comment">// No child with the requested index exists.</span>
+            <span class="kw">if</span> <span class="ident">children_bitmap</span> <span class="op">&amp;</span> (<span class="number">1</span> <span class="op">&lt;</span><span class="op">&lt;</span> <span class="ident">u8::from</span>(<span class="ident">expected_nibble</span>)) <span class="op">=</span><span class="op">=</span> <span class="number">0</span> {
+                <span class="kw">return</span> <span class="prelude-val">Ok</span>(<span class="ident">TrieNodeInfo</span> {
+                    <span class="ident">node_value</span>: <span class="prelude-val">None</span>,
+                    <span class="ident">children</span>: <span class="ident">Children::None</span>,
+                });
+            }
+
+            <span class="kw">for</span> <span class="ident">n</span> <span class="kw">in</span> <span class="number">0</span>.. {
+                <span class="kw">if</span> <span class="ident">children_bitmap</span> <span class="op">&amp;</span> (<span class="number">1</span> <span class="op">&lt;</span><span class="op">&lt;</span> <span class="ident">n</span>) <span class="op">=</span><span class="op">=</span> <span class="number">0</span> {
+                    <span class="kw">continue</span>;
+                }
+
+                <span class="comment">// Find the Merkle value of that child in `node_value`.</span>
+                <span class="kw">let</span> (<span class="ident">node_value_update</span>, <span class="ident">len</span>) <span class="op">=</span> <span class="kw">crate</span><span class="ident">::util::nom_scale_compact_usize</span>(<span class="ident">node_value</span>)
+                    .<span class="ident">map_err</span>(
+                        <span class="op">|</span><span class="kw">_</span>: <span class="ident">nom::Err</span><span class="op">&lt;</span><span class="ident">nom::error::Error</span><span class="op">&lt;</span><span class="kw-2">&amp;</span>[<span class="ident">u8</span>]<span class="op">&gt;</span><span class="op">&gt;</span><span class="op">|</span> <span class="ident">Error::InvalidNodeValue</span> {
+                            <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                        },
+                    )<span class="question-mark">?</span>;
+                <span class="ident">node_value</span> <span class="op">=</span> <span class="ident">node_value_update</span>;
+                <span class="kw">if</span> <span class="ident">node_value</span>.<span class="ident">len</span>() <span class="op">&lt;</span> <span class="ident">len</span> {
+                    <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">Error::InvalidNodeValue</span> {
+                        <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                    });
+                }
+
+                <span class="comment">// The Merkle value that was just found is the one that interests us.</span>
+                <span class="kw">if</span> <span class="ident">n</span> <span class="op">=</span><span class="op">=</span> <span class="ident">u8::from</span>(<span class="ident">expected_nibble</span>) {
+                    <span class="kw">if</span> <span class="ident">len</span> <span class="op">&lt;</span> <span class="number">32</span> {
+                        <span class="comment">// If the node value is less than 32 bytes, it means it&#39;s unhashed. In that</span>
+                        <span class="comment">// case, the child isn&#39;t part of `proof`.</span>
+                        <span class="ident">node_value</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="ident">node_value</span>[..<span class="ident">len</span>];
+                    } <span class="kw">else</span> {
+                        <span class="comment">// Find the entry in `proof` matching this Merkle value and update</span>
+                        <span class="comment">// `proof_iter`.</span>
+                        <span class="kw">let</span> <span class="ident">proof_iter</span> <span class="op">=</span> <span class="ident">merkle_values</span>
+                            .<span class="ident">iter</span>()
+                            .<span class="ident">position</span>(<span class="op">|</span><span class="ident">v</span><span class="op">|</span> <span class="ident">v</span>[..] <span class="op">=</span><span class="op">=</span> <span class="ident">node_value</span>[..<span class="ident">len</span>])
+                            .<span class="ident">ok_or</span>(<span class="ident">Error::MissingProofEntry</span> {
+                                <span class="ident">closest_ancestor_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                            })<span class="question-mark">?</span>;
+                        <span class="ident">node_value</span> <span class="op">=</span> <span class="ident">config</span>.<span class="ident">proof</span>.<span class="ident">clone</span>().<span class="ident">nth</span>(<span class="ident">proof_iter</span>).<span class="ident">unwrap</span>();
+                    }
+
+                    <span class="comment">// Break out of the children iteration, to jump to the next node.</span>
+                    <span class="ident">iter_nibbles</span> <span class="op">+</span><span class="op">=</span> <span class="number">1</span>;
+                    <span class="kw">break</span>;
+                }
+
+                <span class="ident">node_value</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="ident">node_value</span>[<span class="ident">len</span>..];
+            }
+        } <span class="kw">else</span> <span class="kw">if</span> <span class="ident">has_storage_value</span> {
+            <span class="comment">// The current node (as per `proof_iter`) exactly matches the requested key, and</span>
+            <span class="comment">// a storage value exists.</span>
+
+            <span class="comment">// Skip over the Merkle values of the children.</span>
+            <span class="kw">for</span> <span class="kw">_</span> <span class="kw">in</span> <span class="number">0</span>..<span class="ident">children_bitmap</span>.<span class="ident">count_ones</span>() {
+                <span class="kw">let</span> (<span class="ident">node_value_update</span>, <span class="ident">len</span>) <span class="op">=</span> <span class="kw">crate</span><span class="ident">::util::nom_scale_compact_usize</span>(<span class="ident">node_value</span>)
+                    .<span class="ident">map_err</span>(
+                        <span class="op">|</span><span class="kw">_</span>: <span class="ident">nom::Err</span><span class="op">&lt;</span><span class="ident">nom::error::Error</span><span class="op">&lt;</span><span class="kw-2">&amp;</span>[<span class="ident">u8</span>]<span class="op">&gt;</span><span class="op">&gt;</span><span class="op">|</span> <span class="ident">Error::InvalidNodeValue</span> {
+                            <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                        },
+                    )<span class="question-mark">?</span>;
+                <span class="ident">node_value</span> <span class="op">=</span> <span class="ident">node_value_update</span>;
+                <span class="kw">if</span> <span class="ident">node_value</span>.<span class="ident">len</span>() <span class="op">&lt;</span> <span class="ident">len</span> {
+                    <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">Error::InvalidNodeValue</span> {
+                        <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                    });
+                }
+                <span class="ident">node_value</span> <span class="op">=</span> <span class="kw-2">&amp;</span><span class="ident">node_value</span>[<span class="ident">len</span>..];
+            }
+
+            <span class="comment">// Now at the value that interests us.</span>
+            <span class="kw">let</span> (<span class="ident">node_value_update</span>, <span class="ident">len</span>) <span class="op">=</span> <span class="kw">crate</span><span class="ident">::util::nom_scale_compact_usize</span>(<span class="ident">node_value</span>)
+                .<span class="ident">map_err</span>(
+                    <span class="op">|</span><span class="kw">_</span>: <span class="ident">nom::Err</span><span class="op">&lt;</span><span class="ident">nom::error::Error</span><span class="op">&lt;</span><span class="kw-2">&amp;</span>[<span class="ident">u8</span>]<span class="op">&gt;</span><span class="op">&gt;</span><span class="op">|</span> <span class="ident">Error::InvalidNodeValue</span> {
+                        <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                    },
+                )<span class="question-mark">?</span>;
+            <span class="ident">node_value</span> <span class="op">=</span> <span class="ident">node_value_update</span>;
+            <span class="kw">if</span> <span class="ident">node_value</span>.<span class="ident">len</span>() <span class="op">!</span><span class="op">=</span> <span class="ident">len</span> {
+                <span class="kw">return</span> <span class="prelude-val">Err</span>(<span class="ident">Error::InvalidNodeValue</span> {
+                    <span class="ident">invalid_node_nibbles</span>: <span class="ident">iter_nibbles</span>,
+                });
+            }
+            <span class="kw">return</span> <span class="prelude-val">Ok</span>(<span class="ident">TrieNodeInfo</span> {
+                <span class="ident">node_value</span>: <span class="prelude-val">Some</span>(<span class="ident">node_value</span>),
+                <span class="ident">children</span>: <span class="ident">Children::Multiple</span> { <span class="ident">children_bitmap</span> },
+            });
+        } <span class="kw">else</span> {
+            <span class="comment">// The current node (as per `proof_iter`) exactly matches the requested key, but no</span>
+            <span class="comment">// storage value exists.</span>
+            <span class="kw">return</span> <span class="prelude-val">Ok</span>(<span class="ident">TrieNodeInfo</span> {
+                <span class="ident">node_value</span>: <span class="prelude-val">None</span>,
+                <span class="ident">children</span>: <span class="ident">Children::Multiple</span> { <span class="ident">children_bitmap</span> },
+            });
+        }
+    }
+}
+
+<span class="doccomment">/// Information about a node of the trie.</span>
+<span class="kw">pub</span> <span class="kw">struct</span> <span class="ident">TrieNodeInfo</span><span class="op">&lt;</span><span class="lifetime">&#39;a</span><span class="op">&gt;</span> {
+    <span class="doccomment">/// Storage value of the node, if any.</span>
+    <span class="kw">pub</span> <span class="ident">node_value</span>: <span class="prelude-ty">Option</span><span class="op">&lt;</span><span class="kw-2">&amp;</span><span class="lifetime">&#39;a</span> [<span class="ident">u8</span>]<span class="op">&gt;</span>,
+    <span class="doccomment">/// Which children the node has.</span>
+    <span class="kw">pub</span> <span class="ident">children</span>: <span class="ident">Children</span>,
+}
+
+<span class="doccomment">/// See [`TrieNodeInfo::children`].</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Debug</span>, <span class="ident">Copy</span>, <span class="ident">Clone</span>)]</span>
+<span class="kw">pub</span> <span class="kw">enum</span> <span class="ident">Children</span> {
+    <span class="doccomment">/// Node doesn&#39;t have any child.</span>
+    <span class="prelude-val">None</span>,
+    <span class="doccomment">/// Node has one child. The key of that child starts with the key of the parent, followed with</span>
+    <span class="doccomment">/// the nibble contained here, followed with 0 or more extra nibbles unknown here.</span>
+    <span class="ident">One</span>(<span class="ident">nibble::Nibble</span>),
+    <span class="doccomment">/// Node has zero or more children.</span>
+    <span class="ident">Multiple</span> {
+        <span class="doccomment">/// If `(children_bitmap &amp; (1 &lt;&lt; n)) == 1` (where `n is in 0..16`), then this node has a</span>
+        <span class="doccomment">/// child whose key starts with the key of the parent, followed with</span>
+        <span class="doccomment">/// `Nibble::try_from(n).unwrap()`, followed with 0 or more extra nibbles unknown here.</span>
+        <span class="ident">children_bitmap</span>: <span class="ident">u16</span>,
+    },
+}
+
+<span class="kw">impl</span> <span class="ident">Children</span> {
+    <span class="doccomment">/// Iterates over all the children of the node. For each child, contains the nibble that must</span>
+    <span class="doccomment">/// be appended to the key of the node in order to find the child.</span>
+    <span class="kw">pub</span> <span class="kw">fn</span> <span class="ident">next_nibbles</span>(<span class="kw-2">&amp;</span><span class="self">self</span>) <span class="op">-</span><span class="op">&gt;</span> <span class="kw">impl</span> <span class="ident">Iterator</span><span class="op">&lt;</span><span class="ident">Item</span> <span class="op">=</span> <span class="ident">nibble::Nibble</span><span class="op">&gt;</span> {
+        <span class="kw">match</span> <span class="kw-2">*</span><span class="self">self</span> {
+            <span class="ident">Children::None</span> <span class="op">=</span><span class="op">&gt;</span> <span class="ident">either::Left</span>(<span class="prelude-val">None</span>.<span class="ident">into_iter</span>()),
+            <span class="ident">Children::One</span>(<span class="ident">nibble</span>) <span class="op">=</span><span class="op">&gt;</span> <span class="ident">either::Left</span>(<span class="prelude-val">Some</span>(<span class="ident">nibble</span>).<span class="ident">into_iter</span>()),
+            <span class="ident">Children::Multiple</span> { <span class="ident">children_bitmap</span> } <span class="op">=</span><span class="op">&gt;</span> <span class="ident">either::Right</span>(
+                <span class="ident">nibble::all_nibbles</span>().<span class="ident">filter</span>(<span class="kw">move</span> <span class="op">|</span><span class="ident">n</span><span class="op">|</span> (<span class="ident">children_bitmap</span> <span class="op">&amp;</span> (<span class="number">1</span> <span class="op">&lt;</span><span class="op">&lt;</span> <span class="ident">u8::from</span>(<span class="kw-2">*</span><span class="ident">n</span>)) <span class="op">!</span><span class="op">=</span> <span class="number">0</span>)),
+            ),
+        }
+    }
+}
+
+<span class="doccomment">/// Possible error returned by [`verify_proof`]</span>
+<span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Debug</span>, <span class="ident">derive_more::Display</span>)]</span>
+<span class="kw">pub</span> <span class="kw">enum</span> <span class="ident">Error</span> {
+    <span class="doccomment">/// Trie root wasn&#39;t found in the proof.</span>
+    <span class="ident">TrieRootNotFound</span>,
+    <span class="doccomment">/// One of the node values in the proof has an invalid format.</span>
+    <span class="attribute">#[<span class="ident">display</span>(
+        <span class="ident">fmt</span> <span class="op">=</span> <span class="string">&quot;A node of the proof has an invalid format (nibbles: {})&quot;</span>,
+        <span class="ident">invalid_node_nibbles</span>
+    )]</span>
+    <span class="ident">InvalidNodeValue</span> {
+        <span class="doccomment">/// Number of nibbles in the key of the node whose value is invalid.</span>
+        <span class="ident">invalid_node_nibbles</span>: <span class="ident">usize</span>,
+    },
+    <span class="doccomment">/// Missing an entry in the proof.</span>
+    <span class="attribute">#[<span class="ident">display</span>(
+        <span class="ident">fmt</span> <span class="op">=</span> <span class="string">&quot;An entry is missing from the proof (closest ancestor nibbles: {})&quot;</span>,
+        <span class="ident">closest_ancestor_nibbles</span>
+    )]</span>
+    <span class="ident">MissingProofEntry</span> {
+        <span class="doccomment">/// Number of nibbles in the key of the closest ancestor that was found in the proof.</span>
+        <span class="ident">closest_ancestor_nibbles</span>: <span class="ident">usize</span>,
+    },
+}
+
+<span class="attribute">#[<span class="ident">cfg</span>(<span class="ident">test</span>)]</span>
+<span class="kw">mod</span> <span class="ident">tests</span> {
+    <span class="kw">use</span> <span class="ident">core::convert::TryFrom</span> <span class="kw">as</span> <span class="kw">_</span>;
+
+    <span class="attribute">#[<span class="ident">test</span>]</span>
+    <span class="kw">fn</span> <span class="ident">basic_works</span>() {
+        <span class="comment">// Key/value taken from the Polkadot genesis block.</span>
+
+        <span class="kw">let</span> <span class="ident">proof</span> <span class="op">=</span> <span class="macro">vec!</span>[
+            <span class="ident">hex::decode</span>(<span class="string">&quot;7d01542596adb05d6140c170ac479edf7cfd5aa35357590acfe5d11a804d944e500d1456fdda7b8ec7f9e5c794cd83194f0593e4ea&quot;</span>).<span class="ident">unwrap</span>(),
+            <span class="ident">hex::decode</span>(<span class="string">&quot;803f93804e4c6c4222b747e507008ef1def063bb0d2deeadf17ef4b10e71624d3a0cf81c80241f2c06f22ec58968fb68d432319e25e6c8faa3ad2c5ca9ee48f2e8ed158e2480ad8a68234932269846bc40240a47cfd8d8857b1d81e167bfb24c947a4cdad9e680c84590e39f8b79a2694ad2bf7e7258af686b472f38b064bbce7d08404931a430805c72f25b1b6304d16667e2766fa1a906cb081788eb4502787df7c3597412b17b806e21c5f1a24a196615b4e5b36d21280cdcc80098c1e2bce8eeaf301e9951767480424f1acd80ba074a2ce8d180bf3488a5ca91cb81fba96c8c3c1d33eacbb18160805e849d5c148ca361a55a2c9b384e17ce919e936ccb8011a4f72504e9f93db8cd80edd005a1495c70250d77f81c24c15a9919f034f7983df8e505e53a5af7b402138012a0dd90497b65312bda67ea15996578eeb3891bca8666951a326612418e3143&quot;</span>).<span class="ident">unwrap</span>(),
+            <span class="ident">hex::decode</span>(<span class="string">&quot;80555d8043fb497c1b2a7b9e4feb59f410c1a29e28b2a628ff9c6003e080f6b9fadd95f9806e8d911b6818038eb7c8534af8e78e9920a1ab8d939c36d3e69b0a1e5928110b80ba4d3f543957f422b40c8e74af9de00acbeba8154afca57a7f80fbbcfebb1e4a803d1b8f5cf1788b294537b8fd2d34acec4646a7627c6cd3d2039af64ff5d1976d80e7620f21cf13964f29d34ba708c3b44ea45ea11c58fbbedda29d13470bc80ca080f98aae4f83d81bf15d88019e5c303d7c19d0524e84c714e05f61517cde0b138280d518faf566fdc4d045094abe372bb3bbecd4753f76db8c41ba9fc015558bf23a80908f991126d12ce7acd55508ff1e7dffa56f742401e1814fc1469658a78c7a7f8001b0a08da0c83253d5c0cb877286c062da2f530ae424fe2545377941fd016913&quot;</span>).<span class="ident">unwrap</span>(),
+            <span class="ident">hex::decode</span>(<span class="string">&quot;80b3a780a29fac7f7dfae21d05d9506e7da6515b7fa1ad970ff876de35f1bec2599ec002805b6772dc6a4e7604c8d0652479f95b343607c2d9138c59eeb799d85bf43b6bbf803d12becb6a4b9919ddc7c5973d04eed7696c834f90c779fc1fcf7350ccc28d6b805f33ebcf191fddcf3b3f346ec336c105c74b40a4d35dfda0c592f2bea00084e980f764c733d6e35771a9b26a1fa86b9bec59742b046f698be6c140af1073897d3d80cd3bc8c3ce3cf8359f7371a13316f02fd22b02a3d327684a2b61f4a47e0022b880da752afaeb925d5300e45b851052c5f8a9c5aae884f15d64764edf961b8b22c880bf1fa9c7e4c94340dbafd75cbe016c980d0e5d5b4e76823fa11e61629014c34b804f54a15e5d51d02b84e8cae94c9833ae81e56b8f0b684d257f6f722ee66cadf98094833fb2dce8c78d443cd6786e0c01d8974a4b779c178ef5e66b49e021dd7f1a&quot;</span>).<span class="ident">unwrap</span>(),
+            <span class="ident">hex::decode</span>(<span class="string">&quot;9f0c5d795d0297be56027a4b2464e33397609280f332ff556abf5daf0d34523df7c8cd1369bcb6adbb23a48093bf070a9711bf3480382934134aa919b59c16ff8de8d97a7fdcc2448ea327b26f44005d756d1785878081d634140b36ce031c4b6c6266e2a7c19d9a88e38fdd8ad23abd3db20e714f6980fde17041f22f09609d79dbe38dcccefcaac139c7a10fb23bd284c1c492b004fd80d287ad1d0ade65e64d3969f4ab85a37076816031438cea0bf8c33b7b2bc6c330&quot;</span>).<span class="ident">unwrap</span>(),
+            <span class="ident">hex::decode</span>(<span class="string">&quot;9f03e6d3c1fb15805edfd024172ea4817dffff80152833e34a852e9751cfc0f954aeb835e1f843936ba9979853a40e439937255f806a36e0ad23fb3224fff6e6db62048463a7f27ccb92f65b4e348acd5a7aa3a0688027b6e099c11581fb2e8acf3b6b94eaed442277b9a74ce7f922f6e3bf2959867b80fd0cc2c846db6a9ed19a715d6c3cd46a48b7f409883c70b2d4c978b306de379e80ab008a78c340f5cc75d99cdb905951936686445c834719be21f7620b950dcd5c806d86af54d5dfb1c06f3fefdd5a430861c0d19e25fad4bad07c6e70d4a679f0b880f35edc5400b6661fb1e6fba7c599c8ba891458d14400030fa506999a1972369f80746cdaa0b7da2e9c3864971f50f12d9b4281f804d5a2dba6ebe06959b2a9fb47802ecfde11456423c87fed8068f414a5ba44ebe3ae91b06d14cc231a78d4aba68e80f655291833a49cf23d057bb15c42d377c55d50f5885329060b0aaab22283cbb1808c95fb2b62baf30718b8330ef68a527c97c1bc9960304353224d8a8ae88a79d58045c1b6d9904ae171d573bdcebaa05142d81648bdbeb16ceeddc54a0ed15d3e2b80a8ea193282fe85b6481707091c77c9218ea19de914e75950925fe86400fb0cb080c222ceab5355eaa41da807146f2e2df7ff648c3e8bbb6d8ee23274ba724551b18008f142dc3c59bf1151c829ecefea35919e80453db5e9669f5a73899aaa5166ee804f1d21fbdc0180c4de886bf40f91dfc2202b3eb6d42548d476908041dd617bb8&quot;</span>).<span class="ident">unwrap</span>(),
+        ];
+
+        <span class="kw">let</span> <span class="ident">requested_key</span> <span class="op">=</span> <span class="ident">hex::decode</span>(<span class="string">&quot;9c5d795d0297be56027a4b2464e3339763e6d3c1fb15805edfd024172ea4817d7081542596adb05d6140c170ac479edf7cfd5aa35357590acfe5d11a804d944e&quot;</span>).<span class="ident">unwrap</span>();
+
+        <span class="kw">let</span> <span class="ident">trie_root</span> <span class="op">=</span> {
+            <span class="kw">let</span> <span class="ident">bytes</span> <span class="op">=</span>
+                <span class="ident">hex::decode</span>(<span class="kw-2">&amp;</span><span class="string">&quot;29d0d972cd27cbc511e9589fcb7a4506d5eb6a9e8df205f00472e5ab354a4e17&quot;</span>)
+                    .<span class="ident">unwrap</span>();
+            <span class="op">&lt;</span>[<span class="ident">u8</span>; <span class="number">32</span>]<span class="op">&gt;</span><span class="ident">::try_from</span>(<span class="kw-2">&amp;</span><span class="ident">bytes</span>[..]).<span class="ident">unwrap</span>()
+        };
+
+        <span class="kw">let</span> <span class="ident">obtained</span> <span class="op">=</span> <span class="kw">super</span><span class="ident">::verify_proof</span>(<span class="kw">super</span><span class="ident">::VerifyProofConfig</span> {
+            <span class="ident">requested_key</span>: <span class="kw-2">&amp;</span><span class="ident">requested_key</span>[..],
+            <span class="ident">trie_root_hash</span>: <span class="kw-2">&amp;</span><span class="ident">trie_root</span>,
+            <span class="ident">proof</span>: <span class="ident">proof</span>.<span class="ident">iter</span>().<span class="ident">map</span>(<span class="op">|</span><span class="ident">p</span><span class="op">|</span> <span class="kw-2">&amp;</span><span class="ident">p</span>[..]),
+        })
+        .<span class="ident">unwrap</span>();
+
+        <span class="macro">assert_eq!</span>(
+            <span class="ident">obtained</span>,
+            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span><span class="ident">hex::decode</span>(<span class="string">&quot;0d1456fdda7b8ec7f9e5c794cd83194f0593e4ea&quot;</span>).<span class="ident">unwrap</span>()[..])
+        );
+    }
+
+    <span class="attribute">#[<span class="ident">test</span>]</span>
+    <span class="kw">fn</span> <span class="ident">node_values_smaller_than_32bytes</span>() {
+        <span class="kw">let</span> <span class="ident">proof</span> <span class="op">=</span> <span class="macro">vec!</span>[
+            <span class="macro">vec!</span>[
+                <span class="number">158</span>, <span class="number">195</span>, <span class="number">101</span>, <span class="number">195</span>, <span class="number">207</span>, <span class="number">89</span>, <span class="number">214</span>, <span class="number">113</span>, <span class="number">235</span>, <span class="number">114</span>, <span class="number">218</span>, <span class="number">14</span>, <span class="number">122</span>, <span class="number">65</span>, <span class="number">19</span>, <span class="number">196</span>, <span class="number">0</span>, <span class="number">3</span>,
+                <span class="number">88</span>, <span class="number">95</span>, <span class="number">7</span>, <span class="number">141</span>, <span class="number">67</span>, <span class="number">77</span>, <span class="number">97</span>, <span class="number">37</span>, <span class="number">180</span>, <span class="number">4</span>, <span class="number">67</span>, <span class="number">254</span>, <span class="number">17</span>, <span class="number">253</span>, <span class="number">41</span>, <span class="number">45</span>, <span class="number">19</span>, <span class="number">164</span>, <span class="number">16</span>, <span class="number">2</span>,
+                <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">104</span>, <span class="number">95</span>, <span class="number">15</span>, <span class="number">31</span>, <span class="number">5</span>, <span class="number">21</span>, <span class="number">244</span>, <span class="number">98</span>, <span class="number">205</span>, <span class="number">207</span>, <span class="number">132</span>, <span class="number">224</span>, <span class="number">241</span>, <span class="number">214</span>, <span class="number">4</span>, <span class="number">93</span>, <span class="number">252</span>,
+                <span class="number">187</span>, <span class="number">32</span>, <span class="number">80</span>, <span class="number">82</span>, <span class="number">127</span>, <span class="number">41</span>, <span class="number">119</span>, <span class="number">1</span>, <span class="number">0</span>, <span class="number">0</span>,
+            ],
+            <span class="macro">vec!</span>[
+                <span class="number">128</span>, <span class="number">175</span>, <span class="number">188</span>, <span class="number">128</span>, <span class="number">15</span>, <span class="number">126</span>, <span class="number">137</span>, <span class="number">9</span>, <span class="number">189</span>, <span class="number">204</span>, <span class="number">29</span>, <span class="number">117</span>, <span class="number">244</span>, <span class="number">124</span>, <span class="number">194</span>, <span class="number">9</span>, <span class="number">181</span>, <span class="number">214</span>,
+                <span class="number">119</span>, <span class="number">106</span>, <span class="number">91</span>, <span class="number">55</span>, <span class="number">85</span>, <span class="number">146</span>, <span class="number">101</span>, <span class="number">112</span>, <span class="number">37</span>, <span class="number">46</span>, <span class="number">31</span>, <span class="number">42</span>, <span class="number">133</span>, <span class="number">72</span>, <span class="number">101</span>, <span class="number">38</span>, <span class="number">60</span>, <span class="number">66</span>, <span class="number">128</span>,
+                <span class="number">28</span>, <span class="number">186</span>, <span class="number">118</span>, <span class="number">76</span>, <span class="number">106</span>, <span class="number">111</span>, <span class="number">232</span>, <span class="number">204</span>, <span class="number">106</span>, <span class="number">88</span>, <span class="number">52</span>, <span class="number">218</span>, <span class="number">113</span>, <span class="number">2</span>, <span class="number">76</span>, <span class="number">119</span>, <span class="number">132</span>, <span class="number">172</span>,
+                <span class="number">202</span>, <span class="number">215</span>, <span class="number">130</span>, <span class="number">198</span>, <span class="number">184</span>, <span class="number">230</span>, <span class="number">206</span>, <span class="number">134</span>, <span class="number">44</span>, <span class="number">171</span>, <span class="number">25</span>, <span class="number">86</span>, <span class="number">243</span>, <span class="number">121</span>, <span class="number">128</span>, <span class="number">233</span>, <span class="number">10</span>,
+                <span class="number">145</span>, <span class="number">50</span>, <span class="number">95</span>, <span class="number">100</span>, <span class="number">17</span>, <span class="number">213</span>, <span class="number">147</span>, <span class="number">28</span>, <span class="number">9</span>, <span class="number">142</span>, <span class="number">56</span>, <span class="number">95</span>, <span class="number">33</span>, <span class="number">40</span>, <span class="number">56</span>, <span class="number">9</span>, <span class="number">39</span>, <span class="number">3</span>, <span class="number">193</span>, <span class="number">79</span>,
+                <span class="number">169</span>, <span class="number">207</span>, <span class="number">115</span>, <span class="number">80</span>, <span class="number">61</span>, <span class="number">217</span>, <span class="number">4</span>, <span class="number">106</span>, <span class="number">172</span>, <span class="number">152</span>, <span class="number">128</span>, <span class="number">12</span>, <span class="number">255</span>, <span class="number">241</span>, <span class="number">157</span>, <span class="number">249</span>, <span class="number">219</span>,
+                <span class="number">101</span>, <span class="number">33</span>, <span class="number">139</span>, <span class="number">178</span>, <span class="number">174</span>, <span class="number">121</span>, <span class="number">165</span>, <span class="number">33</span>, <span class="number">175</span>, <span class="number">0</span>, <span class="number">232</span>, <span class="number">230</span>, <span class="number">129</span>, <span class="number">23</span>, <span class="number">89</span>, <span class="number">219</span>, <span class="number">21</span>, <span class="number">35</span>,
+                <span class="number">23</span>, <span class="number">48</span>, <span class="number">18</span>, <span class="number">153</span>, <span class="number">124</span>, <span class="number">96</span>, <span class="number">81</span>, <span class="number">66</span>, <span class="number">128</span>, <span class="number">30</span>, <span class="number">174</span>, <span class="number">194</span>, <span class="number">227</span>, <span class="number">100</span>, <span class="number">149</span>, <span class="number">97</span>, <span class="number">237</span>, <span class="number">23</span>,
+                <span class="number">238</span>, <span class="number">114</span>, <span class="number">178</span>, <span class="number">106</span>, <span class="number">158</span>, <span class="number">238</span>, <span class="number">48</span>, <span class="number">166</span>, <span class="number">82</span>, <span class="number">19</span>, <span class="number">210</span>, <span class="number">129</span>, <span class="number">122</span>, <span class="number">70</span>, <span class="number">165</span>, <span class="number">94</span>, <span class="number">186</span>, <span class="number">31</span>,
+                <span class="number">28</span>, <span class="number">80</span>, <span class="number">29</span>, <span class="number">73</span>, <span class="number">252</span>, <span class="number">128</span>, <span class="number">16</span>, <span class="number">56</span>, <span class="number">19</span>, <span class="number">158</span>, <span class="number">188</span>, <span class="number">178</span>, <span class="number">192</span>, <span class="number">234</span>, <span class="number">12</span>, <span class="number">251</span>, <span class="number">221</span>, <span class="number">107</span>,
+                <span class="number">119</span>, <span class="number">243</span>, <span class="number">74</span>, <span class="number">155</span>, <span class="number">111</span>, <span class="number">53</span>, <span class="number">36</span>, <span class="number">107</span>, <span class="number">183</span>, <span class="number">204</span>, <span class="number">174</span>, <span class="number">253</span>, <span class="number">183</span>, <span class="number">67</span>, <span class="number">77</span>, <span class="number">199</span>, <span class="number">47</span>, <span class="number">121</span>,
+                <span class="number">185</span>, <span class="number">162</span>, <span class="number">128</span>, <span class="number">17</span>, <span class="number">217</span>, <span class="number">226</span>, <span class="number">195</span>, <span class="number">240</span>, <span class="number">113</span>, <span class="number">144</span>, <span class="number">201</span>, <span class="number">129</span>, <span class="number">184</span>, <span class="number">240</span>, <span class="number">237</span>, <span class="number">204</span>, <span class="number">79</span>,
+                <span class="number">68</span>, <span class="number">191</span>, <span class="number">165</span>, <span class="number">29</span>, <span class="number">219</span>, <span class="number">170</span>, <span class="number">152</span>, <span class="number">134</span>, <span class="number">160</span>, <span class="number">153</span>, <span class="number">245</span>, <span class="number">38</span>, <span class="number">181</span>, <span class="number">131</span>, <span class="number">83</span>, <span class="number">209</span>, <span class="number">245</span>,
+                <span class="number">194</span>, <span class="number">128</span>, <span class="number">137</span>, <span class="number">217</span>, <span class="number">3</span>, <span class="number">84</span>, <span class="number">1</span>, <span class="number">224</span>, <span class="number">52</span>, <span class="number">199</span>, <span class="number">112</span>, <span class="number">213</span>, <span class="number">150</span>, <span class="number">42</span>, <span class="number">51</span>, <span class="number">214</span>, <span class="number">103</span>, <span class="number">194</span>,
+                <span class="number">225</span>, <span class="number">224</span>, <span class="number">210</span>, <span class="number">84</span>, <span class="number">84</span>, <span class="number">53</span>, <span class="number">31</span>, <span class="number">159</span>, <span class="number">82</span>, <span class="number">201</span>, <span class="number">3</span>, <span class="number">104</span>, <span class="number">118</span>, <span class="number">212</span>, <span class="number">110</span>, <span class="number">7</span>, <span class="number">128</span>, <span class="number">240</span>,
+                <span class="number">251</span>, <span class="number">81</span>, <span class="number">190</span>, <span class="number">126</span>, <span class="number">80</span>, <span class="number">60</span>, <span class="number">139</span>, <span class="number">88</span>, <span class="number">152</span>, <span class="number">39</span>, <span class="number">153</span>, <span class="number">231</span>, <span class="number">178</span>, <span class="number">31</span>, <span class="number">184</span>, <span class="number">56</span>, <span class="number">44</span>, <span class="number">133</span>,
+                <span class="number">31</span>, <span class="number">47</span>, <span class="number">98</span>, <span class="number">234</span>, <span class="number">107</span>, <span class="number">15</span>, <span class="number">248</span>, <span class="number">64</span>, <span class="number">78</span>, <span class="number">36</span>, <span class="number">89</span>, <span class="number">9</span>, <span class="number">149</span>, <span class="number">128</span>, <span class="number">233</span>, <span class="number">75</span>, <span class="number">238</span>, <span class="number">120</span>, <span class="number">212</span>,
+                <span class="number">149</span>, <span class="number">223</span>, <span class="number">135</span>, <span class="number">48</span>, <span class="number">174</span>, <span class="number">211</span>, <span class="number">219</span>, <span class="number">223</span>, <span class="number">217</span>, <span class="number">20</span>, <span class="number">172</span>, <span class="number">212</span>, <span class="number">172</span>, <span class="number">3</span>, <span class="number">234</span>, <span class="number">54</span>, <span class="number">130</span>, <span class="number">55</span>,
+                <span class="number">225</span>, <span class="number">63</span>, <span class="number">17</span>, <span class="number">255</span>, <span class="number">217</span>, <span class="number">150</span>, <span class="number">252</span>, <span class="number">93</span>, <span class="number">15</span>, <span class="number">128</span>, <span class="number">89</span>, <span class="number">54</span>, <span class="number">254</span>, <span class="number">99</span>, <span class="number">202</span>, <span class="number">80</span>, <span class="number">50</span>, <span class="number">27</span>, <span class="number">92</span>,
+                <span class="number">48</span>, <span class="number">57</span>, <span class="number">174</span>, <span class="number">8</span>, <span class="number">211</span>, <span class="number">44</span>, <span class="number">58</span>, <span class="number">108</span>, <span class="number">207</span>, <span class="number">129</span>, <span class="number">245</span>, <span class="number">129</span>, <span class="number">80</span>, <span class="number">170</span>, <span class="number">57</span>, <span class="number">130</span>, <span class="number">80</span>, <span class="number">166</span>,
+                <span class="number">250</span>, <span class="number">214</span>, <span class="number">40</span>, <span class="number">156</span>, <span class="number">181</span>,
+            ],
+            <span class="macro">vec!</span>[
+                <span class="number">128</span>, <span class="number">65</span>, <span class="number">0</span>, <span class="number">128</span>, <span class="number">182</span>, <span class="number">204</span>, <span class="number">71</span>, <span class="number">61</span>, <span class="number">83</span>, <span class="number">76</span>, <span class="number">85</span>, <span class="number">166</span>, <span class="number">19</span>, <span class="number">22</span>, <span class="number">212</span>, <span class="number">242</span>, <span class="number">236</span>, <span class="number">229</span>, <span class="number">51</span>,
+                <span class="number">88</span>, <span class="number">16</span>, <span class="number">191</span>, <span class="number">227</span>, <span class="number">125</span>, <span class="number">217</span>, <span class="number">54</span>, <span class="number">7</span>, <span class="number">31</span>, <span class="number">36</span>, <span class="number">176</span>, <span class="number">211</span>, <span class="number">111</span>, <span class="number">72</span>, <span class="number">220</span>, <span class="number">181</span>, <span class="number">241</span>, <span class="number">128</span>,
+                <span class="number">149</span>, <span class="number">2</span>, <span class="number">12</span>, <span class="number">26</span>, <span class="number">95</span>, <span class="number">9</span>, <span class="number">193</span>, <span class="number">115</span>, <span class="number">207</span>, <span class="number">253</span>, <span class="number">90</span>, <span class="number">218</span>, <span class="number">0</span>, <span class="number">41</span>, <span class="number">140</span>, <span class="number">119</span>, <span class="number">189</span>, <span class="number">166</span>, <span class="number">101</span>,
+                <span class="number">244</span>, <span class="number">74</span>, <span class="number">171</span>, <span class="number">53</span>, <span class="number">248</span>, <span class="number">82</span>, <span class="number">113</span>, <span class="number">79</span>, <span class="number">110</span>, <span class="number">25</span>, <span class="number">72</span>, <span class="number">62</span>, <span class="number">65</span>,
+            ],
+        ];
+
+        <span class="kw">let</span> <span class="ident">requested_key</span> <span class="op">=</span>
+            <span class="ident">hex::decode</span>(<span class="string">&quot;f0c365c3cf59d671eb72da0e7a4113c49f1f0515f462cdcf84e0f1d6045dfcbb&quot;</span>)
+                .<span class="ident">unwrap</span>();
+
+        <span class="kw">let</span> <span class="ident">trie_root</span> <span class="op">=</span> [
+            <span class="number">43</span>, <span class="number">100</span>, <span class="number">198</span>, <span class="number">174</span>, <span class="number">1</span>, <span class="number">66</span>, <span class="number">26</span>, <span class="number">95</span>, <span class="number">93</span>, <span class="number">119</span>, <span class="number">43</span>, <span class="number">242</span>, <span class="number">5</span>, <span class="number">176</span>, <span class="number">153</span>, <span class="number">134</span>, <span class="number">193</span>, <span class="number">74</span>, <span class="number">159</span>,
+            <span class="number">215</span>, <span class="number">134</span>, <span class="number">15</span>, <span class="number">252</span>, <span class="number">135</span>, <span class="number">67</span>, <span class="number">129</span>, <span class="number">21</span>, <span class="number">16</span>, <span class="number">20</span>, <span class="number">211</span>, <span class="number">97</span>, <span class="number">217</span>,
+        ];
+
+        <span class="kw">let</span> <span class="ident">obtained</span> <span class="op">=</span> <span class="kw">super</span><span class="ident">::verify_proof</span>(<span class="kw">super</span><span class="ident">::VerifyProofConfig</span> {
+            <span class="ident">requested_key</span>: <span class="kw-2">&amp;</span><span class="ident">requested_key</span>[..],
+            <span class="ident">trie_root_hash</span>: <span class="kw-2">&amp;</span><span class="ident">trie_root</span>,
+            <span class="ident">proof</span>: <span class="ident">proof</span>.<span class="ident">iter</span>().<span class="ident">map</span>(<span class="op">|</span><span class="ident">p</span><span class="op">|</span> <span class="kw-2">&amp;</span><span class="ident">p</span>[..]),
+        })
+        .<span class="ident">unwrap</span>();
+
+        <span class="macro">assert_eq!</span>(<span class="ident">obtained</span>, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>[<span class="number">80</span>, <span class="number">82</span>, <span class="number">127</span>, <span class="number">41</span>, <span class="number">119</span>, <span class="number">1</span>, <span class="number">0</span>, <span class="number">0</span>][..]));
+    }
+}
+</pre></div>
+</section><section id="search" class="content hidden"></section><div id="rustdoc-vars" data-root-path="../../../" data-current-crate="smoldot" data-search-index-js="../../../search-index.js" data-search-js="../../../search.js"></div>
+    <script src="../../../main.js"></script><script src="../../../source-script.js"></script><script src="../../../source-files.js"></script></body></html>

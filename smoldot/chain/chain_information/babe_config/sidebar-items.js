@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["FromGenesisStorageError","Error when retrieving the BABE configuration."],["FromVmPrototypeError","Error when retrieving the BABE configuration."]],"struct":[["BabeGenesisConfiguration","BABE configuration of a chain, as extracted from the genesis block."]]});

@@ -1,0 +1,1 @@
+initSidebarItems({"fn":[["next_slot_claim","Calculates the earliest one of the authorities in [`Config::local_authorities`] is allowed to produce a block."]],"struct":[["Config","Configuration for [`next_slot_claim`]."],["SlotClaim","Slot happening now or in the future and that can be attributed to one of the authorities in [`Config::local_authorities`]."]]});

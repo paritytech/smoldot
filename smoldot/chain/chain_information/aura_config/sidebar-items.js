@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["FromGenesisStorageError","Error when retrieving the Aura configuration."],["FromVmPrototypeError","Error when retrieving the Aura configuration."]],"struct":[["AuraGenesisConfiguration","Aura configuration of a chain, as extracted from the genesis block."]]});

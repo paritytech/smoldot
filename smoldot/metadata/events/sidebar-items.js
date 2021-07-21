@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["EventsStorageKeyError","Error potentially returned by [`events_storage_key`]."]],"fn":[["events_storage_key","Returns the key in the storage at which events can be found."]]});

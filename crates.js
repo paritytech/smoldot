@@ -1,0 +1,1 @@
+window.ALL_CRATES = ["full_node","smoldot","smoldot_js"];

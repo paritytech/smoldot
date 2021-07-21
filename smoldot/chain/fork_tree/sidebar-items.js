@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["ForkTree","Tree of nodes. Each node contains a value of type `T`."],["NodeIndex","Index of a node within a [`ForkTree`]. Never invalidated unless the node is removed."],["PruneAncestorsIter","Iterator of elements removed when pruning ancestors."],["PrunedNode","Node removed by [`ForkTree::prune_ancestors`]."]]});

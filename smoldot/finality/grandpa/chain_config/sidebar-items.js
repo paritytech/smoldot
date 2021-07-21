@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["FromGenesisStorageError","Error when retrieving the Grandpa configuration."],["FromVmPrototypeError","Error when retrieving the Grandpa configuration."]],"struct":[["GrandpaGenesisConfiguration","Grandpa configuration of a chain, as extracted from the genesis block."]]});
