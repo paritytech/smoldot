@@ -111,7 +111,7 @@ pub struct NetworkService {
     guarded: parking_lot::Mutex<Guarded>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<Instant, (), ()>,
+    network: service::ChainNetwork<Instant>,
 }
 
 /// Fields of [`NetworkService`] behind a mutex.
@@ -197,7 +197,7 @@ impl NetworkService {
             let mut bootstrap_nodes = Vec::with_capacity(chain.bootstrap_nodes.len());
             for (peer_id, addr) in chain.bootstrap_nodes {
                 bootstrap_nodes.push(known_nodes.len());
-                known_nodes.push(((), peer_id, addr));
+                known_nodes.push((peer_id, addr));
             }
 
             chains.push(service::ChainConfig {
@@ -230,7 +230,8 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 chains,
                 known_nodes,
-                listen_addresses: Vec::new(), // TODO:
+                connections_capacity: 100, // TODO: ?
+                peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 64
@@ -369,7 +370,7 @@ impl NetworkService {
                         {
                             Ok(insert) => {
                                 insert
-                                    .insert(|_| ())
+                                    .insert()
                                     .instrument(tracing::debug_span!("insert"))
                                     .await
                             }
@@ -464,12 +465,12 @@ impl NetworkService {
     #[tracing::instrument(skip(self))]
     pub async fn blocks_request(
         self: Arc<Self>,
-        target: PeerId,
+        target: PeerId, // TODO: by value?
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
         self.network
-            .blocks_request(Instant::now(), target, chain_index, config)
+            .blocks_request(Instant::now(), &target, chain_index, config)
             .await
     }
 }
@@ -500,7 +501,7 @@ async fn connection_task(
         }
     };
 
-    let id = network_service.network.pending_outcome_ok(id, ()).await;
+    let id = network_service.network.pending_outcome_ok(id).await;
 
     // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
     // out and waiting a bit before actually sending it out, in order to potentially merge
