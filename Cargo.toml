@@ -53,7 +53,7 @@ hex = { version = "0.4.3", default-features = false }
 libsecp256k1 = { version = "0.6.0", default-features = false, features = ["static-context"] }
 # Reminder: `log` is forbidden
 merlin = { version = "3.0", default-features = false }
-multihash = "0.11.4"  # TODO: waiting for a crates.io publication of https://github.com/multiformats/rust-multihash/pull/82 that adds no_std support
+multihash = "0.14.0"  # TODO: waiting for a crates.io publication of https://github.com/multiformats/rust-multihash/pull/82 that adds no_std support
 nom = { version = "6.1.2", default-features = false, features = ["alloc"] }
 num-bigint = { version = "0.4.0", default-features = false }
 num-rational = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
