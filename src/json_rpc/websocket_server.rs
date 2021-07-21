@@ -263,14 +263,14 @@ impl<T> WsServer<T> {
             let mut server = Server::new(pending_incoming);
 
             let websocket_key = match server.receive_request().await {
-                Ok(req) => req.into_key(),
+                Ok(req) => req.key(),
                 Err(_) => return (connection_id, unique_id, Err(())),
             };
 
             match server
                 .send_response(&{
                     Response::Accept {
-                        key: &websocket_key,
+                        key: websocket_key,
                         protocol: None,
                     }
                 })
