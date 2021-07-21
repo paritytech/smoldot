@@ -23,22 +23,25 @@ export class SmoldotError extends Error {
   }
 }
 
+function defaultLog(level, target, message) {
+  const fmt = (target, message) => `[${target}] ${message}`;
+  if (level <= 1) {
+    console.error(fmt(target, message));
+  } else if (level == 2) {
+    console.warn(fmt(target, message));
+  } else if (level == 3) {
+    console.info(fmt(target, message));
+  } else if (level == 4) {
+    console.debug(fmt(target, message));
+  } else {
+    console.trace(fmt(target, message));
+  }
+}
+
 export async function start(config) {
   config = config || {};
 
-  const logCallback = config.logCallback || ((level, target, message) => {
-    if (level <= 1) {
-      console.error("[" + target + "]", message);
-    } else if (level == 2) {
-      console.warn("[" + target + "]", message);
-    } else if (level == 3) {
-      console.info("[" + target + "]", message);
-    } else if (level == 4) {
-      console.debug("[" + target + "]", message);
-    } else {
-      console.trace("[" + target + "]", message);
-    }
-  });
+  const logCallback = config.logCallback || defaultLog;
 
   // The actual execution of Smoldot is performed in a worker thread.
   //
