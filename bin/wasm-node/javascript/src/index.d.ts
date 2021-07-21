@@ -24,7 +24,14 @@ export interface SmoldotClient {
   terminate(): void;
 }
 
+export interface SmoldotHealth {
+  isSyncing: boolean;
+  peers: number;
+  shouldHavePeers: boolean;
+}
+
 export interface SmoldotChain {
+  health(): Promise<SmoldotHealth>;
   sendJsonRpc(rpc: string): void;
   remove(): void;
 }

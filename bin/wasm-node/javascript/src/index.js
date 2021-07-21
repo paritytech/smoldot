@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Worker, workerOnError, workerOnMessage } from './compat-nodejs.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export class SmoldotError extends Error {
   constructor(message) {
@@ -52,6 +53,10 @@ export async function start(config) {
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
+  // map of chain ids to health request ids and the their promise resolve and reject funtions
+  // { 1: { requestId: <n>, resolve: fn(), reject: fn() }, /* ... */ }
+  const chainHealthRequestCallbacks =  {};
+
   // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
   // is pushed to this array. The worker needs to send back a confirmation, which pops the first
   // element of this array. In the case of `addChain`, additional fields are stored in this array
@@ -67,7 +72,26 @@ export async function start(config) {
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
+    console.log(message);
     if (message.kind == 'jsonrpc') {
+
+      // check if this was a response to a health request first
+      const msgdata = JSON.parse(message.data);
+      if (chainHealthRequestCallbacks[message.chainId] &&
+        msgdata.id === chainHealthRequestCallbacks[message.chainId].requestId) {
+        // reject it if it was an error response
+        if (msgdata.error) {
+          const reject = chainHealthRequestCallbacks[message.chainId].reject;
+          delete chainHealthRequestCallbacks[message.chainId];
+          return reject(new Error(msgdata.error));
+        }
+
+        // or resolve it
+        const resolve = chainHealthRequestCallbacks[message.chainId].resolve;
+        delete chainHealthRequestCallbacks[message.chainId];
+        return resolve(msgdata.result);
+      }
+
       const cb = chainsJsonRpcCallbacks[message.chainId];
       if (cb) cb(message.data);
 
@@ -82,11 +106,40 @@ export async function start(config) {
       // `expected` was pushed by the `addChain` method.
       // Resolve the promise that `addChain` returned to the user.
       expected.resolve({
+        health: () => {
+          // are we already waiting for a health message reply?
+          if (chainHealthRequestCallbacks[chainId]) {
+            const reject = chainHealthRequestCallbacks[chainId].reject;
+            delete chainHealthRequestCallbacks[chainId];
+            return reject(new Error('Called health before pending health request replied'));
+          }
+
+          // craft a new system_health messsage
+          const id = uuidv4();
+          const request = `{"id":"${id}","jsonrpc":"2.0","method":"system_health","params":[]}`;
+          let hrResolve, hrReject;
+          const hrPromise = new Promise((resolve, reject) => {
+            hrResolve = resolve;
+            hrReject = reject;
+          });
+
+          // track the new message
+          chainHealthRequestCallbacks[chainId] = {
+            requestId: id,
+            resolve: hrResolve,
+            reject: hrReject
+          };
+
+          // send it
+          worker.postMessage({ ty: 'request', request, chainId });
+          return hrPromise;
+        },
         sendJsonRpc: (request) => {
           if (workerError)
             throw workerError;
           if (!chainsJsonRpcCallbacks[message.chainId])
             throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
+
           worker.postMessage({ ty: 'request', request, chainId });
         },
         remove: () => {
