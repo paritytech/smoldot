@@ -117,7 +117,7 @@ export async function start(config) {
         health: () => {
           // craft a new system_health messsage
           const id = uuidv4();
-          const request = `{"id":"${id}","jsonrpc":"2.0","method":"system_health","params":[]}`;
+          const request = JSON.stringify({ id, jsonrpc: "2.0", method: "system_health", params: [] });
           let hrResolve, hrReject;
           const hrPromise = new Promise((resolve, reject) => {
             hrResolve = resolve;
