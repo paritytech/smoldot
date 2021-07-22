@@ -24,6 +24,14 @@ export class SmoldotError extends Error {
   }
 }
 
+function remove(arr, item) {
+  const idx = arr.indexOf(item);
+  if (idx > -1) {
+      arr.splice(index, 1);
+  }
+  return arr;
+}
+
 function defaultLog(level, target, message) {
   const fmt = (target, message) => `[${target}] ${message}`;
   if (level <= 1) {
@@ -53,8 +61,8 @@ export async function start(config) {
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
-  // map of chain ids to health request ids and the their promise resolve and reject funtions
-  // { 1: { requestId: <n>, resolve: fn(), reject: fn() }, /* ... */ }
+  // map of chain ids to health requests - their ids and the their promise resolve and reject funtions
+  // { 1: [{ requestId: <n>, resolve: fn(), reject: fn() }, /* ... */ }]
   const chainHealthRequestCallbacks =  {};
 
   // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
@@ -78,18 +86,18 @@ export async function start(config) {
       // check if this was a response to a health request first
       const msgdata = JSON.parse(message.data);
       if (chainHealthRequestCallbacks[message.chainId] &&
-        msgdata.id === chainHealthRequestCallbacks[message.chainId].requestId) {
+        chainHealthRequestCallbacks[message.chainId].find(r => r.requestId === msgdata.id)) {
+        const request = chainHealthRequestCallbacks[message.chainId].find(r => r.requestId === msgdata.id);
+
         // reject it if it was an error response
         if (msgdata.error) {
-          const reject = chainHealthRequestCallbacks[message.chainId].reject;
-          delete chainHealthRequestCallbacks[message.chainId];
-          return reject(new Error(msgdata.error));
+          remove(chainHealthRequestCallbacks[message.chainId], request);
+          return request.reject(new Error(msgdata.error));
         }
 
         // or resolve it
-        const resolve = chainHealthRequestCallbacks[message.chainId].resolve;
-        delete chainHealthRequestCallbacks[message.chainId];
-        return resolve(msgdata.result);
+        remove(chainHealthRequestCallbacks[message.chainId], request);
+        return request.resolve(msgdata.result);
       }
 
       const cb = chainsJsonRpcCallbacks[message.chainId];
@@ -107,13 +115,6 @@ export async function start(config) {
       // Resolve the promise that `addChain` returned to the user.
       expected.resolve({
         health: () => {
-          // are we already waiting for a health message reply?
-          if (chainHealthRequestCallbacks[chainId]) {
-            const reject = chainHealthRequestCallbacks[chainId].reject;
-            delete chainHealthRequestCallbacks[chainId];
-            return reject(new Error('Called health before pending health request replied'));
-          }
-
           // craft a new system_health messsage
           const id = uuidv4();
           const request = `{"id":"${id}","jsonrpc":"2.0","method":"system_health","params":[]}`;
@@ -124,11 +125,15 @@ export async function start(config) {
           });
 
           // track the new message
-          chainHealthRequestCallbacks[chainId] = {
+          if (!chainHealthRequestCallbacks[chainId]) {
+            chainHealthRequestCallbacks[chainId] = [];
+          }
+
+          chainHealthRequestCallbacks[chainId].push({
             requestId: id,
             resolve: hrResolve,
             reject: hrReject
-          };
+          });
 
           // send it
           worker.postMessage({ ty: 'request', request, chainId });
