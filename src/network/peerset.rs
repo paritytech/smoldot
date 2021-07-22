@@ -189,6 +189,14 @@ impl Peerset {
 
         Some(inner_id)
     }
+
+    pub fn notifications_in_state(&mut self, connection_id: ConnectionId) {
+
+    }
+
+    pub fn notifications_out_state(&mut self, connection_id: ConnectionId) {
+
+    }
 }
 
 /// See [`Peerset::peers`].

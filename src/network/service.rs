@@ -139,8 +139,8 @@ pub struct ConnectionId(libp2p::ConnectionId);
 /// state. See also [the module-level documentation](..).
 pub struct ChainNetwork<TNow> {
     /// Underlying data structure. Collection of connections.
-    /// The "user data" associated to each connection is its identifier in [`Guarded::connections`].
-    libp2p: libp2p::Network<usize, TNow>,
+    /// The "user data" associated to each connection is its identifier in [`Guarded::peerset`].
+    libp2p: libp2p::Network<peerset::ConnectionId, TNow>,
 
     /// Extra fields protected by a `Mutex`.
     guarded: Mutex<Guarded>,
@@ -820,7 +820,7 @@ where
 
             // If `maybe_inner_event` is `None`, that means some ahead-of-events processing needs
             // to be performed. No event has been grabbed from `self.libp2p`.
-            let inner_event = match maybe_inner_event {
+            let inner_event: libp2p::Event<_> = match maybe_inner_event {
                 Some(ev) => ev,
                 None => {
                     // We can't use `take()` because the call to `accept_notifications_in` might
@@ -864,8 +864,8 @@ where
             // An event has been grabbed and is ready to be processed. `self.guarded` is still
             // locked from before the event has been grabbed.
             // In order to avoid futures cancellation issues, no `await` should be used below. If
-            // something requires asynchronous processing, it should instead be added as a field
-            // in `self.guarded`.
+            // something requires asynchronous processing, it should instead be written to
+            // `self.to_process_pre_event`.
             debug_assert!(guarded.to_process_pre_event.is_none());
 
             // `PeerId` of the connection concerned by the event, or expected `PeerId` if the
@@ -1664,7 +1664,7 @@ pub struct SubstreamOpen<'a, TNow> {
     overlay_network_index: usize,
 
     /// Same as [`ChainNetwork::libp2p`].
-    libp2p: &'a libp2p::Network<usize, TNow>,
+    libp2p: &'a libp2p::Network<peerset::ConnectionId, TNow>,
 
     /// Same as [`ChainNetwork::chain_configs`].
     chain_configs: &'a Vec<ChainConfig>,
