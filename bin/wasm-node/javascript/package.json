@@ -26,7 +26,6 @@
     "./src/compat-nodejs.js": "./src/compat-browser.js"
   },
   "dependencies": {
-    "uuid": "^8.3.2",
     "buffer": "^6.0.1",
     "performance-now": "^2.1.0",
     "randombytes": "^2.1.0",

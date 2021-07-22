@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Worker, workerOnError, workerOnMessage } from './compat-nodejs.js';
-import { v4 as uuidv4 } from 'uuid';
 
 export class SmoldotError extends Error {
   constructor(message) {
@@ -27,7 +26,7 @@ export class SmoldotError extends Error {
 function remove(arr, item) {
   const idx = arr.indexOf(item);
   if (idx > -1) {
-      arr.splice(index, 1);
+      arr.splice(idx, 1);
   }
   return arr;
 }
@@ -49,6 +48,9 @@ function defaultLog(level, target, message) {
 
 export async function start(config) {
   config = config || {};
+
+  // Counter used to generate health request ids
+  let nextHealthRequestId = 1;
 
   const logCallback = config.logCallback || defaultLog;
 
@@ -80,28 +82,36 @@ export async function start(config) {
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
-    console.log(message);
     if (message.kind == 'jsonrpc') {
 
       // check if this was a response to a health request first
       const msgdata = JSON.parse(message.data);
-      if (chainHealthRequestCallbacks[message.chainId] &&
-        chainHealthRequestCallbacks[message.chainId].find(r => r.requestId === msgdata.id)) {
-        const request = chainHealthRequestCallbacks[message.chainId].find(r => r.requestId === msgdata.id);
+      if (msgdata.id && msgdata.id.startsWith('health:')) {
+        if (chainHealthRequestCallbacks[message.chainId] &&
+          chainHealthRequestCallbacks[message.chainId].find(r => r.requestId === msgdata.id)) {
+          const request = chainHealthRequestCallbacks[message.chainId].find(r => r.requestId === msgdata.id);
 
-        // reject it if it was an error response
-        if (msgdata.error) {
+          // reject it if it was an error response
+          if (msgdata.error) {
+            remove(chainHealthRequestCallbacks[message.chainId], request);
+            return request.reject(new Error(msgdata.error));
+          }
+
+          // or resolve it
           remove(chainHealthRequestCallbacks[message.chainId], request);
-          return request.reject(new Error(msgdata.error));
+          return request.resolve(msgdata.result);
         }
-
-        // or resolve it
-        remove(chainHealthRequestCallbacks[message.chainId], request);
-        return request.resolve(msgdata.result);
+      } else if (msgdata.id && msgdata.id.startsWith('user:')) {
+        const cb = chainsJsonRpcCallbacks[message.chainId];
+        // strip the namespace off
+        msgdata.id = msgdata.id.slice('user:'.length);
+        // Convert the id back to a number if it looks like one - polkadotjs
+        // expects number ids
+        if (/^[0-9]+$/.test(msgdata.id)) {
+          msgdata.id = Number(msgdata.id);
+        }
+        if (cb) cb(JSON.stringify(msgdata));
       }
-
-      const cb = chainsJsonRpcCallbacks[message.chainId];
-      if (cb) cb(message.data);
 
     } else if (message.kind == 'chainAddedOk') {
       const expected = pendingConfirmations.pop();
@@ -116,7 +126,8 @@ export async function start(config) {
       expected.resolve({
         health: () => {
           // craft a new system_health messsage
-          const id = uuidv4();
+          const id = 'health:' + nextHealthRequestId;
+          nextHealthRequestId += 1;
           const request = JSON.stringify({ id, jsonrpc: "2.0", method: "system_health", params: [] });
           let hrResolve, hrReject;
           const hrPromise = new Promise((resolve, reject) => {
@@ -145,7 +156,17 @@ export async function start(config) {
           if (!chainsJsonRpcCallbacks[message.chainId])
             throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
 
-          worker.postMessage({ ty: 'request', request, chainId });
+          let parsed;
+          try {
+            parsed = JSON.parse(request);
+          } catch {
+            return;
+          }
+
+          const newId = 'user:' + parsed.id;
+          parsed.id = newId;
+
+          worker.postMessage({ ty: 'request', request: JSON.stringify(parsed), chainId });
         },
         remove: () => {
           if (workerError)
