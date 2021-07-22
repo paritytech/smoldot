@@ -47,3 +47,12 @@ fn decode_polkadot() {
     // Has a GrandPa scheduled change.
     super::decode(include_bytes!("./tests-header-polkadot-512271")).unwrap();
 }
+
+#[test]
+fn decode_reencode_kusama_7472481() {
+    // Kusama block #7472481.
+    // Make sure that it encodes back to what is was decoded.
+    let expected = include_bytes!("./tests-header-kusama-7472481");
+    let decoded = super::decode(expected).unwrap();
+    assert_eq!(decoded.scale_encoding_vec(), expected);
+}
