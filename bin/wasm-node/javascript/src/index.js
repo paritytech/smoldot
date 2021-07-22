@@ -31,28 +31,25 @@ function remove(arr, item) {
   return arr;
 }
 
-function defaultLog(level, target, message) {
-  const fmt = (target, message) => `[${target}] ${message}`;
-  if (level <= 1) {
-    console.error(fmt(target, message));
-  } else if (level == 2) {
-    console.warn(fmt(target, message));
-  } else if (level == 3) {
-    console.info(fmt(target, message));
-  } else if (level == 4) {
-    console.debug(fmt(target, message));
-  } else {
-    console.trace(fmt(target, message));
-  }
-}
-
 export async function start(config) {
   config = config || {};
 
   // Counter used to generate health request ids
   let nextHealthRequestId = 1;
 
-  const logCallback = config.logCallback || defaultLog;
+  const logCallback = config.logCallback || ((level, target, message) => {
+    if (level <= 1) {
+      console.error("[" + target + "]", message);
+    } else if (level == 2) {
+      console.warn("[" + target + "]", message);
+    } else if (level == 3) {
+      console.info("[" + target + "]", message);
+    } else if (level == 4) {
+      console.debug("[" + target + "]", message);
+    } else {
+      console.trace("[" + target + "]", message);
+    }
+  });
 
   // The actual execution of Smoldot is performed in a worker thread.
   //
