@@ -367,7 +367,7 @@ impl BabeNextConfig {
     /// encoding of that object.
     pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
         iter::once(either::Left(self.c.0.to_le_bytes()))
-            .chain(iter::once(either::Left(self.c.0.to_le_bytes())))
+            .chain(iter::once(either::Left(self.c.1.to_le_bytes())))
             .chain(self.allowed_slots.scale_encoding().map(either::Right))
     }
 }
