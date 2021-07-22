@@ -1,4 +1,4 @@
-import smoldot, { Smoldot, SmoldotClient } from 'smoldot';
+import smoldot, { Smoldot, SmoldotClient, SmoldotHealth } from 'smoldot';
 
 // Test the export type
 
@@ -29,6 +29,8 @@ sp.then(async (sm) => {
   const chain2 = await chain2Promise;
   // $ExpectType void
   chain2.sendJsonRpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}');
+  // $ExpectType SmoldotHealth
+  const health = await chain2.health();
   // $ExpectType void
   chain2.remove();
   // $ExpectType void
