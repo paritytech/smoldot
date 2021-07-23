@@ -504,7 +504,7 @@ fn add_chain(
         .add_chain(super::AddChainConfig {
             specification: str::from_utf8(&chain_spec).unwrap(),
             json_rpc_running: json_rpc_running != 0,
-            potential_relay_chains,
+            potential_relay_chains: potential_relay_chains.into_iter(),
         });
 
     match result {

@@ -58,12 +58,12 @@ static ALLOC: std::alloc::System = std::alloc::System;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
-pub struct AddChainConfig<'a> {
+pub struct AddChainConfig<'a, TRelays> {
     /// JSON text containing the specification of the chain (the so-called "chain spec").
     pub specification: &'a str,
 
     /// If [`AddChainConfig`] defines a parachain, contains the list of relay chains to choose
-    /// from.
+    /// from. Ignored if not a parachain.
     ///
     /// This field is necessary because multiple different chain can have the same identity. If
     /// the client tried to find the corresponding relay chain in all the previously-spawned
@@ -73,8 +73,7 @@ pub struct AddChainConfig<'a> {
     /// For example: if user A adds a chain named "kusama", then user B adds a different chain
     /// also named "kusama", then user B adds a parachain whose relay chain is "kusama", it would
     /// be wrong to connect to the "kusama" created by user A.
-    // TODO: pass as iterator
-    pub potential_relay_chains: Vec<ChainId>,
+    pub potential_relay_chains: TRelays,
 
     /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targetting this chain to fail.
@@ -198,7 +197,10 @@ impl Client {
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
     #[must_use]
-    pub fn add_chain(&mut self, config: AddChainConfig<'_>) -> Result<ChainId, AddChainError> {
+    pub fn add_chain(
+        &mut self,
+        config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
+    ) -> Result<ChainId, AddChainError> {
         // Decode the chain specification.
         let chain_spec = chain_spec::ChainSpec::from_json_bytes(&config.specification)
             .map_err(AddChainError::InvalidChainSpec)?;
@@ -217,13 +219,13 @@ impl Client {
 
         // If the chain specification specifies a parachain, find the corresponding relay chain.
         let relay_chain = if let Some((relay_chain_id, _para_id)) = chain_spec.relay_chain() {
-            let mut valid_relay_chains_iter = config.potential_relay_chains.iter().filter(|c| {
+            let mut valid_relay_chains_iter = config.potential_relay_chains.filter(|c| {
                 self.public_api_chains
                     .get(c.0)
                     .map_or(false, |chain| chain.chain_spec_chain_id == relay_chain_id)
             });
 
-            let found_relay_chain = *valid_relay_chains_iter
+            let found_relay_chain = valid_relay_chains_iter
                 .next()
                 .ok_or(AddChainError::RelayChainNotFound)?;
             if valid_relay_chains_iter.next().is_some() {
