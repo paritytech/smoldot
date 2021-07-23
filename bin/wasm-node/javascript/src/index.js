@@ -163,7 +163,10 @@ export async function start(config) {
             }
           });
 
-          toCleanUp.forEach(requestId => healthRequests.delete(requestId));
+          toCleanUp.forEach(requestId => {
+            healthRequests.get(requestId).reject(new Error('Chain was removed from smoldot'));
+            healthRequests.delete(requestId);
+          });
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
           // response concerning that `chainId` to arrive after the `remove` function has
           // returned. We solve that by removing the callback immediately.
