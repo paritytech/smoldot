@@ -23,14 +23,6 @@ export class SmoldotError extends Error {
   }
 }
 
-function remove(arr, item) {
-  const idx = arr.indexOf(item);
-  if (idx > -1) {
-      arr.splice(idx, 1);
-  }
-  return arr;
-}
-
 export async function start(config) {
   config = config || {};
 
@@ -60,9 +52,11 @@ export async function start(config) {
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
-  // Pending health requests - their ids and the their promise resolve and reject funtions
-  // [{ requestId: <n>, resolve: fn(), reject: fn() }, /* ... */ }]
-  let healthRequestCallbacks =  [];
+  // Whenever a health request is made we need to track how to calback when we
+  // get a response and what chain it belonged to.  We also use this
+  // Pending health requests - their chain ids and the their promise resolve and reject funtions
+  // requestId --> { chainId: <n>, resolve: fn(), reject: fn() }
+  const healthRequests =  new Map();
 
   // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
   // is pushed to this array. The worker needs to send back a confirmation, which pops the first
@@ -84,16 +78,16 @@ export async function start(config) {
       // check if this was a response to a health request first
       const msgdata = JSON.parse(message.data);
       if (msgdata.id && msgdata.id.startsWith('health:')) {
-        const request = healthRequestCallbacks.find(r => r.requestId === msgdata.id);
+        const request = healthRequests.get(msgdata.id);
         if (request) {
           // reject it if it was an error response
           if (msgdata.error) {
-            remove(healthRequestCallbacks, request);
+            healthRequests.delete(msgdata.id);
             return request.reject(new Error(msgdata.error));
           }
 
           // or resolve it
-          remove(healthRequestCallbacks, request);
+          healthRequests.delete(msgdata.id);
           return request.resolve(msgdata.result);
         }
       } else if (msgdata.id && msgdata.id.startsWith('user:')) {
@@ -124,19 +118,15 @@ export async function start(config) {
           const id = 'health:' + nextHealthRequestId;
           nextHealthRequestId += 1;
           const request = JSON.stringify({ id, jsonrpc: "2.0", method: "system_health", params: [] });
-          let hrResolve, hrReject;
-          const hrPromise = new Promise((resolve, reject) => {
-            hrResolve = resolve;
-            hrReject = reject;
+
+          let resolve, reject;
+          const hrPromise = new Promise((hrResolve, hrReject) => {
+            resolve = hrResolve;
+            reject = hrReject;
           });
 
           // track the new message
-          healthRequestCallbacks.push({
-            chainId,
-            requestId: id,
-            resolve: hrResolve,
-            reject: hrReject
-          });
+          healthRequests.set(id, { chainId, resolve, reject });
 
           // send it
           worker.postMessage({ ty: 'request', request, chainId });
@@ -165,8 +155,15 @@ export async function start(config) {
             throw workerError;
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
-          // clean up pending healthRequestCallbacks for this chain
-          healthRequestCallbacks = healthRequestCallbacks.filter(r => r.chainId !== chainId);
+          // clean up pending healthRequests for this chain
+          let toCleanUp = [];
+          healthRequests.forEach((value, key) => {
+            if (value.chainId === chainId) {
+              toCleanUp.push(key);
+            }
+          });
+
+          toCleanUp.forEach(requestId => healthRequests.delete(requestId));
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
           // response concerning that `chainId` to arrive after the `remove` function has
           // returned. We solve that by removing the callback immediately.
