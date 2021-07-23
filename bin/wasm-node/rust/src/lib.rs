@@ -407,49 +407,49 @@ impl Client {
         // TODO: what about cancellation stuff?
     }
 
+    /// Enqueues a JSON-RPC request towards the given chain.
+    ///
+    /// This function doesn't return an error, as errors are yielded using
+    /// [`ffi::emit_json_rpc_response`].
     pub fn json_rpc_request(&mut self, json_rpc_request: Box<[u8]>, chain_id: ChainId) {
-        fn parse_call_and_log(
-            json_rpc_request: &Box<[u8]>,
-            chain_id: ChainId,
-        ) -> Option<(&str, methods::MethodCall)> {
-            let request_str = match str::from_utf8(&*json_rpc_request) {
-                Ok(s) => s,
-                Err(error) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Failed to parse JSON-RPC query as UTF-8 (chain_id: {:?}): {}",
-                        chain_id, error
-                    );
-                    return None;
-                }
-            };
-
-            log::debug!(
-                target: "json-rpc",
-                "JSON-RPC => {:?}{}",
-                if request_str.len() > 100 { &request_str[..100] } else { &request_str[..] },
-                if request_str.len() > 100 { "…" } else { "" }
-            );
-
-            match methods::parse_json_call(request_str) {
-                Ok(rq) => Some(rq),
-                Err(methods::ParseError::Method { request_id, error }) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Error in JSON-RPC method call: {}", error
-                    );
-                    json_rpc_service::send_back(&error.to_json_error(request_id), chain_id);
-                    return None;
-                }
-                Err(error) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Ignoring malformed JSON-RPC call: {}", error
-                    );
-                    return None;
-                }
+        let request_utf8 = match str::from_utf8(&*json_rpc_request) {
+            Ok(s) => s,
+            Err(error) => {
+                log::warn!(
+                    target: "json-rpc",
+                    "Failed to parse JSON-RPC query as UTF-8 (chain_id: {:?}): {}",
+                    chain_id, error
+                );
+                return;
             }
-        }
+        };
+
+        log::debug!(
+            target: "json-rpc",
+            "JSON-RPC => {:?}{}",
+            if request_utf8.len() > 100 { &request_utf8[..100] } else { &request_utf8[..] },
+            if request_utf8.len() > 100 { "…" } else { "" }
+        );
+
+        // Check whether the JSON-RPC request is correct, and bail out if it isn't.
+        let request_id = match methods::parse_json_call(request_utf8) {
+            Ok((rq_id, _)) => rq_id,
+            Err(methods::ParseError::Method { request_id, error }) => {
+                log::warn!(
+                    target: "json-rpc",
+                    "Error in JSON-RPC method call: {}", error
+                );
+                json_rpc_service::send_back(&error.to_json_error(request_id), chain_id);
+                return;
+            }
+            Err(error) => {
+                log::warn!(
+                    target: "json-rpc",
+                    "Ignoring malformed JSON-RPC call: {}", error
+                );
+                return;
+            }
+        };
 
         if let Some(public_chain) = self.public_api_chains.get(chain_id.0) {
             if let Some(json_rpc_service) = public_chain.json_rpc_service.as_ref() {
@@ -460,10 +460,13 @@ impl Client {
                 };
 
                 let future = async move {
-                    let (request_id, call) = match parse_call_and_log(&json_rpc_request, chain_id) {
-                        Some(v) => v,
-                        None => return,
-                    };
+                    // While the request is parsed above, the parsing outcome borrows the original
+                    // buffer (`json_rpc_request`). This closure therefore only captures said
+                    // original buffer, and the parsing is repeated within the closure. The
+                    // validity of the request has already been checked outside of this future,
+                    // and we can therefore safely unwrap.
+                    let request_str = str::from_utf8(&*json_rpc_request).unwrap();
+                    let (request_id, call) = methods::parse_json_call(request_str).unwrap();
 
                     (&mut json_rpc_service).await;
                     let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
@@ -475,37 +478,33 @@ impl Client {
                     .unbounded_send(("json-rpc-request".to_owned(), future.boxed()))
                     .unwrap();
             } else {
-                if let Some((request_id, _)) = parse_call_and_log(&json_rpc_request, chain_id) {
-                    json_rpc_service::send_back(
-                        &json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ApplicationDefined(
-                                -33000,
-                                &format!(
-                                    "A JSON-RPC service has not been started for chain id {:?}",
-                                    chain_id
-                                ),
-                            ),
-                            None,
-                        ),
-                        chain_id,
-                    );
-                }
-            }
-        } else {
-            if let Some((request_id, _)) = parse_call_and_log(&json_rpc_request, chain_id) {
                 json_rpc_service::send_back(
                     &json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ApplicationDefined(
                             -33000,
-                            &format!("Invalid chain id {:?}", chain_id),
+                            &format!(
+                                "A JSON-RPC service has not been started for chain id {:?}",
+                                chain_id
+                            ),
                         ),
                         None,
                     ),
                     chain_id,
                 );
             }
+        } else {
+            json_rpc_service::send_back(
+                &json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ApplicationDefined(
+                        -33000,
+                        &format!("Invalid chain id {:?}", chain_id),
+                    ),
+                    None,
+                ),
+                chain_id,
+            );
         }
     }
 }
