@@ -429,7 +429,7 @@ where
             let connection_index = *guarded
                 .connections_by_id
                 .get(&target)
-                .ok_or(RequestError::NotConnected)?;
+                .ok_or(RequestError::InvalidConnection)?;
             guarded.connections[connection_index].clone()
         };
 
@@ -622,7 +622,7 @@ where
             let connection_index = *guarded
                 .connections_by_id
                 .get(&connection)
-                .ok_or(QueueNotificationError::NotConnected)?;
+                .ok_or(QueueNotificationError::InvalidConnection)?;
 
             // Find a substream on this connection.
             let substream_id = *guarded
@@ -651,7 +651,7 @@ where
         connection_lock
             .connection
             .as_established()
-            .ok_or(QueueNotificationError::NotConnected)?
+            .ok_or(QueueNotificationError::InvalidConnection)?
             .write_notification_unbounded(substream_id, notification.into());
 
         // Note that no update of the `Guarded` is necessary. The `Guarded` doesn't track
@@ -1620,10 +1620,16 @@ enum PendingEvent {
 /// Error potentially returned by [`Network::request`].
 #[derive(Debug, derive_more::Display)]
 pub enum RequestError {
-    /// Not connected to target.
-    NotConnected,
+    /// Connection no longer exists.
+    ///
+    /// > **Note**: Connections can shut down at any point, after which this error will be returned
+    /// >           if you try to use it. This error is not (necessarily) a bad usage of the API
+    /// >           but can happen in normal situations.
+    InvalidConnection,
+
     /// Connection has been unexpectedly closed by the remote during the request.
     ConnectionClosed,
+
     /// Error in the context of the connection.
     Connection(established::RequestError),
 }
@@ -1631,10 +1637,16 @@ pub enum RequestError {
 /// Error potentially returned by [`Network::queue_notification`].
 #[derive(Debug, derive_more::Display)]
 pub enum QueueNotificationError {
-    /// Not connected to target.
-    NotConnected,
+    /// Connection no longer exists.
+    ///
+    /// > **Note**: Connections can shut down at any point, after which this error will be returned
+    /// >           if you try to use it. This error is not (necessarily) a bad usage of the API
+    /// >           but can happen in normal situations.
+    InvalidConnection,
+
     /// No substream with the given target of the given protocol.
     NoSubstream,
+
     /// Queue of notifications with that peer is full.
     QueueFull,
 }
