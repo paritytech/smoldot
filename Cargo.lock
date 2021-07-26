@@ -2408,6 +2408,7 @@ dependencies = [
  "derive_more",
  "fnv",
  "futures",
+ "itertools 0.10.1",
  "lazy_static",
  "log",
  "lru",
