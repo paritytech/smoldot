@@ -129,12 +129,10 @@ pub fn start(mut config: Config) -> JsonRpcService {
         },
         genesis_block: config.genesis_block_hash,
         next_subscription: atomic::AtomicU64::new(0),
-        all_heads: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
-        new_heads: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
-        finalized_heads: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
-        storage: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
-        transactions: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
-        runtime_specs: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
+        subscriptions: HashMap::with_capacity_and_hasher(
+            usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
+            Default::default(),
+        ),
     };
 
     // Spawns the background task that actually runs the logic of that JSON-RPC service.
@@ -312,29 +310,19 @@ struct Background {
 
     next_subscription: atomic::AtomicU64,
 
-    // TODO: merge all these below into one with a type enum, so that the capacity of the hashmap can match the max subscriptions
-    /// For each active finalized blocks subscription (the key), a sender. If the user
-    /// unsubscribes, send the unsubscription request ID of the channel in order to close the
-    /// subscription.
-    ///
-    /// Note that the default `SipHasher` is used in order to prevent potential hash collision
-    /// attacks.
-    all_heads: HashMap<String, oneshot::Sender<String>>,
+    /// For each active subscription (the key), a sender. If the user unsubscribes, send the
+    /// unsubscription request ID of the channel in order to close the subscription.
+    subscriptions: HashMap<(String, SubscriptionTy), oneshot::Sender<String>, fnv::FnvBuildHasher>,
+}
 
-    /// Same principle as [`Background::all_heads`], but for new heads subscriptions.
-    new_heads: HashMap<String, oneshot::Sender<String>>,
-
-    /// Same principle as [`Background::all_heads`], but for finalized heads subscriptions.
-    finalized_heads: HashMap<String, oneshot::Sender<String>>,
-
-    /// Same principle as [`Background::all_heads`], but for storage subscriptions.
-    storage: HashMap<String, oneshot::Sender<String>>,
-
-    /// Same principle as [`Background::all_heads`], but for transactions.
-    transactions: HashMap<String, oneshot::Sender<String>>,
-
-    /// Same principle as [`Background::all_heads`], but for runtime specs.
-    runtime_specs: HashMap<String, oneshot::Sender<String>>,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+enum SubscriptionTy {
+    AllHeads,
+    NewHeads,
+    FinalizedHeads,
+    Storage,
+    Transaction,
+    RuntimeSpec,
 }
 
 struct Blocks {
@@ -420,7 +408,10 @@ impl Background {
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                let invalid = if let Some(cancel_tx) = self.transactions.remove(&subscription[..]) {
+                let invalid = if let Some(cancel_tx) = self
+                    .subscriptions
+                    .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
+                {
                     // `cancel_tx` might have been closed if the channel from the transactions
                     // service has been closed too. This is not an error.
                     let _ = cancel_tx.send(request_id.to_owned());
@@ -545,7 +536,10 @@ impl Background {
                 self.subscribe_finalized_heads(request_id).await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                let invalid = if let Some(cancel_tx) = self.finalized_heads.remove(&subscription) {
+                let invalid = if let Some(cancel_tx) = self
+                    .subscriptions
+                    .remove(&(subscription, SubscriptionTy::FinalizedHeads))
+                {
                     cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
                     true
@@ -715,8 +709,10 @@ impl Background {
                     self.runtime_service.subscribe_runtime_version().await;
 
                 let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-                self.runtime_specs
-                    .insert(subscription.clone(), unsubscribe_tx);
+                self.subscriptions.insert(
+                    (subscription.clone(), SubscriptionTy::RuntimeSpec),
+                    unsubscribe_tx,
+                );
 
                 let _ = self
                     .responses_sender
@@ -812,7 +808,10 @@ impl Background {
                 self.subscribe_storage(request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                let invalid = if let Some(cancel_tx) = self.storage.remove(&subscription[..]) {
+                let invalid = if let Some(cancel_tx) = self
+                    .subscriptions
+                    .remove(&(subscription.to_owned(), SubscriptionTy::Storage))
+                {
                     cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
                     true
@@ -1016,8 +1015,10 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.transactions
-            .insert(subscription.clone(), unsubscribe_tx);
+        self.subscriptions.insert(
+            (subscription.clone(), SubscriptionTy::Transaction),
+            unsubscribe_tx,
+        );
 
         let confirmation = methods::Response::author_submitAndWatchExtrinsic(&subscription)
             .to_json_response(request_id);
@@ -1139,7 +1140,10 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.all_heads.insert(subscription.clone(), unsubscribe_tx);
+        self.subscriptions.insert(
+            (subscription.clone(), SubscriptionTy::AllHeads),
+            unsubscribe_tx,
+        );
 
         let mut blocks_list = {
             let subscribe_all = self.sync_service.subscribe_all(16).await;
@@ -1196,7 +1200,10 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.new_heads.insert(subscription.clone(), unsubscribe_tx);
+        self.subscriptions.insert(
+            (subscription.clone(), SubscriptionTy::NewHeads),
+            unsubscribe_tx,
+        );
 
         let mut blocks_list = {
             let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
@@ -1249,8 +1256,10 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.finalized_heads
-            .insert(subscription.clone(), unsubscribe_tx);
+        self.subscriptions.insert(
+            (subscription.clone(), SubscriptionTy::FinalizedHeads),
+            unsubscribe_tx,
+        );
 
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
@@ -1305,7 +1314,10 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.storage.insert(subscription.clone(), unsubscribe_tx);
+        self.subscriptions.insert(
+            (subscription.clone(), SubscriptionTy::Storage),
+            unsubscribe_tx,
+        );
 
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {
