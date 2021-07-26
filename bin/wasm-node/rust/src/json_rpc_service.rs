@@ -321,20 +321,20 @@ struct Background {
     /// attacks.
     all_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for new heads subscriptions.
+    /// Same principle as [`Background::all_heads`], but for new heads subscriptions.
     new_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for finalized heads
+    /// Same principle as [`Background::all_heads`], but for finalized heads
     /// subscriptions.
     finalized_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for storage subscriptions.
+    /// Same principle as [`Background::all_heads`], but for storage subscriptions.
     storage: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for transactions.
+    /// Same principle as [`Background::all_heads`], but for transactions.
     transactions: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for runtime specs.
+    /// Same principle as [`Background::all_heads`], but for runtime specs.
     runtime_specs: HashMap<String, oneshot::Sender<String>>,
 }
 
