@@ -20,10 +20,13 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{ffi, network_service, runtime_service, sync_service, transactions_service};
+use crate::{network_service, runtime_service, sync_service, transactions_service};
 
-use futures::{channel::oneshot, lock::Mutex, prelude::*};
-use methods::MethodCall;
+use futures::{
+    channel::{mpsc, oneshot},
+    lock::Mutex,
+    prelude::*,
+};
 use smoldot::{
     chain_spec,
     executor::{host, read_only_runtime_host},
@@ -35,6 +38,7 @@ use std::{
     collections::HashMap,
     convert::TryFrom as _,
     iter,
+    num::NonZeroU32,
     pin::Pin,
     str,
     sync::{atomic, Arc},
@@ -77,112 +81,214 @@ pub struct Config {
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 
-    /// The id of the chain that this service is handling requests for. Used only for the FFI layer.
-    // TODO: a bit spaghetti
-    pub chain_id: super::ChainId,
+    /// Maximum number of JSON-RPC requests that can be processed simultaneously. Any additional
+    /// request will be immediately rejected.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_pending_requests: NonZeroU32,
+
+    /// Maximum number of active subscriptions. Any additional subscription will be immediately
+    /// rejected.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_subscriptions: u32,
 }
 
 /// Initializes the JSON-RPC service with the given configuration.
-pub async fn start(config: Config) -> Arc<JsonRpcService> {
-    let (_finalized_block_header, finalized_blocks_subscription) =
-        config.sync_service.subscribe_best().await;
-    let (best_block_header, best_blocks_subscription) = config.sync_service.subscribe_best().await;
-    debug_assert_eq!(_finalized_block_header, best_block_header);
-    let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
-
-    let mut known_blocks = lru::LruCache::new(256);
-    known_blocks.put(
-        best_block_hash,
-        header::decode(&best_block_header).unwrap().into(),
+pub fn start(mut config: Config) -> JsonRpcService {
+    // Chanel from the foreground to the background.
+    // Requests are dropped if the channel is full.
+    let (new_requests_in, new_requests_rx) = mpsc::channel(
+        usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
     );
 
-    let client = Arc::new(JsonRpcService {
-        tasks_executor: Mutex::new(config.tasks_executor),
+    // Channel from the background to the foreground.
+    let (responses_sender, responses_rx) = mpsc::channel(128);
+
+    let client = JsonRpcService {
+        new_requests_in: Mutex::new(new_requests_in),
+        responses_rx: Mutex::new(responses_rx),
+    };
+
+    let mut background = Background {
+        new_requests_rx,
+        responses_sender,
+        active_subscriptions: stream::FuturesUnordered::new(),
+        max_subscriptions: config.max_subscriptions,
         chain_spec: config.chain_spec,
         network_service: config.network_service.0,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         transactions_service: config.transactions_service,
-        blocks: Mutex::new(Blocks {
-            known_blocks,
-            best_block: best_block_hash,
-            finalized_block: best_block_hash,
-        }),
+        blocks: Blocks {
+            known_blocks: lru::LruCache::new(256),
+            best_block: [0; 32],      // Filled below.
+            finalized_block: [0; 32], // Filled below.
+        },
         genesis_block: config.genesis_block_hash,
         next_subscription: atomic::AtomicU64::new(0),
-        per_userdata_subscriptions: Default::default(),
-        chain_id: config.chain_id,
-    });
+        all_heads: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
+        new_heads: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
+        finalized_heads: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
+        storage: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
+        transactions: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
+        runtime_specs: HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity
+    };
 
-    // Spawns a task whose role is to update `blocks` with the new best and finalized blocks.
-    (client.clone().tasks_executor.lock().await)("jsonrpc-known-blocks-update".into(), {
-        let client = client.clone();
-        Box::pin(async move {
-            futures::pin_mut!(best_blocks_subscription, finalized_blocks_subscription);
+    // Spawns the background task that actually runs the logic of that JSON-RPC service.
+    (config.tasks_executor)(
+        "json-rpc-service".into(),
+        async move {
+            let (_finalized_block_header, mut finalized_blocks_subscription) =
+                background.sync_service.subscribe_best().await;
+            let (best_block_header, mut best_blocks_subscription) =
+                background.sync_service.subscribe_best().await;
+            debug_assert_eq!(_finalized_block_header, best_block_header);
+            let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
+
+            background.blocks.known_blocks.put(
+                best_block_hash,
+                header::decode(&best_block_header).unwrap().into(),
+            );
+            background.blocks.best_block = best_block_hash;
+            background.blocks.finalized_block = best_block_hash;
 
             loop {
-                match future::select(
-                    best_blocks_subscription.next(),
-                    finalized_blocks_subscription.next(),
-                )
-                .await
-                {
-                    future::Either::Left((Some(block), _)) => {
-                        let hash = header::hash_from_scale_encoded_header(&block);
-                        let mut blocks = client.blocks.lock().await;
-                        let blocks = &mut *blocks;
-                        blocks.best_block = hash;
-                        // As a small trick, we re-query the finalized block from `known_blocks` in
-                        let header = header::decode(&block).unwrap().into();
-                        // order to ensure that it never leaves the LRU cache.
-                        blocks.known_blocks.get(&blocks.finalized_block);
-                        blocks.known_blocks.put(hash, header);
-                    }
-                    future::Either::Right((Some(block), _)) => {
-                        let hash = header::hash_from_scale_encoded_header(&block);
-                        let header = header::decode(&block).unwrap().into();
-                        let mut blocks = client.blocks.lock().await;
-                        blocks.finalized_block = hash;
-                        blocks.known_blocks.put(hash, header);
-                    }
-
-                    // One of the two streams is over.
-                    _ => break,
+                futures::select! {
+                    () = background.active_subscriptions.select_next_some() => {},
+                    message = background.new_requests_rx.next() => {
+                        match message {
+                            Some(m) => background.handle_request(m).await,
+                            None => return, // Foreground is closed.
+                        }
+                    },
+                    block = best_blocks_subscription.next() => {
+                        match block {
+                            Some(block) => {
+                                let hash = header::hash_from_scale_encoded_header(&block);
+                                background.blocks.best_block = hash;
+                                // As a small trick, we re-query the finalized block from
+                                // `known_blocks` in order to ensure that it never leaves the
+                                // LRU cache.
+                                let header = header::decode(&block).unwrap().into();
+                                background.blocks.known_blocks.get(&background.blocks.finalized_block);
+                                background.blocks.known_blocks.put(hash, header);
+                            },
+                            None => return,
+                        }
+                    },
+                    block = finalized_blocks_subscription.next() => {
+                        match block {
+                            Some(block) => {
+                                let hash = header::hash_from_scale_encoded_header(&block);
+                                let header = header::decode(&block).unwrap().into();
+                                background.blocks.finalized_block = hash;
+                                background.blocks.known_blocks.put(hash, header);
+                            },
+                            None => return,
+                        }
+                    },
                 }
             }
-        })
-    });
+        }
+        .boxed(),
+    );
 
     client
 }
 
-#[derive(Default)]
-struct PerUserDataSubscriptions {
-    /// For each active finalized blocks subscription (the key), a sender. If the user
-    /// unsubscribes, send the unsubscription request ID of the channel in order to close the
-    /// subscription.
-    all_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
+pub struct JsonRpcService {
+    /// Channel to send JSON-RPC requests to the background task.
+    ///
+    /// Limited to [`Config::max_pending_requests`] elements.
+    new_requests_in: Mutex<mpsc::Sender<String>>,
 
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for new heads subscriptions.
-    new_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
-
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for finalized heads subscriptions.
-    finalized_heads: Mutex<HashMap<String, oneshot::Sender<String>>>,
-
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for storage subscriptions.
-    storage: Mutex<HashMap<String, oneshot::Sender<String>>>,
-
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for transactions.
-    transactions: Mutex<HashMap<String, oneshot::Sender<String>>>,
-
-    /// Same principle as [`PerUserDataSubscriptions::all_heads`], but for runtime specs.
-    runtime_specs: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    /// Channel where responses are pushed out.
+    responses_rx: Mutex<mpsc::Receiver<String>>,
 }
 
-// TODO: destroying the JsonRpcService should stop all subscriptions
-pub struct JsonRpcService {
-    /// See [`Config::tasks_executor`].
-    tasks_executor: Mutex<Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
+impl JsonRpcService {
+    /// Analyzes the given JSON-RPC call and processes it in the background.
+    ///
+    /// This method is `async`, but it is expected to finish very quickly. The processing of the
+    /// request is done in parallel in the background.
+    ///
+    /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
+    /// if the requests take a long time to process or if [`JsonRpcService::next_response`] isn't
+    /// called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the JSON-RPC
+    /// response to immediately send back to the user.
+    pub async fn handle_rpc(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+        let mut lock = self.new_requests_in.lock().await;
+
+        match lock.try_send(json_rpc_request) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                assert!(err.is_full());
+                let json_rpc_request = err.into_inner();
+                Err(HandleRpcError::Overloaded { json_rpc_request })
+            }
+        }
+    }
+
+    /// Waits until the JSON-RPC service has generated a response and returns it.
+    pub async fn next_response(&self) -> String {
+        let mut lock = self.responses_rx.lock().await;
+
+        // The sender is stored in the background task, and the background task never ends before
+        // the foreground. We can thus unwrap safely.
+        lock.next().await.unwrap()
+    }
+}
+
+/// Error potentially returned by [`JsonRpcService::handle_rpc`].
+#[derive(Debug, derive_more::Display)]
+pub enum HandleRpcError {
+    /// The JSON-RPC service cannot process this request, as it is already too busy.
+    #[display(
+        fmt = "The JSON-RPC service cannot process this request, as it is already too busy."
+    )]
+    Overloaded {
+        /// Value that was passed as parameter to [`JsonRpcService::handle_rpc`].
+        json_rpc_request: String,
+    },
+}
+
+impl HandleRpcError {
+    /// Builds the JSON-RPC error string corresponding to this error.
+    pub fn into_json_rpc_error(self) -> Option<String> {
+        let HandleRpcError::Overloaded { json_rpc_request } = self;
+
+        match json_rpc::parse::parse_call(&json_rpc_request) {
+            Ok(call) => match call.id_json {
+                Some(id) => Some(json_rpc::parse::build_error_response(
+                    id,
+                    json_rpc::parse::ErrorResponse::ServerError(-32000, "Too busy"),
+                    None,
+                )),
+                None => None,
+            },
+            Err(_) => None,
+        }
+    }
+}
+
+/// Fields used to process JSON-RPC requests in the background.
+struct Background {
+    /// Receiver for new incoming JSON-RPC requests.
+    new_requests_rx: mpsc::Receiver<String>,
+
+    /// Channel to send out responses.
+    responses_sender: mpsc::Sender<String>,
+
+    /// Each active subscription leads to a task being inserted into this container.
+    /// Never contains more than [`Background::max_subscriptions`] items.
+    active_subscriptions: stream::FuturesUnordered<future::BoxFuture<'static, ()>>,
+
+    /// See [`Config::max_subscriptions`].
+    // TODO: not enforced
+    max_subscriptions: u32,
 
     chain_spec: chain_spec::ChainSpec,
 
@@ -196,7 +302,8 @@ pub struct JsonRpcService {
     transactions_service: Arc<transactions_service::TransactionsService>,
 
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
-    blocks: Mutex<Blocks>,
+    // TODO: move somewhere else
+    blocks: Blocks,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -205,13 +312,29 @@ pub struct JsonRpcService {
 
     next_subscription: atomic::AtomicU64,
 
-    /// For each value of `user_data` passed when a JSON-RPC request is received, the list of
-    /// active subscriptions.
-    per_userdata_subscriptions: Mutex<HashMap<u32, Arc<PerUserDataSubscriptions>>>,
+    // TODO: merge all these below into one with a type enum, so that the capacity of the hashmap can match the max subscriptions
+    /// For each active finalized blocks subscription (the key), a sender. If the user
+    /// unsubscribes, send the unsubscription request ID of the channel in order to close the
+    /// subscription.
+    ///
+    /// Note that the default `SipHasher` is used in order to prevent potential hash collision
+    /// attacks.
+    all_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// The id of the chain that this service is handling requests for.
-    // TODO: a bit spaghetti
-    chain_id: super::ChainId,
+    /// Same principle as [`Background::all_heads`], but for new heads subscriptions.
+    new_heads: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`Background::all_heads`], but for finalized heads subscriptions.
+    finalized_heads: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`Background::all_heads`], but for storage subscriptions.
+    storage: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`Background::all_heads`], but for transactions.
+    transactions: HashMap<String, oneshot::Sender<String>>,
+
+    /// Same principle as [`Background::all_heads`], but for runtime specs.
+    runtime_specs: HashMap<String, oneshot::Sender<String>>,
 }
 
 struct Blocks {
@@ -227,47 +350,43 @@ struct Blocks {
     finalized_block: [u8; 32],
 }
 
-/// Send back a response or a notification to the JSON-RPC client.
-///
-/// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
-/// >           in order to print a log message.
-// TODO: a bit spaghetti
-pub fn send_back(message: &str, chain_id: super::ChainId) {
-    log::debug!(
-        target: "json-rpc",
-        "JSON-RPC <= {}{}",
-        if message.len() > 100 { &message[..100] } else { &message[..] },
-        if message.len() > 100 { "…" } else { "" }
-    );
+impl Background {
+    async fn handle_request(&mut self, json_rpc_request: String) {
+        // Check whether the JSON-RPC request is correct, and bail out if it isn't.
+        let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
+            Ok(v) => v,
+            Err(methods::ParseError::Method { request_id, error }) => {
+                log::warn!(
+                    target: "json-rpc",
+                    "Error in JSON-RPC method call: {}", error
+                );
+                let _ = self
+                    .responses_sender
+                    .send(error.to_json_error(request_id))
+                    .await;
+                return;
+            }
+            Err(error) => {
+                log::warn!(
+                    target: "json-rpc",
+                    "Ignoring malformed JSON-RPC call: {}", error
+                );
+                return;
+            }
+        };
 
-    ffi::emit_json_rpc_response(message, chain_id);
-}
-
-impl JsonRpcService {
-    /// Send back a response or a notification to the JSON-RPC client.
-    fn send_back(&self, message: &str) {
-        send_back(message, self.chain_id)
-    }
-
-    /// Analyzes the given JSON-RPC call and processes it.
-    ///
-    /// Depending on the request, either calls [`JsonRpcService::send_back`] immediately or
-    /// spawns a background task for further processing.
-    pub async fn handle_rpc<'a>(
-        self: Arc<JsonRpcService>,
-
-        request_id: &'a str,
-        call: MethodCall<'a>,
-    ) {
         // Most calls are handled directly in this method's body. The most voluminous (in terms
         // of lines of code) have their dedicated methods.
         match call {
             methods::MethodCall::author_pendingExtrinsics {} => {
                 // TODO: ask transactions service
-                self.send_back(
-                    &methods::Response::author_pendingExtrinsics(Vec::new())
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::author_pendingExtrinsics(Vec::new())
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
                 // In Substrate, `author_submitExtrinsic` returns the hash of the extrinsic. It
@@ -286,39 +405,38 @@ impl JsonRpcService {
                     .submit_extrinsic(transaction.0)
                     .await;
 
-                self.send_back(
-                    &methods::Response::author_submitExtrinsic(methods::HashHexString(
-                        transaction_hash,
-                    ))
-                    .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::author_submitExtrinsic(methods::HashHexString(
+                            transaction_hash,
+                        ))
+                        .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
                 self.submit_and_watch_extrinsic(request_id, transaction)
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                let invalid =
-                    if let Some(subs) = self.per_userdata_subscriptions.lock().await.get_mut(&0) {
-                        if let Some(cancel_tx) =
-                            subs.transactions.lock().await.remove(&subscription[..])
-                        {
-                            // `cancel_tx` might have been closed if the channel from the transactions
-                            // service has been closed too. This is not an error.
-                            let _ = cancel_tx.send(request_id.to_owned());
-                            false
-                        } else {
-                            true
-                        }
-                    } else {
-                        true
-                    };
+                let invalid = if let Some(cancel_tx) = self.transactions.remove(&subscription[..]) {
+                    // `cancel_tx` might have been closed if the channel from the transactions
+                    // service has been closed too. This is not an error.
+                    let _ = cancel_tx.send(request_id.to_owned());
+                    false
+                } else {
+                    true
+                };
 
                 if invalid {
-                    self.send_back(
-                        &methods::Response::author_unwatchExtrinsic(false)
-                            .to_json_response(request_id),
-                    );
+                    let _ = self
+                        .responses_sender
+                        .send(
+                            methods::Response::author_unwatchExtrinsic(false)
+                                .to_json_response(request_id),
+                        )
+                        .await;
                 } else {
                 }
             }
@@ -326,7 +444,7 @@ impl JsonRpcService {
                 // `hash` equal to `None` means "the current best block".
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.lock().await.best_block,
+                    None => self.blocks.best_block,
                 };
 
                 // Block bodies and justifications aren't stored locally. Ask the network.
@@ -346,41 +464,51 @@ impl JsonRpcService {
                 // The `block_query` function guarantees that the header and body are present and
                 // are correct.
 
-                self.send_back(&if let Ok(block) = result {
-                    methods::Response::chain_getBlock(methods::Block {
-                        extrinsics: block
-                            .body
-                            .unwrap()
-                            .into_iter()
-                            .map(methods::Extrinsic)
-                            .collect(),
-                        header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
+                let _ = self
+                    .responses_sender
+                    .send(if let Ok(block) = result {
+                        methods::Response::chain_getBlock(methods::Block {
+                            extrinsics: block
+                                .body
+                                .unwrap()
+                                .into_iter()
+                                .map(methods::Extrinsic)
+                                .collect(),
+                            header: methods::Header::from_scale_encoded_header(
+                                &block.header.unwrap(),
+                            )
                             .unwrap(),
-                        justification: block.justification.map(methods::HexString),
+                            justification: block.justification.map(methods::HexString),
+                        })
+                        .to_json_response(request_id)
+                    } else {
+                        json_rpc::parse::build_success_response(request_id, "null")
                     })
-                    .to_json_response(request_id)
-                } else {
-                    json_rpc::parse::build_success_response(request_id, "null")
-                });
+                    .await;
             }
             methods::MethodCall::chain_getBlockHash { height } => {
                 self.get_block_hash(request_id, height).await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
-                self.send_back(
-                    &methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                        self.blocks.lock().await.finalized_block,
-                    ))
-                    .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::chain_getFinalizedHead(methods::HashHexString(
+                            self.blocks.finalized_block,
+                        ))
+                        .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.lock().await.best_block,
+                    None => self.blocks.best_block,
                 };
 
-                self.send_back(&match self.header_query(&hash).await {
+                let fut = self.header_query(&hash);
+                let header = fut.await;
+                let response = match header {
                     Ok(header) => {
                         // In the case of a parachain, it is possible for the header to be in
                         // a format that smoldot isn't capable of parsing. In that situation,
@@ -403,7 +531,9 @@ impl JsonRpcService {
                         // TODO: error or null?
                         json_rpc::parse::build_success_response(request_id, "null")
                     }
-                });
+                };
+
+                let _ = self.responses_sender.send(response).await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.subscribe_all_heads(request_id).await;
@@ -415,49 +545,51 @@ impl JsonRpcService {
                 self.subscribe_finalized_heads(request_id).await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                let invalid = if let Some(subs) =
-                    self.per_userdata_subscriptions.lock().await.get_mut(&0)
-                {
-                    if let Some(cancel_tx) = subs.finalized_heads.lock().await.remove(&subscription)
-                    {
-                        cancel_tx.send(request_id.to_owned()).is_err()
-                    } else {
-                        true
-                    }
+                let invalid = if let Some(cancel_tx) = self.finalized_heads.remove(&subscription) {
+                    cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
                     true
                 };
 
                 if invalid {
-                    self.send_back(
-                        &methods::Response::chain_unsubscribeFinalizedHeads(false)
-                            .to_json_response(request_id),
-                    );
+                    let _ = self
+                        .responses_sender
+                        .send(
+                            methods::Response::chain_unsubscribeFinalizedHeads(false)
+                                .to_json_response(request_id),
+                        )
+                        .await;
                 } else {
                 }
             }
             methods::MethodCall::payment_queryInfo { extrinsic: _, hash } => {
                 assert!(hash.is_none()); // TODO: handle when hash != None
                                          // TODO: complete hack
-                self.send_back(
-                    &methods::Response::payment_queryInfo(methods::RuntimeDispatchInfo {
-                        weight: 220429000,                     // TODO: no
-                        class: methods::DispatchClass::Normal, // TODO: no
-                        partial_fee: 15600000001,              // TODO: no
-                    })
-                    .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::payment_queryInfo(methods::RuntimeDispatchInfo {
+                            weight: 220429000,                     // TODO: no
+                            class: methods::DispatchClass::Normal, // TODO: no
+                            partial_fee: 15600000001,              // TODO: no
+                        })
+                        .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::rpc_methods {} => {
-                self.send_back(
-                    &methods::Response::rpc_methods(methods::RpcMethods {
-                        version: 1,
-                        methods: methods::MethodCall::method_names()
-                            .map(|n| n.into())
-                            .collect(),
-                    })
-                    .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::rpc_methods(methods::RpcMethods {
+                            version: 1,
+                            methods: methods::MethodCall::method_names()
+                                .map(|n| n.into())
+                                .collect(),
+                        })
+                        .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -467,14 +599,11 @@ impl JsonRpcService {
             } => {
                 assert!(hash.is_none()); // TODO: not implemented
 
-                let mut lock = self.blocks.lock().await;
-
-                let block_hash = lock.best_block;
+                let block_hash = self.blocks.best_block;
                 let (state_root, block_number) = {
-                    let block = lock.known_blocks.get(&block_hash).unwrap();
+                    let block = self.blocks.known_blocks.get(&block_hash).unwrap();
                     (block.state_root, block.number)
                 };
-                drop(lock);
 
                 let outcome = self
                     .sync_service
@@ -487,48 +616,51 @@ impl JsonRpcService {
                     )
                     .await;
 
-                self.send_back(&match outcome {
-                    Ok(keys) => {
-                        // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
-                        let out = keys
-                            .into_iter()
-                            .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
-                            .map(methods::HexString)
-                            .take(usize::try_from(count).unwrap_or(usize::max_value()))
-                            .collect::<Vec<_>>();
-                        methods::Response::state_getKeysPaged(out).to_json_response(request_id)
-                    }
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
-                });
+                let _ = self
+                    .responses_sender
+                    .send(match outcome {
+                        Ok(keys) => {
+                            // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
+                            let out = keys
+                                .into_iter()
+                                .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                                .map(methods::HexString)
+                                .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                                .collect::<Vec<_>>();
+                            methods::Response::state_getKeysPaged(out).to_json_response(request_id)
+                        }
+                        Err(error) => json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                            None,
+                        ),
+                    })
+                    .await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
-                let blocks = self.blocks.lock().await;
-                let at = at.as_ref().map(|h| h.0).unwrap_or(blocks.best_block);
+                let at = at.as_ref().map(|h| h.0).unwrap_or(self.blocks.best_block);
 
                 // TODO: have no idea what this describes actually
                 let mut out = methods::StorageChangeSet {
-                    block: methods::HashHexString(blocks.best_block),
+                    block: methods::HashHexString(self.blocks.best_block),
                     changes: Vec::new(),
                 };
 
-                // Drop the lock to make sure that we don't accidentally lock it again below.
-                drop(blocks);
-
                 for key in keys {
                     // TODO: parallelism?
-                    if let Ok(value) = self.storage_query(&key.0, &at).await {
+                    let fut = self.storage_query(&key.0, &at);
+                    if let Ok(value) = fut.await {
                         out.changes.push((key, value.map(methods::HexString)));
                     }
                 }
 
-                self.send_back(
-                    &methods::Response::state_queryStorageAt(vec![out])
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::state_queryStorageAt(vec![out])
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::state_getMetadata {} => {
                 let response = match self.runtime_service.clone().metadata().await {
@@ -551,15 +683,14 @@ impl JsonRpcService {
                     }
                 };
 
-                self.send_back(&response);
+                let _ = self.responses_sender.send(response).await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
-                let hash = hash
-                    .as_ref()
-                    .map(|h| h.0)
-                    .unwrap_or(self.blocks.lock().await.best_block);
+                let hash = hash.as_ref().map(|h| h.0).unwrap_or(self.blocks.best_block);
 
-                self.send_back(&match self.storage_query(&key.0, &hash).await {
+                let fut = self.storage_query(&key.0, &hash);
+                let response = fut.await;
+                let response = match response {
                     Ok(Some(value)) => {
                         methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
                             .to_json_response(request_id)
@@ -570,7 +701,9 @@ impl JsonRpcService {
                         json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                         None,
                     ),
-                });
+                };
+
+                let _ = self.responses_sender.send(response).await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
                 let subscription = self
@@ -582,23 +715,16 @@ impl JsonRpcService {
                     self.runtime_service.subscribe_runtime_version().await;
 
                 let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-                let reference_arc = self
-                    .per_userdata_subscriptions
-                    .lock()
-                    .await
-                    .entry(0)
-                    .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
-                    .clone();
-                reference_arc
-                    .runtime_specs
-                    .lock()
-                    .await
+                self.runtime_specs
                     .insert(subscription.clone(), unsubscribe_tx);
 
-                self.send_back(
-                    &methods::Response::state_subscribeRuntimeVersion(&subscription)
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::state_subscribeRuntimeVersion(&subscription)
+                            .to_json_response(request_id),
+                    )
+                    .await;
 
                 let notification = if let Ok(runtime_spec) = current_specs {
                     let runtime_spec = runtime_spec.decode();
@@ -619,100 +745,87 @@ impl JsonRpcService {
                     "null".to_string()
                 };
 
-                self.send_back(&smoldot::json_rpc::parse::build_subscription_event(
-                    "state_runtimeVersion",
-                    &subscription,
-                    &notification,
-                ));
+                let _ = self
+                    .responses_sender
+                    .send(json_rpc::parse::build_subscription_event(
+                        "state_runtimeVersion",
+                        &subscription,
+                        &notification,
+                    ))
+                    .await;
 
-                let client = self.clone();
-                (self.tasks_executor.lock().await)(
-                    "jsonrpc-subscription-runtime-spec".into(),
-                    Box::pin(async move {
-                        futures::pin_mut!(spec_changes);
+                let mut responses_sender = self.responses_sender.clone();
+                self.active_subscriptions.push(Box::pin(async move {
+                    futures::pin_mut!(spec_changes);
 
-                        loop {
-                            // Wait for either a new storage update, or for the subscription to be canceled.
-                            let next_change = spec_changes.next();
-                            futures::pin_mut!(next_change);
-                            match future::select(next_change, &mut unsubscribe_rx).await {
-                                future::Either::Left((new_runtime, _)) => {
-                                    let notification_body =
-                                        if let Ok(runtime_spec) = new_runtime.unwrap() {
-                                            let runtime_spec = runtime_spec.decode();
-                                            serde_json::to_string(&methods::RuntimeVersion {
-                                                spec_name: runtime_spec.spec_name.into(),
-                                                impl_name: runtime_spec.impl_name.into(),
-                                                authoring_version: u64::from(
-                                                    runtime_spec.authoring_version,
-                                                ),
-                                                spec_version: u64::from(runtime_spec.spec_version),
-                                                impl_version: u64::from(runtime_spec.impl_version),
-                                                transaction_version: runtime_spec
-                                                    .transaction_version
-                                                    .map(u64::from),
-                                                apis: runtime_spec
-                                                    .apis
-                                                    .map(|api| (api.name, api.version))
-                                                    .collect(),
-                                            })
-                                            .unwrap()
-                                        } else {
-                                            "null".to_string()
-                                        };
-
-                                    let per_source_subscriptions =
-                                        client.per_userdata_subscriptions.lock().await;
-
-                                    if per_source_subscriptions
-                                        .get(&0)
-                                        .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
-                                    {
-                                        client.send_back(
-                                            &smoldot::json_rpc::parse::build_subscription_event(
-                                                "state_runtimeVersion",
-                                                &subscription,
-                                                &notification_body,
+                    loop {
+                        // Wait for either a new storage update, or for the subscription to be canceled.
+                        let next_change = spec_changes.next();
+                        futures::pin_mut!(next_change);
+                        match future::select(next_change, &mut unsubscribe_rx).await {
+                            future::Either::Left((new_runtime, _)) => {
+                                let notification_body =
+                                    if let Ok(runtime_spec) = new_runtime.unwrap() {
+                                        let runtime_spec = runtime_spec.decode();
+                                        serde_json::to_string(&methods::RuntimeVersion {
+                                            spec_name: runtime_spec.spec_name.into(),
+                                            impl_name: runtime_spec.impl_name.into(),
+                                            authoring_version: u64::from(
+                                                runtime_spec.authoring_version,
                                             ),
-                                        );
+                                            spec_version: u64::from(runtime_spec.spec_version),
+                                            impl_version: u64::from(runtime_spec.impl_version),
+                                            transaction_version: runtime_spec
+                                                .transaction_version
+                                                .map(u64::from),
+                                            apis: runtime_spec
+                                                .apis
+                                                .map(|api| (api.name, api.version))
+                                                .collect(),
+                                        })
+                                        .unwrap()
                                     } else {
-                                        break;
-                                    }
-                                }
-                                future::Either::Right((Ok(unsub_request_id), _)) => {
-                                    let response =
-                                        methods::Response::state_unsubscribeRuntimeVersion(true)
-                                            .to_json_response(&unsub_request_id);
-                                    client.send_back(&response);
-                                    break;
-                                }
-                                future::Either::Right((Err(_), _)) => break,
+                                        "null".to_string()
+                                    };
+
+                                let _ = responses_sender
+                                    .send(json_rpc::parse::build_subscription_event(
+                                        "state_runtimeVersion",
+                                        &subscription,
+                                        &notification_body,
+                                    ))
+                                    .await;
                             }
+                            future::Either::Right((Ok(unsub_request_id), _)) => {
+                                let response =
+                                    methods::Response::state_unsubscribeRuntimeVersion(true)
+                                        .to_json_response(&unsub_request_id);
+                                let _ = responses_sender.send(response).await;
+                                break;
+                            }
+                            future::Either::Right((Err(_), _)) => break,
                         }
-                    }),
-                );
+                    }
+                }));
             }
             methods::MethodCall::state_subscribeStorage { list } => {
                 self.subscribe_storage(request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                let invalid = if let Some(subs) =
-                    self.per_userdata_subscriptions.lock().await.get_mut(&0)
-                {
-                    if let Some(cancel_tx) = subs.storage.lock().await.remove(&subscription[..]) {
-                        cancel_tx.send(request_id.to_owned()).is_err()
-                    } else {
-                        true
-                    }
+                let invalid = if let Some(cancel_tx) = self.storage.remove(&subscription[..]) {
+                    cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
                     true
                 };
 
                 if invalid {
-                    self.send_back(
-                        &methods::Response::state_unsubscribeStorage(false)
-                            .to_json_response(request_id),
-                    );
+                    let _ = self
+                        .responses_sender
+                        .send(
+                            methods::Response::state_unsubscribeStorage(false)
+                                .to_json_response(request_id),
+                        )
+                        .await;
                 }
             }
             methods::MethodCall::state_getRuntimeVersion { at } => {
@@ -725,29 +838,34 @@ impl JsonRpcService {
                         .map_err(runtime_service::RuntimeVersionOfBlockError::InvalidRuntime)
                 };
 
-                self.send_back(&match runtime_spec {
-                    Ok(runtime_spec) => {
-                        let runtime_spec = runtime_spec.decode();
-                        methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                            spec_name: runtime_spec.spec_name.into(),
-                            impl_name: runtime_spec.impl_name.into(),
-                            authoring_version: u64::from(runtime_spec.authoring_version),
-                            spec_version: u64::from(runtime_spec.spec_version),
-                            impl_version: u64::from(runtime_spec.impl_version),
-                            transaction_version: runtime_spec.transaction_version.map(u64::from),
-                            apis: runtime_spec
-                                .apis
-                                .map(|api| (api.name, api.version))
-                                .collect(),
-                        })
-                        .to_json_response(request_id)
-                    }
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
-                });
+                let _ = self
+                    .responses_sender
+                    .send(match runtime_spec {
+                        Ok(runtime_spec) => {
+                            let runtime_spec = runtime_spec.decode();
+                            methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
+                                spec_name: runtime_spec.spec_name.into(),
+                                impl_name: runtime_spec.impl_name.into(),
+                                authoring_version: u64::from(runtime_spec.authoring_version),
+                                spec_version: u64::from(runtime_spec.spec_version),
+                                impl_version: u64::from(runtime_spec.impl_version),
+                                transaction_version: runtime_spec
+                                    .transaction_version
+                                    .map(u64::from),
+                                apis: runtime_spec
+                                    .apis
+                                    .map(|api| (api.name, api.version))
+                                    .collect(),
+                            })
+                            .to_json_response(request_id)
+                        }
+                        Err(error) => json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                            None,
+                        ),
+                    })
+                    .await;
             }
             methods::MethodCall::system_accountNextIndex { account } => {
                 let response = match account_nonce(&self.runtime_service, account).await {
@@ -765,95 +883,125 @@ impl JsonRpcService {
                     ),
                 };
 
-                self.send_back(&response);
+                let _ = self.responses_sender.send(response).await;
             }
             methods::MethodCall::system_chain {} => {
-                self.send_back(
-                    &methods::Response::system_chain(self.chain_spec.name())
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_chain(self.chain_spec.name())
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::system_chainType {} => {
-                self.send_back(
-                    &methods::Response::system_chainType(self.chain_spec.chain_type())
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_chainType(self.chain_spec.chain_type())
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::system_health {} => {
-                self.send_back(
-                    &methods::Response::system_health(methods::SystemHealth {
-                        // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
-                        // is finished and that the block notifications report blocks that are
-                        // believed to be near the head of the chain.
-                        is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
-                        peers: u64::try_from(self.network_service.peers_list().await.count())
-                            .unwrap_or(u64::max_value()),
-                        should_have_peers: self.chain_spec.has_live_network(),
-                    })
-                    .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_health(methods::SystemHealth {
+                            // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
+                            // is finished and that the block notifications report blocks that are
+                            // believed to be near the head of the chain.
+                            is_syncing: !self
+                                .runtime_service
+                                .is_near_head_of_chain_heuristic()
+                                .await,
+                            peers: u64::try_from(self.network_service.peers_list().await.count())
+                                .unwrap_or(u64::max_value()),
+                            should_have_peers: self.chain_spec.has_live_network(),
+                        })
+                        .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
                 // Wasm node never listens on any address.
-                self.send_back(
-                    &methods::Response::system_localListenAddresses(Vec::new())
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_localListenAddresses(Vec::new())
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::system_name {} => {
-                self.send_back(
-                    &methods::Response::system_name(env!("CARGO_PKG_NAME"))
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_name(env!("CARGO_PKG_NAME"))
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::system_peers {} => {
-                self.send_back(
-                    &methods::Response::system_peers(
-                        self.sync_service
-                            .syncing_peers()
-                            .await
-                            .map(|(peer_id, best_number, best_hash)| methods::SystemPeer {
-                                peer_id: peer_id.to_string(),
-                                roles: "unknown".to_string(), // TODO: do properly
-                                best_hash: methods::HashHexString(best_hash),
-                                best_number,
-                            })
-                            .collect(),
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_peers(
+                            self.sync_service
+                                .syncing_peers()
+                                .await
+                                .map(|(peer_id, best_number, best_hash)| methods::SystemPeer {
+                                    peer_id: peer_id.to_string(),
+                                    roles: "unknown".to_string(), // TODO: do properly
+                                    best_hash: methods::HashHexString(best_hash),
+                                    best_number,
+                                })
+                                .collect(),
+                        )
+                        .to_json_response(request_id),
                     )
-                    .to_json_response(request_id),
-                );
+                    .await;
             }
             methods::MethodCall::system_properties {} => {
-                self.send_back(
-                    &methods::Response::system_properties(
-                        serde_json::from_str(self.chain_spec.properties()).unwrap(),
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_properties(
+                            serde_json::from_str(self.chain_spec.properties()).unwrap(),
+                        )
+                        .to_json_response(request_id),
                     )
-                    .to_json_response(request_id),
-                );
+                    .await;
             }
             methods::MethodCall::system_version {} => {
-                self.send_back(
-                    &methods::Response::system_version(env!("CARGO_PKG_VERSION"))
-                        .to_json_response(request_id),
-                );
+                let _ = self
+                    .responses_sender
+                    .send(
+                        methods::Response::system_version(env!("CARGO_PKG_VERSION"))
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             _method => {
                 log::error!(target: "json-rpc", "JSON-RPC call not supported yet: {:?}", _method);
-                self.send_back(&json_rpc::parse::build_error_response(
-                    request_id,
-                    json_rpc::parse::ErrorResponse::ServerError(
-                        -32000,
-                        "Not implemented in smoldot yet",
-                    ),
-                    None,
-                ));
+                let _ = self
+                    .responses_sender
+                    .send(json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Not implemented in smoldot yet",
+                        ),
+                        None,
+                    ))
+                    .await;
             }
         }
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
     async fn submit_and_watch_extrinsic(
-        self: Arc<JsonRpcService>,
+        &mut self,
         request_id: &str,
         transaction: methods::HexString,
     ) {
@@ -868,160 +1016,130 @@ impl JsonRpcService {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let reference_arc = self
-            .per_userdata_subscriptions
-            .lock()
-            .await
-            .entry(0)
-            .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
-            .clone();
-        reference_arc
-            .transactions
-            .lock()
-            .await
+        self.transactions
             .insert(subscription.clone(), unsubscribe_tx);
 
         let confirmation = methods::Response::author_submitAndWatchExtrinsic(&subscription)
             .to_json_response(request_id);
 
         // Spawn a separate task for the transaction updates.
-        let client = self.clone();
-        (self.tasks_executor.lock().await)(
-            "jsonrpc-subscription-transaction".into(),
-            Box::pin(async move {
-                // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation);
+        let mut responses_sender = self.responses_sender.clone();
+        self.active_subscriptions.push(Box::pin(async move {
+            // Send back to the user the confirmation of the registration.
+            let _ = responses_sender.send(confirmation).await;
 
-                loop {
-                    // Wait for either a status update block, or for the subscription to
-                    // be canceled.
-                    let next_update = transaction_updates.next();
-                    futures::pin_mut!(next_update);
-                    match future::select(next_update, &mut unsubscribe_rx).await {
-                        future::Either::Left((Some(update), _)) => {
-                            let update = match update {
-                                transactions_service::TransactionStatus::Broadcast(peers) => {
-                                    methods::TransactionStatus::Broadcast(
-                                        peers.into_iter().map(|peer| peer.to_base58()).collect(),
-                                    )
-                                }
-                                transactions_service::TransactionStatus::InBlock(block) => {
-                                    methods::TransactionStatus::InBlock(block)
-                                }
-                                transactions_service::TransactionStatus::Retracted(block) => {
-                                    methods::TransactionStatus::Retracted(block)
-                                }
-                                transactions_service::TransactionStatus::Dropped => {
-                                    methods::TransactionStatus::Dropped
-                                }
-                                transactions_service::TransactionStatus::Finalized(block) => {
-                                    methods::TransactionStatus::Finalized(block)
-                                }
-                            };
-
-                            let per_source_subscriptions =
-                                client.per_userdata_subscriptions.lock().await;
-
-                            if per_source_subscriptions
-                                .get(&0)
-                                .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
-                            {
-                                client.send_back(
-                                    &smoldot::json_rpc::parse::build_subscription_event(
-                                        "author_extrinsicUpdate",
-                                        &subscription,
-                                        &serde_json::to_string(&update).unwrap(),
-                                    ),
-                                );
-                            } else {
-                                break;
+            loop {
+                // Wait for either a status update block, or for the subscription to
+                // be canceled.
+                let next_update = transaction_updates.next();
+                futures::pin_mut!(next_update);
+                match future::select(next_update, &mut unsubscribe_rx).await {
+                    future::Either::Left((Some(update), _)) => {
+                        let update = match update {
+                            transactions_service::TransactionStatus::Broadcast(peers) => {
+                                methods::TransactionStatus::Broadcast(
+                                    peers.into_iter().map(|peer| peer.to_base58()).collect(),
+                                )
                             }
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeNewHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response);
-                            break;
-                        }
-                        future::Either::Left((None, _)) => {
-                            // Channel from the transactions service has been closed.
-                            // Stop the task.
-                            // There is nothing more that can be done except hope that the
-                            // client understands that no new notification is expected and
-                            // unsubscribes.
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
+                            transactions_service::TransactionStatus::InBlock(block) => {
+                                methods::TransactionStatus::InBlock(block)
+                            }
+                            transactions_service::TransactionStatus::Retracted(block) => {
+                                methods::TransactionStatus::Retracted(block)
+                            }
+                            transactions_service::TransactionStatus::Dropped => {
+                                methods::TransactionStatus::Dropped
+                            }
+                            transactions_service::TransactionStatus::Finalized(block) => {
+                                methods::TransactionStatus::Finalized(block)
+                            }
+                        };
+
+                        let _ = responses_sender
+                            .send(json_rpc::parse::build_subscription_event(
+                                "author_extrinsicUpdate",
+                                &subscription,
+                                &serde_json::to_string(&update).unwrap(),
+                            ))
+                            .await;
                     }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeNewHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        let _ = responses_sender.send(response).await;
+                        break;
+                    }
+                    future::Either::Left((None, _)) => {
+                        // Channel from the transactions service has been closed.
+                        // Stop the task.
+                        // There is nothing more that can be done except hope that the
+                        // client understands that no new notification is expected and
+                        // unsubscribes.
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
-            }),
-        );
+            }
+        }));
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
-    async fn get_block_hash(self: Arc<JsonRpcService>, request_id: &str, height: Option<u64>) {
-        let mut blocks = self.blocks.lock().await;
-        let blocks = &mut *blocks;
-
-        self.send_back(&match height {
-            Some(0) => {
-                methods::Response::chain_getBlockHash(methods::HashHexString(self.genesis_block))
-                    .to_json_response(request_id)
-            }
-            None => {
-                methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
-                    .to_json_response(request_id)
-            }
-            Some(n)
-                if blocks
-                    .known_blocks
-                    .get(&blocks.best_block)
-                    .map_or(false, |h| h.number == n) =>
-            {
-                methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
-                    .to_json_response(request_id)
-            }
-            Some(n)
-                if blocks
-                    .known_blocks
-                    .get(&blocks.finalized_block)
-                    .map_or(false, |h| h.number == n) =>
-            {
-                methods::Response::chain_getBlockHash(methods::HashHexString(
-                    blocks.finalized_block,
+    async fn get_block_hash(&mut self, request_id: &str, height: Option<u64>) {
+        let _ = self
+            .responses_sender
+            .send(match height {
+                Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
+                    self.genesis_block,
                 ))
-                .to_json_response(request_id)
-            }
-            Some(_) => {
-                // While the block could be found in `known_blocks`, there is no guarantee
-                // that blocks in `known_blocks` are canonical, and we have no choice but to
-                // return null.
-                // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
-                json_rpc::parse::build_success_response(request_id, "null")
-            }
-        });
+                .to_json_response(request_id),
+                None => methods::Response::chain_getBlockHash(methods::HashHexString(
+                    self.blocks.best_block,
+                ))
+                .to_json_response(request_id),
+                Some(n)
+                    if self
+                        .blocks
+                        .known_blocks
+                        .get(&self.blocks.best_block)
+                        .map_or(false, |h| h.number == n) =>
+                {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(
+                        self.blocks.best_block,
+                    ))
+                    .to_json_response(request_id)
+                }
+                Some(n)
+                    if self
+                        .blocks
+                        .known_blocks
+                        .get(&self.blocks.finalized_block)
+                        .map_or(false, |h| h.number == n) =>
+                {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(
+                        self.blocks.finalized_block,
+                    ))
+                    .to_json_response(request_id)
+                }
+                Some(_) => {
+                    // While the block could be found in `known_blocks`, there is no guarantee
+                    // that blocks in `known_blocks` are canonical, and we have no choice but to
+                    // return null.
+                    // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
+                    json_rpc::parse::build_success_response(request_id, "null")
+                }
+            })
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(self: Arc<JsonRpcService>, request_id: &str) {
+    async fn subscribe_all_heads(&mut self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let reference_arc = self
-            .per_userdata_subscriptions
-            .lock()
-            .await
-            .entry(0)
-            .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
-            .clone();
-        reference_arc
-            .all_heads
-            .lock()
-            .await
-            .insert(subscription.clone(), unsubscribe_tx);
+        self.all_heads.insert(subscription.clone(), unsubscribe_tx);
 
         let mut blocks_list = {
             let subscribe_all = self.sync_service.subscribe_all(16).await;
@@ -1034,77 +1152,51 @@ impl JsonRpcService {
         let confirmation =
             methods::Response::chain_subscribeAllHeads(&subscription).to_json_response(request_id);
 
-        let client = self.clone();
+        let mut responses_sender = self.responses_sender.clone();
 
         // Spawn a separate task for the subscription.
-        (self.tasks_executor.lock().await)(
-            "jsonrpc-subscription-all-heads".into(),
-            Box::pin(async move {
-                // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation);
+        self.active_subscriptions.push(Box::pin(async move {
+            // Send back to the user the confirmation of the registration.
+            let _ = responses_sender.send(confirmation).await;
 
-                loop {
-                    // Wait for either a new block, or for the subscription to be canceled.
-                    let next_block = blocks_list.next();
-                    futures::pin_mut!(next_block);
-                    match future::select(next_block, &mut unsubscribe_rx).await {
-                        future::Either::Left((block, _)) => {
-                            // TODO: don't unwrap `block`! channel can be legitimately closed if full
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block.unwrap())
-                                    .unwrap();
-
-                            let per_source_subscriptions =
-                                client.per_userdata_subscriptions.lock().await;
-
-                            if per_source_subscriptions
-                                .get(&0)
-                                .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
-                            {
-                                client.send_back(
-                                    &smoldot::json_rpc::parse::build_subscription_event(
-                                        "chain_newHead",
-                                        &subscription,
-                                        &serde_json::to_string(&header).unwrap(),
-                                    ),
-                                );
-                            } else {
-                                break;
-                            }
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeAllHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
+            loop {
+                // Wait for either a new block, or for the subscription to be canceled.
+                let next_block = blocks_list.next();
+                futures::pin_mut!(next_block);
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((block, _)) => {
+                        // TODO: don't unwrap `block`! channel can be legitimately closed if full
+                        let header =
+                            methods::Header::from_scale_encoded_header(&block.unwrap()).unwrap();
+                        let _ = responses_sender
+                            .send(json_rpc::parse::build_subscription_event(
+                                "chain_newHead",
+                                &subscription,
+                                &serde_json::to_string(&header).unwrap(),
+                            ))
+                            .await;
                     }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeAllHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        let _ = responses_sender.send(response).await;
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
-            }),
-        );
+            }
+        }));
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(self: Arc<JsonRpcService>, request_id: &str) {
+    async fn subscribe_new_heads(&mut self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let reference_arc = self
-            .per_userdata_subscriptions
-            .lock()
-            .await
-            .entry(0)
-            .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
-            .clone();
-        reference_arc
-            .new_heads
-            .lock()
-            .await
-            .insert(subscription.clone(), unsubscribe_tx);
+        self.new_heads.insert(subscription.clone(), unsubscribe_tx);
 
         let mut blocks_list = {
             let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
@@ -1114,75 +1206,50 @@ impl JsonRpcService {
         let confirmation =
             methods::Response::chain_subscribeNewHeads(&subscription).to_json_response(request_id);
 
-        let client = self.clone();
+        let mut responses_sender = self.responses_sender.clone();
 
         // Spawn a separate task for the subscription.
-        (self.tasks_executor.lock().await)(
-            "jsonrpc-subscription-new-heads".into(),
-            Box::pin(async move {
-                // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation);
+        self.active_subscriptions.push(Box::pin(async move {
+            // Send back to the user the confirmation of the registration.
+            let _ = responses_sender.send(confirmation).await;
 
-                loop {
-                    // Wait for either a new block, or for the subscription to be canceled.
-                    let next_block = blocks_list.next();
-                    futures::pin_mut!(next_block);
-                    match future::select(next_block, &mut unsubscribe_rx).await {
-                        future::Either::Left((block, _)) => {
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block.unwrap())
-                                    .unwrap();
-
-                            let per_source_subscriptions =
-                                client.per_userdata_subscriptions.lock().await;
-
-                            if per_source_subscriptions
-                                .get(&0)
-                                .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
-                            {
-                                client.send_back(
-                                    &smoldot::json_rpc::parse::build_subscription_event(
-                                        "chain_newHead",
-                                        &subscription,
-                                        &serde_json::to_string(&header).unwrap(),
-                                    ),
-                                );
-                            } else {
-                                break;
-                            }
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeNewHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
+            loop {
+                // Wait for either a new block, or for the subscription to be canceled.
+                let next_block = blocks_list.next();
+                futures::pin_mut!(next_block);
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((block, _)) => {
+                        let header =
+                            methods::Header::from_scale_encoded_header(&block.unwrap()).unwrap();
+                        let _ = responses_sender
+                            .send(json_rpc::parse::build_subscription_event(
+                                "chain_newHead",
+                                &subscription,
+                                &serde_json::to_string(&header).unwrap(),
+                            ))
+                            .await;
                     }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeNewHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        let _ = responses_sender.send(response).await;
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
-            }),
-        );
+            }
+        }));
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
-    async fn subscribe_finalized_heads(self: Arc<JsonRpcService>, request_id: &str) {
+    async fn subscribe_finalized_heads(&mut self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let reference_arc = self
-            .per_userdata_subscriptions
-            .lock()
-            .await
-            .entry(0)
-            .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
-            .clone();
-        reference_arc
-            .finalized_heads
-            .lock()
-            .await
+        self.finalized_heads
             .insert(subscription.clone(), unsubscribe_tx);
 
         let mut blocks_list = {
@@ -1194,94 +1261,64 @@ impl JsonRpcService {
         let confirmation = methods::Response::chain_subscribeFinalizedHeads(&subscription)
             .to_json_response(request_id);
 
-        let client = self.clone();
+        let mut responses_sender = self.responses_sender.clone();
 
         // Spawn a separate task for the subscription.
-        (self.tasks_executor.lock().await)(
-            "jsonrpc-subscription-finalized-heads".into(),
-            Box::pin(async move {
-                // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation);
+        self.active_subscriptions.push(Box::pin(async move {
+            // Send back to the user the confirmation of the registration.
+            let _ = responses_sender.send(confirmation).await;
 
-                loop {
-                    // Wait for either a new block, or for the subscription to be canceled.
-                    let next_block = blocks_list.next();
-                    futures::pin_mut!(next_block);
-                    match future::select(next_block, &mut unsubscribe_rx).await {
-                        future::Either::Left((block, _)) => {
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block.unwrap())
-                                    .unwrap();
+            loop {
+                // Wait for either a new block, or for the subscription to be canceled.
+                let next_block = blocks_list.next();
+                futures::pin_mut!(next_block);
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((block, _)) => {
+                        let header =
+                            methods::Header::from_scale_encoded_header(&block.unwrap()).unwrap();
 
-                            let per_source_subscriptions =
-                                client.per_userdata_subscriptions.lock().await;
-
-                            if per_source_subscriptions
-                                .get(&0)
-                                .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
-                            {
-                                client.send_back(
-                                    &smoldot::json_rpc::parse::build_subscription_event(
-                                        "chain_finalizedHead",
-                                        &subscription,
-                                        &serde_json::to_string(&header).unwrap(),
-                                    ),
-                                );
-                            } else {
-                                break;
-                            }
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
+                        let _ = responses_sender
+                            .send(json_rpc::parse::build_subscription_event(
+                                "chain_finalizedHead",
+                                &subscription,
+                                &serde_json::to_string(&header).unwrap(),
+                            ))
+                            .await;
                     }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
+                            .to_json_response(&unsub_request_id);
+                        let _ = responses_sender.send(response).await;
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
-            }),
-        );
+            }
+        }));
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
-    async fn subscribe_storage(
-        self: Arc<JsonRpcService>,
-
-        request_id: &str,
-        list: Vec<methods::HexString>,
-    ) {
+    async fn subscribe_storage(&mut self, request_id: &str, list: Vec<methods::HexString>) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        let reference_arc = self
-            .per_userdata_subscriptions
-            .lock()
-            .await
-            .entry(0)
-            .or_insert_with(|| Arc::new(PerUserDataSubscriptions::default()))
-            .clone();
-        reference_arc
-            .storage
-            .lock()
-            .await
-            .insert(subscription.clone(), unsubscribe_tx);
+        self.storage.insert(subscription.clone(), unsubscribe_tx);
 
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {
             let known_values = (0..list.len()).map(|_| None).collect::<Vec<_>>();
-            let client = self.clone();
             let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
             let blocks_stream =
                 stream::once(future::ready(block_header)).chain(blocks_subscription);
+            let sync_service = self.sync_service.clone();
 
             stream::unfold(
                 (blocks_stream, list, known_values),
                 move |(mut blocks_stream, list, mut known_values)| {
-                    let client = client.clone();
+                    let sync_service = sync_service.clone();
                     async move {
                         loop {
                             let block = blocks_stream.next().await?;
@@ -1295,8 +1332,7 @@ impl JsonRpcService {
 
                             for (key_index, key) in list.iter().enumerate() {
                                 // TODO: parallelism?
-                                match client
-                                    .sync_service
+                                match sync_service
                                     .clone()
                                     .storage_query(&block_hash, state_trie_root, iter::once(&key.0))
                                     .await
@@ -1337,96 +1373,94 @@ impl JsonRpcService {
         let confirmation =
             methods::Response::state_subscribeStorage(&subscription).to_json_response(request_id);
 
-        let client = self.clone();
+        let mut responses_sender = self.responses_sender.clone();
 
         // Spawn a separate task for the subscription.
-        (self.tasks_executor.lock().await)(
-            "jsonrpc-subscription-storage".into(),
-            Box::pin(async move {
-                futures::pin_mut!(storage_updates);
+        self.active_subscriptions.push(Box::pin(async move {
+            futures::pin_mut!(storage_updates);
 
-                // Send back to the user the confirmation of the registration.
-                client.send_back(&confirmation);
+            // Send back to the user the confirmation of the registration.
+            let _ = responses_sender.send(confirmation).await;
 
-                loop {
-                    // Wait for either a new storage update, or for the subscription to be canceled.
-                    let next_block = storage_updates.next();
-                    futures::pin_mut!(next_block);
-                    match future::select(next_block, &mut unsubscribe_rx).await {
-                        future::Either::Left((changes, _)) => {
-                            let per_source_subscriptions =
-                                client.per_userdata_subscriptions.lock().await;
-
-                            if per_source_subscriptions
-                                .get(&0)
-                                .map_or(false, |arc| Arc::ptr_eq(arc, &reference_arc))
-                            {
-                                client.send_back(
-                                    &smoldot::json_rpc::parse::build_subscription_event(
-                                        "state_storage",
-                                        &subscription,
-                                        &serde_json::to_string(&changes).unwrap(),
-                                    ),
-                                );
-                            } else {
-                                break;
-                            }
-                        }
-                        future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::state_unsubscribeStorage(true)
-                                .to_json_response(&unsub_request_id);
-                            client.send_back(&response);
-                            break;
-                        }
-                        future::Either::Right((Err(_), _)) => break,
+            loop {
+                // Wait for either a new storage update, or for the subscription to be canceled.
+                let next_block = storage_updates.next();
+                futures::pin_mut!(next_block);
+                match future::select(next_block, &mut unsubscribe_rx).await {
+                    future::Either::Left((changes, _)) => {
+                        let _ = responses_sender
+                            .send(json_rpc::parse::build_subscription_event(
+                                "state_storage",
+                                &subscription,
+                                &serde_json::to_string(&changes).unwrap(),
+                            ))
+                            .await;
                     }
+                    future::Either::Right((Ok(unsub_request_id), _)) => {
+                        let response = methods::Response::state_unsubscribeStorage(true)
+                            .to_json_response(&unsub_request_id);
+                        let _ = responses_sender.send(response).await;
+                        break;
+                    }
+                    future::Either::Right((Err(_), _)) => break,
                 }
-            }),
-        );
+            }
+        }));
     }
 
-    async fn storage_query(
-        self: &Arc<JsonRpcService>,
+    fn storage_query(
+        &'_ self,
         key: &[u8],
         hash: &[u8; 32],
-    ) -> Result<Option<Vec<u8>>, StorageQueryError> {
-        // TODO: risk of deadlock here?
-        let header = self
-            .header_query(hash)
-            .await
-            .map_err(|_| StorageQueryError::FindStorageRootHashError)?;
-        let trie_root_hash = header::decode(&header).unwrap().state_root;
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, StorageQueryError>> + '_ {
+        // TODO: had to go through hoops to make it compile; clean up
+        let key = key.to_owned();
+        let hash = *hash;
+        let sync_service = self.sync_service.clone();
+        let fut = self.header_query(&hash);
 
-        let mut result = self
-            .sync_service
-            .clone()
-            .storage_query(hash, &trie_root_hash, iter::once(key))
-            .await
-            .map_err(StorageQueryError::StorageRetrieval)?;
-        Ok(result.pop().unwrap())
+        async move {
+            // TODO: risk of deadlock here?
+            let header = fut
+                .await
+                .map_err(|_| StorageQueryError::FindStorageRootHashError)?;
+            let trie_root_hash = header::decode(&header).unwrap().state_root;
+
+            let mut result = sync_service
+                .storage_query(&hash, &trie_root_hash, iter::once(key))
+                .await
+                .map_err(StorageQueryError::StorageRetrieval)?;
+            Ok(result.pop().unwrap())
+        }
     }
 
-    async fn header_query(self: &Arc<JsonRpcService>, hash: &[u8; 32]) -> Result<Vec<u8>, ()> {
-        // TODO: risk of deadlock here?
-        let mut blocks = self.blocks.lock().await;
-        let blocks = &mut *blocks;
+    fn header_query(&'_ self, hash: &[u8; 32]) -> impl Future<Output = Result<Vec<u8>, ()>> + '_ {
+        // TODO: had to go through hoops to make it compile; clean up
+        let hash = *hash;
+        let sync_service = self.sync_service.clone();
 
-        if let Some(header) = blocks.known_blocks.get(hash) {
-            Ok(header.scale_encoding_vec())
-        } else {
-            // Header isn't known locally. Ask the network.
-            let result = self
-                .sync_service
-                .clone()
-                .block_query(
-                    *hash,
-                    protocol::BlocksRequestFields {
-                        header: true,
-                        body: false,
-                        justification: false,
-                    },
-                )
-                .await;
+        async move {
+            // TODO: risk of deadlock here?
+            // TODO: restore
+            /*{
+                let mut blocks = self.blocks;
+                let blocks = &mut *blocks;
+
+                if let Some(header) = blocks.known_blocks.get(&hash) {
+                    return Ok(header.scale_encoding_vec());
+                }
+            }*/
+
+            // Header isn't known locally. Ask the networ
+            let fut = sync_service.block_query(
+                hash,
+                protocol::BlocksRequestFields {
+                    header: true,
+                    body: false,
+                    justification: false,
+                },
+            );
+            let result = fut.await;
 
             // Note that the `block_query` method guarantees that the header is present
             // and valid.
