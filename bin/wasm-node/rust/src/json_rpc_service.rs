@@ -324,8 +324,7 @@ struct Background {
     /// Same principle as [`Background::all_heads`], but for new heads subscriptions.
     new_heads: HashMap<String, oneshot::Sender<String>>,
 
-    /// Same principle as [`Background::all_heads`], but for finalized heads
-    /// subscriptions.
+    /// Same principle as [`Background::all_heads`], but for finalized heads subscriptions.
     finalized_heads: HashMap<String, oneshot::Sender<String>>,
 
     /// Same principle as [`Background::all_heads`], but for storage subscriptions.
