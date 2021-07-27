@@ -81,8 +81,14 @@ pub struct Config {
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 
-    /// Maximum number of JSON-RPC requests that can be processed simultaneously. Any additional
-    /// request will be immediately rejected.
+    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_parallel_requests: NonZeroU32,
+
+    /// Maximum number of JSON-RPC requests that can be added to a queue if it is not ready to be
+    /// processed immediately. Any additional request will be immediately rejected.
     ///
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
@@ -112,30 +118,34 @@ pub fn start(mut config: Config) -> JsonRpcService {
         responses_rx: Mutex::new(responses_rx),
     };
 
-    let mut background = Background {
-        new_requests_rx,
-        responses_sender,
-        active_subscriptions: stream::FuturesUnordered::new(),
+    // Channel used in the background in order to spawn new tasks scoped to the background.
+    let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
+
+    let background = Arc::new(Background {
+        new_requests_rx: Mutex::new(new_requests_rx),
+        responses_sender: Mutex::new(responses_sender),
+        new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
         max_subscriptions: config.max_subscriptions,
         chain_spec: config.chain_spec,
         network_service: config.network_service.0,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         transactions_service: config.transactions_service,
-        blocks: Blocks {
+        blocks: Mutex::new(Blocks {
             known_blocks: lru::LruCache::new(256),
             best_block: [0; 32],      // Filled below.
             finalized_block: [0; 32], // Filled below.
-        },
+        }),
         genesis_block: config.genesis_block_hash,
         next_subscription: atomic::AtomicU64::new(0),
-        subscriptions: HashMap::with_capacity_and_hasher(
+        subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
             usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
             Default::default(),
-        ),
-    };
+        )),
+    });
 
     // Spawns the background task that actually runs the logic of that JSON-RPC service.
+    let max_parallel_requests = config.max_parallel_requests;
     (config.tasks_executor)(
         "json-rpc-service".into(),
         async move {
@@ -146,33 +156,59 @@ pub fn start(mut config: Config) -> JsonRpcService {
             debug_assert_eq!(_finalized_block_header, best_block_header);
             let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
 
-            background.blocks.known_blocks.put(
-                best_block_hash,
-                header::decode(&best_block_header).unwrap().into(),
-            );
-            background.blocks.best_block = best_block_hash;
-            background.blocks.finalized_block = best_block_hash;
+            {
+                let mut blocks = background.blocks.lock().await;
+                blocks.known_blocks.put(
+                    best_block_hash,
+                    header::decode(&best_block_header).unwrap().into(),
+                );
+                blocks.best_block = best_block_hash;
+                blocks.finalized_block = best_block_hash;
+            }
+
+            let mut tasks = stream::FuturesUnordered::new();
+
+            for _ in 0..max_parallel_requests.get() {
+                let background = background.clone();
+                tasks.push(
+                    async move {
+                        loop {
+                            let mut lock = background.new_requests_rx.lock().await;
+                            let message = lock.next().await;
+                            match message {
+                                Some(m) => background.handle_request(m).await,
+                                None => return, // Foreground is closed.
+                            }
+                        }
+                    }
+                    .boxed(),
+                );
+            }
 
             loop {
+                if tasks.is_empty() {
+                    break;
+                }
+
                 futures::select! {
-                    () = background.active_subscriptions.select_next_some() => {},
-                    message = background.new_requests_rx.next() => {
-                        match message {
-                            Some(m) => background.handle_request(m).await,
-                            None => return, // Foreground is closed.
-                        }
-                    },
+                    () = tasks.select_next_some() => {},
+                    task = new_child_tasks_rx.next() => {
+                        let task = task.unwrap();
+                        tasks.push(task);
+                    }
                     block = best_blocks_subscription.next() => {
                         match block {
                             Some(block) => {
                                 let hash = header::hash_from_scale_encoded_header(&block);
-                                background.blocks.best_block = hash;
+                                let mut blocks = background.blocks.lock().await;
+                                let blocks = &mut *blocks;
+                                blocks.best_block = hash;
                                 // As a small trick, we re-query the finalized block from
                                 // `known_blocks` in order to ensure that it never leaves the
                                 // LRU cache.
                                 let header = header::decode(&block).unwrap().into();
-                                background.blocks.known_blocks.get(&background.blocks.finalized_block);
-                                background.blocks.known_blocks.put(hash, header);
+                                blocks.known_blocks.get(&blocks.finalized_block);
+                                blocks.known_blocks.put(hash, header);
                             },
                             None => return,
                         }
@@ -182,8 +218,9 @@ pub fn start(mut config: Config) -> JsonRpcService {
                             Some(block) => {
                                 let hash = header::hash_from_scale_encoded_header(&block);
                                 let header = header::decode(&block).unwrap().into();
-                                background.blocks.finalized_block = hash;
-                                background.blocks.known_blocks.put(hash, header);
+                                let mut blocks = background.blocks.lock().await;
+                                blocks.finalized_block = hash;
+                                blocks.known_blocks.put(hash, header);
                             },
                             None => return,
                         }
@@ -275,14 +312,13 @@ impl HandleRpcError {
 /// Fields used to process JSON-RPC requests in the background.
 struct Background {
     /// Receiver for new incoming JSON-RPC requests.
-    new_requests_rx: mpsc::Receiver<String>,
+    new_requests_rx: Mutex<mpsc::Receiver<String>>,
 
     /// Channel to send out responses.
-    responses_sender: mpsc::Sender<String>,
+    responses_sender: Mutex<mpsc::Sender<String>>,
 
-    /// Each active subscription leads to a task being inserted into this container.
-    /// Never contains more than [`Background::max_subscriptions`] items.
-    active_subscriptions: stream::FuturesUnordered<future::BoxFuture<'static, ()>>,
+    /// Whenever a task is sent on this channel, an executor runs it to completion.
+    new_child_tasks_tx: Mutex<mpsc::UnboundedSender<future::BoxFuture<'static, ()>>>,
 
     /// See [`Config::max_subscriptions`].
     // TODO: not enforced
@@ -301,7 +337,7 @@ struct Background {
 
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
     // TODO: move somewhere else
-    blocks: Blocks,
+    blocks: Mutex<Blocks>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -312,7 +348,8 @@ struct Background {
 
     /// For each active subscription (the key), a sender. If the user unsubscribes, send the
     /// unsubscription request ID of the channel in order to close the subscription.
-    subscriptions: HashMap<(String, SubscriptionTy), oneshot::Sender<String>, fnv::FnvBuildHasher>,
+    subscriptions:
+        Mutex<HashMap<(String, SubscriptionTy), oneshot::Sender<String>, fnv::FnvBuildHasher>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -339,7 +376,7 @@ struct Blocks {
 }
 
 impl Background {
-    async fn handle_request(&mut self, json_rpc_request: String) {
+    async fn handle_request(&self, json_rpc_request: String) {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
             Ok(v) => v,
@@ -350,6 +387,8 @@ impl Background {
                 );
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(error.to_json_error(request_id))
                     .await;
                 return;
@@ -370,6 +409,8 @@ impl Background {
                 // TODO: ask transactions service
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::author_pendingExtrinsics(Vec::new())
                             .to_json_response(request_id),
@@ -395,6 +436,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::author_submitExtrinsic(methods::HashHexString(
                             transaction_hash,
@@ -410,6 +453,8 @@ impl Background {
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .subscriptions
+                    .lock()
+                    .await
                     .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
                 {
                     // `cancel_tx` might have been closed if the channel from the transactions
@@ -423,6 +468,8 @@ impl Background {
                 if invalid {
                     let _ = self
                         .responses_sender
+                        .lock()
+                        .await
                         .send(
                             methods::Response::author_unwatchExtrinsic(false)
                                 .to_json_response(request_id),
@@ -435,7 +482,7 @@ impl Background {
                 // `hash` equal to `None` means "the current best block".
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.best_block,
+                    None => self.blocks.lock().await.best_block,
                 };
 
                 // Block bodies and justifications aren't stored locally. Ask the network.
@@ -457,6 +504,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(if let Ok(block) = result {
                         methods::Response::chain_getBlock(methods::Block {
                             extrinsics: block
@@ -483,9 +532,11 @@ impl Background {
             methods::MethodCall::chain_getFinalizedHead {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                            self.blocks.finalized_block,
+                            self.blocks.lock().await.finalized_block,
                         ))
                         .to_json_response(request_id),
                     )
@@ -494,7 +545,7 @@ impl Background {
             methods::MethodCall::chain_getHeader { hash } => {
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.best_block,
+                    None => self.blocks.lock().await.best_block,
                 };
 
                 let fut = self.header_query(&hash);
@@ -524,7 +575,7 @@ impl Background {
                     }
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.subscribe_all_heads(request_id).await;
@@ -538,6 +589,8 @@ impl Background {
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .subscriptions
+                    .lock()
+                    .await
                     .remove(&(subscription, SubscriptionTy::FinalizedHeads))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -548,6 +601,8 @@ impl Background {
                 if invalid {
                     let _ = self
                         .responses_sender
+                        .lock()
+                        .await
                         .send(
                             methods::Response::chain_unsubscribeFinalizedHeads(false)
                                 .to_json_response(request_id),
@@ -561,6 +616,8 @@ impl Background {
                                          // TODO: complete hack
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::payment_queryInfo(methods::RuntimeDispatchInfo {
                             weight: 220429000,                     // TODO: no
@@ -574,6 +631,8 @@ impl Background {
             methods::MethodCall::rpc_methods {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::rpc_methods(methods::RpcMethods {
                             version: 1,
@@ -593,9 +652,10 @@ impl Background {
             } => {
                 assert!(hash.is_none()); // TODO: not implemented
 
-                let block_hash = self.blocks.best_block;
+                let mut blocks = self.blocks.lock().await;
+                let block_hash = blocks.best_block;
                 let (state_root, block_number) = {
-                    let block = self.blocks.known_blocks.get(&block_hash).unwrap();
+                    let block = blocks.known_blocks.get(&block_hash).unwrap();
                     (block.state_root, block.number)
                 };
 
@@ -612,6 +672,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(match outcome {
                         Ok(keys) => {
                             // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
@@ -632,13 +694,17 @@ impl Background {
                     .await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
-                let at = at.as_ref().map(|h| h.0).unwrap_or(self.blocks.best_block);
+                let blocks = self.blocks.lock().await;
+
+                let at = at.as_ref().map(|h| h.0).unwrap_or(blocks.best_block);
 
                 // TODO: have no idea what this describes actually
                 let mut out = methods::StorageChangeSet {
-                    block: methods::HashHexString(self.blocks.best_block),
+                    block: methods::HashHexString(blocks.best_block),
                     changes: Vec::new(),
                 };
+
+                drop(blocks);
 
                 for key in keys {
                     // TODO: parallelism?
@@ -650,6 +716,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::state_queryStorageAt(vec![out])
                             .to_json_response(request_id),
@@ -677,10 +745,13 @@ impl Background {
                     }
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
-                let hash = hash.as_ref().map(|h| h.0).unwrap_or(self.blocks.best_block);
+                let hash = hash
+                    .as_ref()
+                    .map(|h| h.0)
+                    .unwrap_or(self.blocks.lock().await.best_block);
 
                 let fut = self.storage_query(&key.0, &hash);
                 let response = fut.await;
@@ -697,7 +768,7 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
                 let subscription = self
@@ -709,13 +780,15 @@ impl Background {
                     self.runtime_service.subscribe_runtime_version().await;
 
                 let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-                self.subscriptions.insert(
+                self.subscriptions.lock().await.insert(
                     (subscription.clone(), SubscriptionTy::RuntimeSpec),
                     unsubscribe_tx,
                 );
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::state_subscribeRuntimeVersion(&subscription)
                             .to_json_response(request_id),
@@ -743,6 +816,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(json_rpc::parse::build_subscription_event(
                         "state_runtimeVersion",
                         &subscription,
@@ -750,59 +825,63 @@ impl Background {
                     ))
                     .await;
 
-                let mut responses_sender = self.responses_sender.clone();
-                self.active_subscriptions.push(Box::pin(async move {
-                    futures::pin_mut!(spec_changes);
+                let mut responses_sender = self.responses_sender.lock().await.clone();
+                self.new_child_tasks_tx
+                    .lock()
+                    .await
+                    .unbounded_send(Box::pin(async move {
+                        futures::pin_mut!(spec_changes);
 
-                    loop {
-                        // Wait for either a new storage update, or for the subscription to be canceled.
-                        let next_change = spec_changes.next();
-                        futures::pin_mut!(next_change);
-                        match future::select(next_change, &mut unsubscribe_rx).await {
-                            future::Either::Left((new_runtime, _)) => {
-                                let notification_body =
-                                    if let Ok(runtime_spec) = new_runtime.unwrap() {
-                                        let runtime_spec = runtime_spec.decode();
-                                        serde_json::to_string(&methods::RuntimeVersion {
-                                            spec_name: runtime_spec.spec_name.into(),
-                                            impl_name: runtime_spec.impl_name.into(),
-                                            authoring_version: u64::from(
-                                                runtime_spec.authoring_version,
-                                            ),
-                                            spec_version: u64::from(runtime_spec.spec_version),
-                                            impl_version: u64::from(runtime_spec.impl_version),
-                                            transaction_version: runtime_spec
-                                                .transaction_version
-                                                .map(u64::from),
-                                            apis: runtime_spec
-                                                .apis
-                                                .map(|api| (api.name, api.version))
-                                                .collect(),
-                                        })
-                                        .unwrap()
-                                    } else {
-                                        "null".to_string()
-                                    };
+                        loop {
+                            // Wait for either a new storage update, or for the subscription to be canceled.
+                            let next_change = spec_changes.next();
+                            futures::pin_mut!(next_change);
+                            match future::select(next_change, &mut unsubscribe_rx).await {
+                                future::Either::Left((new_runtime, _)) => {
+                                    let notification_body =
+                                        if let Ok(runtime_spec) = new_runtime.unwrap() {
+                                            let runtime_spec = runtime_spec.decode();
+                                            serde_json::to_string(&methods::RuntimeVersion {
+                                                spec_name: runtime_spec.spec_name.into(),
+                                                impl_name: runtime_spec.impl_name.into(),
+                                                authoring_version: u64::from(
+                                                    runtime_spec.authoring_version,
+                                                ),
+                                                spec_version: u64::from(runtime_spec.spec_version),
+                                                impl_version: u64::from(runtime_spec.impl_version),
+                                                transaction_version: runtime_spec
+                                                    .transaction_version
+                                                    .map(u64::from),
+                                                apis: runtime_spec
+                                                    .apis
+                                                    .map(|api| (api.name, api.version))
+                                                    .collect(),
+                                            })
+                                            .unwrap()
+                                        } else {
+                                            "null".to_string()
+                                        };
 
-                                let _ = responses_sender
-                                    .send(json_rpc::parse::build_subscription_event(
-                                        "state_runtimeVersion",
-                                        &subscription,
-                                        &notification_body,
-                                    ))
-                                    .await;
+                                    let _ = responses_sender
+                                        .send(json_rpc::parse::build_subscription_event(
+                                            "state_runtimeVersion",
+                                            &subscription,
+                                            &notification_body,
+                                        ))
+                                        .await;
+                                }
+                                future::Either::Right((Ok(unsub_request_id), _)) => {
+                                    let response =
+                                        methods::Response::state_unsubscribeRuntimeVersion(true)
+                                            .to_json_response(&unsub_request_id);
+                                    let _ = responses_sender.send(response).await;
+                                    break;
+                                }
+                                future::Either::Right((Err(_), _)) => break,
                             }
-                            future::Either::Right((Ok(unsub_request_id), _)) => {
-                                let response =
-                                    methods::Response::state_unsubscribeRuntimeVersion(true)
-                                        .to_json_response(&unsub_request_id);
-                                let _ = responses_sender.send(response).await;
-                                break;
-                            }
-                            future::Either::Right((Err(_), _)) => break,
                         }
-                    }
-                }));
+                    }))
+                    .unwrap();
             }
             methods::MethodCall::state_subscribeStorage { list } => {
                 self.subscribe_storage(request_id, list).await;
@@ -810,6 +889,8 @@ impl Background {
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .subscriptions
+                    .lock()
+                    .await
                     .remove(&(subscription.to_owned(), SubscriptionTy::Storage))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -820,6 +901,8 @@ impl Background {
                 if invalid {
                     let _ = self
                         .responses_sender
+                        .lock()
+                        .await
                         .send(
                             methods::Response::state_unsubscribeStorage(false)
                                 .to_json_response(request_id),
@@ -839,6 +922,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(match runtime_spec {
                         Ok(runtime_spec) => {
                             let runtime_spec = runtime_spec.decode();
@@ -882,11 +967,13 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::system_chain {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_chain(self.chain_spec.name())
                             .to_json_response(request_id),
@@ -896,6 +983,8 @@ impl Background {
             methods::MethodCall::system_chainType {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_chainType(self.chain_spec.chain_type())
                             .to_json_response(request_id),
@@ -905,6 +994,8 @@ impl Background {
             methods::MethodCall::system_health {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_health(methods::SystemHealth {
                             // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
@@ -926,6 +1017,8 @@ impl Background {
                 // Wasm node never listens on any address.
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_localListenAddresses(Vec::new())
                             .to_json_response(request_id),
@@ -935,6 +1028,8 @@ impl Background {
             methods::MethodCall::system_name {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_name(env!("CARGO_PKG_NAME"))
                             .to_json_response(request_id),
@@ -944,6 +1039,8 @@ impl Background {
             methods::MethodCall::system_peers {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_peers(
                             self.sync_service
@@ -964,6 +1061,8 @@ impl Background {
             methods::MethodCall::system_properties {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_properties(
                             serde_json::from_str(self.chain_spec.properties()).unwrap(),
@@ -975,6 +1074,8 @@ impl Background {
             methods::MethodCall::system_version {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_version(env!("CARGO_PKG_VERSION"))
                             .to_json_response(request_id),
@@ -985,6 +1086,8 @@ impl Background {
                 log::error!(target: "json-rpc", "JSON-RPC call not supported yet: {:?}", _method);
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ServerError(
@@ -999,11 +1102,7 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
-    async fn submit_and_watch_extrinsic(
-        &mut self,
-        request_id: &str,
-        transaction: methods::HexString,
-    ) {
+    async fn submit_and_watch_extrinsic(&self, request_id: &str, transaction: methods::HexString) {
         let mut transaction_updates = self
             .transactions_service
             .submit_and_watch_extrinsic(transaction.0, 16)
@@ -1015,7 +1114,7 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::Transaction),
             unsubscribe_tx,
         );
@@ -1024,100 +1123,105 @@ impl Background {
             .to_json_response(request_id);
 
         // Spawn a separate task for the transaction updates.
-        let mut responses_sender = self.responses_sender.clone();
-        self.active_subscriptions.push(Box::pin(async move {
-            // Send back to the user the confirmation of the registration.
-            let _ = responses_sender.send(confirmation).await;
+        let mut responses_sender = self.responses_sender.lock().await.clone();
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(async move {
+                // Send back to the user the confirmation of the registration.
+                let _ = responses_sender.send(confirmation).await;
 
-            loop {
-                // Wait for either a status update block, or for the subscription to
-                // be canceled.
-                let next_update = transaction_updates.next();
-                futures::pin_mut!(next_update);
-                match future::select(next_update, &mut unsubscribe_rx).await {
-                    future::Either::Left((Some(update), _)) => {
-                        let update = match update {
-                            transactions_service::TransactionStatus::Broadcast(peers) => {
-                                methods::TransactionStatus::Broadcast(
-                                    peers.into_iter().map(|peer| peer.to_base58()).collect(),
-                                )
-                            }
-                            transactions_service::TransactionStatus::InBlock(block) => {
-                                methods::TransactionStatus::InBlock(block)
-                            }
-                            transactions_service::TransactionStatus::Retracted(block) => {
-                                methods::TransactionStatus::Retracted(block)
-                            }
-                            transactions_service::TransactionStatus::Dropped => {
-                                methods::TransactionStatus::Dropped
-                            }
-                            transactions_service::TransactionStatus::Finalized(block) => {
-                                methods::TransactionStatus::Finalized(block)
-                            }
-                        };
+                loop {
+                    // Wait for either a status update block, or for the subscription to
+                    // be canceled.
+                    let next_update = transaction_updates.next();
+                    futures::pin_mut!(next_update);
+                    match future::select(next_update, &mut unsubscribe_rx).await {
+                        future::Either::Left((Some(update), _)) => {
+                            let update = match update {
+                                transactions_service::TransactionStatus::Broadcast(peers) => {
+                                    methods::TransactionStatus::Broadcast(
+                                        peers.into_iter().map(|peer| peer.to_base58()).collect(),
+                                    )
+                                }
+                                transactions_service::TransactionStatus::InBlock(block) => {
+                                    methods::TransactionStatus::InBlock(block)
+                                }
+                                transactions_service::TransactionStatus::Retracted(block) => {
+                                    methods::TransactionStatus::Retracted(block)
+                                }
+                                transactions_service::TransactionStatus::Dropped => {
+                                    methods::TransactionStatus::Dropped
+                                }
+                                transactions_service::TransactionStatus::Finalized(block) => {
+                                    methods::TransactionStatus::Finalized(block)
+                                }
+                            };
 
-                        let _ = responses_sender
-                            .send(json_rpc::parse::build_subscription_event(
-                                "author_extrinsicUpdate",
-                                &subscription,
-                                &serde_json::to_string(&update).unwrap(),
-                            ))
-                            .await;
+                            let _ = responses_sender
+                                .send(json_rpc::parse::build_subscription_event(
+                                    "author_extrinsicUpdate",
+                                    &subscription,
+                                    &serde_json::to_string(&update).unwrap(),
+                                ))
+                                .await;
+                        }
+                        future::Either::Right((Ok(unsub_request_id), _)) => {
+                            let response = methods::Response::chain_unsubscribeNewHeads(true)
+                                .to_json_response(&unsub_request_id);
+                            let _ = responses_sender.send(response).await;
+                            break;
+                        }
+                        future::Either::Left((None, _)) => {
+                            // Channel from the transactions service has been closed.
+                            // Stop the task.
+                            // There is nothing more that can be done except hope that the
+                            // client understands that no new notification is expected and
+                            // unsubscribes.
+                            break;
+                        }
+                        future::Either::Right((Err(_), _)) => break,
                     }
-                    future::Either::Right((Ok(unsub_request_id), _)) => {
-                        let response = methods::Response::chain_unsubscribeNewHeads(true)
-                            .to_json_response(&unsub_request_id);
-                        let _ = responses_sender.send(response).await;
-                        break;
-                    }
-                    future::Either::Left((None, _)) => {
-                        // Channel from the transactions service has been closed.
-                        // Stop the task.
-                        // There is nothing more that can be done except hope that the
-                        // client understands that no new notification is expected and
-                        // unsubscribes.
-                        break;
-                    }
-                    future::Either::Right((Err(_), _)) => break,
                 }
-            }
-        }));
+            }))
+            .unwrap();
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
-    async fn get_block_hash(&mut self, request_id: &str, height: Option<u64>) {
+    async fn get_block_hash(&self, request_id: &str, height: Option<u64>) {
+        let mut blocks = self.blocks.lock().await;
+        let blocks = &mut *blocks;
+
         let _ = self
             .responses_sender
+            .lock()
+            .await
             .send(match height {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
                     self.genesis_block,
                 ))
                 .to_json_response(request_id),
-                None => methods::Response::chain_getBlockHash(methods::HashHexString(
-                    self.blocks.best_block,
-                ))
-                .to_json_response(request_id),
-                Some(n)
-                    if self
-                        .blocks
-                        .known_blocks
-                        .get(&self.blocks.best_block)
-                        .map_or(false, |h| h.number == n) =>
-                {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(
-                        self.blocks.best_block,
-                    ))
-                    .to_json_response(request_id)
+                None => {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
+                        .to_json_response(request_id)
                 }
                 Some(n)
-                    if self
-                        .blocks
+                    if blocks
                         .known_blocks
-                        .get(&self.blocks.finalized_block)
+                        .get(&blocks.best_block)
+                        .map_or(false, |h| h.number == n) =>
+                {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
+                        .to_json_response(request_id)
+                }
+                Some(n)
+                    if blocks
+                        .known_blocks
+                        .get(&blocks.finalized_block)
                         .map_or(false, |h| h.number == n) =>
                 {
                     methods::Response::chain_getBlockHash(methods::HashHexString(
-                        self.blocks.finalized_block,
+                        blocks.finalized_block,
                     ))
                     .to_json_response(request_id)
                 }
@@ -1133,14 +1237,14 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(&mut self, request_id: &str) {
+    async fn subscribe_all_heads(&self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::AllHeads),
             unsubscribe_tx,
         );
@@ -1156,51 +1260,56 @@ impl Background {
         let confirmation =
             methods::Response::chain_subscribeAllHeads(&subscription).to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
-        self.active_subscriptions.push(Box::pin(async move {
-            // Send back to the user the confirmation of the registration.
-            let _ = responses_sender.send(confirmation).await;
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(async move {
+                // Send back to the user the confirmation of the registration.
+                let _ = responses_sender.send(confirmation).await;
 
-            loop {
-                // Wait for either a new block, or for the subscription to be canceled.
-                let next_block = blocks_list.next();
-                futures::pin_mut!(next_block);
-                match future::select(next_block, &mut unsubscribe_rx).await {
-                    future::Either::Left((block, _)) => {
-                        // TODO: don't unwrap `block`! channel can be legitimately closed if full
-                        let header =
-                            methods::Header::from_scale_encoded_header(&block.unwrap()).unwrap();
-                        let _ = responses_sender
-                            .send(json_rpc::parse::build_subscription_event(
-                                "chain_newHead",
-                                &subscription,
-                                &serde_json::to_string(&header).unwrap(),
-                            ))
-                            .await;
+                loop {
+                    // Wait for either a new block, or for the subscription to be canceled.
+                    let next_block = blocks_list.next();
+                    futures::pin_mut!(next_block);
+                    match future::select(next_block, &mut unsubscribe_rx).await {
+                        future::Either::Left((block, _)) => {
+                            // TODO: don't unwrap `block`! channel can be legitimately closed if full
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
+                            let _ = responses_sender
+                                .send(json_rpc::parse::build_subscription_event(
+                                    "chain_newHead",
+                                    &subscription,
+                                    &serde_json::to_string(&header).unwrap(),
+                                ))
+                                .await;
+                        }
+                        future::Either::Right((Ok(unsub_request_id), _)) => {
+                            let response = methods::Response::chain_unsubscribeAllHeads(true)
+                                .to_json_response(&unsub_request_id);
+                            let _ = responses_sender.send(response).await;
+                            break;
+                        }
+                        future::Either::Right((Err(_), _)) => break,
                     }
-                    future::Either::Right((Ok(unsub_request_id), _)) => {
-                        let response = methods::Response::chain_unsubscribeAllHeads(true)
-                            .to_json_response(&unsub_request_id);
-                        let _ = responses_sender.send(response).await;
-                        break;
-                    }
-                    future::Either::Right((Err(_), _)) => break,
                 }
-            }
-        }));
+            }))
+            .unwrap();
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(&mut self, request_id: &str) {
+    async fn subscribe_new_heads(&self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::NewHeads),
             unsubscribe_tx,
         );
@@ -1213,50 +1322,55 @@ impl Background {
         let confirmation =
             methods::Response::chain_subscribeNewHeads(&subscription).to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
-        self.active_subscriptions.push(Box::pin(async move {
-            // Send back to the user the confirmation of the registration.
-            let _ = responses_sender.send(confirmation).await;
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(async move {
+                // Send back to the user the confirmation of the registration.
+                let _ = responses_sender.send(confirmation).await;
 
-            loop {
-                // Wait for either a new block, or for the subscription to be canceled.
-                let next_block = blocks_list.next();
-                futures::pin_mut!(next_block);
-                match future::select(next_block, &mut unsubscribe_rx).await {
-                    future::Either::Left((block, _)) => {
-                        let header =
-                            methods::Header::from_scale_encoded_header(&block.unwrap()).unwrap();
-                        let _ = responses_sender
-                            .send(json_rpc::parse::build_subscription_event(
-                                "chain_newHead",
-                                &subscription,
-                                &serde_json::to_string(&header).unwrap(),
-                            ))
-                            .await;
+                loop {
+                    // Wait for either a new block, or for the subscription to be canceled.
+                    let next_block = blocks_list.next();
+                    futures::pin_mut!(next_block);
+                    match future::select(next_block, &mut unsubscribe_rx).await {
+                        future::Either::Left((block, _)) => {
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
+                            let _ = responses_sender
+                                .send(json_rpc::parse::build_subscription_event(
+                                    "chain_newHead",
+                                    &subscription,
+                                    &serde_json::to_string(&header).unwrap(),
+                                ))
+                                .await;
+                        }
+                        future::Either::Right((Ok(unsub_request_id), _)) => {
+                            let response = methods::Response::chain_unsubscribeNewHeads(true)
+                                .to_json_response(&unsub_request_id);
+                            let _ = responses_sender.send(response).await;
+                            break;
+                        }
+                        future::Either::Right((Err(_), _)) => break,
                     }
-                    future::Either::Right((Ok(unsub_request_id), _)) => {
-                        let response = methods::Response::chain_unsubscribeNewHeads(true)
-                            .to_json_response(&unsub_request_id);
-                        let _ = responses_sender.send(response).await;
-                        break;
-                    }
-                    future::Either::Right((Err(_), _)) => break,
                 }
-            }
-        }));
+            }))
+            .unwrap();
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
-    async fn subscribe_finalized_heads(&mut self, request_id: &str) {
+    async fn subscribe_finalized_heads(&self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::FinalizedHeads),
             unsubscribe_tx,
         );
@@ -1270,51 +1384,56 @@ impl Background {
         let confirmation = methods::Response::chain_subscribeFinalizedHeads(&subscription)
             .to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
-        self.active_subscriptions.push(Box::pin(async move {
-            // Send back to the user the confirmation of the registration.
-            let _ = responses_sender.send(confirmation).await;
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(async move {
+                // Send back to the user the confirmation of the registration.
+                let _ = responses_sender.send(confirmation).await;
 
-            loop {
-                // Wait for either a new block, or for the subscription to be canceled.
-                let next_block = blocks_list.next();
-                futures::pin_mut!(next_block);
-                match future::select(next_block, &mut unsubscribe_rx).await {
-                    future::Either::Left((block, _)) => {
-                        let header =
-                            methods::Header::from_scale_encoded_header(&block.unwrap()).unwrap();
+                loop {
+                    // Wait for either a new block, or for the subscription to be canceled.
+                    let next_block = blocks_list.next();
+                    futures::pin_mut!(next_block);
+                    match future::select(next_block, &mut unsubscribe_rx).await {
+                        future::Either::Left((block, _)) => {
+                            let header =
+                                methods::Header::from_scale_encoded_header(&block.unwrap())
+                                    .unwrap();
 
-                        let _ = responses_sender
-                            .send(json_rpc::parse::build_subscription_event(
-                                "chain_finalizedHead",
-                                &subscription,
-                                &serde_json::to_string(&header).unwrap(),
-                            ))
-                            .await;
+                            let _ = responses_sender
+                                .send(json_rpc::parse::build_subscription_event(
+                                    "chain_finalizedHead",
+                                    &subscription,
+                                    &serde_json::to_string(&header).unwrap(),
+                                ))
+                                .await;
+                        }
+                        future::Either::Right((Ok(unsub_request_id), _)) => {
+                            let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
+                                .to_json_response(&unsub_request_id);
+                            let _ = responses_sender.send(response).await;
+                            break;
+                        }
+                        future::Either::Right((Err(_), _)) => break,
                     }
-                    future::Either::Right((Ok(unsub_request_id), _)) => {
-                        let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
-                            .to_json_response(&unsub_request_id);
-                        let _ = responses_sender.send(response).await;
-                        break;
-                    }
-                    future::Either::Right((Err(_), _)) => break,
                 }
-            }
-        }));
+            }))
+            .unwrap();
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
-    async fn subscribe_storage(&mut self, request_id: &str, list: Vec<methods::HexString>) {
+    async fn subscribe_storage(&self, request_id: &str, list: Vec<methods::HexString>) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::Storage),
             unsubscribe_tx,
         );
@@ -1385,39 +1504,43 @@ impl Background {
         let confirmation =
             methods::Response::state_subscribeStorage(&subscription).to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
-        self.active_subscriptions.push(Box::pin(async move {
-            futures::pin_mut!(storage_updates);
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(async move {
+                futures::pin_mut!(storage_updates);
 
-            // Send back to the user the confirmation of the registration.
-            let _ = responses_sender.send(confirmation).await;
+                // Send back to the user the confirmation of the registration.
+                let _ = responses_sender.send(confirmation).await;
 
-            loop {
-                // Wait for either a new storage update, or for the subscription to be canceled.
-                let next_block = storage_updates.next();
-                futures::pin_mut!(next_block);
-                match future::select(next_block, &mut unsubscribe_rx).await {
-                    future::Either::Left((changes, _)) => {
-                        let _ = responses_sender
-                            .send(json_rpc::parse::build_subscription_event(
-                                "state_storage",
-                                &subscription,
-                                &serde_json::to_string(&changes).unwrap(),
-                            ))
-                            .await;
+                loop {
+                    // Wait for either a new storage update, or for the subscription to be canceled.
+                    let next_block = storage_updates.next();
+                    futures::pin_mut!(next_block);
+                    match future::select(next_block, &mut unsubscribe_rx).await {
+                        future::Either::Left((changes, _)) => {
+                            let _ = responses_sender
+                                .send(json_rpc::parse::build_subscription_event(
+                                    "state_storage",
+                                    &subscription,
+                                    &serde_json::to_string(&changes).unwrap(),
+                                ))
+                                .await;
+                        }
+                        future::Either::Right((Ok(unsub_request_id), _)) => {
+                            let response = methods::Response::state_unsubscribeStorage(true)
+                                .to_json_response(&unsub_request_id);
+                            let _ = responses_sender.send(response).await;
+                            break;
+                        }
+                        future::Either::Right((Err(_), _)) => break,
                     }
-                    future::Either::Right((Ok(unsub_request_id), _)) => {
-                        let response = methods::Response::state_unsubscribeStorage(true)
-                            .to_json_response(&unsub_request_id);
-                        let _ = responses_sender.send(response).await;
-                        break;
-                    }
-                    future::Either::Right((Err(_), _)) => break,
                 }
-            }
-        }));
+            }))
+            .unwrap();
     }
 
     fn storage_query(
