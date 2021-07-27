@@ -195,7 +195,7 @@ impl<T> ForkTree<T> {
 
         // `first_root` is updated ahead of the removal of the nodes. The update strategy is as
         // follows:
-        // - If `uncles_only`, then it becomes the oldest ancestor of the target node. This is 
+        // - If `uncles_only`, then it becomes the oldest ancestor of the target node. This is
         //   done in the loop below at the same time as marking node as `is_prune_target_ancestor`.
         // - If `!uncles_only`, then it becomes the first child of the target node.
 
