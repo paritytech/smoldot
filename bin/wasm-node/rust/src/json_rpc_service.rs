@@ -157,7 +157,7 @@ pub fn start(mut config: Config) -> JsonRpcService {
             let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
 
             {
-                let mut blocks = background.blocks.lock().await;
+                let mut blocks = background.blocks.try_lock().unwrap();
                 blocks.known_blocks.put(
                     best_block_hash,
                     header::decode(&best_block_header).unwrap().into(),
@@ -502,45 +502,35 @@ impl Background {
                 // The `block_query` function guarantees that the header and body are present and
                 // are correct.
 
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(if let Ok(block) = result {
-                        methods::Response::chain_getBlock(methods::Block {
-                            extrinsics: block
-                                .body
-                                .unwrap()
-                                .into_iter()
-                                .map(methods::Extrinsic)
-                                .collect(),
-                            header: methods::Header::from_scale_encoded_header(
-                                &block.header.unwrap(),
-                            )
+                let response = if let Ok(block) = result {
+                    methods::Response::chain_getBlock(methods::Block {
+                        extrinsics: block
+                            .body
+                            .unwrap()
+                            .into_iter()
+                            .map(methods::Extrinsic)
+                            .collect(),
+                        header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
                             .unwrap(),
-                            justification: block.justification.map(methods::HexString),
-                        })
-                        .to_json_response(request_id)
-                    } else {
-                        json_rpc::parse::build_success_response(request_id, "null")
+                        justification: block.justification.map(methods::HexString),
                     })
-                    .await;
+                    .to_json_response(request_id)
+                } else {
+                    json_rpc::parse::build_success_response(request_id, "null")
+                };
+
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::chain_getBlockHash { height } => {
                 self.get_block_hash(request_id, height).await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                            self.blocks.lock().await.finalized_block,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
+                    self.blocks.lock().await.finalized_block,
+                ))
+                .to_json_response(request_id);
+
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
                 let hash = match hash {
@@ -658,6 +648,7 @@ impl Background {
                     let block = blocks.known_blocks.get(&block_hash).unwrap();
                     (block.state_root, block.number)
                 };
+                drop(blocks);
 
                 let outcome = self
                     .sync_service
@@ -920,36 +911,31 @@ impl Background {
                         .map_err(runtime_service::RuntimeVersionOfBlockError::InvalidRuntime)
                 };
 
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(match runtime_spec {
-                        Ok(runtime_spec) => {
-                            let runtime_spec = runtime_spec.decode();
-                            methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                                spec_name: runtime_spec.spec_name.into(),
-                                impl_name: runtime_spec.impl_name.into(),
-                                authoring_version: u64::from(runtime_spec.authoring_version),
-                                spec_version: u64::from(runtime_spec.spec_version),
-                                impl_version: u64::from(runtime_spec.impl_version),
-                                transaction_version: runtime_spec
-                                    .transaction_version
-                                    .map(u64::from),
-                                apis: runtime_spec
-                                    .apis
-                                    .map(|api| (api.name, api.version))
-                                    .collect(),
-                            })
-                            .to_json_response(request_id)
-                        }
-                        Err(error) => json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        ),
-                    })
-                    .await;
+                let response = match runtime_spec {
+                    Ok(runtime_spec) => {
+                        let runtime_spec = runtime_spec.decode();
+                        methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
+                            spec_name: runtime_spec.spec_name.into(),
+                            impl_name: runtime_spec.impl_name.into(),
+                            authoring_version: u64::from(runtime_spec.authoring_version),
+                            spec_version: u64::from(runtime_spec.spec_version),
+                            impl_version: u64::from(runtime_spec.impl_version),
+                            transaction_version: runtime_spec.transaction_version.map(u64::from),
+                            apis: runtime_spec
+                                .apis
+                                .map(|api| (api.name, api.version))
+                                .collect(),
+                        })
+                        .to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                };
+
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::system_accountNextIndex { account } => {
                 let response = match account_nonce(&self.runtime_service, account).await {
@@ -992,26 +978,18 @@ impl Background {
                     .await;
             }
             methods::MethodCall::system_health {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_health(methods::SystemHealth {
-                            // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
-                            // is finished and that the block notifications report blocks that are
-                            // believed to be near the head of the chain.
-                            is_syncing: !self
-                                .runtime_service
-                                .is_near_head_of_chain_heuristic()
-                                .await,
-                            peers: u64::try_from(self.network_service.peers_list().await.count())
-                                .unwrap_or(u64::max_value()),
-                            should_have_peers: self.chain_spec.has_live_network(),
-                        })
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                let response = methods::Response::system_health(methods::SystemHealth {
+                    // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
+                    // is finished and that the block notifications report blocks that are
+                    // believed to be near the head of the chain.
+                    is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
+                    peers: u64::try_from(self.network_service.peers_list().await.count())
+                        .unwrap_or(u64::max_value()),
+                    should_have_peers: self.chain_spec.has_live_network(),
+                })
+                .to_json_response(request_id);
+
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
                 // Wasm node never listens on any address.
@@ -1037,26 +1015,21 @@ impl Background {
                     .await;
             }
             methods::MethodCall::system_peers {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_peers(
-                            self.sync_service
-                                .syncing_peers()
-                                .await
-                                .map(|(peer_id, best_number, best_hash)| methods::SystemPeer {
-                                    peer_id: peer_id.to_string(),
-                                    roles: "unknown".to_string(), // TODO: do properly
-                                    best_hash: methods::HashHexString(best_hash),
-                                    best_number,
-                                })
-                                .collect(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                let response = methods::Response::system_peers(
+                    self.sync_service
+                        .syncing_peers()
+                        .await
+                        .map(|(peer_id, best_number, best_hash)| methods::SystemPeer {
+                            peer_id: peer_id.to_string(),
+                            roles: "unknown".to_string(), // TODO: do properly
+                            best_hash: methods::HashHexString(best_hash),
+                            best_number,
+                        })
+                        .collect(),
+                )
+                .to_json_response(request_id);
+
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::system_properties {} => {
                 let _ = self
@@ -1189,14 +1162,11 @@ impl Background {
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
     async fn get_block_hash(&self, request_id: &str, height: Option<u64>) {
-        let mut blocks = self.blocks.lock().await;
-        let blocks = &mut *blocks;
+        let response = {
+            let mut blocks = self.blocks.lock().await;
+            let blocks = &mut *blocks;
 
-        let _ = self
-            .responses_sender
-            .lock()
-            .await
-            .send(match height {
+            match height {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
                     self.genesis_block,
                 ))
@@ -1232,8 +1202,10 @@ impl Background {
                     // TODO: ask a full node instead? or maybe keep a list of canonical blocks?
                     json_rpc::parse::build_success_response(request_id, "null")
                 }
-            })
-            .await;
+            }
+        };
+
+        let _ = self.responses_sender.lock().await.send(response).await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
