@@ -122,11 +122,11 @@ pub fn start(mut config: Config) -> JsonRpcService {
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
         transactions_service: config.transactions_service,
-        blocks: Blocks {
+        blocks: Mutex::new(Blocks {
             known_blocks: lru::LruCache::new(256),
             best_block: [0; 32],      // Filled below.
             finalized_block: [0; 32], // Filled below.
-        },
+        }),
         genesis_block: config.genesis_block_hash,
         next_subscription: atomic::AtomicU64::new(0),
         subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
@@ -146,12 +146,15 @@ pub fn start(mut config: Config) -> JsonRpcService {
             debug_assert_eq!(_finalized_block_header, best_block_header);
             let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
 
-            background.blocks.known_blocks.put(
-                best_block_hash,
-                header::decode(&best_block_header).unwrap().into(),
-            );
-            background.blocks.best_block = best_block_hash;
-            background.blocks.finalized_block = best_block_hash;
+            {
+                let blocks = background.blocks.get_mut();
+                blocks.known_blocks.put(
+                    best_block_hash,
+                    header::decode(&best_block_header).unwrap().into(),
+                );
+                blocks.best_block = best_block_hash;
+                blocks.finalized_block = best_block_hash;
+            }
 
             loop {
                 futures::select! {
@@ -166,13 +169,14 @@ pub fn start(mut config: Config) -> JsonRpcService {
                         match block {
                             Some(block) => {
                                 let hash = header::hash_from_scale_encoded_header(&block);
-                                background.blocks.best_block = hash;
+                                let blocks = background.blocks.get_mut();
+                                blocks.best_block = hash;
                                 // As a small trick, we re-query the finalized block from
                                 // `known_blocks` in order to ensure that it never leaves the
                                 // LRU cache.
                                 let header = header::decode(&block).unwrap().into();
-                                background.blocks.known_blocks.get(&background.blocks.finalized_block);
-                                background.blocks.known_blocks.put(hash, header);
+                                blocks.known_blocks.get(&blocks.finalized_block);
+                                blocks.known_blocks.put(hash, header);
                             },
                             None => return,
                         }
@@ -182,8 +186,9 @@ pub fn start(mut config: Config) -> JsonRpcService {
                             Some(block) => {
                                 let hash = header::hash_from_scale_encoded_header(&block);
                                 let header = header::decode(&block).unwrap().into();
-                                background.blocks.finalized_block = hash;
-                                background.blocks.known_blocks.put(hash, header);
+                                let blocks = background.blocks.get_mut();
+                                blocks.finalized_block = hash;
+                                blocks.known_blocks.put(hash, header);
                             },
                             None => return,
                         }
@@ -301,7 +306,7 @@ struct Background {
 
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
     // TODO: move somewhere else
-    blocks: Blocks,
+    blocks: Mutex<Blocks>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -438,7 +443,7 @@ impl Background {
                 // `hash` equal to `None` means "the current best block".
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.best_block,
+                    None => self.blocks.lock().await.best_block,
                 };
 
                 // Block bodies and justifications aren't stored locally. Ask the network.
@@ -488,7 +493,7 @@ impl Background {
                     .responses_sender
                     .send(
                         methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                            self.blocks.finalized_block,
+                            self.blocks.lock().await.finalized_block,
                         ))
                         .to_json_response(request_id),
                     )
@@ -497,7 +502,7 @@ impl Background {
             methods::MethodCall::chain_getHeader { hash } => {
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.best_block,
+                    None => self.blocks.lock().await.best_block,
                 };
 
                 let fut = self.header_query(&hash);
@@ -598,9 +603,10 @@ impl Background {
             } => {
                 assert!(hash.is_none()); // TODO: not implemented
 
-                let block_hash = self.blocks.best_block;
+                let mut blocks = self.blocks.lock().await;
+                let block_hash = blocks.best_block;
                 let (state_root, block_number) = {
-                    let block = self.blocks.known_blocks.get(&block_hash).unwrap();
+                    let block = blocks.known_blocks.get(&block_hash).unwrap();
                     (block.state_root, block.number)
                 };
 
@@ -637,13 +643,17 @@ impl Background {
                     .await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
-                let at = at.as_ref().map(|h| h.0).unwrap_or(self.blocks.best_block);
+                let blocks = self.blocks.lock().await;
+
+                let at = at.as_ref().map(|h| h.0).unwrap_or(blocks.best_block);
 
                 // TODO: have no idea what this describes actually
                 let mut out = methods::StorageChangeSet {
-                    block: methods::HashHexString(self.blocks.best_block),
+                    block: methods::HashHexString(blocks.best_block),
                     changes: Vec::new(),
                 };
+
+                drop(blocks);
 
                 for key in keys {
                     // TODO: parallelism?
@@ -685,7 +695,10 @@ impl Background {
                 let _ = self.responses_sender.send(response).await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
-                let hash = hash.as_ref().map(|h| h.0).unwrap_or(self.blocks.best_block);
+                let hash = hash
+                    .as_ref()
+                    .map(|h| h.0)
+                    .unwrap_or(self.blocks.lock().await.best_block);
 
                 let fut = self.storage_query(&key.0, &hash);
                 let response = fut.await;
@@ -1093,6 +1106,9 @@ impl Background {
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
     async fn get_block_hash(&mut self, request_id: &str, height: Option<u64>) {
+        let mut blocks = self.blocks.lock().await;
+        let blocks = &mut *blocks;
+
         let _ = self
             .responses_sender
             .send(match height {
@@ -1100,31 +1116,27 @@ impl Background {
                     self.genesis_block,
                 ))
                 .to_json_response(request_id),
-                None => methods::Response::chain_getBlockHash(methods::HashHexString(
-                    self.blocks.best_block,
-                ))
-                .to_json_response(request_id),
-                Some(n)
-                    if self
-                        .blocks
-                        .known_blocks
-                        .get(&self.blocks.best_block)
-                        .map_or(false, |h| h.number == n) =>
-                {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(
-                        self.blocks.best_block,
-                    ))
-                    .to_json_response(request_id)
+                None => {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
+                        .to_json_response(request_id)
                 }
                 Some(n)
-                    if self
-                        .blocks
+                    if blocks
                         .known_blocks
-                        .get(&self.blocks.finalized_block)
+                        .get(&blocks.best_block)
+                        .map_or(false, |h| h.number == n) =>
+                {
+                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
+                        .to_json_response(request_id)
+                }
+                Some(n)
+                    if blocks
+                        .known_blocks
+                        .get(&blocks.finalized_block)
                         .map_or(false, |h| h.number == n) =>
                 {
                     methods::Response::chain_getBlockHash(methods::HashHexString(
-                        self.blocks.finalized_block,
+                        blocks.finalized_block,
                     ))
                     .to_json_response(request_id)
                 }
