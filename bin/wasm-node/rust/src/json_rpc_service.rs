@@ -123,7 +123,7 @@ pub fn start(mut config: Config) -> JsonRpcService {
 
     let background = Arc::new(Background {
         new_requests_rx: Mutex::new(new_requests_rx),
-        responses_sender,
+        responses_sender: Mutex::new(responses_sender),
         new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
         max_subscriptions: config.max_subscriptions,
         chain_spec: config.chain_spec,
@@ -310,7 +310,7 @@ struct Background {
     new_requests_rx: Mutex<mpsc::Receiver<String>>,
 
     /// Channel to send out responses.
-    responses_sender: mpsc::Sender<String>,
+    responses_sender: Mutex<mpsc::Sender<String>>,
 
     /// Whenever a task is sent on this channel, an executor runs it to completion.
     new_child_tasks_tx: Mutex<mpsc::UnboundedSender<future::BoxFuture<'static, ()>>>,
@@ -371,7 +371,7 @@ struct Blocks {
 }
 
 impl Background {
-    async fn handle_request(&mut self, json_rpc_request: String) {
+    async fn handle_request(&self, json_rpc_request: String) {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
             Ok(v) => v,
@@ -382,6 +382,8 @@ impl Background {
                 );
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(error.to_json_error(request_id))
                     .await;
                 return;
@@ -402,6 +404,8 @@ impl Background {
                 // TODO: ask transactions service
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::author_pendingExtrinsics(Vec::new())
                             .to_json_response(request_id),
@@ -427,6 +431,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::author_submitExtrinsic(methods::HashHexString(
                             transaction_hash,
@@ -457,6 +463,8 @@ impl Background {
                 if invalid {
                     let _ = self
                         .responses_sender
+                        .lock()
+                        .await
                         .send(
                             methods::Response::author_unwatchExtrinsic(false)
                                 .to_json_response(request_id),
@@ -491,6 +499,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(if let Ok(block) = result {
                         methods::Response::chain_getBlock(methods::Block {
                             extrinsics: block
@@ -517,6 +527,8 @@ impl Background {
             methods::MethodCall::chain_getFinalizedHead {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::chain_getFinalizedHead(methods::HashHexString(
                             self.blocks.lock().await.finalized_block,
@@ -558,7 +570,7 @@ impl Background {
                     }
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.subscribe_all_heads(request_id).await;
@@ -584,6 +596,8 @@ impl Background {
                 if invalid {
                     let _ = self
                         .responses_sender
+                        .lock()
+                        .await
                         .send(
                             methods::Response::chain_unsubscribeFinalizedHeads(false)
                                 .to_json_response(request_id),
@@ -597,6 +611,8 @@ impl Background {
                                          // TODO: complete hack
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::payment_queryInfo(methods::RuntimeDispatchInfo {
                             weight: 220429000,                     // TODO: no
@@ -610,6 +626,8 @@ impl Background {
             methods::MethodCall::rpc_methods {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::rpc_methods(methods::RpcMethods {
                             version: 1,
@@ -649,6 +667,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(match outcome {
                         Ok(keys) => {
                             // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
@@ -691,6 +711,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::state_queryStorageAt(vec![out])
                             .to_json_response(request_id),
@@ -718,7 +740,7 @@ impl Background {
                     }
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
                 let hash = hash
@@ -741,7 +763,7 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
                 let subscription = self
@@ -760,6 +782,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::state_subscribeRuntimeVersion(&subscription)
                             .to_json_response(request_id),
@@ -787,6 +811,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(json_rpc::parse::build_subscription_event(
                         "state_runtimeVersion",
                         &subscription,
@@ -794,7 +820,7 @@ impl Background {
                     ))
                     .await;
 
-                let mut responses_sender = self.responses_sender.clone();
+                let mut responses_sender = self.responses_sender.lock().await.clone();
                 self.new_child_tasks_tx
                     .lock()
                     .await
@@ -870,6 +896,8 @@ impl Background {
                 if invalid {
                     let _ = self
                         .responses_sender
+                        .lock()
+                        .await
                         .send(
                             methods::Response::state_unsubscribeStorage(false)
                                 .to_json_response(request_id),
@@ -889,6 +917,8 @@ impl Background {
 
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(match runtime_spec {
                         Ok(runtime_spec) => {
                             let runtime_spec = runtime_spec.decode();
@@ -932,11 +962,13 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.send(response).await;
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::system_chain {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_chain(self.chain_spec.name())
                             .to_json_response(request_id),
@@ -946,6 +978,8 @@ impl Background {
             methods::MethodCall::system_chainType {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_chainType(self.chain_spec.chain_type())
                             .to_json_response(request_id),
@@ -955,6 +989,8 @@ impl Background {
             methods::MethodCall::system_health {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_health(methods::SystemHealth {
                             // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
@@ -976,6 +1012,8 @@ impl Background {
                 // Wasm node never listens on any address.
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_localListenAddresses(Vec::new())
                             .to_json_response(request_id),
@@ -985,6 +1023,8 @@ impl Background {
             methods::MethodCall::system_name {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_name(env!("CARGO_PKG_NAME"))
                             .to_json_response(request_id),
@@ -994,6 +1034,8 @@ impl Background {
             methods::MethodCall::system_peers {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_peers(
                             self.sync_service
@@ -1014,6 +1056,8 @@ impl Background {
             methods::MethodCall::system_properties {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_properties(
                             serde_json::from_str(self.chain_spec.properties()).unwrap(),
@@ -1025,6 +1069,8 @@ impl Background {
             methods::MethodCall::system_version {} => {
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(
                         methods::Response::system_version(env!("CARGO_PKG_VERSION"))
                             .to_json_response(request_id),
@@ -1035,6 +1081,8 @@ impl Background {
                 log::error!(target: "json-rpc", "JSON-RPC call not supported yet: {:?}", _method);
                 let _ = self
                     .responses_sender
+                    .lock()
+                    .await
                     .send(json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ServerError(
@@ -1049,11 +1097,7 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
-    async fn submit_and_watch_extrinsic(
-        &mut self,
-        request_id: &str,
-        transaction: methods::HexString,
-    ) {
+    async fn submit_and_watch_extrinsic(&self, request_id: &str, transaction: methods::HexString) {
         let mut transaction_updates = self
             .transactions_service
             .submit_and_watch_extrinsic(transaction.0, 16)
@@ -1074,7 +1118,7 @@ impl Background {
             .to_json_response(request_id);
 
         // Spawn a separate task for the transaction updates.
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
         self.new_child_tasks_tx
             .lock()
             .await
@@ -1139,12 +1183,14 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
-    async fn get_block_hash(&mut self, request_id: &str, height: Option<u64>) {
+    async fn get_block_hash(&self, request_id: &str, height: Option<u64>) {
         let mut blocks = self.blocks.lock().await;
         let blocks = &mut *blocks;
 
         let _ = self
             .responses_sender
+            .lock()
+            .await
             .send(match height {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
                     self.genesis_block,
@@ -1186,7 +1232,7 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(&mut self, request_id: &str) {
+    async fn subscribe_all_heads(&self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1209,7 +1255,7 @@ impl Background {
         let confirmation =
             methods::Response::chain_subscribeAllHeads(&subscription).to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1251,7 +1297,7 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(&mut self, request_id: &str) {
+    async fn subscribe_new_heads(&self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1271,7 +1317,7 @@ impl Background {
         let confirmation =
             methods::Response::chain_subscribeNewHeads(&subscription).to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1312,7 +1358,7 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
-    async fn subscribe_finalized_heads(&mut self, request_id: &str) {
+    async fn subscribe_finalized_heads(&self, request_id: &str) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1333,7 +1379,7 @@ impl Background {
         let confirmation = methods::Response::chain_subscribeFinalizedHeads(&subscription)
             .to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1375,7 +1421,7 @@ impl Background {
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
-    async fn subscribe_storage(&mut self, request_id: &str, list: Vec<methods::HexString>) {
+    async fn subscribe_storage(&self, request_id: &str, list: Vec<methods::HexString>) {
         let subscription = self
             .next_subscription
             .fetch_add(1, atomic::Ordering::Relaxed)
@@ -1453,7 +1499,7 @@ impl Background {
         let confirmation =
             methods::Response::state_subscribeStorage(&subscription).to_json_response(request_id);
 
-        let mut responses_sender = self.responses_sender.clone();
+        let mut responses_sender = self.responses_sender.lock().await.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
