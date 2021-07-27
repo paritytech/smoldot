@@ -398,7 +398,8 @@ impl Client {
                         chain_spec,
                         genesis_block_hash,
                         genesis_block_state_root,
-                        max_pending_requests: NonZeroU32::new(64).unwrap(),
+                        max_parallel_requests: NonZeroU32::new(12).unwrap(),
+                        max_pending_requests: NonZeroU32::new(48).unwrap(),
                         max_subscriptions: 64,
                     }))
                 };

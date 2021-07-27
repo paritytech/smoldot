@@ -81,8 +81,14 @@ pub struct Config {
     /// >           from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 
-    /// Maximum number of JSON-RPC requests that can be processed simultaneously. Any additional
-    /// request will be immediately rejected.
+    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_parallel_requests: NonZeroU32,
+
+    /// Maximum number of JSON-RPC requests that can be added to a queue if it is not ready to be
+    /// processed immediately. Any additional request will be immediately rejected.
     ///
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
