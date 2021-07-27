@@ -173,8 +173,9 @@ pub fn start(mut config: Config) -> JsonRpcService {
                 tasks.push(
                     async move {
                         loop {
-                            let mut lock = background.new_requests_rx.lock().await;
-                            let message = lock.next().await;
+                            let message = background.new_requests_rx.lock().await.next().await;
+                            // It is important for `new_requests_rx` to be unlocked before
+                            // awaiting on `handle_request`.
                             match message {
                                 Some(m) => background.handle_request(m).await,
                                 None => return, // Foreground is closed.
