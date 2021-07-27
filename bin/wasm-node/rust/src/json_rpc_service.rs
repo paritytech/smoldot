@@ -121,7 +121,7 @@ pub fn start(mut config: Config) -> JsonRpcService {
     // Channel used in the background in order to spawn new tasks scoped to the background.
     let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
 
-    let mut background = Background {
+    let background = Arc::new(Background {
         new_requests_rx: Mutex::new(new_requests_rx),
         responses_sender,
         new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
@@ -142,7 +142,7 @@ pub fn start(mut config: Config) -> JsonRpcService {
             usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
             Default::default(),
         )),
-    };
+    });
 
     // Spawns the background task that actually runs the logic of that JSON-RPC service.
     let max_parallel_requests = config.max_parallel_requests;
@@ -157,7 +157,7 @@ pub fn start(mut config: Config) -> JsonRpcService {
             let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
 
             {
-                let blocks = background.blocks.get_mut();
+                let mut blocks = background.blocks.lock().await;
                 blocks.known_blocks.put(
                     best_block_hash,
                     header::decode(&best_block_header).unwrap().into(),
@@ -183,7 +183,8 @@ pub fn start(mut config: Config) -> JsonRpcService {
                         match block {
                             Some(block) => {
                                 let hash = header::hash_from_scale_encoded_header(&block);
-                                let blocks = background.blocks.get_mut();
+                                let mut blocks = background.blocks.lock().await;
+                                let blocks = &mut *blocks;
                                 blocks.best_block = hash;
                                 // As a small trick, we re-query the finalized block from
                                 // `known_blocks` in order to ensure that it never leaves the
@@ -200,7 +201,7 @@ pub fn start(mut config: Config) -> JsonRpcService {
                             Some(block) => {
                                 let hash = header::hash_from_scale_encoded_header(&block);
                                 let header = header::decode(&block).unwrap().into();
-                                let blocks = background.blocks.get_mut();
+                                let mut blocks = background.blocks.lock().await;
                                 blocks.finalized_block = hash;
                                 blocks.known_blocks.put(hash, header);
                             },
