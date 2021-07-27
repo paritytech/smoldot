@@ -191,9 +191,13 @@ impl<T> ForkTree<T> {
         node_index: NodeIndex,
         uncles_only: bool,
     ) -> PruneAncestorsIter<T> {
-        // The implementation consists in replacing the content of `self.first_root` with the
-        // content of `self.nodes[node_index].first_child` and updating everything else
-        // accordingly.
+        let iter = self.first_root.unwrap();
+
+        // `first_root` is updated ahead of the removal of the nodes. The update strategy is as
+        // follows:
+        // - If `uncles_only`, then it becomes the oldest ancestor of the target node. This is
+        //   done in the loop below at the same time as marking node as `is_prune_target_ancestor`.
+        // - If `!uncles_only`, then it becomes the first child of the target node.
 
         // Set `is_prune_target_ancestor` to true for `node_index` and all its ancestors.
         {
@@ -201,6 +205,11 @@ impl<T> ForkTree<T> {
             loop {
                 debug_assert!(!self.nodes[node].is_prune_target_ancestor);
                 self.nodes[node].is_prune_target_ancestor = true;
+
+                if uncles_only {
+                    self.first_root = Some(node);
+                }
+
                 node = match self.nodes[node].parent {
                     Some(n) => n,
                     None => break,
@@ -208,8 +217,9 @@ impl<T> ForkTree<T> {
             }
         }
 
-        let iter = self.first_root.unwrap();
-        self.first_root = self.nodes[node_index.0].first_child;
+        if !uncles_only {
+            self.first_root = self.nodes[node_index.0].first_child;
+        }
 
         PruneAncestorsIter {
             finished: false,
@@ -533,6 +543,8 @@ impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
         // Make sure that all elements are removed.
         while let Some(_) = self.next() {}
 
+        debug_assert!(self.tree.first_root.is_some());
+        debug_assert!(self.tree.nodes.get(self.tree.first_root.unwrap()).is_some());
         debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
     }
 }
