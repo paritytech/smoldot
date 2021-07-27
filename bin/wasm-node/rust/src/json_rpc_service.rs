@@ -169,10 +169,27 @@ pub fn start(mut config: Config) -> JsonRpcService {
             let mut tasks = stream::FuturesUnordered::new();
 
             for _ in 0..max_parallel_requests.get() {
-                tasks.push(async move {}.boxed());
+                let background = background.clone();
+                tasks.push(
+                    async move {
+                        loop {
+                            let mut lock = background.new_requests_rx.lock().await;
+                            let message = lock.next().await;
+                            match message {
+                                Some(m) => background.handle_request(m).await,
+                                None => return, // Foreground is closed.
+                            }
+                        }
+                    }
+                    .boxed(),
+                );
             }
 
             loop {
+                if tasks.is_empty() {
+                    break;
+                }
+
                 futures::select! {
                     () = tasks.select_next_some() => {},
                     task = new_child_tasks_rx.next() => {
@@ -210,18 +227,6 @@ pub fn start(mut config: Config) -> JsonRpcService {
                     },
                 }
             }
-
-            /*loop {
-                futures::select! {
-                    () = background.active_subscriptions.select_next_some() => {},
-                    message = background.new_requests_rx.next() => {
-                        match message {
-                            Some(m) => background.handle_request(m).await,
-                            None => return, // Foreground is closed.
-                        }
-                    },
-                }
-            }*/
         }
         .boxed(),
     );
