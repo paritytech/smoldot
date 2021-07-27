@@ -129,10 +129,10 @@ pub fn start(mut config: Config) -> JsonRpcService {
         },
         genesis_block: config.genesis_block_hash,
         next_subscription: atomic::AtomicU64::new(0),
-        subscriptions: HashMap::with_capacity_and_hasher(
+        subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
             usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
             Default::default(),
-        ),
+        )),
     };
 
     // Spawns the background task that actually runs the logic of that JSON-RPC service.
@@ -312,7 +312,8 @@ struct Background {
 
     /// For each active subscription (the key), a sender. If the user unsubscribes, send the
     /// unsubscription request ID of the channel in order to close the subscription.
-    subscriptions: HashMap<(String, SubscriptionTy), oneshot::Sender<String>, fnv::FnvBuildHasher>,
+    subscriptions:
+        Mutex<HashMap<(String, SubscriptionTy), oneshot::Sender<String>, fnv::FnvBuildHasher>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -410,6 +411,8 @@ impl Background {
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .subscriptions
+                    .lock()
+                    .await
                     .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
                 {
                     // `cancel_tx` might have been closed if the channel from the transactions
@@ -538,6 +541,8 @@ impl Background {
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .subscriptions
+                    .lock()
+                    .await
                     .remove(&(subscription, SubscriptionTy::FinalizedHeads))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -709,7 +714,7 @@ impl Background {
                     self.runtime_service.subscribe_runtime_version().await;
 
                 let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-                self.subscriptions.insert(
+                self.subscriptions.lock().await.insert(
                     (subscription.clone(), SubscriptionTy::RuntimeSpec),
                     unsubscribe_tx,
                 );
@@ -810,6 +815,8 @@ impl Background {
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
                     .subscriptions
+                    .lock()
+                    .await
                     .remove(&(subscription.to_owned(), SubscriptionTy::Storage))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -1015,7 +1022,7 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::Transaction),
             unsubscribe_tx,
         );
@@ -1140,7 +1147,7 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::AllHeads),
             unsubscribe_tx,
         );
@@ -1200,7 +1207,7 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::NewHeads),
             unsubscribe_tx,
         );
@@ -1256,7 +1263,7 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::FinalizedHeads),
             unsubscribe_tx,
         );
@@ -1314,7 +1321,7 @@ impl Background {
             .to_string();
 
         let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.insert(
+        self.subscriptions.lock().await.insert(
             (subscription.clone(), SubscriptionTy::Storage),
             unsubscribe_tx,
         );
