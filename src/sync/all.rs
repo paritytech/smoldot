@@ -135,7 +135,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
-                highest_block_on_network: 0,
             },
         }
     }
@@ -235,11 +234,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> (SourceId, Vec<Action>) {
-        // TODO: remove
-        if best_block_number > self.shared.highest_block_on_network {
-            self.shared.highest_block_on_network = best_block_number;
-        }
-
         // `inner` is temporarily replaced with `Poisoned`. A new value must be put back before
         // returning.
         match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
@@ -618,12 +612,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> BlockAnnounceOutcome {
-        if let Ok(header) = header::decode(&announced_scale_encoded_header) {
-            if header.number > self.shared.highest_block_on_network {
-                self.shared.highest_block_on_network = header.number;
-            }
-        }
-
         let source_id = self.shared.sources.get(source_id.0).unwrap();
 
         match (&mut self.inner, source_id) {
@@ -1277,8 +1265,6 @@ struct GrandpaWarpSyncSourceExtra<TSrc> {
 struct Shared {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping>,
-    // TODO: this is an insecure way to do things; see https://github.com/paritytech/smoldot/issues/490
-    highest_block_on_network: u64,
 }
 
 impl Shared {
