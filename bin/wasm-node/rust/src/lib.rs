@@ -26,6 +26,7 @@ use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec,
+    informant::HashDisplay,
     json_rpc::{self, methods},
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -308,12 +309,6 @@ impl Client {
                 // Key used by the networking. Represents the identity of the node on the
                 // peer-to-peer network.
                 let network_noise_key = connection::NoiseKey::new(&rand::random());
-                // TODO: move this log line somewhere else
-                log::info!(
-                    "Network public key: {}",
-                    peer_id::PublicKey::Ed25519(*network_noise_key.libp2p_public_ed25519_key())
-                        .into_peer_id()
-                );
 
                 // Spawn a background task that initializes the services of the new chain and
                 // yields a `RunningChain`.
@@ -335,7 +330,14 @@ impl Client {
                                 None
                             };
 
-                        start_services(
+                        // TODO: avoid cloning here
+                        let chain_name = chain_spec.name().to_owned();
+                        let starting_block_number =
+                            chain_information.as_ref().finalized_block_header.number;
+                        let starting_block_hash =
+                            chain_information.as_ref().finalized_block_header.hash();
+
+                        let running_chain = start_services(
                             new_tasks_tx,
                             chain_information,
                             genesis_chain_information,
@@ -343,7 +345,21 @@ impl Client {
                             relay_chain.as_ref(),
                             network_noise_key,
                         )
-                        .await
+                        .await;
+
+                        // Note that the chain name is printed through the `Debug` trait (rather than
+                        // `Display`) because it is an untrusted user input.
+                        log::info!(
+                            "Chain initialization complete. Name: {:?}. Genesis hash: {}. \
+                            Network identity: {}. Starting at block #{} ({})",
+                            chain_name,
+                            HashDisplay(&genesis_block_hash),
+                            running_chain.network_identity,
+                            starting_block_number,
+                            HashDisplay(&starting_block_hash)
+                        );
+
+                        running_chain
                     };
 
                     let (background_future, output_future) = future.remote_handle();
@@ -403,6 +419,7 @@ impl Client {
                         max_subscriptions: 64,
                     }))
                 };
+
                 let (background_run, output_future) = init_future.remote_handle();
                 self.new_task_tx
                     .unbounded_send(("json-rpc-service-init".to_owned(), background_run.boxed()))
@@ -621,6 +638,7 @@ struct ChainKey {
 #[derive(Clone)]
 struct RunningChain {
     network_service: Arc<network_service::NetworkService>,
+    network_identity: peer_id::PeerId,
     sync_service: Arc<sync_service::SyncService>,
     runtime_service: Arc<runtime_service::RuntimeService>,
     transactions_service: Arc<transactions_service::TransactionsService>,
@@ -651,6 +669,11 @@ async fn start_services(
     relay_chain: Option<&RunningChain>,
     network_noise_key: connection::NoiseKey,
 ) -> RunningChain {
+    // Since `network_noise_key` is moved out below, use it to build the network identity ahead
+    // of the network service starting.
+    let network_identity =
+        peer_id::PublicKey::Ed25519(*network_noise_key.libp2p_public_ed25519_key()).into_peer_id();
+
     // The network service is responsible for connecting to the peer-to-peer network.
     let (network_service, mut network_event_receivers) =
         network_service::NetworkService::new(network_service::Config {
@@ -792,6 +815,7 @@ async fn start_services(
 
     RunningChain {
         network_service,
+        network_identity,
         runtime_service,
         sync_service,
         transactions_service,
