@@ -34,13 +34,13 @@ use futures::{
 use rand::Rng as _;
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
-pub struct Peers<TConn, TNow> {
-    inner: libp2p::Network<TConn, TNow>,
+pub struct Peers<TPeer, TNow> {
+    inner: libp2p::Network<TPeer, TNow>,
 }
 
-impl<TConn, TNow> Peers<TConn, TNow>
+impl<TPeer, TNow> Peers<TPeer, TNow>
 where
-    TConn: Clone,
+    TPeer: Clone,
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Returns the next event produced by the service.
@@ -54,9 +54,63 @@ where
     /// case the events will be distributed amongst the multiple calls in an unspecified way.
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
-    pub async fn next_event(&self) -> Event<TConn> {
+    pub async fn next_event(&self) -> Event<TPeer> {
         let mut events_rx = self.events_rx.lock().await;
         events_rx.next().await.unwrap()
+    }
+
+    /// Adds an incoming connection to the state machine.
+    ///
+    /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
+    /// yet.
+    ///
+    /// After this function has returned, you must process the connection with
+    /// [`ChainNetwork::read_write`].
+    #[must_use]
+    pub async fn add_incoming_connection(
+        &self,
+        local_listen_address: &multiaddr::Multiaddr,
+        remote_addr: multiaddr::Multiaddr,
+    ) -> ConnectionId {
+        todo!()
+    }
+
+    /// Pops a connection request.
+    ///
+    /// If no request is available, waits until there is one.
+    #[must_use]
+    pub async fn next_connection_open(&self) {
+        todo!()
+    }
+
+    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// success of the dialing attempt.
+    ///
+    /// See also [`ChainNetwork::pending_outcome_err`].
+    ///
+    /// After this function has returned, you must process the connection with
+    /// [`ChainNetwork::read_write`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`PendingId`] is invalid.
+    ///
+    #[must_use]
+    pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
+        todo!()
+    }
+
+    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// failure of the dialing attempt.
+    ///
+    /// See also [`ChainNetwork::pending_outcome_ok`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`PendingId`] is invalid.
+    ///
+    pub async fn pending_outcome_err(&self, id: PendingId) {
+        todo!()
     }
 
     ///
@@ -143,7 +197,7 @@ pub enum Event {
         /// Handshake sent in return by the remote.
         remote_handshake: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
-        user_data: TConn,
+        user_data: TPeer,
     },
 
     /// A previously open outbound substream has been closed by the remote, or a handshaking
@@ -152,7 +206,7 @@ pub enum Event {
         peer_id: PeerId,
         overlay_network_index: usize,
         /// Copy of the user data provided when creating the connection.
-        user_data: TConn,
+        user_data: TPeer,
     },
 
     ///
@@ -161,7 +215,7 @@ pub enum Event {
         overlay_network_index: usize,
         remote_handshake: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
-        user_data: TConn,
+        user_data: TPeer,
     },
 
     // TODO: needs a notifications in cancel event? tricky
@@ -171,14 +225,14 @@ pub enum Event {
         overlay_network_index: usize,
         notification: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
-        user_data: TConn,
+        user_data: TPeer,
     },
 
     NotificationsInClose {
         peer_id: PeerId,
         overlay_network_index: usize,
         /// Copy of the user data provided when creating the connection.
-        user_data: TConn,
+        user_data: TPeer,
     },
 }
 
@@ -186,7 +240,7 @@ pub enum Event {
 #[derive(Debug, derive_more::Display)]
 pub enum QueueNotificationError {
     /// Not connected to target.
-    NotConnected,
+    NoTPeerected,
     /// No substream with the given target of the given protocol.
     NoSubstream,
     /// Queue of notifications with that peer is full.
