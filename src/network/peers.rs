@@ -15,9 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Network of peers.
+//!
+//! The [`Peers`] state machine builds on top of the [`libp2p`] module and provides an
+//! abstraction over the network based on network identities (i.e. [`PeerId`]s). In other words,
+//! one can use the [`Peers`] struct to determine who to be connected to and through which
+//! notification protocols, and the state machine will try to open or re-open connections with
+//! these peers.
+
 use crate::libp2p::{self, Multiaddr, PeerId};
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec::Vec};
 use core::{
     cmp, iter, mem,
     num::NonZeroU32,
@@ -34,13 +42,16 @@ use futures::{
 use rand::Rng as _;
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
-pub struct Peers<TPeer, TNow> {
-    inner: libp2p::Network<TPeer, TNow>,
+pub use libp2p::ConnectionId;
+
+pub struct Peers<TNow> {
+    inner: libp2p::Network<(), TNow>,
+
+    guarded: Mutex<Guarded>,
 }
 
-impl<TPeer, TNow> Peers<TPeer, TNow>
+impl<TNow> Peers<TNow>
 where
-    TPeer: Clone,
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Returns the next event produced by the service.
@@ -54,9 +65,123 @@ where
     /// case the events will be distributed amongst the multiple calls in an unspecified way.
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
-    pub async fn next_event(&self) -> Event<TPeer> {
-        let mut events_rx = self.events_rx.lock().await;
-        events_rx.next().await.unwrap()
+    pub async fn next_event(&self) -> Event {
+        loop {
+            // The objective of the block of code below is to retrieve the next event that
+            // happened on the underlying libp2p state machine by calling
+            // `self.inner.next_event()`.
+            //
+            // After an event has been grabbed from `self.inner`, some modifications will need to
+            // be performed in `self.guarded`. Since it can take a lot of time to retrieve an
+            // event, and since other methods of `ChainNetwork` need to lock `self.guarded`, it
+            // is undesirable to keep `self.guarded` locked while waiting for the
+            // `self.inner.next_event()` future to finish.
+            //
+            // A naive solution would be to grab an event from `self.inner` then lock
+            // `self.guarded` immediately after. Unfortunately, the user can technically call
+            // `next_event` multiple times simultaneously. If that is done, we want to avoid a
+            // situation where task A retrieves an event, then task B retrieves an event, then
+            // task B locks `self.guarded` before task A could. Some kind of locking must be
+            // performed to prevent this.
+            //
+            // Additionally, `guarded` contains some fields, such as `to_process_pre_event`, that
+            // need to be processed ahead of events. Because processing these fields requires
+            // using `await`, this processing can be interrupted by the user, and as such no event
+            // should be grabbed in that situation.
+            //
+            // For all these reasons, the logic of the code below is as follows:
+            //
+            // - First, asynchronously lock `self.guarded`.
+            // - After `self.guarded` is locked, if some of its fields require ahead-of-events
+            // processing, continue with `maybe_inner_event` equal to `None`.
+            // - Otherwise, and while `self.guarded` is still locked, try to immediately grab an
+            // event with `self.inner.next_event()`.
+            // - If no such event is immediately available, register the task waker and release
+            // the lock. Once the waker is invoked (meaning that an event should be available),
+            // go back to step 1 (locking `self.guarded`).
+            // - If an event is available, continue with `maybe_inner_event` equal to `Some`.
+            //
+            let (mut guarded, maybe_inner_event) = {
+                let next_event_future = self.inner.next_event();
+                futures::pin_mut!(next_event_future);
+
+                let mut lock_acq_future = self.guarded.lock();
+                future::poll_fn(move |cx| {
+                    let lock = match lock_acq_future.poll_unpin(cx) {
+                        Poll::Ready(l) => l,
+                        Poll::Pending => return Poll::Pending,
+                    };
+
+                    if lock.to_process_pre_event.is_some() {
+                        return Poll::Ready((lock, None));
+                    }
+
+                    match next_event_future.poll_unpin(cx) {
+                        Poll::Ready(event) => Poll::Ready((lock, Some(event))),
+                        Poll::Pending => {
+                            lock_acq_future = self.guarded.lock();
+                            Poll::Pending
+                        }
+                    }
+                })
+                .await
+            };
+            let mut guarded = &mut *guarded; // Avoid borrow checker issues.
+
+            // If `maybe_inner_event` is `None`, that means some ahead-of-events processing needs
+            // to be performed. No event has been grabbed from `self.inner`.
+            let inner_event: libp2p::Event<_> = match maybe_inner_event {
+                Some(ev) => ev,
+                None => {
+                    // We can't use `take()` because the call to `accept_notifications_in` might
+                    // be interrupted by the user. The field is set to `None` only after the call
+                    // has succeeded.
+                    match guarded.to_process_pre_event.as_ref().unwrap() {
+                        ToProcessPreEvent::AcceptNotificationsIn {
+                            connection_id,
+                            overlay_network_index,
+                            handshake,
+                        } => {
+                            self.inner
+                                .accept_notifications_in(
+                                    *connection_id,
+                                    *overlay_network_index,
+                                    handshake.clone(), // TODO: clone? :-/
+                                )
+                                .await;
+                        }
+                        ToProcessPreEvent::QueueNotification {
+                            connection_id,
+                            overlay_network_index,
+                            packet,
+                        } => {
+                            let _ = self
+                                .inner
+                                .queue_notification(
+                                    *connection_id,
+                                    *overlay_network_index,
+                                    packet.clone(),
+                                ) // TODO: clone? :-/
+                                .await;
+                        }
+                    }
+
+                    guarded.to_process_pre_event = None;
+                    continue;
+                }
+            };
+
+            // An event has been grabbed and is ready to be processed. `self.guarded` is still
+            // locked from before the event has been grabbed.
+            // In order to avoid futures cancellation issues, no `await` should be used below. If
+            // something requires asynchronous processing, it should instead be written to
+            // `self.to_process_pre_event`.
+            debug_assert!(guarded.to_process_pre_event.is_none());
+
+            match inner_event {
+                _ => todo!(),
+            }
+        }
     }
 
     /// Adds an incoming connection to the state machine.
@@ -65,19 +190,24 @@ where
     /// yet.
     ///
     /// After this function has returned, you must process the connection with
-    /// [`ChainNetwork::read_write`].
+    /// [`Peers::read_write`].
     #[must_use]
     pub async fn add_incoming_connection(
         &self,
-        local_listen_address: &multiaddr::Multiaddr,
-        remote_addr: multiaddr::Multiaddr,
+        local_listen_address: &Multiaddr,
+        remote_addr: Multiaddr,
     ) -> ConnectionId {
-        todo!()
+        self.inner.insert(false, ()).await
     }
 
-    /// Pops a connection request.
+    /// Pops a request for a new connection made by the [`Peers`].
+    ///
+    /// After this method has returned, the [`Peers`] state machine will assume that the user is
+    /// trying to establish the connection that was returned. It is possible to "refuse" a certain
+    /// connection request by calling [`Peers::pending_outcome_err`] immediately after.
     ///
     /// If no request is available, waits until there is one.
+    // TODO: well, complicated, because we would like the outside to handle known multiaddresses
     #[must_use]
     pub async fn next_connection_open(&self) {
         todo!()
@@ -113,6 +243,45 @@ where
         todo!()
     }
 
+    pub async fn set_peer_desired(&self, peer_id: &PeerId, desired: bool) {
+        let mut guarded = self.guarded.lock().await;
+        let peer_index = guarded.peer_index_or_insert(peer_id);
+        guarded.peers[peer_index].desired = desired;
+    }
+
+    pub async fn set_peer_notifications_out_desired(
+        &self,
+        peer_id: &PeerId,
+        notification_protocols: impl Iterator<Item = usize>,
+        new_desired_state: OutNotificationsState,
+    ) {
+        todo!()
+    }
+
+    /// Returns the list of peers whose desired status is TODO: but which couldn't be reached.
+    pub async fn unreachable_peers(&'_ self) -> impl Iterator<Item = PeerId> {}
+
+    pub async fn in_notification_accept(
+        &self,
+        id: DesiredInNotificationId,
+        handshake_back: Vec<u8>,
+    ) {
+        todo!()
+    }
+
+    pub async fn in_notification_refuse(&self, id: DesiredInNotificationId) {
+        todo!()
+    }
+
+    pub async fn queue_notification(
+        &self,
+        peer: &PeerId,
+        overlay_network_index: usize,
+        notification: impl Into<Vec<u8>>,
+    ) -> Result<(), QueueNotificationError> {
+        todo!()
+    }
+
     ///
     /// # Panic
     ///
@@ -130,25 +299,6 @@ where
             .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
             .await
     }
-
-    pub fn set_peer_desired(
-        &self,
-        peer_id: &PeerId,
-        notification_protocols: impl Iterator<Item = usize>,
-        new_desired_state: OutNotificationsState,
-    ) {
-    }
-
-    pub fn desired_in_notifications(&self) -> impl Iterator<Item = DesiredInNotification> {}
-
-    pub async fn queue_notification(
-        &self,
-        peer: &PeerId,
-        overlay_network_index: usize,
-        notification: impl Into<Vec<u8>>,
-    ) -> Result<(), QueueNotificationError> {
-        todo!()
-    }
 }
 
 pub enum OutNotificationsState {
@@ -156,13 +306,18 @@ pub enum OutNotificationsState {
     Open,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DesiredInNotificationId;
+
 pub enum Event {
     /// Established a new connection to the given peer.
     Connected {
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
+
         /// Address of the connection.
         address: Multiaddr, // TODO: Endpoint or something instead
+
         /// Number of other established connections with the same peer, including the one that
         /// has just been established.
         num_peer_connections: NonZeroU32,
@@ -174,6 +329,7 @@ pub enum Event {
     Disconnected {
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
+
         /// Number of other established connections with the same peer remaining after the
         /// disconnection.
         num_peer_connections: u32,
@@ -189,6 +345,12 @@ pub enum Event {
         request_payload: Vec<u8>,
     },
 
+    DesiredInNotification {
+        id: DesiredInNotificationId,
+        peer_id: PeerId,
+        handshake: Vec<u8>,
+    },
+
     /// A handshaking outbound substream has been accepted by the remote.
     NotificationsOutAccept {
         peer_id: PeerId,
@@ -196,8 +358,6 @@ pub enum Event {
         overlay_network_index: usize,
         /// Handshake sent in return by the remote.
         remote_handshake: Vec<u8>,
-        /// Copy of the user data provided when creating the connection.
-        user_data: TPeer,
     },
 
     /// A previously open outbound substream has been closed by the remote, or a handshaking
@@ -205,17 +365,6 @@ pub enum Event {
     NotificationsOutClose {
         peer_id: PeerId,
         overlay_network_index: usize,
-        /// Copy of the user data provided when creating the connection.
-        user_data: TPeer,
-    },
-
-    ///
-    NotificationsInOpen {
-        peer_id: PeerId,
-        overlay_network_index: usize,
-        remote_handshake: Vec<u8>,
-        /// Copy of the user data provided when creating the connection.
-        user_data: TPeer,
     },
 
     // TODO: needs a notifications in cancel event? tricky
@@ -224,15 +373,11 @@ pub enum Event {
         peer_id: PeerId,
         overlay_network_index: usize,
         notification: Vec<u8>,
-        /// Copy of the user data provided when creating the connection.
-        user_data: TPeer,
     },
 
     NotificationsInClose {
         peer_id: PeerId,
         overlay_network_index: usize,
-        /// Copy of the user data provided when creating the connection.
-        user_data: TPeer,
     },
 }
 
@@ -240,9 +385,53 @@ pub enum Event {
 #[derive(Debug, derive_more::Display)]
 pub enum QueueNotificationError {
     /// Not connected to target.
-    NoTPeerected,
+    NotConnected,
     /// No substream with the given target of the given protocol.
     NoSubstream,
     /// Queue of notifications with that peer is full.
     QueueFull,
+}
+
+struct Guarded {
+    /// In the [`Peers::next_event`] function, an event is grabbed from the underlying
+    /// [`Peers::inner`]. This event might lead to some asynchronous post-processing being needed.
+    /// Because the user can interrupt the future returned by [`Peers::next_event`] at any point
+    /// in time, this post-processing cannot be immediately performed, as the user could could
+    /// interrupt the future and lose the event. Instead, the necessary post-processing is stored
+    /// in this field. This field is then processed before the next event is pulled.
+    to_process_pre_event: Option<ToProcessPreEvent>,
+
+    peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
+
+    peers: slab::Slab<Peer>,
+
+    peers_desired: BTreeSet<(usize, usize)>,
+}
+
+impl Guarded {
+    fn peer_index_or_insert(&mut self, peer_id: &PeerId) -> usize {
+        if let Some(idx) = self.peer_indices.get(peer_id) {
+            return *idx;
+        }
+
+        todo!()
+    }
+}
+
+/// See [`Guarded::to_process_pre_event`]
+enum ToProcessPreEvent {
+    AcceptNotificationsIn {
+        connection_id: libp2p::ConnectionId,
+        overlay_network_index: usize,
+        handshake: Vec<u8>,
+    },
+    QueueNotification {
+        connection_id: libp2p::ConnectionId,
+        overlay_network_index: usize,
+        packet: Vec<u8>,
+    },
+}
+
+struct Peer {
+    desired: bool,
 }
