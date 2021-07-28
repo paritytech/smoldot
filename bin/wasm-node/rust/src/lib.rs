@@ -23,6 +23,7 @@
 #![deny(unused_crate_dependencies)]
 
 use futures::{channel::mpsc, prelude::*};
+use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec,
     json_rpc::{self, methods},
@@ -58,12 +59,12 @@ static ALLOC: std::alloc::System = std::alloc::System;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
-pub struct AddChainConfig<'a> {
+pub struct AddChainConfig<'a, TRelays> {
     /// JSON text containing the specification of the chain (the so-called "chain spec").
     pub specification: &'a str,
 
     /// If [`AddChainConfig`] defines a parachain, contains the list of relay chains to choose
-    /// from.
+    /// from. Ignored if not a parachain.
     ///
     /// This field is necessary because multiple different chain can have the same identity. If
     /// the client tried to find the corresponding relay chain in all the previously-spawned
@@ -73,8 +74,7 @@ pub struct AddChainConfig<'a> {
     /// For example: if user A adds a chain named "kusama", then user B adds a different chain
     /// also named "kusama", then user B adds a parachain whose relay chain is "kusama", it would
     /// be wrong to connect to the "kusama" created by user A.
-    // TODO: pass as iterator
-    pub potential_relay_chains: Vec<ChainId>,
+    pub potential_relay_chains: TRelays,
 
     /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targetting this chain to fail.
@@ -197,13 +197,15 @@ impl Client {
     }
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
-    #[must_use]
-    pub fn add_chain(&mut self, config: AddChainConfig<'_>) -> Result<ChainId, AddChainError> {
+    pub fn add_chain(
+        &mut self,
+        config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
+    ) -> Result<ChainId, AddChainError> {
         // Decode the chain specification.
         let chain_spec = chain_spec::ChainSpec::from_json_bytes(&config.specification)
             .map_err(AddChainError::InvalidChainSpec)?;
 
-        // Load the information about the chains from the chain specs. If a light sync state is
+        // Load the information about the chain from the chain spec. If a light sync state is
         // present in the chain specs, it is possible to start sync at the finalized block it
         // describes.
         let genesis_chain_information =
@@ -215,31 +217,44 @@ impl Client {
             genesis_chain_information.clone()
         };
 
-        // If the chain specification specifies a parachain, find the corresponding relay chain.
-        let relay_chain = if let Some((relay_chain_id, _para_id)) = chain_spec.relay_chain() {
-            let mut valid_relay_chains_iter = config.potential_relay_chains.iter().filter(|c| {
-                self.public_api_chains
-                    .get(c.0)
-                    .map_or(false, |chain| chain.chain_spec_chain_id == relay_chain_id)
-            });
-
-            let found_relay_chain = *valid_relay_chains_iter
-                .next()
-                .ok_or(AddChainError::RelayChainNotFound)?;
-            if valid_relay_chains_iter.next().is_some() {
-                return Err(AddChainError::MultipleValidRelayChains);
-            }
-            Some(found_relay_chain)
+        // If the chain specification specifies a parachain, find the corresponding relay chain
+        // in the list of potential relay chains passed by the user.
+        // If no relay chain can be found, the chain creation fails.
+        let relay_chain_id = if let Some((relay_chain_id, _para_id)) = chain_spec.relay_chain() {
+            let chain = config
+                .potential_relay_chains
+                .filter(|c| {
+                    self.public_api_chains
+                        .get(c.0)
+                        .map_or(false, |chain| chain.chain_spec_chain_id == relay_chain_id)
+                })
+                .exactly_one()
+                .map_err(|mut iter| {
+                    if iter.next().is_none() {
+                        AddChainError::RelayChainNotFound
+                    } else {
+                        AddChainError::MultipleValidRelayChains
+                    }
+                })?;
+            Some(chain)
         } else {
             None
         };
 
+        // All the checks are performed above. Adding the chain can't fail anymore at this point.
+
+        // The key generated here uniquely identifies this chain within smoldot. Mutiple chains
+        // having the same key will use the same services.
+        //
+        // This struct is extremely important from a security perspective. We want multiple
+        // identical chains to be de-duplicated, but security issues would arise if two chains
+        // were considered identical while they're in reality not identical.
         let new_chain_key = ChainKey {
             genesis_block_hash: genesis_chain_information
                 .as_ref()
                 .finalized_block_header
                 .hash(),
-            relay_chain: relay_chain.map(|ck| {
+            relay_chain: relay_chain_id.map(|ck| {
                 (
                     Box::new(self.public_api_chains.get(ck.0).unwrap().key.clone()),
                     chain_spec.relay_chain().unwrap().1,
@@ -247,20 +262,8 @@ impl Client {
             }),
         };
 
-        let relay_chain_ready_future = relay_chain.map(|relay_chain| {
-            let relay_chain = &self
-                .chains_by_key
-                .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
-                .unwrap()
-                .0;
-
-            match relay_chain {
-                future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                future::MaybeDone::Gone => unreachable!(),
-            }
-        });
-
+        // Grab a couple of fields from the chain specification for later, as the chain
+        // specification is consumed below.
         let chain_spec_chain_id = chain_spec.id().to_owned();
         let genesis_block_hash = genesis_chain_information
             .as_ref()
@@ -271,103 +274,170 @@ impl Client {
             .finalized_block_header
             .state_root;
 
-        let (running_chain_init, _) = match self.chains_by_key.entry(new_chain_key.clone()) {
+        // Grab the services of the relay chain.
+        //
+        // Since the initialization process of a chain is done asynchronously, it is possible that
+        // the relay chain is still initializing. For this reason, we don't don't simply grab
+        // the relay chain services, but instead a `future::MaybeDone` of a future that yelds the
+        // relay chain services.
+        //
+        // This could in principle be done later on, but doing so raises borrow checker errors.
+        let relay_chain_ready_future: Option<future::MaybeDone<future::Shared<_>>> = relay_chain_id
+            .map(|relay_chain| {
+                let relay_chain = &self
+                    .chains_by_key
+                    .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
+                    .unwrap()
+                    .0;
+
+                match relay_chain {
+                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+                    future::MaybeDone::Gone => unreachable!(),
+                }
+            });
+
+        // Start the services of the chain to add, or grab the services if they already exist.
+        let running_chain_init = match self.chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
                 // TODO: must add bootnodes to the existing network service, otherwise the existing chain with the same key might only be using malicious bootnodes
                 entry.get_mut().1 = NonZeroU32::new(entry.get_mut().1.get() + 1).unwrap();
-                entry.into_mut()
+                &mut entry.into_mut().0
             }
             Entry::Vacant(entry) => {
                 // Key used by the networking. Represents the identity of the node on the
                 // peer-to-peer network.
                 let network_noise_key = connection::NoiseKey::new(&rand::random());
+                // TODO: move this log line somewhere else
                 log::info!(
                     "Network public key: {}",
                     peer_id::PublicKey::Ed25519(*network_noise_key.libp2p_public_ed25519_key())
                         .into_peer_id()
                 );
 
-                let new_tasks_tx = self.new_task_tx.clone();
-                let chain_spec = chain_spec.clone(); // TODO: quite expensive
-                let running_chain_init_future = async move {
-                    // Wait until the relay chain has finished initializing, if necessary.
-                    let relay_chain =
-                        if let Some(mut relay_chain_ready_future) = relay_chain_ready_future {
-                            (&mut relay_chain_ready_future).await;
-                            Some(
-                                Pin::new(&mut relay_chain_ready_future)
-                                    .take_output()
-                                    .unwrap(),
-                            )
-                        } else {
-                            None
-                        };
+                // Spawn a background task that initializes the services of the new chain and
+                // yields a `RunningChain`.
+                let running_chain_init_future: future::RemoteHandle<RunningChain> = {
+                    let new_tasks_tx = self.new_task_tx.clone();
+                    let chain_spec = chain_spec.clone(); // TODO: quite expensive
 
-                    start_services(
-                        new_tasks_tx,
-                        chain_information,
-                        genesis_chain_information,
-                        chain_spec,
-                        relay_chain.as_ref(),
-                        network_noise_key,
-                    )
-                    .await
+                    let future = async move {
+                        // Wait until the relay chain has finished initializing, if necessary.
+                        let relay_chain =
+                            if let Some(mut relay_chain_ready_future) = relay_chain_ready_future {
+                                (&mut relay_chain_ready_future).await;
+                                Some(
+                                    Pin::new(&mut relay_chain_ready_future)
+                                        .take_output()
+                                        .unwrap(),
+                                )
+                            } else {
+                                None
+                            };
+
+                        start_services(
+                            new_tasks_tx,
+                            chain_information,
+                            genesis_chain_information,
+                            chain_spec,
+                            relay_chain.as_ref(),
+                            network_noise_key,
+                        )
+                        .await
+                    };
+
+                    let (background_future, output_future) = future.remote_handle();
+                    self.new_task_tx
+                        .unbounded_send((
+                            "services-initialization".to_owned(),
+                            background_future.boxed(),
+                        ))
+                        .unwrap();
+                    output_future
                 };
 
-                let (drive_init, running_chain_init_future) =
-                    running_chain_init_future.remote_handle();
-                self.new_task_tx
-                    .unbounded_send(("services-initialization".to_owned(), drive_init.boxed()))
-                    .unwrap();
-                entry.insert((
-                    future::maybe_done(running_chain_init_future.shared()),
-                    NonZeroU32::new(1).unwrap(),
-                ))
+                &mut entry
+                    .insert((
+                        future::maybe_done(running_chain_init_future.shared()),
+                        NonZeroU32::new(1).unwrap(),
+                    ))
+                    .0
             }
         };
 
-        // Everything went ok. Adding the chain can't fail anymore at this point. Generate a
-        // `ChainId` for that chain.
+        // Apart from its services, each chain also has an entry in `public_api_chains`.
         let public_api_chains_entry = self.public_api_chains.vacant_entry();
         let new_chain_id = ChainId(public_api_chains_entry.key());
 
+        // JSON-RPC service initialization. This is done every time `add_chain` is called, even
+        // if a similar chain already existed.
         let json_rpc_service = if config.json_rpc_running {
+            // Clone `running_chain_init`.
             let mut running_chain_init = match running_chain_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                 future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
                 future::MaybeDone::Gone => unreachable!(),
             };
 
-            let new_task_tx = self.new_task_tx.clone();
-            let json_rpc_service_init = async move {
-                (&mut running_chain_init).await;
-                let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+            // Spawn a background task that initializes the JSON-RPC service.
+            let json_rpc_service_init: future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>> = {
+                let new_task_tx = self.new_task_tx.clone();
+                let init_future = async move {
+                    // Wait for the chain to finish initializing before starting the JSON-RPC service.
+                    (&mut running_chain_init).await;
+                    let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
 
-                json_rpc_service::start(json_rpc_service::Config {
-                    tasks_executor: Box::new({
-                        move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
-                    }),
-                    network_service: (running_chain.network_service.clone(), 0),
-                    sync_service: running_chain.sync_service,
-                    transactions_service: running_chain.transactions_service,
-                    runtime_service: running_chain.runtime_service,
-                    chain_spec,
-                    genesis_block_hash,
-                    genesis_block_state_root,
-                    chain_id: new_chain_id,
-                })
-                .await
+                    Arc::new(json_rpc_service::start(json_rpc_service::Config {
+                        tasks_executor: Box::new({
+                            move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+                        }),
+                        network_service: (running_chain.network_service.clone(), 0),
+                        sync_service: running_chain.sync_service,
+                        transactions_service: running_chain.transactions_service,
+                        runtime_service: running_chain.runtime_service,
+                        chain_spec,
+                        genesis_block_hash,
+                        genesis_block_state_root,
+                        max_parallel_requests: NonZeroU32::new(24).unwrap(),
+                        max_pending_requests: NonZeroU32::new(32).unwrap(),
+                        max_subscriptions: 64,
+                    }))
+                };
+                let (background_run, output_future) = init_future.remote_handle();
+                self.new_task_tx
+                    .unbounded_send(("json-rpc-service-init".to_owned(), background_run.boxed()))
+                    .unwrap();
+                output_future
             };
 
-            let (json_rpc_service_init_run, json_rpc_service_init) =
-                json_rpc_service_init.remote_handle();
-            self.new_task_tx
-                .unbounded_send((
-                    "json-rpc-service-init".to_owned(),
-                    json_rpc_service_init_run.boxed(),
-                ))
-                .unwrap();
-            Some(future::maybe_done(json_rpc_service_init.shared()))
+            // Make `json_rpc_service_init` clonable.
+            let json_rpc_service_init = json_rpc_service_init.shared();
+
+            // Spawn another task that, after the JSON-RPC service has finished initializing,
+            // polls its responses and sends them through the FFI layer.
+            //
+            // The expression is an `AbortHandle` that can be used in order to instantly kill this
+            // background task once the user decides to get rid of this chain.
+            let abort_run_task: future::AbortHandle = {
+                let shared_init = json_rpc_service_init.clone();
+                let run_task = async move {
+                    let json_rpc_service = shared_init.await;
+                    loop {
+                        let response = json_rpc_service.next_response().await;
+                        send_back(&response, new_chain_id)
+                    }
+                };
+                let (run_task, abort_run_task) = future::abortable(run_task);
+                self.new_task_tx
+                    .unbounded_send((
+                        "json-rpc-service-messages-out".to_owned(),
+                        run_task.map(|_| ()).boxed(),
+                    ))
+                    .unwrap();
+                abort_run_task
+            };
+
+            Some((future::maybe_done(json_rpc_service_init), abort_run_task))
         } else {
             None
         };
@@ -401,56 +471,50 @@ impl Client {
         } else {
             running_chain.1 = NonZeroU32::new(running_chain.1.get() - 1).unwrap();
         }
-
-        // TODO: what about cancellation stuff?
     }
 
-    pub fn json_rpc_request(&mut self, json_rpc_request: Box<[u8]>, chain_id: ChainId) {
-        fn parse_call_and_log(
-            json_rpc_request: &Box<[u8]>,
-            chain_id: ChainId,
-        ) -> Option<(&str, methods::MethodCall)> {
-            let request_str = match str::from_utf8(&*json_rpc_request) {
-                Ok(s) => s,
-                Err(error) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Failed to parse JSON-RPC query as UTF-8 (chain_id: {:?}): {}",
-                        chain_id, error
-                    );
-                    return None;
-                }
-            };
+    /// Enqueues a JSON-RPC request towards the given chain.
+    ///
+    /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
+    /// queued and will be decoded and processed later. An error is returned if, for each
+    /// individual chain, the queue of requests is too large.
+    ///
+    /// This function doesn't return an error, as errors are yielded using
+    /// [`ffi::emit_json_rpc_response`].
+    pub fn json_rpc_request(&mut self, json_rpc_request: impl Into<String>, chain_id: ChainId) {
+        self.json_rpc_request_inner(json_rpc_request.into(), chain_id)
+    }
 
-            log::debug!(
-                target: "json-rpc",
-                "JSON-RPC => {:?}{}",
-                if request_str.len() > 100 { &request_str[..100] } else { &request_str[..] },
-                if request_str.len() > 100 { "…" } else { "" }
-            );
+    fn json_rpc_request_inner(&mut self, json_rpc_request: String, chain_id: ChainId) {
+        log::debug!(
+            target: "json-rpc",
+            "JSON-RPC => {:?}{}",
+            if json_rpc_request.len() > 100 { &json_rpc_request[..100] } else { &json_rpc_request[..] },
+            if json_rpc_request.len() > 100 { "…" } else { "" }
+        );
 
-            match methods::parse_json_call(request_str) {
-                Ok(rq) => Some(rq),
-                Err(methods::ParseError::Method { request_id, error }) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Error in JSON-RPC method call: {}", error
-                    );
-                    json_rpc_service::send_back(&error.to_json_error(request_id), chain_id);
-                    return None;
-                }
-                Err(error) => {
-                    log::warn!(
-                        target: "json-rpc",
-                        "Ignoring malformed JSON-RPC call: {}", error
-                    );
-                    return None;
-                }
+        // Check whether the JSON-RPC request is correct, and bail out if it isn't.
+        let request_id = match methods::parse_json_call(&json_rpc_request) {
+            Ok((rq_id, _)) => rq_id,
+            Err(methods::ParseError::Method { request_id, error }) => {
+                log::warn!(
+                    target: "json-rpc",
+                    "Error in JSON-RPC method call: {}", error
+                );
+                send_back(&error.to_json_error(request_id), chain_id);
+                return;
             }
-        }
+            Err(error) => {
+                log::warn!(
+                    target: "json-rpc",
+                    "Ignoring malformed JSON-RPC call: {}", error
+                );
+                return;
+            }
+        };
 
         if let Some(public_chain) = self.public_api_chains.get(chain_id.0) {
-            if let Some(json_rpc_service) = public_chain.json_rpc_service.as_ref() {
+            if let Some((json_rpc_service, _)) = public_chain.json_rpc_service.as_ref() {
                 let mut json_rpc_service = match json_rpc_service {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                     future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
@@ -458,14 +522,13 @@ impl Client {
                 };
 
                 let future = async move {
-                    let (request_id, call) = match parse_call_and_log(&json_rpc_request, chain_id) {
-                        Some(v) => v,
-                        None => return,
-                    };
-
                     (&mut json_rpc_service).await;
                     let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
-                    json_rpc_service.handle_rpc(request_id, call).await;
+                    if let Err(err) = json_rpc_service.handle_rpc(json_rpc_request).await {
+                        if let Some(err) = err.into_json_rpc_error() {
+                            send_back(&err, chain_id);
+                        }
+                    }
                 };
 
                 // TODO: properly spread resources usage instead of spawning new tasks all the time
@@ -473,37 +536,33 @@ impl Client {
                     .unbounded_send(("json-rpc-request".to_owned(), future.boxed()))
                     .unwrap();
             } else {
-                if let Some((request_id, _)) = parse_call_and_log(&json_rpc_request, chain_id) {
-                    json_rpc_service::send_back(
-                        &json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ApplicationDefined(
-                                -33000,
-                                &format!(
-                                    "A JSON-RPC service has not been started for chain id {:?}",
-                                    chain_id
-                                ),
-                            ),
-                            None,
-                        ),
-                        chain_id,
-                    );
-                }
-            }
-        } else {
-            if let Some((request_id, _)) = parse_call_and_log(&json_rpc_request, chain_id) {
-                json_rpc_service::send_back(
+                send_back(
                     &json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ApplicationDefined(
                             -33000,
-                            &format!("Invalid chain id {:?}", chain_id),
+                            &format!(
+                                "A JSON-RPC service has not been started for chain id {:?}",
+                                chain_id
+                            ),
                         ),
                         None,
                     ),
                     chain_id,
                 );
             }
+        } else {
+            send_back(
+                &json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ApplicationDefined(
+                        -33000,
+                        &format!("Invalid chain id {:?}", chain_id),
+                    ),
+                    None,
+                ),
+                chain_id,
+            );
         }
     }
 }
@@ -511,12 +570,35 @@ impl Client {
 struct PublicApiChain {
     key: ChainKey,
     chain_spec_chain_id: String,
-    // TODO: actually a bit overkill to spawn one separate service per chain
-    json_rpc_service: Option<
+    json_rpc_service: Option<(
         future::MaybeDone<
             future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>>>,
         >,
-    >,
+        future::AbortHandle,
+    )>,
+}
+
+impl Drop for PublicApiChain {
+    fn drop(&mut self) {
+        if let Some((_, abort)) = &self.json_rpc_service {
+            abort.abort();
+        }
+    }
+}
+
+/// Sends back a response or a notification to the JSON-RPC client.
+///
+/// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
+/// >           in order to print a log message.
+fn send_back(message: &str, chain_id: ChainId) {
+    log::debug!(
+        target: "json-rpc",
+        "JSON-RPC <= {}{}",
+        if message.len() > 100 { &message[..100] } else { &message[..] },
+        if message.len() > 100 { "…" } else { "" }
+    );
+
+    ffi::emit_json_rpc_response(message, chain_id);
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.

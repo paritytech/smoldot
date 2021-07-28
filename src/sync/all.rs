@@ -1703,6 +1703,19 @@ pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
+    /// Returns the identifier and user data of the source that has sent the fragment to be
+    /// verified.
+    pub fn proof_sender(&self) -> (SourceId, &TSrc) {
+        let sender = match &self.inner.inner {
+            AllSyncInner::GrandpaWarpSync(
+                grandpa_warp_sync::InProgressGrandpaWarpSync::Verifier(verifier),
+            ) => verifier.proof_sender(),
+            _ => unreachable!(),
+        };
+
+        (sender.1.outer_source_id, &sender.1.user_data)
+    }
+
     /// Perform the verification.
     pub fn perform(
         mut self,

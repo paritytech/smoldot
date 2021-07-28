@@ -20,20 +20,48 @@ use crate::finality::justification::verify::{
     verify, Config as VerifyConfig, Error as VerifyError,
 };
 use crate::header::{DigestItemRef, GrandpaAuthority, GrandpaConsensusLogRef, Header};
+use crate::informant::HashDisplay;
 use crate::network::protocol::GrandpaWarpSyncResponseFragment;
 
 use alloc::vec::Vec;
+use core::fmt;
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug)]
 pub enum Error {
-    #[display(fmt = "{}", _0)]
     Verify(VerifyError),
-    #[display(fmt = "Justification target hash doesn't match the hash of the associated header.")]
-    TargetHashMismatch,
-    #[display(fmt = "Warp sync proof fragment doesn't contain an authorities list change.")]
+    TargetHashMismatch {
+        justification_target_hash: [u8; 32],
+        justification_target_height: u64,
+        header_hash: [u8; 32],
+    },
     NonMinimalProof,
-    #[display(fmt = "Warp sync proof is empty.")]
     EmptyProof,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::Verify(err) => fmt::Display::fmt(err, f),
+            Error::TargetHashMismatch {
+                justification_target_hash,
+                justification_target_height,
+                header_hash,
+            } => {
+                write!(
+                    f,
+                    "Justification target hash ({}, height: {}) doesn't match the hash of the associated header ({})",
+                    HashDisplay(justification_target_hash),
+                    justification_target_height,
+                    HashDisplay(header_hash)
+                )
+            }
+            Error::NonMinimalProof => write!(
+                f,
+                "Warp sync proof fragment doesn't contain an authorities list change"
+            ),
+            Error::EmptyProof => write!(f, "Warp sync proof is empty"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -81,8 +109,13 @@ impl Verifier {
         debug_assert!(self.fragments.len() > self.index);
         let fragment = &self.fragments[self.index];
 
-        if fragment.justification.target_hash != fragment.header.hash() {
-            return Err(Error::TargetHashMismatch);
+        let fragment_header_hash = fragment.header.hash();
+        if fragment.justification.target_hash != fragment_header_hash {
+            return Err(Error::TargetHashMismatch {
+                justification_target_hash: fragment.justification.target_hash,
+                justification_target_height: fragment.justification.target_number.into(), // TODO: some u32/u64 mismatch here; figure out
+                header_hash: fragment_header_hash,
+            });
         }
 
         verify(VerifyConfig {

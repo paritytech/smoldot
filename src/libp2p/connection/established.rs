@@ -1091,6 +1091,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                             });
                         }
                         Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                            debug_assert_ne!(num_read, 0);
                             data = &data[num_read..];
                             *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
                                 handshake,
@@ -1242,6 +1243,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                         });
                     }
                     Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                        debug_assert_ne!(num_read, 0);
                         data = &data[num_read..];
                         *substream.user_data() = Substream::NotificationsInHandshake {
                             handshake,
@@ -1254,7 +1256,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                 },
                 Substream::NotificationsInWait { protocol_index } => {
                     // TODO: what to do with data?
-                    data = &data[data.len()..];
+                    data = &[];
                     *substream.user_data() = Substream::NotificationsInWait { protocol_index };
                 }
                 Substream::NotificationsIn {
@@ -1262,8 +1264,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                     protocol_index,
                     user_data,
                 } => {
-                    // TODO: rewrite this block to support sending one notification at a
-                    // time
+                    // TODO: rewrite this block to support sending one notification at a time
 
                     let mut notification = None;
                     let max_notification_size =
@@ -1284,10 +1285,9 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 break;
                             }
                             Err(_) => {
-                                // TODO: report to user and all ; this is just a dummy
-                                next_notification =
-                                    leb128::FramedInProgress::new(max_notification_size);
-                                break;
+                                substream.reset();
+                                // TODO: report to user; there's no corresponding event yet
+                                return None;
                             }
                         }
                     }

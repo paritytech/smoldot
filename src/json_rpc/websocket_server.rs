@@ -263,14 +263,14 @@ impl<T> WsServer<T> {
             let mut server = Server::new(pending_incoming);
 
             let websocket_key = match server.receive_request().await {
-                Ok(req) => req.into_key(),
+                Ok(req) => req.key(),
                 Err(_) => return (connection_id, unique_id, Err(())),
             };
 
             match server
                 .send_response(&{
                     Response::Accept {
-                        key: &websocket_key,
+                        key: websocket_key,
                         protocol: None,
                     }
                 })
@@ -426,7 +426,7 @@ impl<T> WsServer<T> {
                         let mut send_rx = self.connections[connection_id.0].send_rx.take().unwrap();
                         Box::pin(async move {
                             while let Some(message) = send_rx.next().await {
-                                match sender.send_text(&message).await {
+                                match sender.send_text_owned(message).await {
                                     Ok(()) => {}
                                     Err(_) => break,
                                 }

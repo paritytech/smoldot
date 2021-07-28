@@ -504,7 +504,7 @@ fn add_chain(
         .add_chain(super::AddChainConfig {
             specification: str::from_utf8(&chain_spec).unwrap(),
             json_rpc_running: json_rpc_running != 0,
-            potential_relay_chains,
+            potential_relay_chains: potential_relay_chains.into_iter(),
         });
 
     match result {
@@ -537,6 +537,9 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
         let len = usize::try_from(len).unwrap();
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) }
     };
+
+    // As mentioned in the documentation, the bytes *must* be valid UTF-8.
+    let json_rpc_request: String = String::from_utf8(json_rpc_request.into()).unwrap();
 
     let mut client_lock = CLIENT.lock().unwrap();
     client_lock

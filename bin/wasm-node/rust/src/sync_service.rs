@@ -843,15 +843,16 @@ async fn start_relay_chain(
                         break;
                     }
                     all::ProcessOne::VerifyWarpSyncFragment(verify) => {
+                        let sender_peer_id = verify.proof_sender().1.clone(); // TODO: unnecessary cloning most of the time
+
                         let (sync_out, next_actions, result) = verify.perform();
                         sync = sync_out;
                         requests_to_start.extend(next_actions);
 
                         if let Err(err) = result {
-                            // TODO: indicate peer who sent it?
                             log::warn!(
                                 target: "sync-verify",
-                                "Failed to verify warp sync fragment: {}", err
+                                "Failed to verify warp sync fragment from {}: {}", sender_peer_id, err
                             );
                         }
                     }
