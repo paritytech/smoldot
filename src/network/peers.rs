@@ -45,7 +45,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 pub use libp2p::ConnectionId;
 
 pub struct Peers<TNow> {
-    inner: libp2p::Network<(), TNow>,
+    inner: libp2p::Network<usize, TNow>,
 
     guarded: Mutex<Guarded>,
 }
@@ -179,7 +179,74 @@ where
             debug_assert!(guarded.to_process_pre_event.is_none());
 
             match inner_event {
-                _ => todo!(),
+                libp2p::Event::HandshakeFinished {
+                    id,
+                    peer_id,
+                    user_data,
+                } => {
+                    guarded.connections_peer_index[user_data];
+                }
+                libp2p::Event::Shutdown {
+                    id,
+                    out_overlay_network_indices,
+                    in_overlay_network_indices,
+                    user_data,
+                } => {
+                    todo!()
+                }
+
+                libp2p::Event::RequestIn {
+                    id,
+                    substream_id,
+                    protocol_index,
+                    request_payload,
+                    user_data,
+                } => {}
+
+                libp2p::Event::NotificationsOutAccept {
+                    id,
+                    overlay_network_index,
+                    remote_handshake,
+                    user_data,
+                } => {
+                    let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                    let _inserted = guarded
+                        .peers_notifications_out
+                        .insert((peer_index, overlay_network_index));
+                    debug_assert!(_inserted);
+                }
+
+                libp2p::Event::NotificationsOutClose {
+                    id,
+                    overlay_network_index,
+                    user_data,
+                } => {
+                    let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                    let _was_in = guarded
+                        .peers_notifications_out
+                        .remove(&(peer_index, overlay_network_index));
+                    debug_assert!(_was_in);
+                }
+
+                libp2p::Event::NotificationsInOpen {
+                    id,
+                    overlay_network_index,
+                    remote_handshake,
+                    user_data,
+                } => {}
+
+                libp2p::Event::NotificationsIn {
+                    id,
+                    overlay_network_index,
+                    notification,
+                    user_data,
+                } => {}
+
+                libp2p::Event::NotificationsInClose {
+                    id,
+                    overlay_network_index,
+                    user_data,
+                } => {}
             }
         }
     }
@@ -401,11 +468,15 @@ struct Guarded {
     /// in this field. This field is then processed before the next event is pulled.
     to_process_pre_event: Option<ToProcessPreEvent>,
 
+    connections_peer_index: slab::Slab<Option<usize>>,
+
     peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
 
     peers: slab::Slab<Peer>,
 
     peers_desired: BTreeSet<(usize, usize)>,
+
+    peers_notifications_out: BTreeSet<(usize, usize)>,
 }
 
 impl Guarded {
