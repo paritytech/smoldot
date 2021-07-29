@@ -261,6 +261,7 @@ impl Client {
                     chain_spec.relay_chain().unwrap().1,
                 )
             }),
+            protocol_id: chain_spec.protocol_id().to_owned(),
         };
 
         // Grab a couple of fields from the chain specification for later, as the chain
@@ -629,10 +630,12 @@ struct ChainKey {
     /// Hash of the genesis block of the chain.
     genesis_block_hash: [u8; 32],
     // TODO: what about light checkpoints?
-    // TODO: must also contain protocolId, forkBlocks, and badBlocks fields
+    // TODO: must also contain forkBlocks, and badBlocks fields
     /// If the chain is a parachain, contains the relay chain and the "para ID" on this relay
     /// chain.
     relay_chain: Option<(Box<ChainKey>, u32)>,
+    /// Network protocol id, found in the chain specification.
+    protocol_id: String,
 }
 
 #[derive(Clone)]
