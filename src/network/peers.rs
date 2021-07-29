@@ -328,15 +328,39 @@ where
     /// Returns the list of peers whose desired status is TODO: but which couldn't be reached.
     pub async fn unreachable_peers(&'_ self) -> impl Iterator<Item = PeerId> {}
 
+    ///
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`DesiredInNotificationId`] is invalid. Note that these ids remain valid
+    /// forever until [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`] is
+    /// called.
+    ///
     pub async fn in_notification_accept(
         &self,
         id: DesiredInNotificationId,
         handshake_back: Vec<u8>,
     ) {
+        let mut guarded = self.guarded.lock().await;
+        assert!(guarded.desired_in_notifications.contains(id.0));
+        guarded.desired_in_notifications.remove(id.0);
+
         todo!()
     }
 
+    ///
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`DesiredInNotificationId`] is invalid. Note that these ids remain valid
+    /// forever until [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`] is
+    /// called.
+    ///
     pub async fn in_notification_refuse(&self, id: DesiredInNotificationId) {
+        let mut guarded = self.guarded.lock().await;
+        assert!(guarded.desired_in_notifications.contains(id.0));
+        guarded.desired_in_notifications.remove(id.0);
+
         todo!()
     }
 
@@ -374,7 +398,7 @@ pub enum OutNotificationsState {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DesiredInNotificationId;
+pub struct DesiredInNotificationId(usize);
 
 pub enum Event {
     /// Established a new connection to the given peer.
@@ -477,6 +501,8 @@ struct Guarded {
     peers_desired: BTreeSet<(usize, usize)>,
 
     peers_notifications_out: BTreeSet<(usize, usize)>,
+
+    desired_in_notifications: slab::Slab<()>,
 }
 
 impl Guarded {
