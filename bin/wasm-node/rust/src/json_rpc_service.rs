@@ -102,142 +102,6 @@ pub struct Config<'a> {
     pub max_subscriptions: u32,
 }
 
-/// Initializes the JSON-RPC service with the given configuration.
-pub fn start(mut config: Config<'_>) -> JsonRpcService {
-    // Chanel from the foreground to the background.
-    // Requests are dropped if the channel is full.
-    let (new_requests_in, new_requests_rx) = mpsc::channel(
-        usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
-    );
-
-    // Channel from the background to the foreground.
-    let (responses_sender, responses_rx) = mpsc::channel(128);
-
-    let client = JsonRpcService {
-        new_requests_in: Mutex::new(new_requests_in),
-        responses_rx: Mutex::new(responses_rx),
-    };
-
-    // Channel used in the background in order to spawn new tasks scoped to the background.
-    let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
-
-    let background = Arc::new(Background {
-        new_requests_rx: Mutex::new(new_requests_rx),
-        responses_sender: Mutex::new(responses_sender),
-        new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
-        max_subscriptions: config.max_subscriptions,
-        chain_name: config.chain_spec.name().to_owned(),
-        chain_ty: config.chain_spec.chain_type().to_owned(),
-        chain_is_live: config.chain_spec.has_live_network(),
-        chain_properties_json: config.chain_spec.properties().to_owned(),
-        network_service: config.network_service.0,
-        sync_service: config.sync_service,
-        runtime_service: config.runtime_service,
-        transactions_service: config.transactions_service,
-        blocks: Mutex::new(Blocks {
-            known_blocks: lru::LruCache::new(256),
-            best_block: [0; 32],      // Filled below.
-            finalized_block: [0; 32], // Filled below.
-        }),
-        genesis_block: config.genesis_block_hash,
-        next_subscription: atomic::AtomicU64::new(0),
-        subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
-            usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
-            Default::default(),
-        )),
-    });
-
-    // Spawns the background task that actually runs the logic of that JSON-RPC service.
-    let max_parallel_requests = config.max_parallel_requests;
-    (config.tasks_executor)(
-        "json-rpc-service".into(),
-        async move {
-            let (_finalized_block_header, mut finalized_blocks_subscription) =
-                background.sync_service.subscribe_best().await;
-            let (best_block_header, mut best_blocks_subscription) =
-                background.sync_service.subscribe_best().await;
-            debug_assert_eq!(_finalized_block_header, best_block_header);
-            let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
-
-            {
-                let mut blocks = background.blocks.try_lock().unwrap();
-                blocks.known_blocks.put(
-                    best_block_hash,
-                    header::decode(&best_block_header).unwrap().into(),
-                );
-                blocks.best_block = best_block_hash;
-                blocks.finalized_block = best_block_hash;
-            }
-
-            let mut tasks = stream::FuturesUnordered::new();
-
-            for _ in 0..max_parallel_requests.get() {
-                let background = background.clone();
-                tasks.push(
-                    async move {
-                        loop {
-                            let message = background.new_requests_rx.lock().await.next().await;
-                            // It is important for `new_requests_rx` to be unlocked before
-                            // awaiting on `handle_request`.
-                            match message {
-                                Some(m) => background.handle_request(m).await,
-                                None => return, // Foreground is closed.
-                            }
-                        }
-                    }
-                    .boxed(),
-                );
-            }
-
-            loop {
-                if tasks.is_empty() {
-                    break;
-                }
-
-                futures::select! {
-                    () = tasks.select_next_some() => {},
-                    task = new_child_tasks_rx.next() => {
-                        let task = task.unwrap();
-                        tasks.push(task);
-                    }
-                    block = best_blocks_subscription.next() => {
-                        match block {
-                            Some(block) => {
-                                let hash = header::hash_from_scale_encoded_header(&block);
-                                let mut blocks = background.blocks.lock().await;
-                                let blocks = &mut *blocks;
-                                blocks.best_block = hash;
-                                // As a small trick, we re-query the finalized block from
-                                // `known_blocks` in order to ensure that it never leaves the
-                                // LRU cache.
-                                let header = header::decode(&block).unwrap().into();
-                                blocks.known_blocks.get(&blocks.finalized_block);
-                                blocks.known_blocks.put(hash, header);
-                            },
-                            None => return,
-                        }
-                    },
-                    block = finalized_blocks_subscription.next() => {
-                        match block {
-                            Some(block) => {
-                                let hash = header::hash_from_scale_encoded_header(&block);
-                                let header = header::decode(&block).unwrap().into();
-                                let mut blocks = background.blocks.lock().await;
-                                blocks.finalized_block = hash;
-                                blocks.known_blocks.put(hash, header);
-                            },
-                            None => return,
-                        }
-                    },
-                }
-            }
-        }
-        .boxed(),
-    );
-
-    client
-}
-
 pub struct JsonRpcService {
     /// Channel to send JSON-RPC requests to the background task.
     ///
@@ -249,6 +113,142 @@ pub struct JsonRpcService {
 }
 
 impl JsonRpcService {
+    /// Creates a new JSON-RPC service with the given configuration.
+    pub fn new(mut config: Config<'_>) -> JsonRpcService {
+        // Channel from the foreground to the background.
+        // Requests are dropped if the channel is full.
+        let (new_requests_in, new_requests_rx) = mpsc::channel(
+            usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
+        );
+
+        // Channel from the background to the foreground.
+        let (responses_sender, responses_rx) = mpsc::channel(128);
+
+        let client = JsonRpcService {
+            new_requests_in: Mutex::new(new_requests_in),
+            responses_rx: Mutex::new(responses_rx),
+        };
+
+        // Channel used in the background in order to spawn new tasks scoped to the background.
+        let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
+
+        let background = Arc::new(Background {
+            new_requests_rx: Mutex::new(new_requests_rx),
+            responses_sender: Mutex::new(responses_sender),
+            new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
+            max_subscriptions: config.max_subscriptions,
+            chain_name: config.chain_spec.name().to_owned(),
+            chain_ty: config.chain_spec.chain_type().to_owned(),
+            chain_is_live: config.chain_spec.has_live_network(),
+            chain_properties_json: config.chain_spec.properties().to_owned(),
+            network_service: config.network_service.0,
+            sync_service: config.sync_service,
+            runtime_service: config.runtime_service,
+            transactions_service: config.transactions_service,
+            blocks: Mutex::new(Blocks {
+                known_blocks: lru::LruCache::new(256),
+                best_block: [0; 32],      // Filled below.
+                finalized_block: [0; 32], // Filled below.
+            }),
+            genesis_block: config.genesis_block_hash,
+            next_subscription: atomic::AtomicU64::new(0),
+            subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
+                usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
+                Default::default(),
+            )),
+        });
+
+        // Spawns the background task that actually runs the logic of that JSON-RPC service.
+        let max_parallel_requests = config.max_parallel_requests;
+        (config.tasks_executor)(
+            "json-rpc-service".into(),
+            async move {
+                let (_finalized_block_header, mut finalized_blocks_subscription) =
+                    background.sync_service.subscribe_best().await;
+                let (best_block_header, mut best_blocks_subscription) =
+                    background.sync_service.subscribe_best().await;
+                debug_assert_eq!(_finalized_block_header, best_block_header);
+                let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
+
+                {
+                    let mut blocks = background.blocks.try_lock().unwrap();
+                    blocks.known_blocks.put(
+                        best_block_hash,
+                        header::decode(&best_block_header).unwrap().into(),
+                    );
+                    blocks.best_block = best_block_hash;
+                    blocks.finalized_block = best_block_hash;
+                }
+
+                let mut tasks = stream::FuturesUnordered::new();
+
+                for _ in 0..max_parallel_requests.get() {
+                    let background = background.clone();
+                    tasks.push(
+                        async move {
+                            loop {
+                                let message = background.new_requests_rx.lock().await.next().await;
+                                // It is important for `new_requests_rx` to be unlocked before
+                                // awaiting on `handle_request`.
+                                match message {
+                                    Some(m) => background.handle_request(m).await,
+                                    None => return, // Foreground is closed.
+                                }
+                            }
+                        }
+                        .boxed(),
+                    );
+                }
+
+                loop {
+                    if tasks.is_empty() {
+                        break;
+                    }
+
+                    futures::select! {
+                        () = tasks.select_next_some() => {},
+                        task = new_child_tasks_rx.next() => {
+                            let task = task.unwrap();
+                            tasks.push(task);
+                        }
+                        block = best_blocks_subscription.next() => {
+                            match block {
+                                Some(block) => {
+                                    let hash = header::hash_from_scale_encoded_header(&block);
+                                    let mut blocks = background.blocks.lock().await;
+                                    let blocks = &mut *blocks;
+                                    blocks.best_block = hash;
+                                    // As a small trick, we re-query the finalized block from
+                                    // `known_blocks` in order to ensure that it never leaves the
+                                    // LRU cache.
+                                    let header = header::decode(&block).unwrap().into();
+                                    blocks.known_blocks.get(&blocks.finalized_block);
+                                    blocks.known_blocks.put(hash, header);
+                                },
+                                None => return,
+                            }
+                        },
+                        block = finalized_blocks_subscription.next() => {
+                            match block {
+                                Some(block) => {
+                                    let hash = header::hash_from_scale_encoded_header(&block);
+                                    let header = header::decode(&block).unwrap().into();
+                                    let mut blocks = background.blocks.lock().await;
+                                    blocks.finalized_block = hash;
+                                    blocks.known_blocks.put(hash, header);
+                                },
+                                None => return,
+                            }
+                        },
+                    }
+                }
+            }
+            .boxed(),
+        );
+
+        client
+    }
+
     /// Analyzes the given JSON-RPC call and processes it in the background.
     ///
     /// This method is `async`, but it is expected to finish very quickly. The processing of the
