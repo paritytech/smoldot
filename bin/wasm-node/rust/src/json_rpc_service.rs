@@ -45,7 +45,7 @@ use std::{
 };
 
 /// Configuration for a JSON-RPC service.
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
@@ -63,7 +63,7 @@ pub struct Config {
     pub runtime_service: Arc<runtime_service::RuntimeService>,
 
     /// Specification of the chain.
-    pub chain_spec: chain_spec::ChainSpec,
+    pub chain_spec: &'a chain_spec::ChainSpec,
 
     /// Hash of the genesis block of the chain.
     ///
@@ -103,7 +103,7 @@ pub struct Config {
 }
 
 /// Initializes the JSON-RPC service with the given configuration.
-pub fn start(mut config: Config) -> JsonRpcService {
+pub fn start(mut config: Config<'_>) -> JsonRpcService {
     // Chanel from the foreground to the background.
     // Requests are dropped if the channel is full.
     let (new_requests_in, new_requests_rx) = mpsc::channel(
@@ -126,7 +126,10 @@ pub fn start(mut config: Config) -> JsonRpcService {
         responses_sender: Mutex::new(responses_sender),
         new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
         max_subscriptions: config.max_subscriptions,
-        chain_spec: config.chain_spec,
+        chain_name: config.chain_spec.name().to_owned(),
+        chain_ty: config.chain_spec.chain_type().to_owned(),
+        chain_is_live: config.chain_spec.has_live_network(),
+        chain_properties_json: config.chain_spec.properties().to_owned(),
         network_service: config.network_service.0,
         sync_service: config.sync_service,
         runtime_service: config.runtime_service,
@@ -325,7 +328,14 @@ struct Background {
     // TODO: not enforced
     max_subscriptions: u32,
 
-    chain_spec: chain_spec::ChainSpec,
+    /// Name of the chain, as found in the chain specification.
+    chain_name: String,
+    /// Type of chain, as found in the chain specification.
+    chain_ty: String,
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    chain_properties_json: String,
+    /// Whether the chain is a live network. Found in the chain specification.
+    chain_is_live: bool,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService>,
@@ -962,7 +972,7 @@ impl Background {
                     .lock()
                     .await
                     .send(
-                        methods::Response::system_chain(self.chain_spec.name())
+                        methods::Response::system_chain(&self.chain_name)
                             .to_json_response(request_id),
                     )
                     .await;
@@ -973,7 +983,7 @@ impl Background {
                     .lock()
                     .await
                     .send(
-                        methods::Response::system_chainType(self.chain_spec.chain_type())
+                        methods::Response::system_chainType(&self.chain_ty)
                             .to_json_response(request_id),
                     )
                     .await;
@@ -986,7 +996,7 @@ impl Background {
                     is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
                     peers: u64::try_from(self.network_service.peers_list().await.count())
                         .unwrap_or(u64::max_value()),
-                    should_have_peers: self.chain_spec.has_live_network(),
+                    should_have_peers: self.chain_is_live,
                 })
                 .to_json_response(request_id);
 
@@ -1039,7 +1049,7 @@ impl Background {
                     .await
                     .send(
                         methods::Response::system_properties(
-                            serde_json::from_str(self.chain_spec.properties()).unwrap(),
+                            serde_json::from_str(&self.chain_properties_json).unwrap(),
                         )
                         .to_json_response(request_id),
                     )
