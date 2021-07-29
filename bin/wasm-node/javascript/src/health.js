@@ -182,8 +182,10 @@ export function healthChecker() {
                 },
 
                 destroy: function () {
-                    if (this.currentHealthTimeout)
+                    if (this.currentHealthTimeout) {
                         clearTimeout(this.currentHealthTimeout);
+                        this.currentHealthTimeout = null;
+                    }
                 }
             };
 
