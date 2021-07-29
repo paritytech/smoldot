@@ -144,8 +144,10 @@ export function healthChecker() {
                 startHealthCheck: function () {
                     if (this.currentHealthCheckId)
                         throw new Error('Internal error in health checker');
-                    if (this.currentHealthTimeout)
+                    if (this.currentHealthTimeout) {
                         clearTimeout(this.currentHealthTimeout);
+                        this.currentHealthTimeout = null;
+                    }
                     this.currentHealthCheckId = randombytes(32).toString('base64');
                     sendJsonRpc(JSON.stringify({
                         jsonrpc: "2.0",
