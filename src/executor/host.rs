@@ -183,8 +183,8 @@
 use super::{allocator, vm};
 use crate::util;
 
-use alloc::{format, string::String, vec::Vec};
-use core::{convert::TryFrom as _, fmt, hash::Hasher as _, iter};
+use alloc::{borrow::ToOwned as _, format, string::String, vec::Vec};
+use core::{convert::TryFrom as _, fmt, hash::Hasher as _, iter, str};
 use parity_scale_codec::DecodeAll as _;
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
@@ -679,6 +679,7 @@ impl ReadyToRun {
                 };
             }
 
+            // Passed a parameter index. Produces an `impl AsRef<[u8]>`.
             macro_rules! expect_pointer_size {
                 ($num:expr) => {{
                     let val = match &params[$num] {
@@ -693,15 +694,17 @@ impl ReadyToRun {
                                 },
                                 prototype: self.inner.into_prototype(),
                             }
-                        },
+                        }
                     };
 
                     let len = u32::try_from(val >> 32).unwrap();
                     let ptr = u32::try_from(val & 0xffffffff).unwrap();
 
-                    match self.inner.vm.read_memory(ptr, len).map(|v| v.as_ref().to_vec()) { // TODO: no; keep the impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
+                    let result = self.inner.vm.read_memory(ptr, len);
+                    match result {
                         Ok(v) => v,
                         Err(vm::OutOfBoundsError) => {
+                            drop(result);
                             return HostVm::Error {
                                 error: Error::ParamOutOfRange {
                                     function: host_fn.name(),
@@ -710,10 +713,10 @@ impl ReadyToRun {
                                     length: len,
                                 },
                                 prototype: self.inner.into_prototype(),
-                            }
+                            };
                         }
                     }
-                }}
+                }};
             }
 
             macro_rules! expect_pointer_size_raw {
@@ -766,12 +769,14 @@ impl ReadyToRun {
                                 },
                                 prototype: self.inner.into_prototype(),
                             }
-                        },
+                        }
                     };
 
-                    match self.inner.vm.read_memory(ptr, $size).map(|v| v.as_ref().to_vec()) { // TODO: no; keep the impl AsRef<[u8]>; however Rust doesn't like the way we borrow things
+                    let result = self.inner.vm.read_memory(ptr, $size);
+                    match result {
                         Ok(v) => v,
                         Err(vm::OutOfBoundsError) => {
+                            drop(result);
                             return HostVm::Error {
                                 error: Error::ParamOutOfRange {
                                     function: host_fn.name(),
@@ -780,10 +785,10 @@ impl ReadyToRun {
                                     length: $size,
                                 },
                                 prototype: self.inner.into_prototype(),
-                            }
+                            };
                         }
                     }
-                }}
+                }};
             }
 
             macro_rules! expect_u32 {
@@ -877,9 +882,10 @@ impl ReadyToRun {
                 }
                 HostFunction::ext_storage_clear_prefix_version_2 => {
                     let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
-                    let limit_encoded = expect_pointer_size!(1);
 
-                    let max_keys_to_remove = match Option::<u32>::decode_all(&limit_encoded) {
+                    let max_keys_to_remove =
+                        Option::<u32>::decode_all(expect_pointer_size!(1).as_ref());
+                    let max_keys_to_remove = match max_keys_to_remove {
                         Ok(l) => l,
                         Err(err) => {
                             return HostVm::Error {
@@ -989,20 +995,22 @@ impl ReadyToRun {
                 HostFunction::ext_crypto_ed25519_generate_version_1 => todo!(),
                 HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
                 HostFunction::ext_crypto_ed25519_verify_version_1 => {
-                    let sig = expect_pointer_constant_size!(0, 64);
-                    let message = expect_pointer_size!(1);
-                    let pubkey = expect_pointer_constant_size!(2, 32);
-
-                    // TODO: copy overhead?
-                    let success = if let Ok(public_key) =
-                        ed25519_zebra::VerificationKey::try_from(&pubkey[..])
-                    {
+                    let success = {
                         // TODO: copy overhead?
-                        let signature =
-                            ed25519_zebra::Signature::from(<[u8; 64]>::try_from(&sig[..]).unwrap());
-                        public_key.verify(&signature, &message).is_ok()
-                    } else {
-                        false
+                        let public_key = ed25519_zebra::VerificationKey::try_from(
+                            expect_pointer_constant_size!(2, 32).as_ref(),
+                        );
+                        if let Ok(public_key) = public_key {
+                            // TODO: copy overhead?
+                            let signature = ed25519_zebra::Signature::from(
+                                <[u8; 64]>::try_from(expect_pointer_constant_size!(0, 64).as_ref())
+                                    .unwrap(),
+                            );
+                            let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
+                            public_key.verify(&signature, &message).is_ok()
+                        } else {
+                            false
+                        }
                     };
 
                     self = ReadyToRun {
@@ -1014,17 +1022,22 @@ impl ReadyToRun {
                 HostFunction::ext_crypto_sr25519_generate_version_1 => todo!(),
                 HostFunction::ext_crypto_sr25519_sign_version_1 => todo!(),
                 HostFunction::ext_crypto_sr25519_verify_version_1 => {
-                    let sig = expect_pointer_constant_size!(0, 64);
-                    let message = expect_pointer_size!(1);
-                    let pubkey = expect_pointer_constant_size!(2, 32);
+                    let success = {
+                        // The `unwrap()` below can only panic if the input is the wrong length, which
+                        // we know can't happen.
+                        // TODO: copy overhead?
+                        let signing_public_key = schnorrkel::PublicKey::from_bytes(
+                            expect_pointer_constant_size!(2, 32).as_ref(),
+                        )
+                        .unwrap();
 
-                    // The `unwrap()` below can only panic if the input is the wrong length, which
-                    // we know can't happen.
-                    // TODO: copy overhead?
-                    let signing_public_key = schnorrkel::PublicKey::from_bytes(&pubkey).unwrap();
-                    let success = signing_public_key
-                        .verify_simple_preaudit_deprecated(b"substrate", &message, &sig)
-                        .is_ok();
+                        let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
+                        let signature = expect_pointer_constant_size!(0, 64).as_ref().to_owned(); // TODO: to_owned() :-/
+
+                        signing_public_key
+                            .verify_simple_preaudit_deprecated(b"substrate", &message, &signature)
+                            .is_ok()
+                    };
 
                     self = ReadyToRun {
                         resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
@@ -1032,20 +1045,28 @@ impl ReadyToRun {
                     };
                 }
                 HostFunction::ext_crypto_sr25519_verify_version_2 => {
-                    let sig = expect_pointer_constant_size!(0, 64);
-                    let message = expect_pointer_size!(1);
-                    let pubkey = expect_pointer_constant_size!(2, 32);
+                    let success = {
+                        // The two `unwrap()`s below can only panic if the input is the wrong
+                        // length, which we know can't happen.
+                        // TODO: copy overhead?
+                        let signing_public_key = schnorrkel::PublicKey::from_bytes(
+                            expect_pointer_constant_size!(2, 32).as_ref(),
+                        )
+                        .unwrap();
+                        // TODO: copy overhead?
+                        let signature = schnorrkel::Signature::from_bytes(
+                            expect_pointer_constant_size!(0, 64).as_ref(),
+                        )
+                        .unwrap();
 
-                    // The two `unwrap()`s below can only panic if the input is the wrong length,
-                    // which we know can't happen.
-                    // TODO: copy overhead?
-                    let signing_public_key = schnorrkel::PublicKey::from_bytes(&pubkey).unwrap();
-                    // TODO: copy overhead?
-                    let signature = schnorrkel::Signature::from_bytes(&sig).unwrap();
-
-                    let success = signing_public_key
-                        .verify_simple(b"substrate", &message, &signature)
-                        .is_ok();
+                        signing_public_key
+                            .verify_simple(
+                                b"substrate",
+                                expect_pointer_size!(1).as_ref(),
+                                &signature,
+                            )
+                            .is_ok()
+                    };
 
                     self = ReadyToRun {
                         resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
@@ -1062,8 +1083,10 @@ impl ReadyToRun {
                         BadSignature,
                     }
 
-                    let sig = expect_pointer_constant_size!(0, 65);
-                    let msg = expect_pointer_constant_size!(1, 32);
+                    // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
+                    let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
+                    // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
+                    let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
                         let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
@@ -1103,8 +1126,10 @@ impl ReadyToRun {
                         BadSignature,
                     }
 
-                    let sig = expect_pointer_constant_size!(0, 65);
-                    let msg = expect_pointer_constant_size!(1, 32);
+                    // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
+                    let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
+                    // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
+                    let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
 
                     let result = (|| -> Result<_, EcdsaVerifyError> {
                         let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
@@ -1148,10 +1173,8 @@ impl ReadyToRun {
                     };
                 }
                 HostFunction::ext_hashing_keccak_256_version_1 => {
-                    let data = expect_pointer_size!(0);
-
                     let mut keccak = tiny_keccak::Keccak::v256();
-                    keccak.update(&data);
+                    keccak.update(expect_pointer_size!(0).as_ref());
                     let mut out = [0u8; 32];
                     keccak.finalize(&mut out);
 
@@ -1164,10 +1187,8 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_hashing_sha2_256_version_1 => {
-                    let data = expect_pointer_size!(0);
-
                     let mut hasher = sha2::Sha256::new();
-                    hasher.update(data);
+                    hasher.update(expect_pointer_size!(0));
 
                     match self.inner.alloc_write_and_return_pointer(
                         host_fn.name(),
@@ -1178,8 +1199,10 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_hashing_blake2_128_version_1 => {
-                    let data = expect_pointer_size!(0);
-                    let out = blake2_rfc::blake2b::blake2b(16, &[], &data);
+                    let out = {
+                        let data = expect_pointer_size!(0);
+                        blake2_rfc::blake2b::blake2b(16, &[], data.as_ref())
+                    };
 
                     match self
                         .inner
@@ -1190,8 +1213,10 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_hashing_blake2_256_version_1 => {
-                    let data = expect_pointer_size!(0);
-                    let out = blake2_rfc::blake2b::blake2b(32, &[], &data);
+                    let out = {
+                        let data = expect_pointer_size!(0);
+                        blake2_rfc::blake2b::blake2b(32, &[], data.as_ref())
+                    };
 
                     match self
                         .inner
@@ -1202,10 +1227,11 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_hashing_twox_64_version_1 => {
-                    let data = expect_pointer_size!(0);
-
                     let mut h0 = twox_hash::XxHash::with_seed(0);
-                    h0.write(&data);
+                    {
+                        let data = expect_pointer_size!(0);
+                        h0.write(data.as_ref());
+                    }
                     let r0 = h0.finish();
 
                     match self.inner.alloc_write_and_return_pointer(
@@ -1217,12 +1243,14 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_hashing_twox_128_version_1 => {
-                    let data = expect_pointer_size!(0);
-
                     let mut h0 = twox_hash::XxHash::with_seed(0);
                     let mut h1 = twox_hash::XxHash::with_seed(1);
-                    h0.write(&data);
-                    h1.write(&data);
+                    {
+                        let data = expect_pointer_size!(0);
+                        let data = data.as_ref();
+                        h0.write(data);
+                        h1.write(data);
+                    }
                     let r0 = h0.finish();
                     let r1 = h1.finish();
 
@@ -1235,16 +1263,18 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_hashing_twox_256_version_1 => {
-                    let data = expect_pointer_size!(0);
-
                     let mut h0 = twox_hash::XxHash::with_seed(0);
                     let mut h1 = twox_hash::XxHash::with_seed(1);
                     let mut h2 = twox_hash::XxHash::with_seed(2);
                     let mut h3 = twox_hash::XxHash::with_seed(3);
-                    h0.write(&data);
-                    h1.write(&data);
-                    h2.write(&data);
-                    h3.write(&data);
+                    {
+                        let data = expect_pointer_size!(0);
+                        let data = data.as_ref();
+                        h0.write(data);
+                        h1.write(data);
+                        h2.write(data);
+                        h3.write(data);
+                    }
                     let r0 = h0.finish();
                     let r1 = h1.finish();
                     let r2 = h2.finish();
@@ -1305,9 +1335,10 @@ impl ReadyToRun {
                 HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
                 HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
                 HostFunction::ext_trie_blake2_256_root_version_1 => {
-                    let encoded = expect_pointer_size!(0);
+                    let decode_result =
+                        Vec::<(Vec<u8>, Vec<u8>)>::decode_all(expect_pointer_size!(0).as_ref());
 
-                    let elements = match Vec::<(Vec<u8>, Vec<u8>)>::decode_all(&encoded) {
+                    let elements = match decode_result {
                         Ok(e) => e,
                         Err(err) => {
                             return HostVm::Error {
@@ -1333,9 +1364,10 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
-                    let encoded = expect_pointer_size!(0);
+                    let decode_result =
+                        Vec::<Vec<u8>>::decode_all(expect_pointer_size!(0).as_ref());
 
-                    let elements = match Vec::<Vec<u8>>::decode_all(&encoded) {
+                    let elements = match decode_result {
                         Ok(e) => e,
                         Err(err) => {
                             return HostVm::Error {
@@ -1392,15 +1424,16 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_misc_print_utf8_version_1 => {
-                    let data = expect_pointer_size!(0);
-                    let log_entry = match String::from_utf8(data) {
+                    let data =
+                        str::from_utf8(expect_pointer_size!(0).as_ref()).map(|s| s.to_owned());
+                    let log_entry = match data {
                         Ok(m) => m,
                         Err(error) => {
                             return HostVm::Error {
                                 error: Error::Utf8Error {
                                     function: host_fn.name(),
                                     param_num: 2,
-                                    error: error.utf8_error(),
+                                    error,
                                 },
                                 prototype: self.inner.into_prototype(),
                             };
@@ -1413,8 +1446,7 @@ impl ReadyToRun {
                     });
                 }
                 HostFunction::ext_misc_print_hex_version_1 => {
-                    let data = expect_pointer_size!(0);
-                    let log_entry = hex::encode(&data);
+                    let log_entry = hex::encode(expect_pointer_size!(0));
                     return HostVm::LogEmit(LogEmit {
                         inner: self.inner,
                         log_entry,
@@ -1477,16 +1509,18 @@ impl ReadyToRun {
                 }
                 HostFunction::ext_logging_log_version_1 => {
                     let _log_level = expect_u32!(0);
-                    let _target = expect_pointer_size!(1);
-                    let message = expect_pointer_size!(2);
-                    let log_entry = match String::from_utf8(message) {
+                    // let _target = expect_pointer_size!(1);
+
+                    let message =
+                        str::from_utf8(expect_pointer_size!(2).as_ref()).map(|s| s.to_owned());
+                    let log_entry = match message {
                         Ok(m) => m,
                         Err(error) => {
                             return HostVm::Error {
                                 error: Error::Utf8Error {
                                     function: host_fn.name(),
                                     param_num: 2,
-                                    error: error.utf8_error(),
+                                    error,
                                 },
                                 prototype: self.inner.into_prototype(),
                             };
