@@ -658,7 +658,6 @@ impl ReadyToRun {
                 HostFunction::ext_trie_blake2_256_root_version_1 => 1,
                 HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
                 HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
-                HostFunction::ext_misc_chain_id_version_1 => 0,
                 HostFunction::ext_misc_print_num_version_1 => 1,
                 HostFunction::ext_misc_print_utf8_version_1 => 1,
                 HostFunction::ext_misc_print_hex_version_1 => 1,
@@ -1362,13 +1361,6 @@ impl ReadyToRun {
                     }
                 }
                 HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
-                HostFunction::ext_misc_chain_id_version_1 => {
-                    // TODO: this parachain-related function always returns 42 at the moment
-                    self = ReadyToRun {
-                        resume_value: Some(vm::WasmValue::I32(42)),
-                        inner: self.inner,
-                    };
-                }
                 HostFunction::ext_misc_print_num_version_1 => {
                     let num = match params[0] {
                         vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
@@ -2548,7 +2540,6 @@ externalities! {
     ext_trie_blake2_256_root_version_1,
     ext_trie_blake2_256_ordered_root_version_1,
     ext_trie_keccak_256_ordered_root_version_1,
-    ext_misc_chain_id_version_1,
     ext_misc_print_num_version_1,
     ext_misc_print_utf8_version_1,
     ext_misc_print_hex_version_1,
