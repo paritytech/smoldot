@@ -32,6 +32,7 @@ use smoldot::{
     executor::{host, read_only_runtime_host},
     header,
     json_rpc::{self, methods},
+    libp2p::PeerId,
     network::protocol,
 };
 use std::{
@@ -64,6 +65,9 @@ pub struct Config<'a> {
 
     /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
+
+    /// Network identity of the node.
+    pub peer_id: &'a PeerId,
 
     /// Hash of the genesis block of the chain.
     ///
@@ -142,6 +146,7 @@ impl JsonRpcService {
             chain_ty: config.chain_spec.chain_type().to_owned(),
             chain_is_live: config.chain_spec.has_live_network(),
             chain_properties_json: config.chain_spec.properties().to_owned(),
+            peer_id_base58: config.peer_id.to_base58(),
             network_service: config.network_service.0,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
@@ -337,6 +342,9 @@ struct Background {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
+    /// See [`Config::peer_id`]. The only use for this field is to send the base58 encoding of
+    /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
+    peer_id_base58: String,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService>,
@@ -1011,6 +1019,17 @@ impl Background {
                     .await
                     .send(
                         methods::Response::system_localListenAddresses(Vec::new())
+                            .to_json_response(request_id),
+                    )
+                    .await;
+            }
+            methods::MethodCall::system_localPeerId {} => {
+                let _ = self
+                    .responses_sender
+                    .lock()
+                    .await
+                    .send(
+                        methods::Response::system_localPeerId(&self.peer_id_base58)
                             .to_json_response(request_id),
                     )
                     .await;

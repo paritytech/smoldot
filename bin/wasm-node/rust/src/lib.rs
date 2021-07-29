@@ -414,6 +414,7 @@ impl Client {
                             transactions_service: running_chain.transactions_service,
                             runtime_service: running_chain.runtime_service,
                             chain_spec: &chain_spec,
+                            peer_id: &running_chain.network_identity.clone(),
                             genesis_block_hash,
                             genesis_block_state_root,
                             max_parallel_requests: NonZeroU32::new(24).unwrap(),

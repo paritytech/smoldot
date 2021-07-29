@@ -328,6 +328,7 @@ define_methods! {
     system_dryRun() -> () [system_dryRunAt], // TODO:
     system_health() -> SystemHealth,
     system_localListenAddresses() -> Vec<String>,
+    /// Returns the base58 encoding of the network identity of the node on the peer-to-peer network.
     system_localPeerId() -> &'a str,
     /// Returns, as an opaque string, the name of the client serving these JSON-RPC requests.
     system_name() -> &'a str,
