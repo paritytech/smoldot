@@ -581,11 +581,35 @@ impl Background {
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.subscribe_all_heads(request_id).await;
             }
+            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                self.subscribe_finalized_heads(request_id).await;
+            }
             methods::MethodCall::chain_subscribeNewHeads {} => {
                 self.subscribe_new_heads(request_id).await;
             }
-            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(request_id).await;
+            methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
+                let invalid = if let Some(cancel_tx) = self
+                    .subscriptions
+                    .lock()
+                    .await
+                    .remove(&(subscription, SubscriptionTy::AllHeads))
+                {
+                    cancel_tx.send(request_id.to_owned()).is_err()
+                } else {
+                    true
+                };
+
+                if invalid {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(
+                            methods::Response::chain_unsubscribeAllHeads(false)
+                                .to_json_response(request_id),
+                        )
+                        .await;
+                }
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
@@ -609,7 +633,30 @@ impl Background {
                                 .to_json_response(request_id),
                         )
                         .await;
+                }
+            }
+            methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
+                let invalid = if let Some(cancel_tx) = self
+                    .subscriptions
+                    .lock()
+                    .await
+                    .remove(&(subscription, SubscriptionTy::NewHeads))
+                {
+                    cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
+                    true
+                };
+
+                if invalid {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(
+                            methods::Response::chain_unsubscribeNewHeads(false)
+                                .to_json_response(request_id),
+                        )
+                        .await;
                 }
             }
             methods::MethodCall::payment_queryInfo { extrinsic: _, hash } => {
@@ -993,7 +1040,10 @@ impl Background {
                     // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
                     // is finished and that the block notifications report blocks that are
                     // believed to be near the head of the chain.
-                    is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
+                    // Note that since it is the `sync_service` that is used for block
+                    // subscriptions (as opposed to the `runtime_service`), it is also the
+                    // `sync_service` that is used to determine `is_syncing`.
+                    is_syncing: !self.sync_service.is_near_head_of_chain_heuristic().await,
                     peers: u64::try_from(self.network_service.peers_list().await.count())
                         .unwrap_or(u64::max_value()),
                     should_have_peers: self.chain_is_live,
