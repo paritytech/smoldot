@@ -205,13 +205,7 @@ impl StorageGet {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.as_ref().unwrap()
                 {
-                    struct One(u8);
-                    impl AsRef<[u8]> for One {
-                        fn as_ref(&self) -> &[u8] {
-                            slice::from_ref(&self.0)
-                        }
-                    }
-                    either::Right(value_request.key().map(One).map(either::Right))
+                    either::Right(value_request.key().map(|v| [v]).map(either::Right))
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()

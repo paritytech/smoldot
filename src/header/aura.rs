@@ -53,18 +53,10 @@ impl<'a> AuraConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             AuraConsensusLogRef::AuthoritiesChange(_) => [1],
             AuraConsensusLogRef::OnDisabled(_) => [2],
-        }));
+        });
 
         let body = match self {
             AuraConsensusLogRef::AuthoritiesChange(list) => {
