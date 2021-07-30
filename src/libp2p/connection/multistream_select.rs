@@ -587,15 +587,7 @@ where
             MessageOut::ProtocolNa => 3,
         };
 
-        let length_prefix = leb128::encode_usize(len).map(|n| {
-            struct One(u8);
-            impl AsRef<[u8]> for One {
-                fn as_ref(&self) -> &[u8] {
-                    slice::from_ref(&self.0)
-                }
-            }
-            One(n)
-        });
+        let length_prefix = leb128::encode_usize(len).map(|n| [n]);
 
         let mut n = 0;
         let body = iter::from_fn(move || {
