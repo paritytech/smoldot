@@ -567,8 +567,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Returns the details of a request to start towards a source.
     ///
-    /// This method doesn't modify the state machine in any way. [`AllForksSync::add_request`]
-    /// must be called in order for the request to actually be marked as started.
+    /// This method doesn't modify the state machine in any way. [`AllSync::add_request`] must be
+    /// called in order for the request to actually be marked as started.
     pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestDetail)> + '_ {
         match &self.inner {
             AllSyncInner::AllForks(sync) => {
@@ -638,7 +638,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Inserts a new request in the data structure.
     ///
     /// > **Note**: The request doesn't necessarily have to match a request returned by
-    /// >           [`AllForksSync::desired_requests`].
+    /// >           [`AllSync::desired_requests`].
     ///
     /// # Panic
     ///
@@ -983,7 +983,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 }
 
-/// See [`Action::Start::detail`].
+/// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub enum RequestDetail {
