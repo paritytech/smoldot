@@ -86,21 +86,13 @@ impl<'a> GrandpaConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             GrandpaConsensusLogRef::ScheduledChange(_) => [1],
             GrandpaConsensusLogRef::ForcedChange { .. } => [2],
             GrandpaConsensusLogRef::OnDisabled(_) => [3],
             GrandpaConsensusLogRef::Pause(_) => [4],
             GrandpaConsensusLogRef::Resume(_) => [5],
-        }));
+        });
 
         let body = match self {
             GrandpaConsensusLogRef::ScheduledChange(change) => either::Left(either::Left(
