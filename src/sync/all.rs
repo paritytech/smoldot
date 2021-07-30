@@ -863,8 +863,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }
                 }
             }
-            // TODO: not all variants implemented
-            _ => panic!(),
+            _ => unreachable!(),
         }
     }
 
@@ -898,7 +897,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            _ => ResponseOutcome::Queued, // TODO: no
+            other => {
+                self.inner = other;
+                ResponseOutcome::Queued // TODO: no
+            }
         }
     }
 
@@ -960,7 +962,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 self.inject_grandpa(grandpa_warp_sync)
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            _ => ResponseOutcome::Queued, // TODO: no
+            other => {
+                self.inner = other;
+                ResponseOutcome::Queued // TODO: no
+            }
         }
     }
 
