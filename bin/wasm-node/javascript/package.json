@@ -17,9 +17,8 @@
   "main": "src/index.js",
   "scripts": {
     "prepublishOnly": "node prepare.js --release",
-    "prestart": "node prepare.js --release",
-    "build": "node prepare.js --debug",
-    "start": "node test/demo.js",
+    "build": "node prepare.js --release",
+    "start": "node prepare.js --debug && node test/demo.js",
     "test": "node prepare.js --debug && dtslint src/ && node test/test.js"
   },
   "browser": {
