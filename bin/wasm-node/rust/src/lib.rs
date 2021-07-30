@@ -261,6 +261,7 @@ impl Client {
                     chain_spec.relay_chain().unwrap().1,
                 )
             }),
+            protocol_id: chain_spec.protocol_id().to_owned(),
         };
 
         // Grab a couple of fields from the chain specification for later, as the chain
@@ -403,21 +404,24 @@ impl Client {
                     (&mut running_chain_init).await;
                     let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
 
-                    Arc::new(json_rpc_service::start(json_rpc_service::Config {
-                        tasks_executor: Box::new({
-                            move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
-                        }),
-                        network_service: (running_chain.network_service.clone(), 0),
-                        sync_service: running_chain.sync_service,
-                        transactions_service: running_chain.transactions_service,
-                        runtime_service: running_chain.runtime_service,
-                        chain_spec: &chain_spec,
-                        genesis_block_hash,
-                        genesis_block_state_root,
-                        max_parallel_requests: NonZeroU32::new(24).unwrap(),
-                        max_pending_requests: NonZeroU32::new(32).unwrap(),
-                        max_subscriptions: 64,
-                    }))
+                    Arc::new(json_rpc_service::JsonRpcService::new(
+                        json_rpc_service::Config {
+                            tasks_executor: Box::new({
+                                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+                            }),
+                            network_service: (running_chain.network_service.clone(), 0),
+                            sync_service: running_chain.sync_service,
+                            transactions_service: running_chain.transactions_service,
+                            runtime_service: running_chain.runtime_service,
+                            chain_spec: &chain_spec,
+                            peer_id: &running_chain.network_identity.clone(),
+                            genesis_block_hash,
+                            genesis_block_state_root,
+                            max_parallel_requests: NonZeroU32::new(24).unwrap(),
+                            max_pending_requests: NonZeroU32::new(32).unwrap(),
+                            max_subscriptions: 64,
+                        },
+                    ))
                 };
 
                 let (background_run, output_future) = init_future.remote_handle();
@@ -629,10 +633,12 @@ struct ChainKey {
     /// Hash of the genesis block of the chain.
     genesis_block_hash: [u8; 32],
     // TODO: what about light checkpoints?
-    // TODO: must also contain protocolId, forkBlocks, and badBlocks fields
+    // TODO: must also contain forkBlocks, and badBlocks fields
     /// If the chain is a parachain, contains the relay chain and the "para ID" on this relay
     /// chain.
     relay_chain: Option<(Box<ChainKey>, u32)>,
+    /// Network protocol id, found in the chain specification.
+    protocol_id: String,
 }
 
 #[derive(Clone)]
