@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-js"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "blake2-rfc",
  "derive_more",

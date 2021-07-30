@@ -46,8 +46,21 @@ export interface SmoldotAddChainOptions {
   jsonRpcCallback?: SmoldotJsonRpcCallback;
 }
 
+export interface SmoldotHealth {
+  isSyncing: boolean;
+  peers: number;
+  shouldHavePeers: boolean;
+}
+
+export interface HealthChecker {
+  start(sendRequest: (request: string) => void, healthCallback: (health: SmoldotHealth) => void): void;
+  stop(): void;
+  responsePassThrough(response: string): string | null;
+}
+
 export interface Smoldot {
   start(options?: SmoldotOptions): Promise<SmoldotClient>;
+  healthChecker(): HealthChecker;
 }
 
 export const smoldot: Smoldot;
