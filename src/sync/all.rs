@@ -597,7 +597,62 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     )
                 })
             }
-            AllSyncInner::GrandpaWarpSync { inner } => inner.desired_requests(),
+            AllSyncInner::GrandpaWarpSync { inner } => match inner {
+                grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(rq) => {
+                    self.inner = AllSyncInner::GrandpaWarpSync {
+                        inner: grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(rq),
+                    };
+                    return ResponseOutcome::Queued;
+                }
+                grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(get) => {
+                    debug_assert!(self.shared.requests.is_empty());
+                    let request_id =
+                        RequestId(self.shared.requests.insert(RequestMapping::GrandpaWarpSync));
+                    let outer_source_id = get.warp_sync_source().1.outer_source_id;
+                    let action = Action::Start {
+                        request_id,
+                        source_id: outer_source_id,
+                        detail: RequestDetail::StorageGet {
+                            block_hash: get.warp_sync_header().hash(),
+                            state_trie_root: *get.warp_sync_header().state_root,
+                            keys: vec![get.key_as_vec()],
+                        },
+                    };
+
+                    self.inner = AllSyncInner::GrandpaWarpSync {
+                        inner: grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(get),
+                    };
+                    return ResponseOutcome::Queued {
+                        next_actions: vec![action],
+                    };
+                }
+                grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(rq) => {
+                    debug_assert!(self.shared.requests.is_empty());
+                    let request_id =
+                        RequestId(self.shared.requests.insert(RequestMapping::GrandpaWarpSync));
+                    let outer_source_id = rq.warp_sync_source().1.outer_source_id;
+                    let action = Action::Start {
+                        request_id,
+                        source_id: outer_source_id,
+                        detail: RequestDetail::StorageGet {
+                            block_hash: rq.warp_sync_header().hash(),
+                            state_trie_root: *rq.warp_sync_header().state_root,
+                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                        },
+                    };
+
+                    self.inner = AllSyncInner::GrandpaWarpSync {
+                        inner:
+                            grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(
+                                rq,
+                            ),
+                    };
+                    return ResponseOutcome::Queued {
+                        next_actions: vec![action],
+                    };
+                }
+                _ => iter::empty(),
+            },
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -629,7 +684,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let inner_request_id = sync.add_request(
                     inner_source_id,
-                    detail,
+                    match detail {
+                        _ => todo!(),
+                    },
                     AllForksRequestExtra {
                         outer_request_id,
                         user_data: Some(user_data),
@@ -657,6 +714,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
         match self.inner {
             AllSyncInner::AllForks(sync) => {
+                // TODO: add the grandpa warp sync requests
                 sync.obsolete_requests().map(|(_, rq)| rq.outer_request_id)
             }
             AllSyncInner::GrandpaWarpSync { inner: sync } => sync.obsolete_requests(),
@@ -712,10 +770,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     all_forks::BlockAnnounceOutcome::NotFinalizedChain => {
                         BlockAnnounceOutcome::NotFinalizedChain
                     }
-                    all_forks::BlockAnnounceOutcome::Disjoint => {
-                        let next_actions = self.shared.all_forks_next_actions(sync);
-                        BlockAnnounceOutcome::Disjoint { next_actions }
-                    }
+                    all_forks::BlockAnnounceOutcome::Disjoint => BlockAnnounceOutcome::Disjoint,
                     all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                         BlockAnnounceOutcome::InvalidHeader(error)
                     }
@@ -736,9 +791,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     user_data.best_block_hash = header.hash();
                 }
 
-                BlockAnnounceOutcome::Disjoint {
-                    next_actions: Vec::new(),
-                }
+                BlockAnnounceOutcome::Disjoint
             }
             (AllSyncInner::Poisoned, _) => unreachable!(),
 
@@ -793,26 +846,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         })
                     }),
                 ) {
-                    all_forks::AncestrySearchResponseOutcome::Verify => {
-                        let next_actions = self.shared.all_forks_next_actions(sync);
-                        ResponseOutcome::Queued { next_actions }
-                    }
+                    all_forks::AncestrySearchResponseOutcome::Verify => ResponseOutcome::Queued,
                     all_forks::AncestrySearchResponseOutcome::NotFinalizedChain {
                         discarded_unverified_block_headers,
-                    } => {
-                        let next_actions = self.shared.all_forks_next_actions(sync);
-                        ResponseOutcome::NotFinalizedChain {
-                            next_actions,
-                            discarded_unverified_block_headers,
-                        }
-                    }
+                    } => ResponseOutcome::NotFinalizedChain {
+                        discarded_unverified_block_headers,
+                    },
                     all_forks::AncestrySearchResponseOutcome::Inconclusive => {
-                        let next_actions = self.shared.all_forks_next_actions(sync);
-                        ResponseOutcome::Queued { next_actions }
+                        ResponseOutcome::Queued
                     }
                     all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain => {
-                        let next_actions = self.shared.all_forks_next_actions(sync);
-                        ResponseOutcome::AllAlreadyInChain { next_actions }
+                        ResponseOutcome::AllAlreadyInChain
                     }
                 }
             }
@@ -914,6 +958,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    // TODO: questionable function
     fn inject_grandpa(
         &mut self,
         grandpa_warp_sync: grandpa_warp_sync::GrandpaWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>,
@@ -926,11 +971,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let (all_forks, next_actions) =
                     self.shared.transition_grandpa_warp_sync_all_forks(success);
                 self.inner = AllSyncInner::AllForks(all_forks);
-                return ResponseOutcome::WarpSyncFinished { next_actions };
+                return ResponseOutcome::WarpSyncFinished;
             }
         }
     }
 
+    // TODO: questionable function
     fn inject_in_progress_grandpa(
         &mut self,
         grandpa_warp_sync: grandpa_warp_sync::InProgressGrandpaWarpSync<
@@ -940,26 +986,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         loop {
             match grandpa_warp_sync {
                 grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(get) => {
-                    debug_assert!(self.shared.requests.is_empty());
-                    let request_id =
-                        RequestId(self.shared.requests.insert(RequestMapping::GrandpaWarpSync));
-                    let outer_source_id = get.warp_sync_source().1.outer_source_id;
-                    let action = Action::Start {
-                        request_id,
-                        source_id: outer_source_id,
-                        detail: RequestDetail::StorageGet {
-                            block_hash: get.warp_sync_header().hash(),
-                            state_trie_root: *get.warp_sync_header().state_root,
-                            keys: vec![get.key_as_vec()],
-                        },
-                    };
-
                     self.inner = AllSyncInner::GrandpaWarpSync {
                         inner: grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(get),
                     };
-                    return ResponseOutcome::Queued {
-                        next_actions: vec![action],
-                    };
+                    return ResponseOutcome::Queued;
                 }
                 grandpa_warp_sync::InProgressGrandpaWarpSync::NextKey(next_key) => {
                     self.inner = AllSyncInner::GrandpaWarpSync {
@@ -972,49 +1002,26 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     self.inner = AllSyncInner::GrandpaWarpSync {
                         inner: grandpa_warp_sync::InProgressGrandpaWarpSync::Verifier(verifier),
                     };
-                    return ResponseOutcome::Queued {
-                        next_actions: vec![],
-                    };
+                    return ResponseOutcome::Queued;
                 }
                 grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(rq) => {
-                    let action = self.shared.grandpa_warp_sync_request_to_request(&rq);
                     self.inner = AllSyncInner::GrandpaWarpSync {
                         inner: grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(rq),
                     };
-                    return ResponseOutcome::Queued {
-                        next_actions: vec![action],
-                    };
+                    return ResponseOutcome::Queued;
                 }
                 grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(rq) => {
-                    debug_assert!(self.shared.requests.is_empty());
-                    let request_id =
-                        RequestId(self.shared.requests.insert(RequestMapping::GrandpaWarpSync));
-                    let outer_source_id = rq.warp_sync_source().1.outer_source_id;
-                    let action = Action::Start {
-                        request_id,
-                        source_id: outer_source_id,
-                        detail: RequestDetail::StorageGet {
-                            block_hash: rq.warp_sync_header().hash(),
-                            state_trie_root: *rq.warp_sync_header().state_root,
-                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                        },
-                    };
-
                     self.inner = AllSyncInner::GrandpaWarpSync {
                         inner:
                             grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(
                                 rq,
                             ),
                     };
-                    return ResponseOutcome::Queued {
-                        next_actions: vec![action],
-                    };
+                    return ResponseOutcome::Queued;
                 }
                 gp @ grandpa_warp_sync::InProgressGrandpaWarpSync::WaitingForSources(_) => {
                     self.inner = AllSyncInner::GrandpaWarpSync { inner: gp };
-                    return ResponseOutcome::Queued {
-                        next_actions: Vec::new(),
-                    };
+                    return ResponseOutcome::Queued;
                 }
             }
         }
@@ -1095,10 +1102,7 @@ pub enum BlockAnnounceOutcome {
     /// Announced block is known to not be a descendant of the finalized block.
     NotFinalizedChain,
     /// Header cannot be verified now, and has been stored for later.
-    Disjoint {
-        /// Next requests that the same source should now perform.
-        next_actions: Vec<Action>,
-    },
+    Disjoint,
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
 }
@@ -1118,16 +1122,10 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
 /// Outcome of injecting a response in the [`AllSync`].
 pub enum ResponseOutcome {
     /// Content of the response has been queued and will be processed later.
-    Queued {
-        /// Next requests that must be started.
-        next_actions: Vec<Action>,
-    },
+    Queued,
 
     /// Response has made it possible to finish warp syncing.
-    WarpSyncFinished {
-        /// Next requests that must be started.
-        next_actions: Vec<Action>,
-    },
+    WarpSyncFinished,
 
     /// Source has given blocks that aren't part of the finalized chain.
     ///
@@ -1135,9 +1133,6 @@ pub enum ResponseOutcome {
     /// is possible for this to legitimately happen, for example if the finalized chain has been
     /// updated while the ancestry search was in progress.
     NotFinalizedChain {
-        /// Next requests that must be started.
-        next_actions: Vec<Action>,
-
         /// List of block headers that were pending verification and that have now been discarded
         /// since it has been found out that they don't belong to the finalized chain.
         discarded_unverified_block_headers: Vec<Vec<u8>>,
@@ -1147,10 +1142,7 @@ pub enum ResponseOutcome {
     ///
     /// This can happen if a block announce or different ancestry search response has been
     /// processed in between the request and response.
-    AllAlreadyInChain {
-        /// Next requests that must be started.
-        next_actions: Vec<Action>,
-    },
+    AllAlreadyInChain,
 }
 
 pub struct HeaderVerify<TRq, TSrc, TBl> {
@@ -1190,41 +1182,33 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         is_new_best,
                         mut sync,
                         justification_verification,
-                    } => {
-                        let next_actions = self.shared.all_forks_next_actions(&mut sync);
-                        HeaderVerifyOutcome::Success {
-                            is_new_best,
-                            is_new_finalized: justification_verification.is_success(),
-                            sync: AllSync {
-                                inner: AllSyncInner::AllForks(sync),
-                                shared: self.shared,
-                            },
-                            next_actions,
-                        }
-                    }
+                    } => HeaderVerifyOutcome::Success {
+                        is_new_best,
+                        is_new_finalized: justification_verification.is_success(),
+                        sync: AllSync {
+                            inner: AllSyncInner::AllForks(sync),
+                            shared: self.shared,
+                        },
+                    },
                     all_forks::HeaderVerifyOutcome::Error {
                         mut sync,
                         error,
                         user_data,
-                    } => {
-                        let next_actions = self.shared.all_forks_next_actions(&mut sync);
-                        HeaderVerifyOutcome::Error {
-                            sync: AllSync {
-                                inner: AllSyncInner::AllForks(sync),
-                                shared: self.shared,
-                            },
-                            error: match error {
-                                all_forks::HeaderVerifyError::VerificationFailed(error) => {
-                                    HeaderVerifyError::VerificationFailed(error)
-                                }
-                                all_forks::HeaderVerifyError::ConsensusMismatch => {
-                                    HeaderVerifyError::ConsensusMismatch
-                                }
-                            },
-                            user_data,
-                            next_actions,
-                        }
-                    }
+                    } => HeaderVerifyOutcome::Error {
+                        sync: AllSync {
+                            inner: AllSyncInner::AllForks(sync),
+                            shared: self.shared,
+                        },
+                        error: match error {
+                            all_forks::HeaderVerifyError::VerificationFailed(error) => {
+                                HeaderVerifyError::VerificationFailed(error)
+                            }
+                            all_forks::HeaderVerifyError::ConsensusMismatch => {
+                                HeaderVerifyError::ConsensusMismatch
+                            }
+                        },
+                        user_data,
+                    },
                 }
             }
         }
@@ -1286,7 +1270,6 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
         mut self,
     ) -> (
         AllSync<TRq, TSrc, TBl>,
-        Vec<Action>,
         Result<(), grandpa_warp_sync::FragmentError>,
     ) {
         let (next_grandpa_warp_sync, error) =
@@ -1297,15 +1280,10 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
                 _ => unreachable!(),
             };
 
-        let next_actions = match self
-            .inner
-            .inject_in_progress_grandpa(next_grandpa_warp_sync)
-        {
-            ResponseOutcome::Queued { next_actions } => next_actions,
-            _ => unreachable!(), // TODO: change API of inject_in_progress_grandpa instead
-        };
+        self.inner
+            .inject_in_progress_grandpa(next_grandpa_warp_sync);
 
-        (self.inner, next_actions, error)
+        (self.inner, error)
     }
 }
 
