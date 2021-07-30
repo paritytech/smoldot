@@ -66,19 +66,11 @@ impl<'a> BabeConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             BabeConsensusLogRef::NextEpochData(_) => [1],
             BabeConsensusLogRef::OnDisabled(_) => [2],
             BabeConsensusLogRef::NextConfigData(_) => [3],
-        }));
+        });
 
         let body = match self {
             BabeConsensusLogRef::NextEpochData(digest) => either::Left(either::Left(
@@ -88,7 +80,7 @@ impl<'a> BabeConsensusLogRef<'a> {
                 either::Left(either::Right(digest.to_le_bytes())),
             ))),
             BabeConsensusLogRef::NextConfigData(digest) => either::Right(
-                iter::once(either::Right(either::Left(One([1])))).chain(
+                iter::once(either::Right(either::Left([1]))).chain(
                     digest
                         .scale_encoding()
                         .map(either::Right)
@@ -400,19 +392,11 @@ impl BabeAllowedSlots {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
     pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        iter::once(One(match self {
+        iter::once(match self {
             BabeAllowedSlots::PrimarySlots => [0],
             BabeAllowedSlots::PrimaryAndSecondaryPlainSlots => [1],
             BabeAllowedSlots::PrimaryAndSecondaryVrfSlots => [2],
-        }))
+        })
     }
 }
 
@@ -464,19 +448,11 @@ impl<'a> BabePreDigestRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             BabePreDigestRef::Primary(_) => [1],
             BabePreDigestRef::SecondaryPlain(_) => [2],
             BabePreDigestRef::SecondaryVRF(_) => [3],
-        }));
+        });
 
         let body = match self {
             BabePreDigestRef::Primary(digest) => either::Left(either::Left(

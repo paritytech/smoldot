@@ -38,8 +38,15 @@ const client = smoldot.start({
 // is established, but smoldot will de-duplicate them and only connect to the chain once.
 // By calling it now, we let smoldot start syncing that chain in the background even before a
 // WebSocket connection has been established.
+const healthChecker = smoldot.healthChecker();
 client
-    .then(client => client.addChain({ chainSpec }))
+    .then(client => client.addChain({
+        chainSpec,
+        jsonRpcCallback: (response) => healthChecker.responsePassThrough(response)
+    }))
+    .then(chain => {
+        healthChecker.start((request) => chain.sendJsonRpc(request), (health) => console.log(health));
+    })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
@@ -92,6 +99,6 @@ wsServer.on('request', function (request) {
 
     connection.on('close', function (reasonCode, description) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
-        chain.then(chain => chain.remove()).catch(() => {});
+        chain.then(chain => chain.remove()).catch(() => { });
     });
 });

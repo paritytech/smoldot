@@ -32,6 +32,7 @@ use smoldot::{
     executor::{host, read_only_runtime_host},
     header,
     json_rpc::{self, methods},
+    libp2p::PeerId,
     network::protocol,
 };
 use std::{
@@ -45,7 +46,7 @@ use std::{
 };
 
 /// Configuration for a JSON-RPC service.
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
@@ -63,22 +64,26 @@ pub struct Config {
     pub runtime_service: Arc<runtime_service::RuntimeService>,
 
     /// Specification of the chain.
-    pub chain_spec: chain_spec::ChainSpec,
+    pub chain_spec: &'a chain_spec::ChainSpec,
+
+    /// Network identity of the node.
+    pub peer_id: &'a PeerId,
 
     /// Hash of the genesis block of the chain.
     ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the [`start`]
-    /// >           function could in theory use the [`Config::chain_spec`] parameter to derive
-    /// >           this value, doing so is quite expensive. We prefer to require this value
-    /// >           from the upper layer instead, as it is most likely needed anyway.
+    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
+    /// >           [`JsonRpcService::new`] function could in theory use the [`Config::chain_spec`]
+    /// >           parameter to derive this value, doing so is quite expensive. We prefer to
+    /// >           require this value from the upper layer instead, as it is most likely needed
+    /// >           anyway.
     pub genesis_block_hash: [u8; 32],
 
     /// Hash of the storage trie root of the genesis block of the chain.
     ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the [`start`]
-    /// >           function could in theory use the [`Config::chain_spec`] parameter to derive
-    /// >           this value, doing so is quite expensive. We prefer to require this value
-    /// >           from the upper layer instead.
+    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
+    /// >           [`JsonRpcService::new`] function could in theory use the [`Config::chain_spec`]
+    /// >           parameter to derive this value, doing so is quite expensive. We prefer to
+    /// >           require this value from the upper layer instead.
     pub genesis_block_state_root: [u8; 32],
 
     /// Maximum number of JSON-RPC requests that can be processed simultaneously.
@@ -102,139 +107,6 @@ pub struct Config {
     pub max_subscriptions: u32,
 }
 
-/// Initializes the JSON-RPC service with the given configuration.
-pub fn start(mut config: Config) -> JsonRpcService {
-    // Chanel from the foreground to the background.
-    // Requests are dropped if the channel is full.
-    let (new_requests_in, new_requests_rx) = mpsc::channel(
-        usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
-    );
-
-    // Channel from the background to the foreground.
-    let (responses_sender, responses_rx) = mpsc::channel(128);
-
-    let client = JsonRpcService {
-        new_requests_in: Mutex::new(new_requests_in),
-        responses_rx: Mutex::new(responses_rx),
-    };
-
-    // Channel used in the background in order to spawn new tasks scoped to the background.
-    let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
-
-    let background = Arc::new(Background {
-        new_requests_rx: Mutex::new(new_requests_rx),
-        responses_sender: Mutex::new(responses_sender),
-        new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
-        max_subscriptions: config.max_subscriptions,
-        chain_spec: config.chain_spec,
-        network_service: config.network_service.0,
-        sync_service: config.sync_service,
-        runtime_service: config.runtime_service,
-        transactions_service: config.transactions_service,
-        blocks: Mutex::new(Blocks {
-            known_blocks: lru::LruCache::new(256),
-            best_block: [0; 32],      // Filled below.
-            finalized_block: [0; 32], // Filled below.
-        }),
-        genesis_block: config.genesis_block_hash,
-        next_subscription: atomic::AtomicU64::new(0),
-        subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
-            usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
-            Default::default(),
-        )),
-    });
-
-    // Spawns the background task that actually runs the logic of that JSON-RPC service.
-    let max_parallel_requests = config.max_parallel_requests;
-    (config.tasks_executor)(
-        "json-rpc-service".into(),
-        async move {
-            let (_finalized_block_header, mut finalized_blocks_subscription) =
-                background.sync_service.subscribe_best().await;
-            let (best_block_header, mut best_blocks_subscription) =
-                background.sync_service.subscribe_best().await;
-            debug_assert_eq!(_finalized_block_header, best_block_header);
-            let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
-
-            {
-                let mut blocks = background.blocks.try_lock().unwrap();
-                blocks.known_blocks.put(
-                    best_block_hash,
-                    header::decode(&best_block_header).unwrap().into(),
-                );
-                blocks.best_block = best_block_hash;
-                blocks.finalized_block = best_block_hash;
-            }
-
-            let mut tasks = stream::FuturesUnordered::new();
-
-            for _ in 0..max_parallel_requests.get() {
-                let background = background.clone();
-                tasks.push(
-                    async move {
-                        loop {
-                            let message = background.new_requests_rx.lock().await.next().await;
-                            // It is important for `new_requests_rx` to be unlocked before
-                            // awaiting on `handle_request`.
-                            match message {
-                                Some(m) => background.handle_request(m).await,
-                                None => return, // Foreground is closed.
-                            }
-                        }
-                    }
-                    .boxed(),
-                );
-            }
-
-            loop {
-                if tasks.is_empty() {
-                    break;
-                }
-
-                futures::select! {
-                    () = tasks.select_next_some() => {},
-                    task = new_child_tasks_rx.next() => {
-                        let task = task.unwrap();
-                        tasks.push(task);
-                    }
-                    block = best_blocks_subscription.next() => {
-                        match block {
-                            Some(block) => {
-                                let hash = header::hash_from_scale_encoded_header(&block);
-                                let mut blocks = background.blocks.lock().await;
-                                let blocks = &mut *blocks;
-                                blocks.best_block = hash;
-                                // As a small trick, we re-query the finalized block from
-                                // `known_blocks` in order to ensure that it never leaves the
-                                // LRU cache.
-                                let header = header::decode(&block).unwrap().into();
-                                blocks.known_blocks.get(&blocks.finalized_block);
-                                blocks.known_blocks.put(hash, header);
-                            },
-                            None => return,
-                        }
-                    },
-                    block = finalized_blocks_subscription.next() => {
-                        match block {
-                            Some(block) => {
-                                let hash = header::hash_from_scale_encoded_header(&block);
-                                let header = header::decode(&block).unwrap().into();
-                                let mut blocks = background.blocks.lock().await;
-                                blocks.finalized_block = hash;
-                                blocks.known_blocks.put(hash, header);
-                            },
-                            None => return,
-                        }
-                    },
-                }
-            }
-        }
-        .boxed(),
-    );
-
-    client
-}
-
 pub struct JsonRpcService {
     /// Channel to send JSON-RPC requests to the background task.
     ///
@@ -246,6 +118,143 @@ pub struct JsonRpcService {
 }
 
 impl JsonRpcService {
+    /// Creates a new JSON-RPC service with the given configuration.
+    pub fn new(mut config: Config<'_>) -> JsonRpcService {
+        // Channel from the foreground to the background.
+        // Requests are dropped if the channel is full.
+        let (new_requests_in, new_requests_rx) = mpsc::channel(
+            usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
+        );
+
+        // Channel from the background to the foreground.
+        let (responses_sender, responses_rx) = mpsc::channel(128);
+
+        let client = JsonRpcService {
+            new_requests_in: Mutex::new(new_requests_in),
+            responses_rx: Mutex::new(responses_rx),
+        };
+
+        // Channel used in the background in order to spawn new tasks scoped to the background.
+        let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
+
+        let background = Arc::new(Background {
+            new_requests_rx: Mutex::new(new_requests_rx),
+            responses_sender: Mutex::new(responses_sender),
+            new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
+            max_subscriptions: config.max_subscriptions,
+            chain_name: config.chain_spec.name().to_owned(),
+            chain_ty: config.chain_spec.chain_type().to_owned(),
+            chain_is_live: config.chain_spec.has_live_network(),
+            chain_properties_json: config.chain_spec.properties().to_owned(),
+            peer_id_base58: config.peer_id.to_base58(),
+            network_service: config.network_service.0,
+            sync_service: config.sync_service,
+            runtime_service: config.runtime_service,
+            transactions_service: config.transactions_service,
+            blocks: Mutex::new(Blocks {
+                known_blocks: lru::LruCache::new(256),
+                best_block: [0; 32],      // Filled below.
+                finalized_block: [0; 32], // Filled below.
+            }),
+            genesis_block: config.genesis_block_hash,
+            next_subscription: atomic::AtomicU64::new(0),
+            subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
+                usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
+                Default::default(),
+            )),
+        });
+
+        // Spawns the background task that actually runs the logic of that JSON-RPC service.
+        let max_parallel_requests = config.max_parallel_requests;
+        (config.tasks_executor)(
+            "json-rpc-service".into(),
+            async move {
+                let (_finalized_block_header, mut finalized_blocks_subscription) =
+                    background.sync_service.subscribe_best().await;
+                let (best_block_header, mut best_blocks_subscription) =
+                    background.sync_service.subscribe_best().await;
+                debug_assert_eq!(_finalized_block_header, best_block_header);
+                let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
+
+                {
+                    let mut blocks = background.blocks.try_lock().unwrap();
+                    blocks.known_blocks.put(
+                        best_block_hash,
+                        header::decode(&best_block_header).unwrap().into(),
+                    );
+                    blocks.best_block = best_block_hash;
+                    blocks.finalized_block = best_block_hash;
+                }
+
+                let mut tasks = stream::FuturesUnordered::new();
+
+                for _ in 0..max_parallel_requests.get() {
+                    let background = background.clone();
+                    tasks.push(
+                        async move {
+                            loop {
+                                let message = background.new_requests_rx.lock().await.next().await;
+                                // It is important for `new_requests_rx` to be unlocked before
+                                // awaiting on `handle_request`.
+                                match message {
+                                    Some(m) => background.handle_request(m).await,
+                                    None => return, // Foreground is closed.
+                                }
+                            }
+                        }
+                        .boxed(),
+                    );
+                }
+
+                loop {
+                    if tasks.is_empty() {
+                        break;
+                    }
+
+                    futures::select! {
+                        () = tasks.select_next_some() => {},
+                        task = new_child_tasks_rx.next() => {
+                            let task = task.unwrap();
+                            tasks.push(task);
+                        }
+                        block = best_blocks_subscription.next() => {
+                            match block {
+                                Some(block) => {
+                                    let hash = header::hash_from_scale_encoded_header(&block);
+                                    let mut blocks = background.blocks.lock().await;
+                                    let blocks = &mut *blocks;
+                                    blocks.best_block = hash;
+                                    // As a small trick, we re-query the finalized block from
+                                    // `known_blocks` in order to ensure that it never leaves the
+                                    // LRU cache.
+                                    let header = header::decode(&block).unwrap().into();
+                                    blocks.known_blocks.get(&blocks.finalized_block);
+                                    blocks.known_blocks.put(hash, header);
+                                },
+                                None => return,
+                            }
+                        },
+                        block = finalized_blocks_subscription.next() => {
+                            match block {
+                                Some(block) => {
+                                    let hash = header::hash_from_scale_encoded_header(&block);
+                                    let header = header::decode(&block).unwrap().into();
+                                    let mut blocks = background.blocks.lock().await;
+                                    blocks.finalized_block = hash;
+                                    blocks.known_blocks.put(hash, header);
+                                },
+                                None => return,
+                            }
+                        },
+                    }
+                }
+            }
+            .boxed(),
+        );
+
+        client
+    }
+
     /// Analyzes the given JSON-RPC call and processes it in the background.
     ///
     /// This method is `async`, but it is expected to finish very quickly. The processing of the
@@ -325,7 +334,17 @@ struct Background {
     // TODO: not enforced
     max_subscriptions: u32,
 
-    chain_spec: chain_spec::ChainSpec,
+    /// Name of the chain, as found in the chain specification.
+    chain_name: String,
+    /// Type of chain, as found in the chain specification.
+    chain_ty: String,
+    /// JSON-encoded properties of the chain, as found in the chain specification.
+    chain_properties_json: String,
+    /// Whether the chain is a live network. Found in the chain specification.
+    chain_is_live: bool,
+    /// See [`Config::peer_id`]. The only use for this field is to send the base58 encoding of
+    /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
+    peer_id_base58: String,
 
     /// See [`Config::network_service`].
     network_service: Arc<network_service::NetworkService>,
@@ -571,11 +590,35 @@ impl Background {
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.subscribe_all_heads(request_id).await;
             }
+            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
+                self.subscribe_finalized_heads(request_id).await;
+            }
             methods::MethodCall::chain_subscribeNewHeads {} => {
                 self.subscribe_new_heads(request_id).await;
             }
-            methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(request_id).await;
+            methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
+                let invalid = if let Some(cancel_tx) = self
+                    .subscriptions
+                    .lock()
+                    .await
+                    .remove(&(subscription, SubscriptionTy::AllHeads))
+                {
+                    cancel_tx.send(request_id.to_owned()).is_err()
+                } else {
+                    true
+                };
+
+                if invalid {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(
+                            methods::Response::chain_unsubscribeAllHeads(false)
+                                .to_json_response(request_id),
+                        )
+                        .await;
+                }
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
@@ -599,7 +642,30 @@ impl Background {
                                 .to_json_response(request_id),
                         )
                         .await;
+                }
+            }
+            methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
+                let invalid = if let Some(cancel_tx) = self
+                    .subscriptions
+                    .lock()
+                    .await
+                    .remove(&(subscription, SubscriptionTy::NewHeads))
+                {
+                    cancel_tx.send(request_id.to_owned()).is_err()
                 } else {
+                    true
+                };
+
+                if invalid {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(
+                            methods::Response::chain_unsubscribeNewHeads(false)
+                                .to_json_response(request_id),
+                        )
+                        .await;
                 }
             }
             methods::MethodCall::payment_queryInfo { extrinsic: _, hash } => {
@@ -962,7 +1028,7 @@ impl Background {
                     .lock()
                     .await
                     .send(
-                        methods::Response::system_chain(self.chain_spec.name())
+                        methods::Response::system_chain(&self.chain_name)
                             .to_json_response(request_id),
                     )
                     .await;
@@ -973,7 +1039,7 @@ impl Background {
                     .lock()
                     .await
                     .send(
-                        methods::Response::system_chainType(self.chain_spec.chain_type())
+                        methods::Response::system_chainType(&self.chain_ty)
                             .to_json_response(request_id),
                     )
                     .await;
@@ -983,10 +1049,13 @@ impl Background {
                     // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
                     // is finished and that the block notifications report blocks that are
                     // believed to be near the head of the chain.
-                    is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
+                    // Note that since it is the `sync_service` that is used for block
+                    // subscriptions (as opposed to the `runtime_service`), it is also the
+                    // `sync_service` that is used to determine `is_syncing`.
+                    is_syncing: !self.sync_service.is_near_head_of_chain_heuristic().await,
                     peers: u64::try_from(self.network_service.peers_list().await.count())
                         .unwrap_or(u64::max_value()),
-                    should_have_peers: self.chain_spec.has_live_network(),
+                    should_have_peers: self.chain_is_live,
                 })
                 .to_json_response(request_id);
 
@@ -1000,6 +1069,17 @@ impl Background {
                     .await
                     .send(
                         methods::Response::system_localListenAddresses(Vec::new())
+                            .to_json_response(request_id),
+                    )
+                    .await;
+            }
+            methods::MethodCall::system_localPeerId {} => {
+                let _ = self
+                    .responses_sender
+                    .lock()
+                    .await
+                    .send(
+                        methods::Response::system_localPeerId(&self.peer_id_base58)
                             .to_json_response(request_id),
                     )
                     .await;
@@ -1039,7 +1119,7 @@ impl Background {
                     .await
                     .send(
                         methods::Response::system_properties(
-                            serde_json::from_str(self.chain_spec.properties()).unwrap(),
+                            serde_json::from_str(&self.chain_properties_json).unwrap(),
                         )
                         .to_json_response(request_id),
                     )

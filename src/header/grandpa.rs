@@ -86,21 +86,13 @@ impl<'a> GrandpaConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             GrandpaConsensusLogRef::ScheduledChange(_) => [1],
             GrandpaConsensusLogRef::ForcedChange { .. } => [2],
             GrandpaConsensusLogRef::OnDisabled(_) => [3],
             GrandpaConsensusLogRef::Pause(_) => [4],
             GrandpaConsensusLogRef::Resume(_) => [5],
-        }));
+        });
 
         let body = match self {
             GrandpaConsensusLogRef::ScheduledChange(change) => either::Left(either::Left(
@@ -109,22 +101,21 @@ impl<'a> GrandpaConsensusLogRef<'a> {
             GrandpaConsensusLogRef::ForcedChange {
                 reset_block_height,
                 change,
-            } => {
-                let reset_block_height = reset_block_height.to_le_bytes().to_vec(); // TODO: to_vec() :-/
-                either::Left(either::Right(
-                    iter::once(either::Right(reset_block_height))
-                        .chain(change.scale_encoding().map(either::Right).map(either::Left)),
-                ))
+            } => either::Left(either::Right(
+                iter::once(either::Right(either::Right(
+                    reset_block_height.to_le_bytes(),
+                )))
+                .chain(change.scale_encoding().map(either::Right).map(either::Left)),
+            )),
+            GrandpaConsensusLogRef::OnDisabled(n) => {
+                either::Right(iter::once(either::Right(either::Left(n.to_le_bytes()))))
             }
-            GrandpaConsensusLogRef::OnDisabled(n) => either::Right(iter::once(
-                either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
-            )),
-            GrandpaConsensusLogRef::Pause(n) => either::Right(iter::once(
-                either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
-            )),
-            GrandpaConsensusLogRef::Resume(n) => either::Right(iter::once(
-                either::Right(n.to_le_bytes().to_vec()), // TODO: to_vec()
-            )),
+            GrandpaConsensusLogRef::Pause(n) => {
+                either::Right(iter::once(either::Right(either::Right(n.to_le_bytes()))))
+            }
+            GrandpaConsensusLogRef::Resume(n) => {
+                either::Right(iter::once(either::Right(either::Right(n.to_le_bytes()))))
+            }
         };
 
         index.map(either::Left).chain(body.map(either::Right))
@@ -243,7 +234,7 @@ impl<'a> GrandpaScheduledChangeRef<'a> {
                     .map(either::Right),
             )
             .chain(iter::once(either::Left(either::Right(
-                self.delay.to_le_bytes().to_vec(), // TODO: don't allocate
+                self.delay.to_le_bytes(),
             ))))
     }
 }
