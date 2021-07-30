@@ -324,31 +324,43 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`SourceId`] doesn't correspond to a valid source.
     ///
-    // TODO: return requests as iterator
-    // TODO: return the `TRq`s as well
-    pub fn remove_source(&mut self, source_id: SourceId) -> TSrc {
+    pub fn remove_source(
+        &mut self,
+        source_id: SourceId,
+    ) -> (TSrc, impl Iterator<Item = (RequestId, RequestDetail, TRq)>) {
         debug_assert!(self.shared.sources.contains(source_id.0));
         match (&mut self.inner, self.shared.sources.remove(source_id.0)) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
                 let (user_data, requests) = sync.remove_source(source_id);
                 let requests = requests
-                    .map(|(_inner_request_id, _, request_inner_user_data)| {
-                        debug_assert!(self
-                            .shared
-                            .requests
-                            .contains(request_inner_user_data.outer_request_id.0));
-                        let _removed = self
-                            .shared
-                            .requests
-                            .remove(request_inner_user_data.outer_request_id.0);
-                        debug_assert!(matches!(
-                            _removed,
-                            RequestMapping::AllForks(_inner_request_id)
-                        ));
-                        Action::Cancel(request_inner_user_data.outer_request_id)
-                    })
-                    .collect();
-                (requests, user_data.user_data)
+                    .map(
+                        |(_inner_request_id, request_params, request_inner_user_data)| {
+                            debug_assert!(self
+                                .shared
+                                .requests
+                                .contains(request_inner_user_data.outer_request_id.0));
+                            let _removed = self
+                                .shared
+                                .requests
+                                .remove(request_inner_user_data.outer_request_id.0);
+                            debug_assert!(matches!(
+                                _removed,
+                                RequestMapping::AllForks(_inner_request_id)
+                            ));
+
+                            (
+                                request_inner_user_data.outer_request_id,
+                                all_forks_request_convert(request_params),
+                                request_inner_user_data.user_data.unwrap(),
+                            )
+                        },
+                    )
+                    .collect::<Vec<_>>()
+                    .into_iter();
+
+                // TODO: also handle the "inline" requests
+
+                (user_data.user_data, requests)
             }
             (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::GrandpaWarpSync(source_id)) => {
                 let sync = match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
@@ -356,36 +368,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     _ => unreachable!(),
                 };
 
-                let ongoing_query = match &sync {
-                    grandpa_warp_sync::InProgressGrandpaWarpSync::WaitingForSources(_) => false,
-                    grandpa_warp_sync::InProgressGrandpaWarpSync::Verifier(_) => false,
-                    grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(sync) => {
-                        sync.current_source().0 == source_id
-                    }
-                    grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(sync) => {
-                        sync.warp_sync_source().0 == source_id
-                    }
-                    grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(sync) => {
-                        sync.warp_sync_source().0 == source_id
-                    }
-                    grandpa_warp_sync::InProgressGrandpaWarpSync::NextKey(sync) => {
-                        sync.warp_sync_source().0 == source_id
-                    }
+                let (user_data, grandpa_warp_sync) = sync.remove_source(source_id);
+                self.inner = AllSyncInner::GrandpaWarpSync {
+                    inner: grandpa_warp_sync,
                 };
 
-                let (user_data, grandpa_warp_sync) = sync.remove_source(source_id);
-
-                let mut actions = Vec::with_capacity(2);
-
-                if ongoing_query {
-                    debug_assert_eq!(self.shared.requests.len(), 1);
-                    let request_id = self.shared.requests.iter().next().unwrap().0;
-                    self.shared.requests.remove(request_id);
-                    actions.push(Action::Cancel(RequestId(request_id)));
-                }
-
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                (actions, user_data.user_data)
+                (user_data.user_data, Vec::new().into_iter()) // TODO: properly return requests
             }
             (AllSyncInner::Poisoned, _) => unreachable!(),
             (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_))
@@ -589,14 +577,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .map(move |(inner_source_id, rq_params)| {
                         (
                             sync.source_user_data(inner_source_id).outer_source_id,
-                            RequestDetail::BlocksRequest {
-                                ascending: false,
-                                first_block: BlocksRequestFirstBlock::Hash(rq_params.first_block_hash),
-                                num_blocks: rq_params.num_blocks,
-                                request_bodies: false,
-                                request_headers: true,
-                                request_justification: true,
-                            },
+                            all_forks_request_convert(rq_params),
                         )
                     });
 
@@ -669,8 +650,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         detail: RequestDetail,
         user_data: TRq,
     ) -> RequestId {
-        match self.inner {
-            AllSyncInner::AllForks(sync) => {
+        match (&mut self.inner, &detail) {
+            (
+                AllSyncInner::AllForks(sync),
+                RequestDetail::BlocksRequest {
+                    ascending: false,
+                    first_block_hash,
+                    first_block_height,
+                    num_blocks,
+                    ..
+                },
+            ) => {
                 let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
                     SourceMapping::AllForks(inner_source_id) => *inner_source_id,
                     _ => unreachable!(),
@@ -681,8 +671,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let inner_request_id = sync.add_request(
                     inner_source_id,
-                    match detail {
-                        _ => todo!(),
+                    all_forks::RequestParams {
+                        first_block_hash: *first_block_hash,
+                        first_block_height: *first_block_height,
+                        num_blocks: *num_blocks,
                     },
                     AllForksRequestExtra {
                         outer_request_id,
@@ -691,15 +683,18 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 );
 
                 request_mapping_entry.insert(RequestMapping::AllForks(inner_request_id));
-                outer_request_id
+                return outer_request_id;
             }
-            AllSyncInner::GrandpaWarpSync { inner } => RequestId(
-                self.shared
-                    .requests
-                    .insert(RequestMapping::Inline(source_id, detail, user_data)),
-            ),
-            AllSyncInner::Poisoned => unreachable!(),
+            (AllSyncInner::AllForks { .. }, _) => {}
+            (AllSyncInner::GrandpaWarpSync { .. }, _) => {}
+            (AllSyncInner::Poisoned, _) => unreachable!(),
         }
+
+        RequestId(
+            self.shared
+                .requests
+                .insert(RequestMapping::Inline(source_id, detail, user_data)),
+        )
     }
 
     /// Returns a list of requests that are considered obsolete and can be removed using
@@ -725,7 +720,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     );
                 either::Left(iter)
             }
-            AllSyncInner::GrandpaWarpSync { inner: sync } => either::Right(iter::empty()), // TODO: not implemented properly
+            AllSyncInner::GrandpaWarpSync { .. } => either::Right(iter::empty()), // TODO: not implemented properly
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -994,8 +989,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 pub enum RequestDetail {
     /// Requesting blocks from the source is requested.
     BlocksRequest {
+        /// Height of the first block to request.
+        first_block_height: u64,
         /// Hash of the first block to request.
-        first_block: BlocksRequestFirstBlock,
+        first_block_hash: [u8; 32],
         /// `True` if the `first_block_hash` is the response should contain blocks in an
         /// increasing number, starting from `first_block_hash` with the lowest number. If `false`,
         /// the blocks should be in decreasing number, with `first_block_hash` as the highest
@@ -1029,12 +1026,6 @@ pub enum RequestDetail {
         /// Keys whose values is requested.
         keys: Vec<Vec<u8>>,
     },
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum BlocksRequestFirstBlock {
-    Hash([u8; 32]),
-    Number(NonZeroU64),
 }
 
 pub struct BlockRequestSuccessBlock<TBl> {
@@ -1131,7 +1122,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
 
     /// Perform the verification.
     pub fn perform(
-        mut self,
+        self,
         now_from_unix_epoch: Duration,
         user_data: TBl,
     ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
@@ -1140,7 +1131,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                 match verify.perform(now_from_unix_epoch, user_data) {
                     all_forks::HeaderVerifyOutcome::Success {
                         is_new_best,
-                        mut sync,
+                        sync,
                         justification_verification,
                     } => HeaderVerifyOutcome::Success {
                         is_new_best,
@@ -1151,7 +1142,7 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                         },
                     },
                     all_forks::HeaderVerifyOutcome::Error {
-                        mut sync,
+                        sync,
                         error,
                         user_data,
                     } => HeaderVerifyOutcome::Error {
@@ -1332,4 +1323,16 @@ enum RequestMapping<TRq> {
 enum SourceMapping {
     GrandpaWarpSync(grandpa_warp_sync::SourceId),
     AllForks(all_forks::SourceId),
+}
+
+fn all_forks_request_convert(rq_params: all_forks::RequestParams) -> RequestDetail {
+    RequestDetail::BlocksRequest {
+        ascending: false,
+        first_block_hash: rq_params.first_block_hash,
+        first_block_height: rq_params.first_block_height,
+        num_blocks: rq_params.num_blocks,
+        request_bodies: false,
+        request_headers: true,
+        request_justification: true,
+    }
 }

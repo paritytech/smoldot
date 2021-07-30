@@ -686,10 +686,6 @@ async fn start_relay_chain(
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut all_notifications = Vec::<mpsc::Sender<BlockNotification>>::new();
 
-        // Queue of requests that the sync state machine wants to start and that haven't been
-        // sent out yet.
-        let mut requests_to_start = Vec::<all::Action>::with_capacity(16);
-
         let mut has_new_best = false;
         let mut has_new_finalized = false;
 
@@ -702,20 +698,23 @@ async fn start_relay_chain(
             // still exist. This is only guaranteed to be case because we process
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
-            for request in requests_to_start.drain(..) {
+            loop {
+                let (source_id, request) = match sync.desired_requests().next() {
+                    Some(v) => v,
+                    None => break,
+                };
+
+                let request_id = sync.add_request(source_id, request.clone(), ());
+
                 match request {
-                    all::Action::Start {
-                        source_id,
-                        request_id,
-                        detail:
-                            all::RequestDetail::BlocksRequest {
-                                first_block,
-                                ascending,
-                                num_blocks,
-                                request_headers,
-                                request_bodies,
-                                request_justification,
-                            },
+                    all::RequestDetail::BlocksRequest {
+                        first_block_hash,
+                        first_block_height: _,
+                        ascending,
+                        num_blocks,
+                        request_headers,
+                        request_bodies,
+                        request_justification,
                     } => {
                         let peer_id = sync.source_user_data_mut(source_id).clone();
 
@@ -723,14 +722,9 @@ async fn start_relay_chain(
                             peer_id.clone(),
                             network_chain_index,
                             network::protocol::BlocksRequestConfig {
-                                start: match first_block {
-                                    all::BlocksRequestFirstBlock::Hash(h) => {
-                                        network::protocol::BlocksRequestConfigStart::Hash(h)
-                                    }
-                                    all::BlocksRequestFirstBlock::Number(n) => {
-                                        network::protocol::BlocksRequestConfigStart::Number(n)
-                                    }
-                                },
+                                start: network::protocol::BlocksRequestConfigStart::Hash(
+                                    first_block_hash,
+                                ),
                                 desired_count: NonZeroU32::new(
                                     u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                                 )
@@ -754,13 +748,8 @@ async fn start_relay_chain(
                         pending_block_requests
                             .push(async move { (request_id, block_request.await) });
                     }
-                    all::Action::Start {
-                        source_id,
-                        request_id,
-                        detail:
-                            all::RequestDetail::GrandpaWarpSync {
-                                sync_start_block_hash,
-                            },
+                    all::RequestDetail::GrandpaWarpSync {
+                        sync_start_block_hash,
                     } => {
                         let peer_id = sync.source_user_data_mut(source_id).clone();
 
@@ -776,15 +765,10 @@ async fn start_relay_chain(
                         pending_grandpa_requests
                             .push(async move { (request_id, grandpa_request.await) });
                     }
-                    all::Action::Start {
-                        source_id,
-                        request_id,
-                        detail:
-                            all::RequestDetail::StorageGet {
-                                block_hash,
-                                state_trie_root,
-                                keys,
-                            },
+                    all::RequestDetail::StorageGet {
+                        block_hash,
+                        state_trie_root,
+                        keys,
                     } => {
                         let peer_id = sync.source_user_data_mut(source_id).clone();
 
@@ -825,11 +809,10 @@ async fn start_relay_chain(
                         pending_storage_requests
                             .push(async move { (request_id, storage_request.await) });
                     }
-                    all::Action::Cancel(request_id) => {
-                        pending_requests.remove(&request_id).unwrap().abort();
-                    }
                 }
             }
+
+            // TODO: handle obsolete requests
 
             // The sync state machine can be in a few various states. At the time of writing:
             // idle, verifying header, verifying block, verifying grandpa warp sync proof,
@@ -845,9 +828,8 @@ async fn start_relay_chain(
                     all::ProcessOne::VerifyWarpSyncFragment(verify) => {
                         let sender_peer_id = verify.proof_sender().1.clone(); // TODO: unnecessary cloning most of the time
 
-                        let (sync_out, next_actions, result) = verify.perform();
+                        let (sync_out, result) = verify.perform();
                         sync = sync_out;
-                        requests_to_start.extend(next_actions);
 
                         if let Err(err) = result {
                             log::warn!(
@@ -862,7 +844,6 @@ async fn start_relay_chain(
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
                                 sync: sync_out,
-                                next_actions,
                                 is_new_best,
                                 is_new_finalized,
                                 ..
@@ -873,8 +854,6 @@ async fn start_relay_chain(
                                     HashDisplay(&verified_hash),
                                     if is_new_best { "yes" } else { "no" }
                                 );
-
-                                requests_to_start.extend(next_actions);
 
                                 if is_new_best {
                                     has_new_best = true;
@@ -912,7 +891,6 @@ async fn start_relay_chain(
                             }
                             all::HeaderVerifyOutcome::Error {
                                 sync: sync_out,
-                                next_actions,
                                 error,
                                 ..
                             } => {
@@ -923,7 +901,6 @@ async fn start_relay_chain(
                                     error
                                 );
 
-                                requests_to_start.extend(next_actions);
                                 sync = sync_out;
                                 continue;
                             }
@@ -1019,16 +996,17 @@ async fn start_relay_chain(
                         network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
-                            let (id, requests) = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let id = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
-                            requests_to_start.extend(requests);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
                             if chain_index == network_chain_index =>
                         {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (requests, _) = sync.remove_source(id);
-                            requests_to_start.extend(requests);
+                            let (_, requests) = sync.remove_source(id);
+                            for (request_id, _, _) in requests {
+                                pending_requests.remove(&request_id).unwrap().abort();
+                            }
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
                             if chain_index == network_chain_index =>
@@ -1043,9 +1021,7 @@ async fn start_relay_chain(
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
                                 all::BlockAnnounceOutcome::InvalidHeader(_) => {},
-                                all::BlockAnnounceOutcome::Disjoint { next_actions } => {
-                                    requests_to_start.extend(next_actions);
-                                },
+                                all::BlockAnnounceOutcome::Disjoint {} => {},
                             }
                         },
                         network_service::Event::GrandpaCommitMessage { chain_index, message }
@@ -1226,12 +1202,10 @@ async fn start_relay_chain(
             // `response_outcome` represents the way the state machine has changed as a
             // consequence of the response to a request.
             match response_outcome {
-                all::ResponseOutcome::Queued { next_actions }
-                | all::ResponseOutcome::NotFinalizedChain { next_actions, .. }
-                | all::ResponseOutcome::AllAlreadyInChain { next_actions, .. } => {
-                    requests_to_start.extend(next_actions);
-                }
-                all::ResponseOutcome::WarpSyncFinished { next_actions } => {
+                all::ResponseOutcome::Queued
+                | all::ResponseOutcome::NotFinalizedChain { .. }
+                | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
+                all::ResponseOutcome::WarpSyncFinished => {
                     let finalized_num = sync.finalized_block_header().number;
                     log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
                     has_new_finalized = true;
@@ -1239,7 +1213,6 @@ async fn start_relay_chain(
                     // Since there is a gap in the blocks, all active notifications to all blocks
                     // must be cleared.
                     all_notifications.clear();
-                    requests_to_start.extend(next_actions);
                 }
             }
         }
