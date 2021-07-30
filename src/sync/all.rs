@@ -233,7 +233,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         user_data: TSrc,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> (SourceId, Vec<Action>) {
+    ) -> SourceId {
         // `inner` is temporarily replaced with `Poisoned`. A new value must be put back before
         // returning.
         match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
@@ -251,17 +251,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 });
 
                 let inner_source_id = warp_sync_request.current_source().0;
-
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
-
-                let action = self
-                    .shared
-                    .grandpa_warp_sync_request_to_request(&warp_sync_request);
 
                 self.inner = AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync_request.into(),
                 };
-                (outer_source_id, vec![action])
+
+                outer_source_id
             }
             AllSyncInner::GrandpaWarpSync { inner: mut grandpa } => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
@@ -298,7 +294,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
 
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: grandpa };
-                (outer_source_id, Vec::new())
+                outer_source_id
             }
             AllSyncInner::AllForks(mut all_forks) => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
@@ -314,10 +310,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 );
                 outer_source_id_entry.insert(SourceMapping::AllForks(source_id));
 
-                let next_actions = self.shared.all_forks_next_actions(&mut all_forks);
-
                 self.inner = AllSyncInner::AllForks(all_forks);
-                (outer_source_id, next_actions)
+                outer_source_id
             }
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -332,7 +326,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     // TODO: return requests as iterator
     // TODO: return the `TRq`s as well
-    pub fn remove_source(&mut self, source_id: SourceId) -> (Vec<Action>, TSrc) {
+    pub fn remove_source(&mut self, source_id: SourceId) -> TSrc {
         debug_assert!(self.shared.sources.contains(source_id.0));
         match (&mut self.inner, self.shared.sources.remove(source_id.0)) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
@@ -593,10 +587,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// This method doesn't modify the state machine in any way. [`AllForksSync::add_request`]
     /// must be called in order for the request to actually be marked as started.
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
+    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestDetail)> + '_ {
         match self.inner {
-            AllSyncInner::AllForks(sync) => sync.desired_requests(),
-            AllSyncInner::GrandpaWarpSync { inner: sync } => sync.desired_requests(),
+            AllSyncInner::AllForks(sync) => {
+                sync.desired_requests().map(|(inner_source_id, rq_params)| {
+                    (
+                        sync.source_user_data(inner_source_id).outer_source_id,
+                        rq_params,
+                    )
+                })
+            }
+            AllSyncInner::GrandpaWarpSync { inner } => inner.desired_requests(),
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -613,11 +614,31 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn add_request(
         &mut self,
         source_id: SourceId,
-        detail: RequestParams,
+        detail: RequestDetail,
         user_data: TRq,
     ) -> RequestId {
         match self.inner {
-            AllSyncInner::AllForks(sync) => sync.add_request(source_id, detail, user_data),
+            AllSyncInner::AllForks(sync) => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::AllForks(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = sync.add_request(
+                    inner_source_id,
+                    detail,
+                    AllForksRequestExtra {
+                        outer_request_id,
+                        user_data: Some(user_data),
+                    },
+                );
+
+                request_mapping_entry.insert(RequestMapping::AllForks(inner_request_id));
+                outer_request_id
+            }
             AllSyncInner::GrandpaWarpSync { inner: sync } => {
                 sync.add_request(source_id, detail, user_data)
             }
@@ -626,7 +647,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 
     /// Returns a list of requests that are considered obsolete and can be removed using
-    /// [`AllForksSync::finish_ancestry_search`] or similar.
+    /// [`AllSync::blocks_request_response`] or similar.
     ///
     /// A request becomes obsolete if the state of the request blocks changes in such a way that
     /// they don't need to be requested anymore. The response to the request will be useless.
@@ -635,7 +656,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// >           requests that are returned.
     pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
         match self.inner {
-            AllSyncInner::AllForks(sync) => sync.obsolete_requests(),
+            AllSyncInner::AllForks(sync) => {
+                sync.obsolete_requests().map(|(_, rq)| rq.outer_request_id)
+            }
             AllSyncInner::GrandpaWarpSync { inner: sync } => sync.obsolete_requests(),
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -998,22 +1021,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     }
 }
 
-/// Start or cancel a request.
-#[derive(Debug, Clone)]
-pub enum Action {
-    /// Start a request towards a source.
-    Start {
-        /// Identifier of the request to pass back later in order to indicate a response.
-        request_id: RequestId,
-        /// Identifier of the source that must perform the request.
-        source_id: SourceId,
-        /// Actual details of the request to perform.
-        detail: RequestDetail,
-    },
-    /// Cancel a previously-emitted request.
-    Cancel(RequestId),
-}
-
 /// See [`Action::Start::detail`].
 #[derive(Debug, Clone)]
 #[must_use]
@@ -1234,8 +1241,6 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         is_new_finalized: bool,
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
-        /// Next requests that must be started.
-        next_actions: Vec<Action>,
     },
 
     /// Header verification failed.
@@ -1246,8 +1251,6 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
         error: HeaderVerifyError,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
-        /// Next requests that must be started.
-        next_actions: Vec<Action>,
     },
 }
 
@@ -1321,7 +1324,7 @@ struct AllForksSourceExtra<TSrc> {
 
 struct AllForksRequestExtra<TRq> {
     outer_request_id: RequestId,
-    user_data: Option<TRq>,
+    user_data: Option<TRq>, // TODO: why option?
 }
 
 struct GrandpaWarpSyncSourceExtra<TSrc> {
@@ -1384,22 +1387,6 @@ impl Shared {
         }
 
         out
-    }
-
-    fn grandpa_warp_sync_request_to_request<TSrc>(
-        &mut self,
-        grandpa_warp_sync: &grandpa_warp_sync::WarpSyncRequest<GrandpaWarpSyncSourceExtra<TSrc>>,
-    ) -> Action {
-        debug_assert!(self.requests.is_empty());
-        let request_id = RequestId(self.requests.insert(RequestMapping::GrandpaWarpSync));
-        let outer_source_id = grandpa_warp_sync.current_source().1.outer_source_id;
-        Action::Start {
-            request_id,
-            source_id: outer_source_id,
-            detail: RequestDetail::GrandpaWarpSync {
-                sync_start_block_hash: grandpa_warp_sync.start_block_hash(),
-            },
-        }
     }
 
     /// Transitions the sync state machine from the grandpa warp strategy to the "all-forks"

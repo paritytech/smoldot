@@ -740,14 +740,14 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
+    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> + '_ {
         // TODO: more than that?
         self.requests
             .iter()
             .filter(move |(_, rq)| {
                 rq.detail.first_block_height <= self.sources.finalized_block_height()
             })
-            .map(|(id, _)| RequestId(id))
+            .map(|(id, rq)| (RequestId(id), &rq.user_data))
     }
 
     /// Returns the details of a request to start towards a source.
