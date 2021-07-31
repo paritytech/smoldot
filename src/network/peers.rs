@@ -251,7 +251,7 @@ where
         }
     }
 
-    /// Adds an incoming connection to the state machine.
+    /// Inserts an incoming connection in the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
@@ -267,46 +267,34 @@ where
         self.inner.insert(false, ()).await
     }
 
-    /// Pops a request for a new connection made by the [`Peers`].
+    /// Inserts an outgoing connection in the state machine.
     ///
-    /// After this method has returned, the [`Peers`] state machine will assume that the user is
-    /// trying to establish the connection that was returned. It is possible to "refuse" a certain
-    /// connection request by calling [`Peers::pending_outcome_err`] immediately after.
-    ///
-    /// If no request is available, waits until there is one.
-    // TODO: well, complicated, because we would like the outside to handle known multiaddresses
-    #[must_use]
-    pub async fn next_connection_open(&self) {
-        todo!()
-    }
-
-    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
-    /// success of the dialing attempt.
-    ///
-    /// See also [`ChainNetwork::pending_outcome_err`].
+    /// This connection hasn't finished handshaking, and the [`PeerId`] of the remote isn't known
+    /// yet, but it is expected to be `unfulfilled_desired_peers`. After this function has been
+    /// called, the provided `expected_peer_id` will no longer be part of the return value of
+    /// [`Peers::unfulfilled_desired_peers`].
     ///
     /// After this function has returned, you must process the connection with
-    /// [`ChainNetwork::read_write`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`PendingId`] is invalid.
-    ///
+    /// [`Peers::read_write`].
     #[must_use]
-    pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
-        todo!()
+    pub async fn add_outgoing_connection(
+        &self,
+        local_listen_address: &Multiaddr,
+        remote_addr: Multiaddr,
+        expected_peer_id: &PeerId,
+    ) -> ConnectionId {
+        self.inner.insert(true, ()).await
     }
 
-    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
-    /// failure of the dialing attempt.
-    ///
-    /// See also [`ChainNetwork::pending_outcome_ok`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`PendingId`] is invalid.
-    ///
-    pub async fn pending_outcome_err(&self, id: PendingId) {
+    /// Returns the list of [`PeerId`]s that have been marked as desired, but that don't have any
+    /// associated connection. An associated connection is either a fully established connection
+    /// with that peer, or an outgoing connection that is still handshaking but expects to reach
+    /// that peer.
+    // TODO: well, complicated, because we would like the outside to handle known multiaddresses
+    #[must_use]
+    pub async fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = PeerId> {
+        let mut guarded = self.guarded.lock().await;
+
         todo!()
     }
 
@@ -322,11 +310,12 @@ where
         notification_protocols: impl Iterator<Item = usize>,
         new_desired_state: OutNotificationsState,
     ) {
-        todo!()
+        let mut guarded = self.guarded.lock().await;
+        let peer_index = guarded.peer_index_or_insert(peer_id);
+        for notification_protocol in notification_protocols {
+            guarded.peers_desired.insert((peer_index, notification_protocol));
+        }
     }
-
-    /// Returns the list of peers whose desired status is TODO: but which couldn't be reached.
-    pub async fn unreachable_peers(&'_ self) -> impl Iterator<Item = PeerId> {}
 
     ///
     ///
