@@ -20,8 +20,6 @@
 **   Not ready yet                                      **
 *********************************************************/
 
-mod peerset;
-
 pub mod peers;
 pub mod protocol;
 pub mod service;

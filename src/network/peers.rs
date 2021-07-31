@@ -25,22 +25,15 @@
 
 use crate::libp2p::{self, Multiaddr, PeerId};
 
-use alloc::{collections::BTreeSet, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeSet, vec::Vec};
 use core::{
-    cmp, iter, mem,
+    iter,
     num::NonZeroU32,
     ops::{Add, Sub},
-    pin::Pin,
-    task::{Context, Poll},
+    task::Poll,
     time::Duration,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    lock::{Mutex, MutexGuard},
-    prelude::*,
-}; // TODO: no_std-ize
-use rand::Rng as _;
-use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
+use futures::{lock::Mutex, prelude::*}; // TODO: no_std-ize
 
 pub use libp2p::ConnectionId;
 
@@ -54,6 +47,23 @@ impl<TNow> Peers<TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
+    /// Creates a new [`Peers`].
+    // TODO: proper config
+    pub fn new(config: libp2p::Config) -> Self {
+        Peers {
+            inner: libp2p::Network::new(config),
+            guarded: Mutex::new(Guarded {
+                to_process_pre_event: None,
+                connections_peer_index: slab::Slab::new(), // TODO: capacity
+                peer_indices: todo!(),                     // TODO:
+                peers: slab::Slab::new(),                  // TODO: capacity
+                peers_desired: BTreeSet::new(),
+                peers_notifications_out: BTreeSet::new(),
+                desired_in_notifications: slab::Slab::new(), // TODO: capacity
+            }),
+        }
+    }
+
     /// Returns the next event produced by the service.
     ///
     /// This function should be called at a high enough rate that [`Network::read_write`] can
@@ -264,7 +274,9 @@ where
         local_listen_address: &Multiaddr,
         remote_addr: Multiaddr,
     ) -> ConnectionId {
-        self.inner.insert(false, ()).await
+        let mut guarded = self.guarded.lock().await;
+        let connection_id = guarded.connections_peer_index.insert(None);
+        self.inner.insert(false, connection_id).await
     }
 
     /// Inserts an outgoing connection in the state machine.
@@ -283,7 +295,9 @@ where
         remote_addr: Multiaddr,
         expected_peer_id: &PeerId,
     ) -> ConnectionId {
-        self.inner.insert(true, ()).await
+        let mut guarded = self.guarded.lock().await;
+        let connection_id = guarded.connections_peer_index.insert(None);
+        self.inner.insert(true, connection_id).await
     }
 
     /// Returns the list of [`PeerId`]s that have been marked as desired, but that don't have any
@@ -293,9 +307,8 @@ where
     // TODO: well, complicated, because we would like the outside to handle known multiaddresses
     #[must_use]
     pub async fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = PeerId> {
-        let mut guarded = self.guarded.lock().await;
-
-        todo!()
+        let guarded = self.guarded.lock().await;
+        iter::empty() // TODO:
     }
 
     pub async fn set_peer_desired(&self, peer_id: &PeerId, desired: bool) {
@@ -313,7 +326,9 @@ where
         let mut guarded = self.guarded.lock().await;
         let peer_index = guarded.peer_index_or_insert(peer_id);
         for notification_protocol in notification_protocols {
-            guarded.peers_desired.insert((peer_index, notification_protocol));
+            guarded
+                .peers_desired
+                .insert((peer_index, notification_protocol));
         }
     }
 
@@ -362,19 +377,45 @@ where
         todo!()
     }
 
+    /// Equivalent to calling [`Peers::queue_notification`] for all peers an outbound
+    /// notifications substream is open with.
+    ///
+    /// Individual errors that would have occured when calling [`Peers::queue_notification`] are
+    /// silently discarded.
+    // TODO: consider returning the peers we successfully sent to
+    pub async fn broadcast_notification(
+        &self,
+        overlay_network_index: usize,
+        notification: impl Into<Vec<u8>>,
+    ) {
+        todo!()
+    }
+
+    // TODO: doc
+    pub async fn request(
+        &self,
+        now: TNow,
+        target: &PeerId,
+        protocol_index: usize,
+        request_data: Vec<u8>,
+        // TODO: bad error type
+    ) -> Result<Vec<u8>, libp2p::RequestError> {
+        todo!()
+    }
+
     ///
     /// # Panic
     ///
     /// Panics if `connection_id` isn't a valid connection.
     ///
-    // TODO: document the `write_close` thing
+    // TODO: document
     pub async fn read_write<'a>(
         &self,
         connection_id: ConnectionId,
         now: TNow,
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
-    ) -> Result<ReadWrite<TNow>, ConnectionError> {
+    ) -> Result<libp2p::ReadWrite<TNow>, libp2p::ConnectionError> {
         self.inner
             .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
             .await
@@ -420,7 +461,7 @@ pub enum Event {
         peer_id: PeerId,
         /// Substream on which the request has been received. Must be passed back when providing
         /// the response.
-        substream_id: established::SubstreamId,
+        substream_id: libp2p::connection::established::SubstreamId, // TODO: no, use a RequestId
         protocol_index: usize,
         request_payload: Vec<u8>,
     },

@@ -15,10 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::libp2p::{
-    self, connection, discovery::kademlia, multiaddr, peer_id, PeerId, QueueNotificationError,
+use crate::libp2p::{self, connection, discovery::kademlia, multiaddr, peer_id, PeerId};
+use crate::network::{
+    peers::{self, QueueNotificationError},
+    protocol,
 };
-use crate::network::{peerset, protocol};
 use crate::util;
 
 use alloc::{
@@ -138,9 +139,8 @@ pub struct ConnectionId(libp2p::ConnectionId);
 /// Data structure containing the list of all connections, pending or not, and their latest known
 /// state. See also [the module-level documentation](..).
 pub struct ChainNetwork<TNow> {
-    /// Underlying data structure. Collection of connections.
-    /// The "user data" associated to each connection is its identifier in [`Guarded::peerset`].
-    libp2p: libp2p::Network<peerset::ConnectionId, TNow>,
+    /// Underlying data structure.
+    inner: peers::Peers<TNow>,
 
     /// Extra fields protected by a `Mutex`.
     guarded: Mutex<Guarded>,
@@ -153,8 +153,6 @@ pub struct ChainNetwork<TNow> {
 }
 
 struct Guarded {
-    peerset: peerset::Peerset,
-
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
     /// [`ChainNetwork::libp2p`]. This event might lead to some asynchronous post-processing
     /// being needed. Because the user can interrupt the future returned by
@@ -391,7 +389,7 @@ where
         }
 
         ChainNetwork {
-            libp2p: libp2p::Network::new(libp2p::Config {
+            inner: peers::Peers::new(libp2p::Config {
                 capacity: config.connections_capacity,
                 request_response_protocols,
                 noise_key: config.noise_key,
@@ -401,7 +399,6 @@ where
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
             }),
             guarded: Mutex::new(Guarded {
-                peerset: peerset::Peerset::new(),
                 to_process_pre_event: None,
                 chain_grandpa_config,
                 substream_open_waker: None,
@@ -418,7 +415,7 @@ where
     /// Returns the number of established TCP connections, both incoming and outgoing.
     // TODO: note about race
     pub async fn num_established_connections(&self) -> usize {
-        self.libp2p.len().await
+        self.inner.len().await
     }
 
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
@@ -439,22 +436,9 @@ where
         local_listen_address: &multiaddr::Multiaddr,
         remote_addr: multiaddr::Multiaddr,
     ) -> ConnectionId {
-        let mut guarded = self.guarded.lock().await;
-
-        let local_connections_entry = guarded.connections.vacant_entry();
-
-        let inner_id = self
-            .libp2p
-            .insert(false, local_connections_entry.key())
-            .await;
-
-        local_connections_entry.insert(Connection {
-            address: remote_addr,
-            peer_id: todo!(), // TODO: `None` or something
-            reached: Some(ConnectionReached { inner_id }),
-        });
-
-        ConnectionId(inner_id)
+        self.inner
+            .add_incoming_connection(local_listen_address, remote_addr)
+            .await
     }
 
     /// Update the state of the local node with regards to GrandPa rounds.
@@ -494,28 +478,13 @@ where
         });
 
         // Now sending out.
-        // TODO: right now we just try to send to everyone no matter which substream is open, which is wasteful
-        for (_, connection) in &guarded.connections {
-            if let Some(reached) = connection.reached.as_ref() {
-                // Ignore sending errors.
-                let _ = self
-                    .libp2p
-                    .queue_notification(
-                        reached.inner_id,
-                        chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                        packet.clone(),
-                    )
-                    .await;
-            }
-        }
-    }
-
-    async fn request_connection_id(
-        &self,
-        target: &peer_id::PeerId,
-    ) -> Option<libp2p::ConnectionId> {
-        let guarded = self.guarded.lock().await;
-        guarded.peerset.peer_main_established(&target)
+        let _ = self
+            .inner
+            .broadcast_notification(
+                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                packet.clone(),
+            )
+            .await;
     }
 
     /// Sends a blocks request to the given peer.
@@ -527,23 +496,16 @@ where
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
-        let connection_id =
-            self.request_connection_id(target)
-                .await
-                .ok_or(BlocksRequestError::Request(
-                    libp2p::RequestError::NotConnected,
-                ))?;
-
         let request_data = protocol::build_block_request(config).fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
         });
 
         let response = self
-            .libp2p
+            .inner
             .request(
                 now,
-                connection_id,
+                target,
                 self.protocol_index(chain_index, 0),
                 request_data,
             )
@@ -560,17 +522,13 @@ where
         chain_index: usize,
         begin_hash: [u8; 32],
     ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
-        let connection_id = self.request_connection_id(target).await.ok_or(
-            GrandpaWarpSyncRequestError::Request(libp2p::RequestError::NotConnected),
-        )?;
-
         let request_data = begin_hash.to_vec();
 
         let response = self
-            .libp2p
+            .inner
             .request(
                 now,
-                connection_id,
+                target,
                 self.protocol_index(chain_index, 3),
                 request_data,
             )
@@ -590,13 +548,6 @@ where
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
-        let connection_id =
-            self.request_connection_id(target)
-                .await
-                .ok_or(StorageProofRequestError::Request(
-                    libp2p::RequestError::NotConnected,
-                ))?;
-
         let request_data =
             protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
@@ -604,10 +555,10 @@ where
             });
 
         let response = self
-            .libp2p
+            .inner
             .request(
                 now,
-                connection_id,
+                target,
                 self.protocol_index(chain_index, 1),
                 request_data,
             )
@@ -634,13 +585,6 @@ where
         chain_index: usize,
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
-        let connection_id =
-            self.request_connection_id(target)
-                .await
-                .ok_or(CallProofRequestError::Request(
-                    libp2p::RequestError::NotConnected,
-                ))?;
-
         let request_data =
             protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
@@ -648,10 +592,10 @@ where
             });
 
         let response = self
-            .libp2p
+            .inner
             .request(
                 now,
-                connection_id,
+                target,
                 self.protocol_index(chain_index, 1),
                 request_data,
             )
@@ -670,18 +614,12 @@ where
         chain_index: usize,
         extrinsic: &[u8],
     ) -> Result<(), QueueNotificationError> {
-        // TODO: no, don't use request_connection_id, must have a substream open
-        let connection_id = self
-            .request_connection_id(target)
-            .await
-            .ok_or(QueueNotificationError::NotConnected)?;
-
         let mut val = Vec::with_capacity(1 + extrinsic.len());
         val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
         val.extend_from_slice(extrinsic);
-        self.libp2p
+        self.inner
             .queue_notification(
-                connection_id,
+                target,
                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
                 val,
             )
@@ -711,7 +649,7 @@ where
         // only correctly if `reached` is `None`.
         assert!(connection.reached.is_none());
 
-        let inner_id = self.libp2p.insert(true, id.0).await;
+        let inner_id = self.inner.insert(true, id.0).await;
 
         connection.reached = Some(ConnectionReached { inner_id });
 
@@ -792,7 +730,7 @@ where
             // - If an event is available, continue with `maybe_inner_event` equal to `Some`.
             //
             let (mut guarded, maybe_inner_event) = {
-                let next_event_future = self.libp2p.next_event();
+                let next_event_future = self.inner.next_event();
                 futures::pin_mut!(next_event_future);
 
                 let mut lock_acq_future = self.guarded.lock();
@@ -832,7 +770,7 @@ where
                             overlay_network_index,
                             handshake,
                         } => {
-                            self.libp2p
+                            self.inner
                                 .accept_notifications_in(
                                     *connection_id,
                                     *overlay_network_index,
@@ -846,7 +784,7 @@ where
                             packet,
                         } => {
                             let _ = self
-                                .libp2p
+                                .inner
                                 .queue_notification(
                                     *connection_id,
                                     *overlay_network_index,
@@ -1298,7 +1236,7 @@ where
                         // TODO: filter out if no substream yet
 
                         return SubstreamOpen {
-                            libp2p: &self.libp2p,
+                            libp2p: &self.inner,
                             chain_configs: &self.chain_configs,
                             connection_id,
                             overlay_network_index: chain_index, // TODO: no
@@ -1393,7 +1331,7 @@ where
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
     ) -> Result<ReadWrite<TNow>, libp2p::ConnectionError> {
         let inner = self
-            .libp2p
+            .inner
             .read_write(connection_id.0, now, incoming_buffer, outgoing_buffer)
             .await?;
         Ok(ReadWrite {
@@ -1745,18 +1683,18 @@ where
             protocol::build_identify_response(protocol::IdentifyResponse {
                 protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
                 agent_version,
-                ed25519_public_key: self.service.libp2p.noise_key().libp2p_public_ed25519_key(),
+                ed25519_public_key: self.service.inner.noise_key().libp2p_public_ed25519_key(),
                 listen_addrs: iter::empty(), // TODO:
                 observed_addr,
                 protocols: self
                     .service
-                    .libp2p
+                    .inner
                     .request_response_protocols()
                     .filter(|p| p.inbound_allowed)
                     .map(|p| &p.name[..])
                     .chain(
                         self.service
-                            .libp2p
+                            .inner
                             .overlay_networks()
                             .map(|p| &p.protocol_name[..]),
                     ),
@@ -1769,7 +1707,7 @@ where
 
         let _ = self
             .service
-            .libp2p
+            .inner
             .respond_in_request(self.id, self.substream_id, Ok(response))
             .await;
     }
