@@ -27,6 +27,7 @@ use crate::libp2p::{self, Multiaddr, PeerId};
 
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{
+    convert::TryFrom as _,
     iter,
     num::NonZeroU32,
     ops::{Add, Sub},
@@ -54,9 +55,29 @@ where
             inner: libp2p::Network::new(config),
             guarded: Mutex::new(Guarded {
                 to_process_pre_event: None,
-                connections_peer_index: slab::Slab::new(), // TODO: capacity
-                peer_indices: todo!(),                     // TODO:
-                peers: slab::Slab::new(),                  // TODO: capacity
+                connections_peer_index: slab::Slab::with_capacity(config.capacity), // TODO: capacity
+                peer_indices: {
+                    // TODO: capacity
+                    // TODO: uses the same seed as libp2p right now, obviously bad
+                    hashbrown::HashMap::with_capacity_and_hasher(
+                        0,
+                        ahash::RandomState::with_seeds(
+                            u64::from_ne_bytes(
+                                <[u8; 8]>::try_from(&config.randomness_seed[0..8]).unwrap(),
+                            ),
+                            u64::from_ne_bytes(
+                                <[u8; 8]>::try_from(&config.randomness_seed[8..16]).unwrap(),
+                            ),
+                            u64::from_ne_bytes(
+                                <[u8; 8]>::try_from(&config.randomness_seed[16..24]).unwrap(),
+                            ),
+                            u64::from_ne_bytes(
+                                <[u8; 8]>::try_from(&config.randomness_seed[24..32]).unwrap(),
+                            ),
+                        ),
+                    )
+                },
+                peers: slab::Slab::new(), // TODO: capacity
                 peers_desired: BTreeSet::new(),
                 peers_notifications_out: BTreeSet::new(),
                 desired_in_notifications: slab::Slab::new(), // TODO: capacity
@@ -149,27 +170,27 @@ where
                     match guarded.to_process_pre_event.as_ref().unwrap() {
                         ToProcessPreEvent::AcceptNotificationsIn {
                             connection_id,
-                            overlay_network_index,
+                            notifications_protocol_index,
                             handshake,
                         } => {
                             self.inner
                                 .accept_notifications_in(
                                     *connection_id,
-                                    *overlay_network_index,
+                                    *notifications_protocol_index,
                                     handshake.clone(), // TODO: clone? :-/
                                 )
                                 .await;
                         }
                         ToProcessPreEvent::QueueNotification {
                             connection_id,
-                            overlay_network_index,
+                            notifications_protocol_index,
                             packet,
                         } => {
                             let _ = self
                                 .inner
                                 .queue_notification(
                                     *connection_id,
-                                    *overlay_network_index,
+                                    *notifications_protocol_index,
                                     packet.clone(),
                                 ) // TODO: clone? :-/
                                 .await;
@@ -215,46 +236,46 @@ where
 
                 libp2p::Event::NotificationsOutAccept {
                     id,
-                    overlay_network_index,
+                    notifications_protocol_index,
                     remote_handshake,
                     user_data,
                 } => {
                     let peer_index = guarded.connections_peer_index[user_data].unwrap();
                     let _inserted = guarded
                         .peers_notifications_out
-                        .insert((peer_index, overlay_network_index));
+                        .insert((peer_index, notifications_protocol_index));
                     debug_assert!(_inserted);
                 }
 
                 libp2p::Event::NotificationsOutClose {
                     id,
-                    overlay_network_index,
+                    notifications_protocol_index,
                     user_data,
                 } => {
                     let peer_index = guarded.connections_peer_index[user_data].unwrap();
                     let _was_in = guarded
                         .peers_notifications_out
-                        .remove(&(peer_index, overlay_network_index));
+                        .remove(&(peer_index, notifications_protocol_index));
                     debug_assert!(_was_in);
                 }
 
                 libp2p::Event::NotificationsInOpen {
                     id,
-                    overlay_network_index,
+                    notifications_protocol_index,
                     remote_handshake,
                     user_data,
                 } => {}
 
                 libp2p::Event::NotificationsIn {
                     id,
-                    overlay_network_index,
+                    notifications_protocol_index,
                     notification,
                     user_data,
                 } => {}
 
                 libp2p::Event::NotificationsInClose {
                     id,
-                    overlay_network_index,
+                    notifications_protocol_index,
                     user_data,
                 } => {}
             }
@@ -269,11 +290,7 @@ where
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
     #[must_use]
-    pub async fn add_incoming_connection(
-        &self,
-        local_listen_address: &Multiaddr,
-        remote_addr: Multiaddr,
-    ) -> ConnectionId {
+    pub async fn add_incoming_connection(&self) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
         let connection_id = guarded.connections_peer_index.insert(None);
         self.inner.insert(false, connection_id).await
@@ -289,12 +306,7 @@ where
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
     #[must_use]
-    pub async fn add_outgoing_connection(
-        &self,
-        local_listen_address: &Multiaddr,
-        remote_addr: Multiaddr,
-        expected_peer_id: &PeerId,
-    ) -> ConnectionId {
+    pub async fn add_outgoing_connection(&self, expected_peer_id: &PeerId) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
         let connection_id = guarded.connections_peer_index.insert(None);
         self.inner.insert(true, connection_id).await
@@ -371,7 +383,7 @@ where
     pub async fn queue_notification(
         &self,
         peer: &PeerId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) -> Result<(), QueueNotificationError> {
         todo!()
@@ -385,7 +397,7 @@ where
     // TODO: consider returning the peers we successfully sent to
     pub async fn broadcast_notification(
         &self,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) {
         todo!()
@@ -420,6 +432,19 @@ where
             .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
             .await
     }
+
+    /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
+    /// with.
+    // TODO: this doesn't do what it says it does
+    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
+        let guarded = self.guarded.lock().await;
+        guarded
+            .peers_by_id
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 }
 
 pub enum OutNotificationsState {
@@ -451,6 +476,17 @@ pub enum Event {
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
 
+        /// `true` if the peer is marked as desired. If this is `true` and `num_peer_connections`
+        /// is `0`, then calling [`Peers::unfulfilled_desired_peers`] will now return this peer.
+        ///
+        /// > **Note**: Keep in mind that everything is subject to race conditions. For example,
+        /// >           a parallel thread might at the same time remove the "desired" marker of
+        /// >           this peer, or an incoming connection might at the same time finish
+        /// >           negotiating a new connection with this peer. When sharing the [`Peers`]
+        /// >           between multiple threads, there is no guarantee that
+        /// >           [`Peers::unfulfilled_desired_peers`] will in fact return this peer.
+        peer_is_desired: bool,
+
         /// Number of other established connections with the same peer remaining after the
         /// disconnection.
         num_peer_connections: u32,
@@ -469,6 +505,7 @@ pub enum Event {
     DesiredInNotification {
         id: DesiredInNotificationId,
         peer_id: PeerId,
+        notifications_protocol_index: usize,
         handshake: Vec<u8>,
     },
 
@@ -476,7 +513,7 @@ pub enum Event {
     NotificationsOutAccept {
         peer_id: PeerId,
         // TODO: what if fallback?
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         /// Handshake sent in return by the remote.
         remote_handshake: Vec<u8>,
     },
@@ -485,20 +522,20 @@ pub enum Event {
     /// outbound substream has been denied by the remote.
     NotificationsOutClose {
         peer_id: PeerId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
     },
 
     // TODO: needs a notifications in cancel event? tricky
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
         peer_id: PeerId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         notification: Vec<u8>,
     },
 
     NotificationsInClose {
         peer_id: PeerId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
     },
 }
 
@@ -549,12 +586,12 @@ impl Guarded {
 enum ToProcessPreEvent {
     AcceptNotificationsIn {
         connection_id: libp2p::ConnectionId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         handshake: Vec<u8>,
     },
     QueueNotification {
         connection_id: libp2p::ConnectionId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         packet: Vec<u8>,
     },
 }
