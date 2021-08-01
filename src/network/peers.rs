@@ -18,10 +18,24 @@
 //! Network of peers.
 //!
 //! The [`Peers`] state machine builds on top of the [`libp2p`] module and provides an
-//! abstraction over the network based on network identities (i.e. [`PeerId`]s). In other words,
-//! one can use the [`Peers`] struct to determine who to be connected to and through which
-//! notification protocols, and the state machine will try to open or re-open connections with
-//! these peers.
+//! abstraction over the network based on network identities (i.e. [`PeerId`]s). One can set the
+//! list of peers to be connected to and through which notification protocols, and the [`Peers`]
+//! struct will try to open or re-open connections with these peers. Once connected, one can use
+//! the [`Peers`] to send request or notifications with these peers.
+//!
+//! # Detailed usage
+//!
+//! The [`Peers`] struct contains four different collections:
+//!
+//! - A list of peers that are marked as "desired".
+//! - A list of `(peer_id, notification_protocol)` tuples that are marked as "desired".
+//! - A list of connections identified by [`ConnectionId`]s.
+//! - A list of [`DesiredInNotificationId`]. When a peer desired to open a notification substream
+//! with the local node, a [`DesiredInNotificationId`] is generated. The API user must answer by
+//! either accepting or refusing the request. The requests can automatically become obsolete if
+//! the remote decides to withdraw their request or the connection closes. A request becoming
+//! obsolete does *not* invalidate its [`DesiredInNotificationId`].
+//!
 
 use crate::libp2p::{self, Multiaddr, PeerId};
 
