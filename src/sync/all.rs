@@ -66,13 +66,17 @@ pub struct Config {
     /// Should be set to the maximum number of block between two consecutive justifications.
     pub blocks_capacity: usize,
 
-    /// Maximum number of blocks returned by a response.
+    /// Maximum number of blocks of unknown ancestry to keep in memory.
     ///
-    /// > **Note**: If blocks are requested from the network, this should match the network
-    /// >           protocol enforced limit.
-    pub blocks_request_granularity: NonZeroU32,
+    /// See [`all_forks::Config::max_disjoint_headers`] for more information.
+    pub max_disjoint_headers: usize,
 
-    /// Number of blocks to download ahead of the best block.
+    /// Maximum number of simultaneous pending requests made towards the same block.
+    ///
+    /// See [`all_forks::Config::max_requests_per_block`] for more information.
+    pub max_requests_per_block: NonZeroU32,
+
+    /// Number of blocks to download ahead of the best verified block.
     ///
     /// Whenever the latest best block is updated, the state machine will start block
     /// requests for the block `best_block_height + download_ahead_blocks` and all its
@@ -81,14 +85,8 @@ pub struct Config {
     ///
     /// The ideal value here depends on the speed of blocks verification speed and latency of
     /// block requests.
+    // TODO: unused at the moment
     pub download_ahead_blocks: u32,
-
-    /// Seed used by the PRNG (Pseudo-Random Number Generator) that selects which source to start
-    /// requests with.
-    ///
-    /// You are encouraged to use something like `rand::random()` to fill this field, except in
-    /// situations where determinism/reproducibility is desired.
-    pub source_selection_randomness_seed: u64,
 
     /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
     /// configuration.
@@ -135,6 +133,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
+                sources_capacity: config.sources_capacity,
+                blocks_capacity: config.blocks_capacity,
+                max_disjoint_headers: config.max_disjoint_headers,
+                max_requests_per_block: config.max_requests_per_block,
             },
         }
     }
@@ -1272,6 +1274,15 @@ struct GrandpaWarpSyncSourceExtra<TSrc> {
 struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
+
+    /// Value passed through [`Config::sources_capacity`].
+    sources_capacity: usize,
+    /// Value passed through [`Config::blocks_capacity`].
+    blocks_capacity: usize,
+    /// Value passed through [`Config::max_disjoint_headers`].
+    max_disjoint_headers: usize,
+    /// Value passed through [`Config::max_requests_per_block`].
+    max_requests_per_block: NonZeroU32,
 }
 
 impl<TRq> Shared<TRq> {
@@ -1281,13 +1292,12 @@ impl<TRq> Shared<TRq> {
         &mut self,
         grandpa: grandpa_warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
     ) -> all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>> {
-        // TODO: arbitrary config
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
             chain_information: grandpa.chain_information,
-            sources_capacity: 1024,
-            blocks_capacity: 1024,
-            max_disjoint_headers: 1024,
-            max_requests_per_block: NonZeroU32::new(3).unwrap(),
+            sources_capacity: self.sources_capacity,
+            blocks_capacity: self.blocks_capacity,
+            max_disjoint_headers: self.max_disjoint_headers,
+            max_requests_per_block: self.max_requests_per_block,
             full: false,
         });
 
