@@ -643,12 +643,12 @@ async fn start_relay_chain(
     let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
-        source_selection_randomness_seed: rand::random(),
-        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
         blocks_capacity: {
             // This is the maximum number of blocks between two consecutive justifications.
             1024
         },
+        max_disjoint_headers: 1024,
+        max_requests_per_block: NonZeroU32::new(3).unwrap(),
         download_ahead_blocks: {
             // Verifying a block mostly consists in:
             //
