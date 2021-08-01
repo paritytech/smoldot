@@ -85,6 +85,11 @@ where
         }
     }
 
+    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    pub fn noise_key(&self) -> &libp2p::connection::NoiseKey {
+        self.inner.noise_key()
+    }
+
     /// Returns the next event produced by the service.
     ///
     /// This function should be called at a high enough rate that [`Network::read_write`] can
@@ -215,6 +220,8 @@ where
                     peer_id,
                     user_data,
                 } => {
+                    // TODO: compare with expected
+                    guarded.connections_by_peer.insert(peer_id, id);
                     guarded.connections_peer_index[user_data];
                 }
                 libp2p::Event::Shutdown {
@@ -403,7 +410,33 @@ where
         todo!()
     }
 
-    // TODO: doc
+    /// Sends a request to the given peer, and waits for a response.
+    ///
+    /// This consists in:
+    ///
+    /// - Opening a substream on an established connection with the target.
+    /// - Negotiating the requested protocol (`protocol_index`) on this substream using the
+    ///   *multistream-select* protocol.
+    /// - Sending the request (`request_data` parameter), prefixed with its length.
+    /// - Waiting for the response (prefixed with its length), which is then returned.
+    ///
+    /// An error happens if there is no suitable connection for that request, if the connection
+    /// closes while the request is in progress, if the request or response doesn't respect
+    /// the protocol limits (see [`ConfigRequestResponse`]), or if the remote takes too much time
+    /// to answer.
+    ///
+    /// As the API of this module is inherently subject to race conditions, it is never possible
+    /// to guarantee that this function will succeed. [`RequestError::ConnectionClosed`] should
+    /// be handled by retrying the same request again.
+    ///
+    /// > **Note**: This function doesn't return before the remote has answered. It is strongly
+    /// >           recommended to await the returned `Future` in the background, and not block
+    /// >           any important task on this.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `protocol_index` isn't a valid index in [`Config::request_response_protocols`].
+    ///
     pub async fn request(
         &self,
         now: TNow,
@@ -564,6 +597,8 @@ struct Guarded {
     peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
 
     peers: slab::Slab<Peer>,
+
+    connections_by_peer: BTreeSet<(PeerId, usize)>,
 
     peers_desired: BTreeSet<(usize, usize)>,
 

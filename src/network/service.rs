@@ -38,6 +38,8 @@ use core::{
 use futures::{lock::Mutex, prelude::*};
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
+pub use crate::network::peers::ConnectionId;
+
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
     /// Capacity to initially reserve to the list of connections.
@@ -131,10 +133,6 @@ pub struct GrandpaState {
 /// Identifier of a pending connection requested by the network through a [`StartConnect`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(usize);
-
-/// Identifier of a connection spawned by the [`ChainNetwork`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ConnectionId(libp2p::ConnectionId);
 
 /// Data structure containing the list of all connections, pending or not, and their latest known
 /// state. See also [the module-level documentation](..).
@@ -653,7 +651,7 @@ where
     ///
     #[must_use]
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
-        let lock = self.pending.lock().await;
+        let mut lock = self.pending.lock().await;
 
         let pending_info = lock.pending_ids.remove(id.0);
 
@@ -680,7 +678,7 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
-        let lock = self.pending.lock().await;
+        let mut lock = self.pending.lock().await;
         let pending_info = lock.pending_ids.remove(id.0);
 
         // Update `lock.peers`.

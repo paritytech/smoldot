@@ -398,10 +398,9 @@ where
     /// - Sending the request (`request_data` parameter), prefixed with its length.
     /// - Waiting for the response (prefixed with its length), which is then returned.
     ///
-    /// An error happens if there is no suitable connection for that request, if the connection
-    /// closes while the request is in progress, if the request or response doesn't respect
-    /// the protocol limits (see [`ConfigRequestResponse`]), or if the remote takes too much time
-    /// to answer.
+    /// An error happens if the provided [`ConnectionId`] is invalid, if the connection closes
+    /// while the request is in progress, if the request or response doesn't respect the protocol
+    /// limits (see [`ConfigRequestResponse`]), or if the remote takes too much time to answer.
     ///
     /// As the API of this module is inherently subject to race conditions, it is never possible
     /// to guarantee that this function will succeed. [`RequestError::ConnectionClosed`] should
@@ -959,7 +958,7 @@ pub enum Event<TConn> {
     NotificationsOutAccept {
         id: ConnectionId,
         // TODO: what if fallback?
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         /// Handshake sent in return by the remote.
         remote_handshake: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
@@ -970,7 +969,7 @@ pub enum Event<TConn> {
     /// outbound substream has been denied by the remote.
     NotificationsOutClose {
         id: ConnectionId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
@@ -978,7 +977,7 @@ pub enum Event<TConn> {
     ///
     NotificationsInOpen {
         id: ConnectionId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         remote_handshake: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
@@ -988,7 +987,7 @@ pub enum Event<TConn> {
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
         id: ConnectionId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         notification: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
@@ -996,7 +995,7 @@ pub enum Event<TConn> {
 
     NotificationsInClose {
         id: ConnectionId,
-        overlay_network_index: usize,
+        notifications_protocol_index: usize,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
@@ -1405,7 +1404,7 @@ where
                     .events_tx
                     .try_send(Event::NotificationsInOpen {
                         id: self.id,
-                        overlay_network_index,
+                        notifications_protocol_index: overlay_network_index,
                         remote_handshake: handshake,
                         user_data: self.user_data.clone(),
                     })
@@ -1443,7 +1442,7 @@ where
                     .events_tx
                     .try_send(Event::NotificationsIn {
                         id: self.id,
-                        overlay_network_index,
+                        notifications_protocol_index: overlay_network_index,
                         notification,
                         user_data: self.user_data.clone(),
                     })
@@ -1483,7 +1482,7 @@ where
                     .events_tx
                     .try_send(Event::NotificationsOutAccept {
                         id: self.id,
-                        overlay_network_index,
+                        notifications_protocol_index: overlay_network_index,
                         remote_handshake,
                         user_data: self.user_data.clone(),
                     })
@@ -1505,7 +1504,7 @@ where
                     .events_tx
                     .try_send(Event::NotificationsOutClose {
                         id: self.id,
-                        overlay_network_index,
+                        notifications_protocol_index: overlay_network_index,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
@@ -1529,7 +1528,7 @@ where
                     .events_tx
                     .try_send(Event::NotificationsOutClose {
                         id: self.id,
-                        overlay_network_index,
+                        notifications_protocol_index: overlay_network_index,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
