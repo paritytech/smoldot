@@ -545,7 +545,7 @@ impl Client {
                 let future = async move {
                     (&mut json_rpc_service).await;
                     let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
-                    if let Err(err) = json_rpc_service.handle_rpc(json_rpc_request).await {
+                    if let Err(err) = json_rpc_service.queue_rpc_request(json_rpc_request).await {
                         if let Some(err) = err.into_json_rpc_error() {
                             send_back(&err, chain_id);
                         }

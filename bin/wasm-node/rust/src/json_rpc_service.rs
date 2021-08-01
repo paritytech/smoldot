@@ -16,6 +16,23 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //! Background JSON-RPC service.
+//!
+//! # Usage
+//!
+//! Create a new JSON-RPC service using [`JsonRpcService::new`]. Creating a JSON-RPC service
+//! spawns a background task (through [`Config::tasks_executor`]) dedicated to processing JSON-RPC
+//! requests.
+//!
+//! In order to process a JSON-RPC request, call [`JsonRpcService::queue_rpc_request`]. Later, the
+//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification. Use
+//! [`JsonRpcService::next_response`] in order to pull the next available response.
+//!
+//! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
+//! processed and continuously submits this same expensive request over and over again, the queue
+//! of pending requests will start growing and use more and more memory. For this reason, if this
+//! queue grows past [`Config::max_pending_requests`] items, [`JsonRpcService::queue_rpc_request`]
+//! will instead return an error.
+//!
 
 // TODO: doc
 // TODO: re-review this once finished
@@ -255,7 +272,7 @@ impl JsonRpcService {
         client
     }
 
-    /// Analyzes the given JSON-RPC call and processes it in the background.
+    /// Queues the given JSON-RPC request to be processed in the background.
     ///
     /// This method is `async`, but it is expected to finish very quickly. The processing of the
     /// request is done in parallel in the background.
@@ -264,7 +281,7 @@ impl JsonRpcService {
     /// if the requests take a long time to process or if [`JsonRpcService::next_response`] isn't
     /// called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the JSON-RPC
     /// response to immediately send back to the user.
-    pub async fn handle_rpc(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+    pub async fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let mut lock = self.new_requests_in.lock().await;
 
         match lock.try_send(json_rpc_request) {
