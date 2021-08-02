@@ -140,11 +140,23 @@ pub struct ChainNetwork<TNow> {
     /// Underlying data structure.
     inner: peers::Peers<TNow>,
 
+    /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
+    /// [`ChainNetwork::libp2p`]. This event might lead to some asynchronous post-processing
+    /// being needed. Because the user can interrupt the future returned by
+    /// [`ChainNetwork::next_event`] at any point in time, this post-processing cannot be
+    /// immediately performed, as the user could could interrupt the future and lose the event.
+    /// Instead, the necessary post-processing is stored in this field. This field is then
+    /// processed before the next event is pulled.
+    to_process_pre_event: crossbeam_queue::SegQueue<ToProcessPreEvent>,
+
     /// Extra fields protected by a `Mutex` and that relate to pending outgoing connections.
     pending: Mutex<PendingConnections>,
 
-    /// Extra fields protected by a `Mutex`.
-    guarded: Mutex<Guarded>,
+    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
+    ///
+    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
+    /// is `None` if the chain doesn't use the Grandpa protocol.
+    chain_grandpa_config: Mutex<Vec<Option<GrandpaState>>>,
 
     /// See [`Config::chains`].
     chain_configs: Vec<ChainConfig>,
@@ -158,56 +170,32 @@ struct PendingConnections {
     peers: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
 
     /// Keys of this slab are [`PendingId`]s. Values are . TODO:
-    pending_ids: slab::Slab<PeerId>,
-}
+    pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
 
-struct Guarded {
-    /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
-    /// [`ChainNetwork::libp2p`]. This event might lead to some asynchronous post-processing
-    /// being needed. Because the user can interrupt the future returned by
-    /// [`ChainNetwork::next_event`] at any point in time, this post-processing cannot be
-    /// immediately performed, as the user could could interrupt the future and lose the event.
-    /// Instead, the necessary post-processing is stored in this field. This field is then
-    /// processed before the next event is pulled.
-    to_process_pre_event: Option<ToProcessPreEvent>,
-
-    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
-    ///
-    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
-    /// is `None` if the chain doesn't use the Grandpa protocol.
-    chain_grandpa_config: Vec<Option<GrandpaState>>,
-
-    // TODO: doc
-    substream_open_waker: Option<Waker>,
-}
-
-/// See [`Guarded::to_process_pre_event`]
-enum ToProcessPreEvent {
-    AcceptNotificationsIn {
-        connection_id: libp2p::ConnectionId,
-        overlay_network_index: usize,
-        handshake: Vec<u8>,
-    },
-    QueueNotification {
-        connection_id: libp2p::ConnectionId,
-        overlay_network_index: usize,
-        packet: Vec<u8>,
-    },
-}
-
-/// See [`Guarded::peers`].
-struct Peer {
-    /// Identity of this peer.
-    peer_id: PeerId,
-
-    /// List of addresses that we assume could be dialed to reach the peer.
-    ///
-    /// If the value is `Some`, a connection using that address can be found at the given index
-    /// in [`Guarded::connections`].
+    /// Combination of addresses that we assume could be dialed to reach a certain peer.
     ///
     /// Does not include "dialing" addresses. For example, no address should contain an outgoing
     /// TCP port.
-    known_addresses: hashbrown::HashMap<multiaddr::Multiaddr, Option<usize>, ahash::RandomState>,
+    // TODO: never cleaned up at the moment
+    // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
+    known_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
+
+    /// Waker to wake up when [`ChainNetwork::fill_out_slots`] should be called again by the user.
+    fill_out_slots_waker: Option<Waker>,
+}
+
+/// See [`ChainNetwork::to_process_pre_event`]
+enum ToProcessPreEvent {
+    AcceptNotificationsIn {
+        id: peers::DesiredInNotificationId,
+        notifications_protocol_index: usize,
+        handshake_back: Vec<u8>,
+    },
+    QueueNotification {
+        peer_id: PeerId,
+        notifications_protocol_index: usize,
+        notification: Vec<u8>,
+    },
 }
 
 /// See [`Guarded::connections`].
@@ -407,15 +395,14 @@ where
                 overlay_networks,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
             }),
+            to_process_pre_event: crossbeam_queue::SegQueue::new(),
             pending: Mutex::new(PendingConnections {
                 peers: todo!(), // TODO:
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
+                known_addresses: todo!(),
+                fill_out_slots_waker: None,
             }),
-            guarded: Mutex::new(Guarded {
-                to_process_pre_event: None,
-                chain_grandpa_config,
-                substream_open_waker: None,
-            }),
+            chain_grandpa_config: Mutex::new(chain_grandpa_config),
             chain_configs: config.chains,
             randomness: Mutex::new(randomness),
         }
@@ -428,7 +415,8 @@ where
     /// Returns the number of established TCP connections, both incoming and outgoing.
     // TODO: note about race
     pub async fn num_established_connections(&self) -> usize {
-        self.inner.len().await
+        // TODO: better impl
+        self.peers_list().await.count()
     }
 
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
@@ -471,10 +459,10 @@ where
     /// Panics if `chain_index` is out of range, or if the chain has GrandPa disabled.
     ///
     pub async fn set_local_grandpa_state(&self, chain_index: usize, grandpa_state: GrandpaState) {
-        let mut guarded = self.guarded.lock().await;
+        let mut chain_grandpa_configs = self.chain_grandpa_config.lock().await;
 
         // Store this state for later, in case we open new Grandpa substreams.
-        *guarded.chain_grandpa_config[chain_index].as_mut().unwrap() = grandpa_state;
+        *chain_grandpa_configs[chain_index].as_mut().unwrap() = grandpa_state;
 
         // Bytes of the neighbor packet to send out.
         let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
@@ -489,6 +477,7 @@ where
         });
 
         // Now sending out.
+        // TODO: futures cancellation issue; do we care?
         let _ = self
             .inner
             .broadcast_notification(
@@ -656,7 +645,7 @@ where
 
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let expected_peer_id = lock.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, _) = lock.pending_ids.get(id.0).unwrap();
 
         let connection_id = self.inner.add_outgoing_connection(expected_peer_id).await;
 
@@ -686,22 +675,27 @@ where
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
         let mut lock = self.pending.lock().await;
-        let pending_info = lock.pending_ids.remove(id.0);
+        let (expected_peer_id, multiaddr) = lock.pending_ids.remove(id.0);
 
         // Update `lock.peers`.
         {
-            let value = lock.peers.get_mut(&pending_info).unwrap();
+            let value = lock.peers.get_mut(&expected_peer_id).unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                lock.peers.remove(&pending_info).unwrap();
+                lock.peers.remove(&expected_peer_id).unwrap();
             }
         }
 
-        // TODO: remove address from known addresses of that peer
+        // Update `lock.known_addresses`.
+        // TODO: enforce that the address was in?
+        if let Some(entry) = lock.known_addresses.get_mut(&expected_peer_id) {
+            entry.retain(|v| *v != multiaddr);
+        }
 
-        // TODO: finish
-        todo!()
+        if let Some(waker) = lock.fill_out_slots_waker.take() {
+            waker.wake();
+        }
     }
 
     /// Returns the next event produced by the service.
@@ -717,6 +711,34 @@ where
     /// produced, and calling this function multiple times is therefore discouraged.
     pub async fn next_event(&'_ self) -> Event<'_, TNow> {
         loop {
+            if let Some(to_process_pre_event) = self.to_process_pre_event.pop() {
+                match to_process_pre_event {
+                    ToProcessPreEvent::AcceptNotificationsIn {
+                        id,
+                        handshake_back,
+                        notifications_protocol_index,
+                    } => {
+                        self.inner.in_notification_accept(id, handshake_back).await;
+                    }
+                    ToProcessPreEvent::QueueNotification {
+                        peer_id,
+                        notifications_protocol_index,
+                        notification,
+                    } => {
+                        let _ = self
+                            .inner
+                            .queue_notification(
+                                &peer_id,
+                                notifications_protocol_index,
+                                notification,
+                            )
+                            .await;
+                    }
+                }
+
+                continue;
+            }
+
             match self.inner.next_event().await {
                 peers::Event::Connected {
                     peer_id,
@@ -795,7 +817,8 @@ where
                     } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
                     {
                         // Grandpa notification has been opened. Send neighbor packet.
-                        let grandpa_config = guarded.chain_grandpa_config[chain_index]
+                        // TODO: futures cancellation problem; put the entire thing in to_process_pre_event
+                        let grandpa_config = self.chain_grandpa_config.lock().await[chain_index]
                             .as_ref()
                             .unwrap()
                             .clone();
@@ -813,12 +836,13 @@ where
 
                         // Sending the notification isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event = Some(ToProcessPreEvent::QueueNotification {
-                            connection_id,
-                            notifications_protocol_index,
-                            packet,
-                        });
+                        // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
+                        self.to_process_pre_event
+                            .push(ToProcessPreEvent::QueueNotification {
+                                peer_id,
+                                notifications_protocol_index,
+                                notification: packet,
+                            });
                     } else {
                         unreachable!()
                     }
@@ -840,6 +864,10 @@ where
                     }
 
                     if let Some(waker) = guarded.substream_open_waker.take() {
+                        waker.wake();
+                    }
+
+                    if let Some(waker) = guarded.fill_out_slots_waker.take() {
                         waker.wake();
                     }
                 }
@@ -912,7 +940,7 @@ where
                 peers::Event::DesiredInNotification {
                     peer_id,
                     handshake,
-                    id,
+                    id: desired_in_notification_id,
                     notifications_protocol_index,
                 } => {
                     // Remote requests to open a notifications substream.
@@ -945,11 +973,10 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::AcceptNotificationsIn {
-                                connection_id,
-                                handshake,
+                        self.to_process_pre_event
+                            .push(ToProcessPreEvent::AcceptNotificationsIn {
+                                id: desired_in_notification_id,
+                                handshake_back: handshake,
                                 notifications_protocol_index,
                             });
                     } else if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
@@ -957,11 +984,10 @@ where
                     {
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::AcceptNotificationsIn {
-                                connection_id,
-                                handshake: Vec::new(),
+                        self.to_process_pre_event
+                            .push(ToProcessPreEvent::AcceptNotificationsIn {
+                                id: desired_in_notification_id,
+                                handshake_back: Vec::new(),
                                 notifications_protocol_index,
                             });
                     } else if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
@@ -975,11 +1001,10 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::AcceptNotificationsIn {
-                                connection_id,
-                                handshake,
+                        self.to_process_pre_event
+                            .push(ToProcessPreEvent::AcceptNotificationsIn {
+                                id: desired_in_notification_id,
+                                handshake_back: handshake,
                                 notifications_protocol_index,
                             });
                     } else {
@@ -1035,8 +1060,6 @@ where
     /// Waits until a connection is in a state in which a substream can be opened.
     pub async fn next_substream<'a>(&'a self) -> SubstreamOpen<'a, TNow> {
         loop {
-            let guarded = self.guarded.lock().await;
-
             // TODO: O(n) :-/
             for chain_index in 0..self.chain_configs.len() {
                 // Grab node for which we have an established outgoing connections but haven't yet
@@ -1084,20 +1107,54 @@ where
     }
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
-    // TODO: shouldn't return an `Option`? should instead just wait instead of returning `None`?
     // TODO: give more control, with number of slots and node choice
-    pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> Option<StartConnect> {
-        // TODO: implement
+    pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> StartConnect {
+        loop {
+            let pending = self.pending.lock().await;
 
-        let pending = self.pending.lock().await;
+            let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers().await;
+            for peer_id in unfulfilled_desired_peers {
+                let entry = match pending.peers.entry(peer_id) {
+                    hashbrown::hash_map::Entry::Occupied(_) => continue,
+                    hashbrown::hash_map::Entry::Vacant(entry) => entry,
+                };
 
-        let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers().await;
-        for peer_id in unfulfilled_desired_peers {
-            // TODO:
-            pending.peers.get(&peer_id);
+                let multiaddr = if let Some(entry) = pending.known_addresses.get(entry.key()) {
+                    // TODO: what if address is already being dialed, ughhhh
+                    todo!()
+                } else {
+                    continue;
+                };
+
+                let pending_id = PendingId(
+                    pending
+                        .pending_ids
+                        .insert((entry.key().clone(), multiaddr.clone())),
+                );
+
+                let start_connect = StartConnect {
+                    expected_peer_id: entry.key().clone(),
+                    id: pending_id,
+                    multiaddr,
+                };
+
+                entry.insert(NonZeroUsize::new(1).unwrap());
+
+                return start_connect;
+            }
+
+            // TODO: if `fill_out_slots` is called multiple times simultaneously, all but the first will deadlock
+            let mut pending = Some(pending);
+            future::poll_fn(move |cx| {
+                if let Some(mut pending) = pending.take() {
+                    pending.fill_out_slots_waker = Some(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await;
         }
-
-        None
     }
 
     ///
@@ -1114,8 +1171,9 @@ where
     ) -> Result<ReadWrite<TNow>, libp2p::ConnectionError> {
         let inner = self
             .inner
-            .read_write(connection_id.0, now, incoming_buffer, outgoing_buffer)
+            .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
             .await?;
+
         Ok(ReadWrite {
             read_bytes: inner.read_bytes,
             written_bytes: inner.written_bytes,
