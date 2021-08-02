@@ -391,9 +391,7 @@ impl NetworkService {
                 let network_service = Arc::downgrade(&network_service);
                 async move {
                     loop {
-                        // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
-                        futures_timer::Delay::new(Duration::from_secs(1)).await;
-
+                        // TODO: stupid way to shut down task
                         let network_service = match network_service.upgrade() {
                             Some(ns) => ns,
                             None => {
@@ -402,10 +400,7 @@ impl NetworkService {
                             }
                         };
 
-                        let start_connect = match network_service.network.fill_out_slots(chain_index).await {
-                            Some(sc) => sc,
-                            None => continue,
-                        };
+                        let start_connect = network_service.network.fill_out_slots(chain_index).await;
 
                         let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                         let _enter = span.enter();
@@ -434,22 +429,6 @@ impl NetworkService {
                 .instrument(tracing::debug_span!(parent: None, "tcp-dial"))
             }))
         }
-
-        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-            let network_service = network_service.clone();
-            async move {
-                // TODO: stop the task if the network service is destroyed
-                loop {
-                    network_service
-                        .network
-                        .next_substream()
-                        .await
-                        .open(Instant::now())
-                        .await;
-                }
-            }
-            .instrument(tracing::debug_span!(parent: None, "substreams-open"))
-        }));
 
         Ok((network_service, receivers))
     }

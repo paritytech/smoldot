@@ -328,9 +328,6 @@ impl NetworkService {
                     let network_service = Arc::downgrade(&network_service);
                     async move {
                         loop {
-                            // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
-                            ffi::Delay::new(Duration::from_secs(1)).await;
-
                             let network_service = match network_service.upgrade() {
                                 Some(ns) => ns,
                                 None => {
@@ -344,10 +341,7 @@ impl NetworkService {
                             }
 
                             let start_connect =
-                                match network_service.network.fill_out_slots(chain_index).await {
-                                    Some(sc) => sc,
-                                    None => continue,
-                                };
+                                network_service.network.fill_out_slots(chain_index).await;
 
                             let is_important_peer = network_service
                                 .important_nodes
@@ -422,34 +416,6 @@ impl NetworkService {
                 }),
             );
         }
-
-        (network_service.guarded.try_lock().unwrap().tasks_executor)(
-            "substreams-open".into(),
-            Box::pin({
-                // TODO: keeping a Weak here doesn't really work to shut down tasks
-                let network_service = Arc::downgrade(&network_service);
-                async move {
-                    loop {
-                        // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
-                        ffi::Delay::new(Duration::from_secs(1)).await;
-
-                        let network_service = match network_service.upgrade() {
-                            Some(ns) => ns,
-                            None => {
-                                return;
-                            }
-                        };
-
-                        network_service
-                            .network
-                            .next_substream()
-                            .await
-                            .open(ffi::Instant::now())
-                            .await;
-                    }
-                }
-            }),
-        );
 
         (network_service, receivers)
     }

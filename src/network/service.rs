@@ -339,54 +339,42 @@ where
             .map(|chain| chain.grandpa_protocol_config)
             .collect();
 
-        let mut peers_by_id = {
+        let peers = {
             let k0 = randomness.next_u64();
             let k1 = randomness.next_u64();
             let k2 = randomness.next_u64();
             let k3 = randomness.next_u64();
             hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
+                0, // TODO:
                 ahash::RandomState::with_seeds(k0, k1, k2, k3),
             )
         };
 
-        let mut peers = slab::Slab::with_capacity(config.peers_capacity);
-        let mut peers_chain_memberships = BTreeSet::new();
+        let mut known_addresses = {
+            let k0 = randomness.next_u64();
+            let k1 = randomness.next_u64();
+            let k2 = randomness.next_u64();
+            let k3 = randomness.next_u64();
+            hashbrown::HashMap::with_capacity_and_hasher(
+                0, // TODO:
+                ahash::RandomState::with_seeds(k0, k1, k2, k3),
+            )
+        };
 
         for (peer_id, multiaddr) in config.known_nodes {
-            let peer_index = match peers_by_id.entry(peer_id) {
-                hashbrown::hash_map::Entry::Occupied(entry) => *entry.get(),
-                hashbrown::hash_map::Entry::Vacant(entry) => {
-                    let known_addresses = {
-                        let k0 = randomness.next_u64();
-                        let k1 = randomness.next_u64();
-                        let k2 = randomness.next_u64();
-                        let k3 = randomness.next_u64();
-                        hashbrown::HashMap::with_capacity_and_hasher(
-                            0,
-                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                        )
-                    };
+            // TODO: filter duplicates?
+            known_addresses
+                .entry(peer_id)
+                .or_insert(Vec::new())
+                .push(multiaddr);
 
-                    let peer_index = peers.insert(Peer {
-                        peer_id: entry.key().clone(),
-                        known_addresses,
-                    });
+            // TODO:
+            /*
 
-                    // Register membership of this peer on this chain.
-                    for chain_index in 0..config.chains.len() {
-                        peers_chain_memberships.insert((chain_index, peer_index));
-                    }
-
-                    entry.insert(peer_index);
-                    peer_index
-                }
-            };
-
-            peers[peer_index]
-                .known_addresses
-                .entry(multiaddr)
-                .or_insert(None);
+            // Register membership of this peer on this chain.
+            for chain_index in 0..config.chains.len() {
+                peers_chain_memberships.insert((chain_index, peer_index));
+            }*/
         }
 
         ChainNetwork {
@@ -401,9 +389,9 @@ where
             }),
             to_process_pre_event: crossbeam_queue::SegQueue::new(),
             pending: Mutex::new(PendingConnections {
-                peers: todo!(), // TODO:
+                peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-                known_addresses: todo!(),
+                known_addresses,
                 fill_out_slots_waker: None,
             }),
             chain_grandpa_config: Mutex::new(chain_grandpa_config),
@@ -789,6 +777,7 @@ where
                 }
                 // Only protocol 0 (identify) can receive requests at the moment.
                 peers::Event::RequestIn { .. } => unreachable!(),
+                peers::Event::RequestInCancel { .. } => {}
 
                 peers::Event::NotificationsOutAccept {
                     peer_id,
@@ -1051,6 +1040,7 @@ where
                         unreachable!()
                     }
                 }
+                peers::Event::DesiredInNotificationCancel { .. } => {}
             }
         }
     }
@@ -1101,7 +1091,8 @@ where
     // TODO: give more control, with number of slots and node choice
     pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> StartConnect {
         loop {
-            let pending = self.pending.lock().await;
+            let mut pending = self.pending.lock().await;
+            let pending = &mut *pending; // Prevents borrow checker issues.
 
             let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers().await;
             for peer_id in unfulfilled_desired_peers {
@@ -1110,12 +1101,13 @@ where
                     hashbrown::hash_map::Entry::Vacant(entry) => entry,
                 };
 
-                let multiaddr = if let Some(entry) = pending.known_addresses.get(entry.key()) {
-                    // TODO: what if address is already being dialed, ughhhh
-                    todo!()
-                } else {
-                    continue;
-                };
+                let multiaddr: multiaddr::Multiaddr =
+                    if let Some(entry) = pending.known_addresses.get(entry.key()) {
+                        // TODO: what if address is already being dialed, ughhhh
+                        todo!()
+                    } else {
+                        continue;
+                    };
 
                 let pending_id = PendingId(
                     pending

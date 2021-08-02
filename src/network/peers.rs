@@ -75,33 +75,35 @@ where
     /// Creates a new [`Peers`].
     // TODO: proper config
     pub fn new(config: libp2p::Config) -> Self {
+        let peer_indices = {
+            // TODO: capacity
+            // TODO: uses the same seed as libp2p right now, obviously bad
+            hashbrown::HashMap::with_capacity_and_hasher(
+                0,
+                ahash::RandomState::with_seeds(
+                    u64::from_ne_bytes(<[u8; 8]>::try_from(&config.randomness_seed[0..8]).unwrap()),
+                    u64::from_ne_bytes(
+                        <[u8; 8]>::try_from(&config.randomness_seed[8..16]).unwrap(),
+                    ),
+                    u64::from_ne_bytes(
+                        <[u8; 8]>::try_from(&config.randomness_seed[16..24]).unwrap(),
+                    ),
+                    u64::from_ne_bytes(
+                        <[u8; 8]>::try_from(&config.randomness_seed[24..32]).unwrap(),
+                    ),
+                ),
+            )
+        };
+
+        let connections_peer_index = slab::Slab::with_capacity(config.capacity); // TODO: capacity
+
         Peers {
             inner: libp2p::Network::new(config),
             guarded: Mutex::new(Guarded {
                 to_process_pre_event: None,
-                connections_peer_index: slab::Slab::with_capacity(config.capacity), // TODO: capacity
+                connections_peer_index,
                 connections_by_peer: BTreeSet::new(),
-                peer_indices: {
-                    // TODO: capacity
-                    // TODO: uses the same seed as libp2p right now, obviously bad
-                    hashbrown::HashMap::with_capacity_and_hasher(
-                        0,
-                        ahash::RandomState::with_seeds(
-                            u64::from_ne_bytes(
-                                <[u8; 8]>::try_from(&config.randomness_seed[0..8]).unwrap(),
-                            ),
-                            u64::from_ne_bytes(
-                                <[u8; 8]>::try_from(&config.randomness_seed[8..16]).unwrap(),
-                            ),
-                            u64::from_ne_bytes(
-                                <[u8; 8]>::try_from(&config.randomness_seed[16..24]).unwrap(),
-                            ),
-                            u64::from_ne_bytes(
-                                <[u8; 8]>::try_from(&config.randomness_seed[24..32]).unwrap(),
-                            ),
-                        ),
-                    )
-                },
+                peer_indices,
                 peers: slab::Slab::new(), // TODO: capacity
                 peers_notifications_out: BTreeMap::new(),
                 requests_in: slab::Slab::new(), // TODO: capacity?
