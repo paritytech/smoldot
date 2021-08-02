@@ -25,17 +25,19 @@
 //!
 //! # Detailed usage
 //!
-//! The [`Peers`] struct contains five different collections:
+//! The [`Peers`] struct contains six different collections:
 //!
 //! - A list of peers that are marked as "desired".
 //! - A list of `(peer_id, notification_protocol)` tuples that are marked as "desired".
 //! - A list of connections identified by [`ConnectionId`]s.
-//! - A list of requests for inbound substreams, identified by an [`DesiredInNotificationId`].
+//! - A list of requests for inbound substreams, identified by a [`DesiredInNotificationId`].
 //! When a peer desired to open a notification substream with the local node, a
 //! [`DesiredInNotificationId`] is generated. The API user must answer by either accepting or
 //! refusing the request. The requests can automatically become obsolete if the remote decides
 //! to withdraw their request or the connection closes. A request becoming obsolete does *not*
 //! invalidate its [`DesiredInNotificationId`].
+//! - A list of requests for outbound substreams emitted by the local node, identified by a
+//! [`DesiredOutNotificationId`]. Must be responded using [`Peers::open_out_notification`].
 //! - A list of requests that have been received, identified by a [`RequestId`]. The API user
 //! must answer by calling [`Peers::respond`]. Requests can automatically become obsolete if the
 //! remote decides to withdraw their request or the connection closes. A request becoming obsolete
@@ -514,6 +516,18 @@ where
         todo!()
     }
 
+    /// Responds to an [`Event::DesiredOutNotification`] by indicating the handshake to send to
+    /// th remote.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`DesiredOutNotificationId`] is invalid. Note that these ids remain valid
+    /// forever until [`Peers::open_out_notification`] is called.
+    ///
+    pub async fn open_out_notification(&self, id: DesiredOutNotificationId, handshake: Vec<u8>) {
+        todo!()
+    }
+
     pub async fn queue_notification(
         &self,
         peer: &PeerId,
@@ -635,6 +649,10 @@ where
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DesiredInNotificationId(usize);
 
+/// See [`Event::DesiredOutNotification`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DesiredOutNotificationId(usize);
+
 /// See [`Event::RequestIn`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(usize);
@@ -721,6 +739,18 @@ pub enum Event {
     DesiredInNotificationCancel {
         /// Identifier for this request.
         id: DesiredInNotificationId,
+    },
+
+    /// Local node would like to open a notifications substream with the given peer. This can only
+    /// happen if the combination of peer and notification protocol was marked as desired.
+    DesiredOutNotification {
+        /// Identifier for this request. Must be passed back when calling
+        /// [`Peers::open_out_notification`].
+        id: DesiredOutNotificationId,
+        /// Peer which tries to open an outbound substream.
+        peer_id: PeerId,
+        /// Notifications protocol the substream is about.
+        notifications_protocol_index: usize,
     },
 
     /// A handshaking outbound substream has been accepted by the remote.

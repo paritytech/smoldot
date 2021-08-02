@@ -191,6 +191,10 @@ enum ToProcessPreEvent {
         notifications_protocol_index: usize,
         handshake_back: Vec<u8>,
     },
+    NotificationsOut {
+        id: peers::DesiredOutNotificationId,
+        handshake: Vec<u8>,
+    },
     QueueNotification {
         peer_id: PeerId,
         notifications_protocol_index: usize,
@@ -712,6 +716,7 @@ where
     pub async fn next_event(&'_ self) -> Event<'_, TNow> {
         loop {
             if let Some(to_process_pre_event) = self.to_process_pre_event.pop() {
+                // TODO: cancellation issues since the thing is already popped 🤦
                 match to_process_pre_event {
                     ToProcessPreEvent::AcceptNotificationsIn {
                         id,
@@ -719,6 +724,9 @@ where
                         notifications_protocol_index,
                     } => {
                         self.inner.in_notification_accept(id, handshake_back).await;
+                    }
+                    ToProcessPreEvent::NotificationsOut { id, handshake } => {
+                        self.inner.open_out_notification(id, handshake).await;
                     }
                     ToProcessPreEvent::QueueNotification {
                         peer_id,
@@ -849,6 +857,45 @@ where
 
                     // TODO:
                 }
+                peers::Event::DesiredOutNotification {
+                    id,
+                    notifications_protocol_index,
+                    ..
+                } => {
+                    let chain_config = &self.chain_configs
+                        [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
+
+                    let handshake = if notifications_protocol_index
+                        % NOTIFICATIONS_PROTOCOLS_PER_CHAIN
+                        == 0
+                    {
+                        protocol::encode_block_announces_handshake(
+                            protocol::BlockAnnouncesHandshakeRef {
+                                best_hash: &chain_config.best_hash,
+                                best_number: chain_config.best_number,
+                                genesis_hash: &chain_config.genesis_hash,
+                                role: chain_config.role,
+                            },
+                        )
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        })
+                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
+                    {
+                        Vec::new()
+                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
+                    {
+                        chain_config.role.scale_encoding().to_vec()
+                    } else {
+                        unreachable!()
+                    };
+
+                    // Indicating the handshake isn't done immediately because of
+                    // futures-cancellation-related concerns.
+                    self.to_process_pre_event
+                        .push(ToProcessPreEvent::NotificationsOut { id, handshake });
+                }
                 peers::Event::NotificationsOutClose {
                     notifications_protocol_index,
                     peer_id,
@@ -863,23 +910,16 @@ where
                         };
                     }
 
-                    if let Some(waker) = guarded.substream_open_waker.take() {
+                    // TODO: something like that:
+                    /*if let Some(waker) = guarded.fill_out_slots_waker.take() {
                         waker.wake();
-                    }
-
-                    if let Some(waker) = guarded.fill_out_slots_waker.take() {
-                        waker.wake();
-                    }
+                    }*/
                 }
                 peers::Event::NotificationsInClose {
                     peer_id,
                     notifications_protocol_index,
                 } => {
                     // TODO: ?
-
-                    if let Some(waker) = guarded.substream_open_waker.take() {
-                        waker.wake();
-                    }
                 }
                 peers::Event::NotificationsIn {
                     notifications_protocol_index,
@@ -1055,55 +1095,6 @@ where
         } else {*/
         Err(DiscoveryError::NoPeer)
         //}
-    }
-
-    /// Waits until a connection is in a state in which a substream can be opened.
-    pub async fn next_substream<'a>(&'a self) -> SubstreamOpen<'a, TNow> {
-        loop {
-            // TODO: O(n) :-/
-            for chain_index in 0..self.chain_configs.len() {
-                // Grab node for which we have an established outgoing connections but haven't yet
-                // opened a substream to.
-                for &(_, peer_index) in guarded
-                    .peers_chain_memberships
-                    .range((chain_index, usize::min_value())..=(chain_index, usize::max_value()))
-                {
-                    for &(_, connection_index) in guarded
-                        .peers_connections
-                        .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
-                    {
-                        let connection = &guarded.connections[connection_index];
-
-                        let connection_id = match connection.reached.as_ref() {
-                            Some(r) => r.inner_id,
-                            None => continue,
-                        };
-
-                        // TODO: filter out if no substream yet
-
-                        return SubstreamOpen {
-                            libp2p: &self.inner,
-                            chain_configs: &self.chain_configs,
-                            connection_id,
-                            overlay_network_index: chain_index, // TODO: no
-                        };
-                    }
-                }
-            }
-
-            // TODO: explain
-            // TODO: if `next_substream` is called multiple times simultaneously, all but the first will deadlock
-            let mut guarded = Some(guarded);
-            future::poll_fn(move |cx| {
-                if let Some(mut guarded) = guarded.take() {
-                    guarded.substream_open_waker = Some(cx.waker().clone());
-                    Poll::Pending
-                } else {
-                    Poll::Ready(())
-                }
-            })
-            .await;
-        }
     }
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
@@ -1357,45 +1348,18 @@ where
 
     /// Insert the results in the [`ChainNetwork`].
     pub async fn insert(self) {
-        let mut guarded = self.service.guarded.lock().await;
-        let guarded = &mut *guarded; // Avoids borrow checker issues.
+        let mut lock = self.service.pending.lock().await;
+        let lock = &mut *lock; // Avoids borrow checker issues.
 
         for (peer_id, addrs) in self.outcome {
-            let peer_index = match guarded.peers_by_id.entry(peer_id) {
-                hashbrown::hash_map::Entry::Occupied(entry) => *entry.get(),
-                hashbrown::hash_map::Entry::Vacant(entry) => {
-                    let known_addresses = {
-                        let mut randomness = self.service.randomness.lock().await;
-                        let k0 = randomness.next_u64();
-                        let k1 = randomness.next_u64();
-                        let k2 = randomness.next_u64();
-                        let k3 = randomness.next_u64();
-                        hashbrown::HashMap::with_capacity_and_hasher(
-                            addrs.len(),
-                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                        )
-                    };
-
-                    let peer_index = guarded.peers.insert(Peer {
-                        peer_id: entry.key().clone(),
-                        known_addresses,
-                    });
-
-                    entry.insert(peer_index);
-                    peer_index
+            let mut existing_addrs = lock.known_addresses.entry(peer_id).or_default();
+            for addr in addrs {
+                if !existing_addrs.iter().any(|a| *a == addr) {
+                    existing_addrs.push(addr);
                 }
-            };
-
-            let peer = &mut guarded.peers[peer_index];
-            peer.known_addresses.reserve(addrs.len());
-            for address in addrs {
-                peer.known_addresses.entry(address).or_insert(None);
             }
 
-            // Register membership of this peer on this chain.
-            guarded
-                .peers_chain_memberships
-                .insert((self.chain_index, peer_index));
+            // TODO: register member of this peer of this chain
         }
     }
 }
@@ -1426,60 +1390,6 @@ pub struct ReadWrite<TNow> {
     pub write_close: bool,
 }
 
-#[must_use]
-pub struct SubstreamOpen<'a, TNow> {
-    /// Connection to open a substream on.
-    connection_id: libp2p::ConnectionId,
-
-    /// Index of the overlay network, according to the underlying libp2p state machine.
-    overlay_network_index: usize,
-
-    /// Same as [`ChainNetwork::libp2p`].
-    libp2p: &'a libp2p::Network<peerset::ConnectionId, TNow>,
-
-    /// Same as [`ChainNetwork::chain_configs`].
-    chain_configs: &'a Vec<ChainConfig>,
-}
-
-impl<'a, TNow> SubstreamOpen<'a, TNow>
-where
-    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-{
-    /// Start the substream opening. Nothing is done as long as this method isn't called.
-    pub async fn open(self, now: TNow) {
-        let chain_config =
-            &self.chain_configs[self.overlay_network_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
-
-        let handshake = if self.overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-            protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
-                best_hash: &chain_config.best_hash,
-                best_number: chain_config.best_number,
-                genesis_hash: &chain_config.genesis_hash,
-                role: chain_config.role,
-            })
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            })
-        } else if self.overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
-            Vec::new()
-        } else if self.overlay_network_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
-            chain_config.role.scale_encoding().to_vec()
-        } else {
-            unreachable!()
-        };
-
-        self.libp2p
-            .open_notifications_substream(
-                self.connection_id,
-                self.overlay_network_index,
-                now,
-                handshake,
-            )
-            .await;
-    }
-}
-
 /// See [`Event::IdentifyRequestIn`].
 #[must_use]
 pub struct IdentifyRequestIn<'a, TNow> {
@@ -1496,7 +1406,8 @@ where
     ///
     /// Has no effect if the connection that sends the request no longer exists.
     pub async fn respond(self, agent_version: &str) {
-        let response = {
+        // TODO: restore
+        /*let response = {
             let guarded = self.service.guarded.lock().await;
 
             // The connection referred to by `self.id` might no longer exist anymore.
@@ -1540,7 +1451,7 @@ where
             .service
             .inner
             .respond(self.request_id, Ok(response))
-            .await;
+            .await;*/
     }
 }
 
