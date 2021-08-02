@@ -44,7 +44,7 @@
 //! does *not* invalidate its [`RequestId`].
 //!
 
-use crate::libp2p::{self, Multiaddr, PeerId};
+use crate::libp2p::{self, PeerId};
 
 use alloc::{
     collections::{btree_map, BTreeMap, BTreeSet},
@@ -445,24 +445,43 @@ where
                         },
                     }
 
-                    return Event::NotificationsOutClose {
+                    // TODO: report
+                    /*return Event::NotificationsOutClose {
                         peer_id: guarded.peers[peer_index].peer_id.clone(),
                         notifications_protocol_index,
-                    };
+                    };*/
                 }
 
                 libp2p::Event::NotificationsInOpen {
-                    id,
+                    id: connection_id,
                     notifications_protocol_index,
-                    remote_handshake,
+                    remote_handshake: handshake,
                     user_data,
-                } => {}
+                } => {
+                    let desired_notif_id = DesiredInNotificationId(
+                        guarded
+                            .desired_in_notifications
+                            .insert(Some((connection_id, notifications_protocol_index))),
+                    );
+
+                    let peer_id = {
+                        let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                        guarded.peers[peer_index].peer_id.clone()
+                    };
+
+                    return Event::DesiredInNotification {
+                        id: desired_notif_id,
+                        peer_id,
+                        notifications_protocol_index,
+                        handshake,
+                    };
+                }
 
                 libp2p::Event::NotificationsIn {
-                    id,
                     notifications_protocol_index,
                     notification,
                     user_data,
+                    ..
                 } => {
                     let peer_id = {
                         let peer_index = guarded.connections_peer_index[user_data].unwrap();
@@ -477,15 +496,17 @@ where
                 }
 
                 libp2p::Event::NotificationsInClose {
-                    id,
                     notifications_protocol_index,
                     user_data,
+                    ..
                 } => {
                     // TODO: does this event also mean a NotificationsInOpen is no longer valid?
                     let peer_id = {
                         let peer_index = guarded.connections_peer_index[user_data].unwrap();
                         guarded.peers[peer_index].peer_id.clone()
                     };
+
+                    // TODO: don't report back if there's still an in substream with the same proto
 
                     return Event::NotificationsInClose {
                         peer_id,
@@ -647,9 +668,22 @@ where
     ) -> Result<(), ()> {
         let mut guarded = self.guarded.lock().await;
         assert!(guarded.desired_in_notifications.contains(id.0));
-        guarded.desired_in_notifications.remove(id.0);
 
-        todo!()
+        let (connection_id, overlay_network_index) =
+            match guarded.desired_in_notifications.get(id.0).unwrap() {
+                Some(v) => *v,
+                None => {
+                    guarded.desired_in_notifications.remove(id.0);
+                    return Err(());
+                }
+            };
+
+        self.inner
+            .accept_notifications_in(connection_id, overlay_network_index, handshake_back)
+            .await;
+
+        guarded.desired_in_notifications.remove(id.0);
+        Ok(())
     }
 
     /// Responds to an [`Event::DesiredInNotification`] by refusing the request for an inbound
@@ -698,13 +732,38 @@ where
         guarded.desired_out_notifications.remove(id.0);
     }
 
+    // TODO: document
     pub async fn queue_notification(
         &self,
-        peer: &PeerId,
+        target: &PeerId,
         notifications_protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) -> Result<(), QueueNotificationError> {
-        todo!()
+        let target = {
+            let guarded = self.guarded.lock().await;
+            match self.connection_id_for_peer(&guarded, target).await {
+                Some(id) => id,
+                None => return Err(QueueNotificationError::NotConnected),
+            }
+        };
+
+        let result = self
+            .inner
+            .queue_notification(target, notifications_protocol_index, notification)
+            .await;
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(libp2p::QueueNotificationError::InvalidConnection) => {
+                Err(QueueNotificationError::NotConnected)
+            } // TODO: better handling of this situation?
+            Err(libp2p::QueueNotificationError::NoSubstream) => {
+                Err(QueueNotificationError::NoSubstream)
+            } // TODO: better handling of this situation?
+            Err(libp2p::QueueNotificationError::QueueFull) => {
+                Err(QueueNotificationError::QueueFull)
+            }
+        }
     }
 
     /// Equivalent to calling [`Peers::queue_notification`] for all peers an outbound
@@ -718,7 +777,7 @@ where
         notifications_protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) {
-        todo!()
+        //todo!()
     }
 
     /// Sends a request to the given peer, and waits for a response.
@@ -756,12 +815,13 @@ where
         request_data: Vec<u8>,
         // TODO: bad error type
     ) -> Result<Vec<u8>, libp2p::RequestError> {
-        let guarded = self.guarded.lock().await;
-        let target = match self.connection_id_for_peer(&guarded, target).await {
-            Some(id) => id,
-            None => return Err(libp2p::RequestError::InvalidConnection), // TODO: no, change error type
+        let target = {
+            let guarded = self.guarded.lock().await;
+            match self.connection_id_for_peer(&guarded, target).await {
+                Some(id) => id,
+                None => return Err(libp2p::RequestError::InvalidConnection), // TODO: no, change error type
+            }
         };
-        drop(guarded);
 
         self.inner
             .request(now, target, protocol_index, request_data)
@@ -1032,7 +1092,7 @@ struct Guarded {
 
     /// Each [`DesiredInNotificationId`] points to this slab.
     // TODO: doc
-    desired_in_notifications: slab::Slab<()>,
+    desired_in_notifications: slab::Slab<Option<(libp2p::ConnectionId, usize)>>,
 
     /// Each [`DesiredOutNotificationId`] points to this slab.
     // TODO: doc
