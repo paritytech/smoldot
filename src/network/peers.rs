@@ -59,7 +59,10 @@ use core::{
     task::Poll,
     time::Duration,
 };
-use futures::{lock::Mutex, prelude::*}; // TODO: no_std-ize
+use futures::{
+    lock::{Mutex, MutexGuard},
+    prelude::*,
+}; // TODO: no_std-ize
 use rand::{Rng as _, SeedableRng as _};
 
 /// Configuration for a [`Peers`].
@@ -695,8 +698,16 @@ where
         request_data: Vec<u8>,
         // TODO: bad error type
     ) -> Result<Vec<u8>, libp2p::RequestError> {
-        // self.inner.request(now, target, protocol_index, request_data)
-        todo!()
+        let guarded = self.guarded.lock().await;
+        let target = match self.connection_id_for_peer(&guarded, target).await {
+            Some(id) => id,
+            None => return Err(libp2p::RequestError::InvalidConnection), // TODO: no, change error type
+        };
+        drop(guarded);
+
+        self.inner
+            .request(now, target, protocol_index, request_data)
+            .await
     }
 
     /// Responds to a previously-emitted [`Event::RequestIn`].
@@ -751,6 +762,23 @@ where
             .map(|(_, p)| p.peer_id.clone())
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    /// Picks the connection to use to send requests or notifications to the given peer.
+    async fn connection_id_for_peer(
+        &self,
+        guarded: &MutexGuard<'_, Guarded>,
+        target: &PeerId,
+    ) -> Option<libp2p::ConnectionId> {
+        // TODO: stupid cloning
+        for (_, connection_id) in guarded.connections_by_peer.range(
+            (target.clone(), libp2p::ConnectionId::min_value())
+                ..=(target.clone(), libp2p::ConnectionId::max_value()),
+        ) {
+            return Some(*connection_id);
+        }
+
+        None
     }
 }
 
