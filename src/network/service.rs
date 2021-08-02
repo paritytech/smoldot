@@ -652,20 +652,27 @@ where
     #[must_use]
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
         let mut lock = self.pending.lock().await;
+        let lock = &mut *lock; // Prevents borrow checker issues.
 
-        let pending_info = lock.pending_ids.remove(id.0);
+        // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
+        // the user cancels the future returned by `add_outgoing_connection`.
+        let expected_peer_id = lock.pending_ids.get(id.0).unwrap();
+
+        let connection_id = self.inner.add_outgoing_connection(expected_peer_id).await;
 
         // Update `lock.peers`.
         {
-            let value = lock.peers.get_mut(&pending_info).unwrap();
+            let value = lock.peers.get_mut(expected_peer_id).unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                lock.peers.remove(&pending_info).unwrap();
+                lock.peers.remove(expected_peer_id).unwrap();
             }
         }
 
-        self.inner.add_outgoing_connection(&pending_info).await
+        lock.pending_ids.remove(id.0);
+
+        connection_id
     }
 
     /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
@@ -719,6 +726,7 @@ where
                     return Event::Connected(peer_id);
                 }
                 peers::Event::Connected { .. } => {}
+
                 peers::Event::Disconnected {
                     num_peer_connections,
                     peer_id,
@@ -734,25 +742,24 @@ where
                     };
                 }
                 peers::Event::Disconnected { .. } => {}
-                peers::Event::RequestIn {
-                    peer_id,
-                    protocol_index,
-                    request_payload,
-                    substream_id,
-                } => {
-                    // Only protocol 0 (identify) can receive requests at the moment.
-                    debug_assert_eq!(protocol_index, 0);
 
+                peers::Event::RequestIn {
+                    request_id,
+                    peer_id,
+                    protocol_index: 0,
+                    request_payload,
+                } => {
                     return Event::IdentifyRequestIn {
-                        peer_id: peer_id.clone(),
+                        peer_id,
                         request: IdentifyRequestIn {
                             service: self,
-                            id,
-                            connection_index: local_connection_index,
-                            substream_id,
+                            request_id,
                         },
                     };
                 }
+                // Only protocol 0 (identify) can receive requests at the moment.
+                peers::Event::RequestIn { .. } => unreachable!(),
+
                 peers::Event::NotificationsOutAccept {
                     peer_id,
                     notifications_protocol_index,
@@ -1419,9 +1426,7 @@ where
 #[must_use]
 pub struct IdentifyRequestIn<'a, TNow> {
     service: &'a ChainNetwork<TNow>,
-    connection_index: usize,
-    id: libp2p::ConnectionId,
-    substream_id: libp2p::connection::established::SubstreamId,
+    request_id: peers::RequestId,
 }
 
 impl<'a, TNow> IdentifyRequestIn<'a, TNow>
@@ -1476,7 +1481,7 @@ where
         let _ = self
             .service
             .inner
-            .respond_in_request(self.id, self.substream_id, Ok(response))
+            .respond(self.request_id, Ok(response))
             .await;
     }
 }
