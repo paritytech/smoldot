@@ -25,16 +25,21 @@
 //!
 //! # Detailed usage
 //!
-//! The [`Peers`] struct contains four different collections:
+//! The [`Peers`] struct contains five different collections:
 //!
 //! - A list of peers that are marked as "desired".
 //! - A list of `(peer_id, notification_protocol)` tuples that are marked as "desired".
 //! - A list of connections identified by [`ConnectionId`]s.
-//! - A list of [`DesiredInNotificationId`]. When a peer desired to open a notification substream
-//! with the local node, a [`DesiredInNotificationId`] is generated. The API user must answer by
-//! either accepting or refusing the request. The requests can automatically become obsolete if
-//! the remote decides to withdraw their request or the connection closes. A request becoming
-//! obsolete does *not* invalidate its [`DesiredInNotificationId`].
+//! - A list of requests for inbound substreams, identified by an [`DesiredInNotificationId`].
+//! When a peer desired to open a notification substream with the local node, a
+//! [`DesiredInNotificationId`] is generated. The API user must answer by either accepting or
+//! refusing the request. The requests can automatically become obsolete if the remote decides
+//! to withdraw their request or the connection closes. A request becoming obsolete does *not*
+//! invalidate its [`DesiredInNotificationId`].
+//! - A list of requests that have been received, identified by a [`RequestId`]. The API user
+//! must answer by calling [`Peers::respond`]. Requests can automatically become obsolete if the
+//! remote decides to withdraw their request or the connection closes. A request becoming obsolete
+//! does *not* invalidate its [`RequestId`].
 //!
 
 use crate::libp2p::{self, Multiaddr, PeerId};
@@ -337,24 +342,35 @@ where
     /// associated connection. An associated connection is either a fully established connection
     /// with that peer, or an outgoing connection that is still handshaking but expects to reach
     /// that peer.
-    // TODO: well, complicated, because we would like the outside to handle known multiaddresses
     #[must_use]
     pub async fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = PeerId> {
         let guarded = self.guarded.lock().await;
         iter::empty() // TODO:
     }
 
+    /// Sets the "desired" flag of the given [`PeerId`].
+    ///
+    /// When a peer is marked as "desired" and there isn't any pending or established connection
+    /// towards it, it is returned when calling [`Peers::unfulfilled_desired_peers`].
     pub async fn set_peer_desired(&self, peer_id: &PeerId, desired: bool) {
         let mut guarded = self.guarded.lock().await;
         let peer_index = guarded.peer_index_or_insert(peer_id);
         guarded.peers[peer_index].desired = desired;
     }
 
+    /// Sets the given combinations of notification protocol and [`PeerId`] as "desired".
+    ///
+    /// When a peer is marked as "desired" and there isn't any pending or established connection
+    /// towards it, it is returned when calling [`Peers::unfulfilled_desired_peers`].
+    ///
+    /// When a combination of network protocol and [`PeerId`] is marked as "desired", the state
+    /// machine will try to maintain open an outbound substream. If the remote refuses the
+    /// substream, it will be returned when calling [`Peers::refused_notifications_out`].
     pub async fn set_peer_notifications_out_desired(
         &self,
         peer_id: &PeerId,
         notification_protocols: impl Iterator<Item = usize>,
-        new_desired_state: OutNotificationsState,
+        new_desired_state: bool,
     ) {
         let mut guarded = self.guarded.lock().await;
         let peer_index = guarded.peer_index_or_insert(peer_id);
@@ -365,7 +381,17 @@ where
         }
     }
 
+    /// Returns the combinations of notification and [`PeerId`] that are marked as "desired", but
+    /// where the remote has refused the request for a notifications substream.
+    pub async fn refused_notifications_out(&self) -> impl Iterator<Item = (PeerId, usize)> {
+        iter::empty() // TODO: /!\
+    }
+
+    /// Responds to an [`Event::DesiredInNotification`] by accepting the request for an inbound
+    /// substream.
     ///
+    /// If `Ok` is returned, the substream is now considered open. If `Err` is returned, then
+    /// that substream request was obsolete and no substream has been opened.
     ///
     /// # Panic
     ///
@@ -377,7 +403,7 @@ where
         &self,
         id: DesiredInNotificationId,
         handshake_back: Vec<u8>,
-    ) {
+    ) -> Result<(), ()> {
         let mut guarded = self.guarded.lock().await;
         assert!(guarded.desired_in_notifications.contains(id.0));
         guarded.desired_in_notifications.remove(id.0);
@@ -385,7 +411,8 @@ where
         todo!()
     }
 
-    ///
+    /// Responds to an [`Event::DesiredInNotification`] by refusing the request for an inbound
+    /// substream.
     ///
     /// # Panic
     ///
@@ -462,6 +489,17 @@ where
         todo!()
     }
 
+    /// Responds to an [`Event::RequestIn`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid. Note that these ids remain valid forever until
+    /// [`Peers::respond`] is called.
+    ///
+    pub async fn respond(&self, id: RequestId, response: Result<Vec<u8>, ()>) {
+        todo!()
+    }
+
     ///
     /// # Panic
     ///
@@ -494,14 +532,16 @@ where
     }
 }
 
-pub enum OutNotificationsState {
-    Closed,
-    Open,
-}
-
+/// See [`Event::DesiredInNotification`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DesiredInNotificationId(usize);
 
+/// See [`Event::RequestIn`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestId(usize);
+
+/// Event happening over the network. See [`Peers::next_event`].
+#[derive(Debug)]
 pub enum Event {
     /// Established a new connection to the given peer.
     Connected {
@@ -541,47 +581,91 @@ pub enum Event {
 
     /// Received a request from a request-response protocol.
     RequestIn {
+        /// Identifier for this request. Must be passed back when calling [`Peers::respond`].
+        request_id: RequestId,
+        /// Peer which sent the request.
         peer_id: PeerId,
-        /// Substream on which the request has been received. Must be passed back when providing
-        /// the response.
-        substream_id: libp2p::connection::established::SubstreamId, // TODO: no, use a RequestId
+        /// Request-response protocol the request is about.
         protocol_index: usize,
+        /// Payload of the request, opaque to this state machine.
+        ///
+        /// > **Note**: Keep in mind that this data is untrusted.
         request_payload: Vec<u8>,
     },
 
+    /// A previously-emitted [`RequestIn`] is now obsolete. This event is for informative purpose
+    /// and does **not** invalidate the [`RequestIn`].
+    RequestInCancel {
+        /// Identifier for this request.
+        id: RequestId,
+    },
+
+    /// A peer would like to open a notifications substream with the local node, in order to
+    /// send notifications.
     DesiredInNotification {
+        /// Identifier for this request. Must be passed back when calling
+        /// [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`].
         id: DesiredInNotificationId,
+        /// Peer which tries to open an inbound substream.
         peer_id: PeerId,
+        /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
+        /// Handshake of the request sent by the peer. Opaque to this state machine.
+        ///
+        /// > **Note**: Keep in mind that this data is untrusted.
         handshake: Vec<u8>,
     },
 
+    /// A previously-emitted [`DesiredInNotificationId`] is now obsolete. This event is for
+    /// informative purpose and does **not** invalidate the [`DesiredInNotificationId`]. Use
+    /// [`Peers::in_notification_refuse`] if you no longer care about this request.
+    DesiredInNotificationCancel {
+        /// Identifier for this request.
+        id: DesiredInNotificationId,
+    },
+
     /// A handshaking outbound substream has been accepted by the remote.
+    ///
+    /// Can only happen for combinations of [`PeerId`] and notification protocols that have been
+    /// marked as desired.
     NotificationsOutAccept {
+        /// Peer the substream is open with.
         peer_id: PeerId,
-        // TODO: what if fallback?
+        /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
         /// Handshake sent in return by the remote.
         remote_handshake: Vec<u8>,
     },
 
-    /// A previously open outbound substream has been closed by the remote, or a handshaking
-    /// outbound substream has been denied by the remote.
+    /// A previously open outbound substream has been closed by the remote. Can only happen after
+    /// a corresponding [`Event::NotificationsOutAccept`] event has been emitted in the past.
+    ///
+    /// This combination of [`PeerId`] and notification protocol will now be returned when calling
+    /// [`Peers::refused_notifications_out`].
     NotificationsOutClose {
+        /// Peer the subtream is no longer open with.
         peer_id: PeerId,
+        /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
     },
 
-    // TODO: needs a notifications in cancel event? tricky
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
+        /// Peer that sent the notification.
         peer_id: PeerId,
+        /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
+        /// Payload of the notification. Opaque to this state machine.
+        ///
+        /// > **Note**: Keep in mind that this data is untrusted.
         notification: Vec<u8>,
     },
 
+    /// Remote has closed a previously-open inbound notifications substream.
     NotificationsInClose {
+        /// Peer the substream is no longer with.
         peer_id: PeerId,
+        /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
     },
 }
