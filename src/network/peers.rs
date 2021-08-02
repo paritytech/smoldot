@@ -48,17 +48,64 @@ use crate::libp2p::{self, Multiaddr, PeerId};
 
 use alloc::{
     collections::{btree_map, BTreeMap, BTreeSet},
+    string::String,
     vec::Vec,
 };
 use core::{
     convert::TryFrom as _,
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Sub},
     task::Poll,
     time::Duration,
 };
 use futures::{lock::Mutex, prelude::*}; // TODO: no_std-ize
+use rand::{Rng as _, SeedableRng as _};
+
+/// Configuration for a [`Peers`].
+pub struct Config {
+    /// Seed for the randomness within the networking state machine.
+    pub randomness_seed: [u8; 32],
+
+    /// Capacity to initially reserve to the list of connections.
+    pub connections_capacity: usize,
+
+    /// Capacity to initially reserve to the list of peers.
+    pub peers_capacity: usize,
+
+    pub overlay_networks: Vec<libp2p::OverlayNetworkConfig>,
+
+    pub request_response_protocols: Vec<libp2p::ConfigRequestResponse>,
+
+    /// Name of the ping protocol on the network.
+    pub ping_protocol: String,
+
+    /// Key used for the encryption layer.
+    /// This is a Noise static key, according to the Noise specification.
+    /// Signed using the actual libp2p key.
+    pub noise_key: libp2p::connection::NoiseKey,
+
+    /// Number of events that can be buffered internally before connections are back-pressured.
+    ///
+    /// A good default value is 64.
+    ///
+    /// # Context
+    ///
+    /// The [`Network`] maintains an internal buffer of the events returned by
+    /// [`Network::next_event`]. When [`Network::read_write`] is called, an event might get pushed
+    /// to this buffer. If this buffer is full, back-pressure will be applied to the connections
+    /// in order to prevent new events from being pushed.
+    ///
+    /// This value is important if [`Network::next_event`] is called at a slower than the calls to
+    /// [`Network::read_write`] generate events.
+    pub pending_api_events_buffer_size: NonZeroUsize,
+
+    // TODO: don't use BTreeSet
+    pub initial_desired_peers: BTreeSet<PeerId>,
+
+    // TODO: don't use BTreeSet
+    pub initial_desired_substreams: BTreeSet<(PeerId, usize)>,
+}
 
 pub use libp2p::ConnectionId;
 
@@ -73,41 +120,75 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Creates a new [`Peers`].
-    // TODO: proper config
-    pub fn new(config: libp2p::Config) -> Self {
-        let peer_indices = {
-            // TODO: capacity
-            // TODO: uses the same seed as libp2p right now, obviously bad
+    pub fn new(config: Config) -> Self {
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
+
+        let mut peer_indices = {
             hashbrown::HashMap::with_capacity_and_hasher(
-                0,
+                config.peers_capacity,
                 ahash::RandomState::with_seeds(
-                    u64::from_ne_bytes(<[u8; 8]>::try_from(&config.randomness_seed[0..8]).unwrap()),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[8..16]).unwrap(),
-                    ),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[16..24]).unwrap(),
-                    ),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[24..32]).unwrap(),
-                    ),
+                    randomness.sample(rand::distributions::Standard),
+                    randomness.sample(rand::distributions::Standard),
+                    randomness.sample(rand::distributions::Standard),
+                    randomness.sample(rand::distributions::Standard),
                 ),
             )
         };
 
-        let connections_peer_index = slab::Slab::with_capacity(config.capacity); // TODO: capacity
+        let mut peers = slab::Slab::with_capacity(config.peers_capacity);
+
+        let mut peers_notifications_out = BTreeMap::new();
+
+        for peer_id in config.initial_desired_peers {
+            if let hashbrown::hash_map::Entry::Vacant(entry) = peer_indices.entry(peer_id) {
+                let peer_index = peers.insert(Peer {
+                    desired: true,
+                    peer_id: entry.key().clone(),
+                });
+
+                entry.insert(peer_index);
+            }
+        }
+
+        for (peer_id, notification_protocol) in config.initial_desired_substreams {
+            let peer_index = match peer_indices.entry(peer_id) {
+                hashbrown::hash_map::Entry::Occupied(entry) => *entry.into_mut(),
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    let peer_index = peers.insert(Peer {
+                        desired: true,
+                        peer_id: entry.key().clone(),
+                    });
+
+                    *entry.insert(peer_index)
+                }
+            };
+
+            peers_notifications_out
+                .entry((peer_index, notification_protocol))
+                .or_insert(NotificationsOutState::Desired);
+        }
+
+        let connections_peer_index = slab::Slab::with_capacity(config.connections_capacity);
 
         Peers {
-            inner: libp2p::Network::new(config),
+            inner: libp2p::Network::new(libp2p::Config {
+                capacity: config.connections_capacity,
+                noise_key: config.noise_key,
+                overlay_networks: config.overlay_networks,
+                request_response_protocols: config.request_response_protocols,
+                ping_protocol: config.ping_protocol,
+                randomness_seed: randomness.sample(rand::distributions::Standard),
+                pending_api_events_buffer_size: config.pending_api_events_buffer_size,
+            }),
             guarded: Mutex::new(Guarded {
                 to_process_pre_event: None,
                 connections_peer_index,
                 connections_by_peer: BTreeSet::new(),
                 peer_indices,
-                peers: slab::Slab::new(), // TODO: capacity
-                peers_notifications_out: BTreeMap::new(),
+                peers,
+                peers_notifications_out,
                 requests_in: slab::Slab::new(), // TODO: capacity?
-                desired_in_notifications: slab::Slab::new(), // TODO: capacity
+                desired_in_notifications: slab::Slab::new(), // TODO: capacity?
             }),
         }
     }

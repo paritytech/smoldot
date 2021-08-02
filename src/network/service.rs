@@ -172,13 +172,14 @@ struct PendingConnections {
     /// Keys of this slab are [`PendingId`]s. Values are . TODO:
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
 
-    /// Combination of addresses that we assume could be dialed to reach a certain peer.
+    /// Combination of addresses that we assume could be dialed to reach a certain peer. When
+    /// an address is tried, it is removed from this list.
     ///
     /// Does not include "dialing" addresses. For example, no address should contain an outgoing
     /// TCP port.
-    // TODO: never cleaned up until addresses are actually tried
+    // TODO: never cleaned up until addresses are actually tried; the idea is to eventually use Kademlia k-buckets only
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
-    known_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
+    potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
 
     /// Waker to wake up when [`ChainNetwork::fill_out_slots`] should be called again by the user.
     fill_out_slots_waker: Option<Waker>,
@@ -321,7 +322,7 @@ where
             )
         };
 
-        let mut known_addresses = {
+        let mut potential_addresses = {
             let k0 = randomness.next_u64();
             let k1 = randomness.next_u64();
             let k2 = randomness.next_u64();
@@ -332,37 +333,41 @@ where
             )
         };
 
+        let mut initial_desired_substreams = BTreeSet::new();
+
         for (peer_id, multiaddr) in config.known_nodes {
+            // Register membership of this peer on this chain.
+            for notifications_protocol in
+                0..(config.chains.len() * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+            {
+                initial_desired_substreams.insert((peer_id.clone(), notifications_protocol));
+            }
+
             // TODO: filter duplicates?
-            known_addresses
+            potential_addresses
                 .entry(peer_id)
                 .or_insert(Vec::new())
                 .push(multiaddr);
-
-            // TODO:
-            /*
-
-            // Register membership of this peer on this chain.
-            for chain_index in 0..config.chains.len() {
-                peers_chain_memberships.insert((chain_index, peer_index));
-            }*/
         }
 
         ChainNetwork {
-            inner: peers::Peers::new(libp2p::Config {
-                capacity: config.connections_capacity,
+            inner: peers::Peers::new(peers::Config {
+                connections_capacity: config.connections_capacity,
+                peers_capacity: config.peers_capacity,
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: inner_randomness_seed,
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 overlay_networks,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
+                initial_desired_peers: Default::default(), // Empty
+                initial_desired_substreams,
             }),
             to_process_pre_event: crossbeam_queue::SegQueue::new(),
             pending: Mutex::new(PendingConnections {
                 peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-                known_addresses,
+                potential_addresses: potential_addresses,
                 fill_out_slots_waker: None,
             }),
             chain_grandpa_config: Mutex::new(chain_grandpa_config),
@@ -608,7 +613,7 @@ where
 
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, _) = lock.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr) = lock.pending_ids.get(id.0).unwrap();
 
         let connection_id = self.inner.add_outgoing_connection(expected_peer_id).await;
 
@@ -619,6 +624,13 @@ where
                 *value = new_value;
             } else {
                 lock.peers.remove(expected_peer_id).unwrap();
+            }
+        }
+
+        // Update `lock.potential_addresses`.
+        if let Some(entry) = lock.potential_addresses.get_mut(&expected_peer_id) {
+            if !entry.iter().any(|a| *a == *multiaddr) {
+                entry.push(multiaddr.clone());
             }
         }
 
@@ -638,7 +650,7 @@ where
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
         let mut lock = self.pending.lock().await;
-        let (expected_peer_id, multiaddr) = lock.pending_ids.remove(id.0);
+        let (expected_peer_id, _) = lock.pending_ids.remove(id.0);
 
         // Update `lock.peers`.
         {
@@ -648,12 +660,6 @@ where
             } else {
                 lock.peers.remove(&expected_peer_id).unwrap();
             }
-        }
-
-        // Update `lock.known_addresses`.
-        // TODO: enforce that the address was in?
-        if let Some(entry) = lock.known_addresses.get_mut(&expected_peer_id) {
-            entry.retain(|v| *v != multiaddr);
         }
 
         if let Some(waker) = lock.fill_out_slots_waker.take() {
@@ -1073,13 +1079,21 @@ where
                     hashbrown::hash_map::Entry::Vacant(entry) => entry,
                 };
 
-                let multiaddr: multiaddr::Multiaddr =
-                    if let Some(entry) = pending.known_addresses.get(entry.key()) {
-                        // TODO: what if address is already being dialed, ughhhh
-                        todo!()
-                    } else {
+                let multiaddr: multiaddr::Multiaddr = if let Some(potential_addresses) =
+                    pending.potential_addresses.get_mut(entry.key())
+                {
+                    if potential_addresses.is_empty() {
                         continue;
-                    };
+                    }
+
+                    let addr = potential_addresses.remove(0);
+                    if potential_addresses.is_empty() {
+                        pending.potential_addresses.remove(entry.key());
+                    }
+                    addr
+                } else {
+                    continue;
+                };
 
                 let pending_id = PendingId(
                     pending
@@ -1330,7 +1344,7 @@ where
                 )
                 .await;
 
-            let existing_addrs = lock.known_addresses.entry(peer_id).or_default();
+            let existing_addrs = lock.potential_addresses.entry(peer_id).or_default();
             for addr in addrs {
                 if !existing_addrs.iter().any(|a| *a == addr) {
                     existing_addrs.push(addr);
