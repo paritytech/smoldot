@@ -434,11 +434,21 @@ where
                     user_data,
                 } => {
                     let peer_index = guarded.connections_peer_index[user_data].unwrap();
-                    let _was_in = guarded
+                    match guarded
                         .peers_notifications_out
-                        .remove(&(peer_index, notifications_protocol_index));
-                    //debug_assert!(_was_in);
-                    todo!() // TODO: finish
+                        .entry((peer_index, notifications_protocol_index))
+                    {
+                        btree_map::Entry::Vacant(_) => {}
+                        btree_map::Entry::Occupied(entry) => match entry.into_mut() {
+                            // TODO: not implemented
+                            _ => {}
+                        },
+                    }
+
+                    return Event::NotificationsOutClose {
+                        peer_id: guarded.peers[peer_index].peer_id.clone(),
+                        notifications_protocol_index,
+                    };
                 }
 
                 libp2p::Event::NotificationsInOpen {

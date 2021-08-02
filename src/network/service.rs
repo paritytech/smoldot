@@ -192,7 +192,6 @@ struct PendingConnections {
 enum ToProcessPreEvent {
     AcceptNotificationsIn {
         id: peers::DesiredInNotificationId,
-        notifications_protocol_index: usize,
         handshake_back: Vec<u8>,
     },
     NotificationsOut {
@@ -681,21 +680,18 @@ where
     /// case the events will be distributed amongst the multiple calls in an unspecified way.
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
-    pub async fn next_event(&'_ self) -> Event<'_, TNow> {
+    // TODO: this `now` parameter, it's a hack
+    pub async fn next_event(&'_ self, now: TNow) -> Event<'_, TNow> {
         loop {
             if let Some(to_process_pre_event) = self.to_process_pre_event.pop() {
                 // TODO: cancellation issues since the thing is already popped 🤦
                 match to_process_pre_event {
-                    ToProcessPreEvent::AcceptNotificationsIn {
-                        id,
-                        handshake_back,
-                        notifications_protocol_index,
-                    } => {
+                    ToProcessPreEvent::AcceptNotificationsIn { id, handshake_back } => {
                         self.inner.in_notification_accept(id, handshake_back).await;
                     }
                     ToProcessPreEvent::NotificationsOut { id, handshake } => {
                         self.inner
-                            .open_out_notification(id, todo!(), handshake)
+                            .open_out_notification(id, now.clone(), handshake)
                             .await;
                     }
                     ToProcessPreEvent::QueueNotification {
@@ -988,7 +984,6 @@ where
                             .push(ToProcessPreEvent::AcceptNotificationsIn {
                                 id: desired_in_notification_id,
                                 handshake_back: handshake,
-                                notifications_protocol_index,
                             });
                     } else if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
                         == 1
@@ -999,7 +994,6 @@ where
                             .push(ToProcessPreEvent::AcceptNotificationsIn {
                                 id: desired_in_notification_id,
                                 handshake_back: Vec::new(),
-                                notifications_protocol_index,
                             });
                     } else if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
                         == 2
@@ -1016,7 +1010,6 @@ where
                             .push(ToProcessPreEvent::AcceptNotificationsIn {
                                 id: desired_in_notification_id,
                                 handshake_back: handshake,
-                                notifications_protocol_index,
                             });
                     } else {
                         unreachable!()

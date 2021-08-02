@@ -192,7 +192,11 @@ impl NetworkService {
                                 }
                             };
 
-                            match network_service.network.next_event().await {
+                            match network_service
+                                .network
+                                .next_event(ffi::Instant::now())
+                                .await
+                            {
                                 service::Event::Connected(peer_id) => {
                                     log::info!(target: "network", "Connected to {}", peer_id);
                                 }
