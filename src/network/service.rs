@@ -35,7 +35,10 @@ use core::{
     task::{Poll, Waker},
     time::Duration,
 };
-use futures::{lock::Mutex, prelude::*};
+use futures::{
+    lock::{Mutex, MutexGuard},
+    prelude::*,
+};
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
 pub use crate::network::peers::ConnectionId;
@@ -691,7 +694,9 @@ where
                         self.inner.in_notification_accept(id, handshake_back).await;
                     }
                     ToProcessPreEvent::NotificationsOut { id, handshake } => {
-                        self.inner.open_out_notification(id, handshake).await;
+                        self.inner
+                            .open_out_notification(id, todo!(), handshake)
+                            .await;
                     }
                     ToProcessPreEvent::QueueNotification {
                         peer_id,
@@ -1069,8 +1074,8 @@ where
     // TODO: chain_index is unused
     pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> StartConnect {
         loop {
-            let mut pending = self.pending.lock().await;
-            let pending = &mut *pending; // Prevents borrow checker issues.
+            let mut pending_lock = self.pending.lock().await;
+            let pending = &mut *pending_lock; // Prevents borrow checker issues.
 
             let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers().await;
             for peer_id in unfulfilled_desired_peers {
@@ -1113,10 +1118,10 @@ where
             }
 
             // TODO: if `fill_out_slots` is called multiple times simultaneously, all but the first will deadlock
-            let mut pending = Some(pending);
+            let mut pending_lock: Option<MutexGuard<_>> = Some(pending_lock);
             future::poll_fn(move |cx| {
-                if let Some(mut pending) = pending.take() {
-                    pending.fill_out_slots_waker = Some(cx.waker().clone());
+                if let Some(mut pending_lock) = pending_lock.take() {
+                    pending_lock.fill_out_slots_waker = Some(cx.waker().clone());
                     Poll::Pending
                 } else {
                     Poll::Ready(())
