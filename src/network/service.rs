@@ -176,7 +176,7 @@ struct PendingConnections {
     ///
     /// Does not include "dialing" addresses. For example, no address should contain an outgoing
     /// TCP port.
-    // TODO: never cleaned up at the moment
+    // TODO: never cleaned up until addresses are actually tried
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     known_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
 
@@ -200,35 +200,6 @@ enum ToProcessPreEvent {
         notifications_protocol_index: usize,
         notification: Vec<u8>,
     },
-}
-
-/// See [`Guarded::connections`].
-struct Connection {
-    /// [`PeerId`] of the remote, or *expected* [`PeerId`] (which might end up being different
-    /// from the actual) if the handshake isn't finished yet.
-    peer_id: PeerId,
-
-    /// Address on the other side of the connection.
-    ///
-    /// Will be found in [`Peer::known_addresses`] if and only if the connection is outbound.
-    address: multiaddr::Multiaddr,
-
-    /// `Some` if the connection with the remote has been reached. Contains extra fields.
-    reached: Option<ConnectionReached>,
-}
-
-/// See [`Connection::reached`].
-struct ConnectionReached {
-    /// Identifier of this connection according to [`ChainNetwork::libp2p`].
-    ///
-    /// Since [`libp2p::ConnectionId`] are never re-used, .
-    inner_id: libp2p::ConnectionId,
-}
-
-enum SubstreamState {
-    Closed,
-    OpeningOut,
-    In,
 }
 
 // Update this when a new request response protocol is added.
@@ -345,7 +316,7 @@ where
             let k2 = randomness.next_u64();
             let k3 = randomness.next_u64();
             hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO:
+                config.peers_capacity,
                 ahash::RandomState::with_seeds(k0, k1, k2, k3),
             )
         };
@@ -1089,6 +1060,7 @@ where
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
     // TODO: give more control, with number of slots and node choice
+    // TODO: chain_index is unused
     pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> StartConnect {
         loop {
             let mut pending = self.pending.lock().await;
@@ -1343,15 +1315,27 @@ where
         let mut lock = self.service.pending.lock().await;
         let lock = &mut *lock; // Avoids borrow checker issues.
 
+        let chain_index = self.chain_index;
+
         for (peer_id, addrs) in self.outcome {
-            let mut existing_addrs = lock.known_addresses.entry(peer_id).or_default();
+            // TODO: hack
+            // TODO: futures cancellation issue
+            self.service
+                .inner
+                .set_peer_notifications_out_desired(
+                    &peer_id,
+                    (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+                        .map(|n| n + chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN),
+                    true,
+                )
+                .await;
+
+            let existing_addrs = lock.known_addresses.entry(peer_id).or_default();
             for addr in addrs {
                 if !existing_addrs.iter().any(|a| *a == addr) {
                     existing_addrs.push(addr);
                 }
             }
-
-            // TODO: register member of this peer of this chain
         }
     }
 }

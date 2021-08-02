@@ -419,7 +419,33 @@ where
     #[must_use]
     pub async fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = PeerId> {
         let guarded = self.guarded.lock().await;
-        iter::empty() // TODO:
+
+        // TODO: complexity of this method is too damn high
+
+        let mut desired = guarded
+            .peers
+            .iter()
+            .filter(|(_, p)| p.desired)
+            .map(|(_, p)| p.peer_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        for ((_, peer_index), state) in &guarded.peers_notifications_out {
+            match state {
+                NotificationsOutState::Desired => {}
+                NotificationsOutState::DesiredOpen | NotificationsOutState::DesiredRefused => {
+                    continue
+                }
+            };
+
+            desired.insert(guarded.peers[*peer_index].peer_id.clone());
+        }
+
+        // TODO: unfinished, must remove the pending connections
+        /*for _ in guarded.connections_by_peer.range(()) {
+
+        }*/
+
+        desired.into_iter()
     }
 
     /// Sets the "desired" flag of the given [`PeerId`].

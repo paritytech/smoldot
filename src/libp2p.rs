@@ -205,6 +205,16 @@ pub struct OverlayNetworkConfig {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(u64);
 
+impl ConnectionId {
+    pub fn min_value() -> Self {
+        ConnectionId(u64::min_value())
+    }
+
+    pub fn max_value() -> Self {
+        ConnectionId(u64::max_value())
+    }
+}
+
 /// Data structure containing the list of all connections, pending or not, and their latest known
 /// state. See also [the module-level documentation](..).
 pub struct Network<TConn, TNow> {
