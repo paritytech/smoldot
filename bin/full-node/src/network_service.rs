@@ -254,7 +254,7 @@ impl NetworkService {
                             }
                         };
 
-                        match network_service.network.next_event().await {
+                        match network_service.network.next_event(Instant::now()).await {
                             service::Event::Connected(peer_id) => {
                                 tracing::debug!(%peer_id, "connected");
                             }
