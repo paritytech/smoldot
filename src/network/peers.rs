@@ -814,19 +814,26 @@ where
         target: &PeerId,
         protocol_index: usize,
         request_data: Vec<u8>,
-        // TODO: bad error type
-    ) -> Result<Vec<u8>, libp2p::RequestError> {
+    ) -> Result<Vec<u8>, RequestError> {
         let target = {
             let guarded = self.guarded.lock().await;
             match self.connection_id_for_peer(&guarded, target).await {
                 Some(id) => id,
-                None => return Err(libp2p::RequestError::InvalidConnection), // TODO: no, change error type
+                None => return Err(RequestError::NotConnected),
             }
         };
 
-        self.inner
+        let result = self
+            .inner
             .request(now, target, protocol_index, request_data)
-            .await
+            .await;
+
+        match result {
+            Ok(r) => Ok(r),
+            Err(libp2p::RequestError::InvalidConnection) => Err(RequestError::ConnectionClosed),
+            Err(libp2p::RequestError::ConnectionClosed) => Err(RequestError::ConnectionClosed),
+            Err(libp2p::RequestError::Connection(err)) => Err(RequestError::Connection(err)),
+        }
     }
 
     /// Responds to a previously-emitted [`Event::RequestIn`].
@@ -1050,6 +1057,17 @@ pub enum Event {
         /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
     },
+}
+
+/// Error potentially returned by [`Peers::request`].
+#[derive(Debug, derive_more::Display)]
+pub enum RequestError {
+    /// Not connected to target.
+    NotConnected,
+    /// Connection has been unexpectedly closed by the remote during the request.
+    ConnectionClosed,
+    /// Error in the context of the connection.
+    Connection(libp2p::connection::established::RequestError),
 }
 
 /// Error potentially returned by [`Peers::queue_notification`].

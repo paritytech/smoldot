@@ -1453,35 +1453,35 @@ impl<'a, TNow> fmt::Debug for IdentifyRequestIn<'a, TNow> {
 #[derive(Debug, derive_more::Display)]
 pub enum DiscoveryError {
     NoPeer,
-    RequestFailed(libp2p::RequestError),
+    RequestFailed(peers::RequestError),
     DecodeError(kademlia::DecodeFindNodeResponseError),
 }
 
 /// Error returned by [`ChainNetwork::blocks_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum BlocksRequestError {
-    Request(libp2p::RequestError),
+    Request(peers::RequestError),
     Decode(protocol::DecodeBlockResponseError),
 }
 
 /// Error returned by [`ChainNetwork::storage_proof_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum StorageProofRequestError {
-    Request(libp2p::RequestError),
+    Request(peers::RequestError),
     Decode(protocol::DecodeStorageProofResponseError),
 }
 
 /// Error returned by [`ChainNetwork::call_proof_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum CallProofRequestError {
-    Request(libp2p::RequestError),
+    Request(peers::RequestError),
     Decode(protocol::DecodeCallProofResponseError),
 }
 
 /// Error returned by [`ChainNetwork::grandpa_warp_sync_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum GrandpaWarpSyncRequestError {
-    Request(libp2p::RequestError),
+    Request(peers::RequestError),
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }
 
