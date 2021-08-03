@@ -113,14 +113,15 @@ pub struct Config {
 
 pub use libp2p::ConnectionId;
 
-pub struct Peers<TNow> {
+pub struct Peers<TConn, TNow> {
     inner: libp2p::Network<usize, TNow>,
 
-    guarded: Mutex<Guarded>,
+    guarded: Mutex<Guarded<TConn>>,
 }
 
-impl<TNow> Peers<TNow>
+impl<TConn, TNow> Peers<TConn, TNow>
 where
+    TConn: Clone,
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Creates a new [`Peers`].
@@ -186,7 +187,7 @@ where
             }),
             guarded: Mutex::new(Guarded {
                 to_process_pre_event: None,
-                connections_peer_index,
+                connections: connections_peer_index,
                 connections_by_peer: BTreeSet::new(),
                 peer_indices,
                 peers,
@@ -228,7 +229,7 @@ where
     /// case the events will be distributed amongst the multiple calls in an unspecified way.
     /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
     /// produced, and calling this function multiple times is therefore discouraged.
-    pub async fn next_event(&self) -> Event {
+    pub async fn next_event(&self) -> Event<TConn> {
         loop {
             // The objective of the block of code below is to retrieve the next event that
             // happened on the underlying libp2p state machine by calling
@@ -344,7 +345,7 @@ where
                     // TODO: compare with expected
                     let peer_index = guarded.peer_index_or_insert(&peer_id);
                     guarded.connections_by_peer.insert((peer_id.clone(), id));
-                    guarded.connections_peer_index[user_data] = Some(peer_index);
+                    guarded.connections[user_data].0 = Some(peer_index);
 
                     let num_peer_connections = {
                         // TODO: cloning
@@ -398,13 +399,18 @@ where
                     user_data,
                 } => {
                     let request_id = RequestId(guarded.requests_in.insert((id, substream_id)));
-                    let peer_id = {
-                        let peer_index = guarded.connections_peer_index[user_data].unwrap();
-                        guarded.peers[peer_index].peer_id.clone()
+                    let (peer_id, connection_user_data) = {
+                        let (peer_index, user_data) = guarded.connections[user_data].clone();
+                        (
+                            guarded.peers[peer_index.unwrap()].peer_id.clone(),
+                            user_data,
+                        )
                     };
 
                     return Event::RequestIn {
                         peer_id,
+                        connection_id: id,
+                        connection_user_data,
                         protocol_index,
                         request_id,
                         request_payload,
@@ -417,7 +423,7 @@ where
                     remote_handshake,
                     user_data,
                 } => {
-                    let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                    let peer_index = guarded.connections[user_data].0.unwrap();
                     match guarded
                         .peers_notifications_out
                         .entry((peer_index, notifications_protocol_index))
@@ -448,7 +454,7 @@ where
                     notifications_protocol_index,
                     user_data,
                 } => {
-                    let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                    let peer_index = guarded.connections[user_data].0.unwrap();
                     match guarded
                         .peers_notifications_out
                         .entry((peer_index, notifications_protocol_index))
@@ -480,7 +486,7 @@ where
                     );
 
                     let peer_id = {
-                        let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                        let peer_index = guarded.connections[user_data].0.unwrap();
                         guarded.peers[peer_index].peer_id.clone()
                     };
 
@@ -499,7 +505,7 @@ where
                     ..
                 } => {
                     let peer_id = {
-                        let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                        let peer_index = guarded.connections[user_data].0.unwrap();
                         guarded.peers[peer_index].peer_id.clone()
                     };
 
@@ -517,7 +523,7 @@ where
                 } => {
                     // TODO: does this event also mean a NotificationsInOpen is no longer valid?
                     let peer_id = {
-                        let peer_index = guarded.connections_peer_index[user_data].unwrap();
+                        let peer_index = guarded.connections[user_data].0.unwrap();
                         guarded.peers[peer_index].peer_id.clone()
                     };
 
@@ -540,14 +546,14 @@ where
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
     #[must_use]
-    pub async fn add_incoming_connection(&self) -> ConnectionId {
+    pub async fn add_incoming_connection(&self, user_data: TConn) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
 
         // A slab entry is first reserved without being inserted, so that the state remains
         // consistent if the user cancels the returned future.
-        let entry = guarded.connections_peer_index.vacant_entry();
+        let entry = guarded.connections.vacant_entry();
         let connection_id = self.inner.insert(false, entry.key()).await;
-        entry.insert(None);
+        entry.insert((None, user_data));
         connection_id
     }
 
@@ -561,13 +567,17 @@ where
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
     #[must_use]
-    pub async fn add_outgoing_connection(&self, expected_peer_id: &PeerId) -> ConnectionId {
+    pub async fn add_outgoing_connection(
+        &self,
+        expected_peer_id: &PeerId,
+        user_data: TConn,
+    ) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
         // A slab entry is first reserved without being inserted, so that the state remains
         // consistent if the user cancels the returned future.
-        let entry = guarded.connections_peer_index.vacant_entry();
+        let entry = guarded.connections.vacant_entry();
         let connection_id = self.inner.insert(true, entry.key()).await;
 
         let peer_index = if let Some(idx) = guarded.peer_indices.get(expected_peer_id) {
@@ -581,7 +591,7 @@ where
             idx
         };
 
-        entry.insert(Some(peer_index));
+        entry.insert((Some(peer_index), user_data));
         connection_id
 
         // TODO: finish
@@ -922,7 +932,7 @@ where
     /// Picks the connection to use to send requests or notifications to the given peer.
     async fn connection_id_for_peer(
         &self,
-        guarded: &MutexGuard<'_, Guarded>,
+        guarded: &MutexGuard<'_, Guarded<TConn>>,
         target: &PeerId,
     ) -> Option<libp2p::ConnectionId> {
         // TODO: stupid cloning
@@ -951,7 +961,7 @@ pub struct RequestId(usize);
 
 /// Event happening over the network. See [`Peers::next_event`].
 #[derive(Debug)]
-pub enum Event {
+pub enum Event<TConn> {
     /// Established a new connection to the given peer.
     Connected {
         /// Identity of the peer on the other side of the connection.
@@ -991,6 +1001,10 @@ pub enum Event {
         request_id: RequestId,
         /// Peer which sent the request.
         peer_id: PeerId,
+        /// Identifier of the connection that has sent the request.
+        connection_id: ConnectionId,
+        /// Copy of the user data associated to this connection.
+        connection_user_data: TConn,
         /// Request-response protocol the request is about.
         protocol_index: usize,
         /// Payload of the request, opaque to this state machine.
@@ -1110,7 +1124,7 @@ pub enum QueueNotificationError {
     QueueFull,
 }
 
-struct Guarded {
+struct Guarded<TConn> {
     /// In the [`Peers::next_event`] function, an event is grabbed from the underlying
     /// [`Peers::inner`]. This event might lead to some asynchronous post-processing being needed.
     /// Because the user can interrupt the future returned by [`Peers::next_event`] at any point
@@ -1128,10 +1142,10 @@ struct Guarded {
     peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
 
     /// Each connection stored in [`Peers::inner`] has a `usize` user data that is an index within
-    /// this slab. The items are indices within [`Guarded::peers`].
-    /// Contains `None` if and only if the connection is an incoming connection whose handshake
-    /// isn't finished yet.
-    connections_peer_index: slab::Slab<Option<usize>>,
+    /// this slab.
+    /// The first tuple element of the items are indices within [`Guarded::peers`], or `None` if
+    /// and only if the connection is an incoming connection whose handshake isn't finished yet.
+    connections: slab::Slab<(Option<usize>, TConn)>,
 
     connections_by_peer: BTreeSet<(PeerId, libp2p::ConnectionId)>,
 
@@ -1152,7 +1166,7 @@ struct Guarded {
     requests_in: slab::Slab<(ConnectionId, libp2p::connection::established::SubstreamId)>,
 }
 
-impl Guarded {
+impl<TConn> Guarded<TConn> {
     fn peer_index_or_insert(&mut self, peer_id: &PeerId) -> usize {
         if let Some(idx) = self.peer_indices.get(peer_id) {
             return *idx;

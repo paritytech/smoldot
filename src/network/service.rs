@@ -141,7 +141,7 @@ pub struct PendingId(usize);
 /// state. See also [the module-level documentation](..).
 pub struct ChainNetwork<TNow> {
     /// Underlying data structure.
-    inner: peers::Peers<TNow>,
+    inner: peers::Peers<multiaddr::Multiaddr, TNow>,
 
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
     /// [`ChainNetwork::libp2p`]. This event might lead to some asynchronous post-processing
@@ -415,7 +415,7 @@ where
         local_listen_address: &multiaddr::Multiaddr,
         remote_addr: multiaddr::Multiaddr,
     ) -> ConnectionId {
-        self.inner.add_incoming_connection().await
+        self.inner.add_incoming_connection(remote_addr).await
     }
 
     /// Update the state of the local node with regards to GrandPa rounds.
@@ -626,7 +626,10 @@ where
         // the user cancels the future returned by `add_outgoing_connection`.
         let (expected_peer_id, multiaddr) = lock.pending_ids.get(id.0).unwrap();
 
-        let connection_id = self.inner.add_outgoing_connection(expected_peer_id).await;
+        let connection_id = self
+            .inner
+            .add_outgoing_connection(expected_peer_id, multiaddr.clone())
+            .await;
 
         // Update `lock.peers`.
         {
@@ -757,8 +760,10 @@ where
                 peers::Event::RequestIn {
                     request_id,
                     peer_id,
+                    connection_user_data: observed_addr,
                     protocol_index: 0,
                     request_payload,
+                    ..
                 } => {
                     // TODO: check that request_payload is empty
                     return Event::IdentifyRequestIn {
@@ -766,6 +771,7 @@ where
                         request: IdentifyRequestIn {
                             service: self,
                             request_id,
+                            observed_addr,
                         },
                     };
                 }
@@ -1425,6 +1431,7 @@ pub struct ReadWrite<TNow> {
 pub struct IdentifyRequestIn<'a, TNow> {
     service: &'a ChainNetwork<TNow>,
     request_id: peers::RequestId,
+    observed_addr: multiaddr::Multiaddr,
 }
 
 impl<'a, TNow> IdentifyRequestIn<'a, TNow>
@@ -1437,25 +1444,12 @@ where
     /// Has no effect if the connection that sends the request no longer exists.
     pub async fn respond(self, agent_version: &str) {
         let response = {
-            // The connection referred to by `self.id` might no longer exist anymore.
-            // `self.connection_index` might no longer exist anymore or correspond to a different
-            // connection. As such, if it exists, we need to compare its id with `self.id` to make
-            // sure it still matches.
-            // TODO: restore somehow
-            let observed_addr = /*match guarded.connections.get(self.connection_index) {
-                Some(c) => match &c.reached {
-                    Some(r) if r.inner_id == self.id => &c.address,
-                    _ => return,
-                },
-                None => return,
-            }*/return;
-
             protocol::build_identify_response(protocol::IdentifyResponse {
                 protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
                 agent_version,
                 ed25519_public_key: self.service.inner.noise_key().libp2p_public_ed25519_key(),
                 listen_addrs: iter::empty(), // TODO:
-                observed_addr,
+                observed_addr: &self.observed_addr,
                 protocols: self
                     .service
                     .inner
