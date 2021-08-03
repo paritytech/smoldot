@@ -61,21 +61,21 @@ export async function start(config) {
   // Entries are instantly removed when the user desires to remove a chain even before the worker
   // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
   // JSON-RPC response even though we've already sent a `removeChain` message to it.
-  let chainsJsonRpcCallbacks = {};
+  let chainsJsonRpcCallbacks = new Map();
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
     if (message.kind == 'jsonrpc') {
-      const cb = chainsJsonRpcCallbacks[message.chainId];
+      const cb = chainsJsonRpcCallbacks.get(message.chainId);
       if (cb) cb(message.data);
 
     } else if (message.kind == 'chainAddedOk') {
       const expected = pendingConfirmations.pop();
       let chainId = message.chainId; // Later set to null when the chain is removed.
 
-      if (!!chainsJsonRpcCallbacks[chainId]) // Sanity check.
+      if (chainsJsonRpcCallbacks.has(chainId)) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
-      chainsJsonRpcCallbacks[chainId] = expected.jsonRpcCallback;
+      chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
 
       // `expected` was pushed by the `addChain` method.
       // Resolve the promise that `addChain` returned to the user.
@@ -85,7 +85,7 @@ export async function start(config) {
             throw workerError;
           if (chainId === null)
             throw new SmoldotError('Chain has already been removed');
-          if (!chainsJsonRpcCallbacks[chainId])
+          if (!chainsJsonRpcCallbacks.has(chainId))
             throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
           worker.postMessage({ ty: 'request', request, chainId });
         },
@@ -99,7 +99,7 @@ export async function start(config) {
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
           // response concerning that `chainId` to arrive after the `remove` function has
           // returned. We solve that by removing the callback immediately.
-          delete chainsJsonRpcCallbacks[chainId];
+          chainsJsonRpcCallbacks.delete(chainId);
           chainId = null;
         },
         // Hacky internal method that later lets us access the `chainId` of this chain for
