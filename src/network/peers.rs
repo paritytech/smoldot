@@ -198,6 +198,20 @@ where
         }
     }
 
+    /// Returns the list the overlay networks originally passed as [`Config::overlay_networks`].
+    // TODO: rename
+    pub fn overlay_networks(&self) -> impl ExactSizeIterator<Item = &libp2p::OverlayNetworkConfig> {
+        self.inner.overlay_networks()
+    }
+
+    /// Returns the list the request-response protocols originally passed as
+    /// [`Config::request_response_protocols`].
+    pub fn request_response_protocols(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &libp2p::ConfigRequestResponse> {
+        self.inner.request_response_protocols()
+    }
+
     /// Returns the Noise key originalled passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &libp2p::connection::NoiseKey {
         self.inner.noise_key()

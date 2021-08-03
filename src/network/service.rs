@@ -168,15 +168,20 @@ pub struct ChainNetwork<TNow> {
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
 }
 
+/// See [`ChainNetwork::pending`].
 struct PendingConnections {
     /// For each peer, the number of pending attempts.
     num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
 
-    /// Keys of this slab are [`PendingId`]s. Values are . TODO:
+    /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
+    /// [`PendingId`].
+    /// The entries here correspond to the entries in
+    /// [`PendingConnections::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
 
     /// Combination of addresses that we assume could be dialed to reach a certain peer. When
-    /// an address is tried, it is removed from this list.
+    /// an address is attempted, it is immediately removed from this list. It is later added
+    /// back if the dial is successful.
     ///
     /// Does not include "dialing" addresses. For example, no address should contain an outgoing
     /// TCP port.
@@ -193,6 +198,9 @@ enum ToProcessPreEvent {
     AcceptNotificationsIn {
         id: peers::DesiredInNotificationId,
         handshake_back: Vec<u8>,
+    },
+    RefuseNotificationsIn {
+        id: peers::DesiredInNotificationId,
     },
     NotificationsOut {
         id: peers::DesiredOutNotificationId,
@@ -578,6 +586,7 @@ where
     ///
     ///
     /// Must be passed the double-SCALE-encoded transaction.
+    // TODO: -> broadcast_transaction
     pub async fn announce_transaction(
         &self,
         target: &peer_id::PeerId,
@@ -692,6 +701,9 @@ where
                     ToProcessPreEvent::AcceptNotificationsIn { id, handshake_back } => {
                         self.inner.in_notification_accept(id, handshake_back).await;
                     }
+                    ToProcessPreEvent::RefuseNotificationsIn { id } => {
+                        self.inner.in_notification_refuse(id).await;
+                    }
                     ToProcessPreEvent::NotificationsOut { id, handshake } => {
                         self.inner
                             .open_out_notification(id, now.clone(), handshake)
@@ -748,6 +760,7 @@ where
                     protocol_index: 0,
                     request_payload,
                 } => {
+                    // TODO: check that request_payload is empty
                     return Event::IdentifyRequestIn {
                         peer_id,
                         request: IdentifyRequestIn {
@@ -960,7 +973,14 @@ where
 
                     if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
                         if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
-                            // TODO: self.libp2p.refuse_notifications_in(*id, *notifications_protocol_index);
+                            // Refusing the substream isn't done immediately because of
+                            // futures-cancellation-related concerns.
+                            self.to_process_pre_event.push(
+                                ToProcessPreEvent::RefuseNotificationsIn {
+                                    id: desired_in_notification_id,
+                                },
+                            );
+
                             return Event::ProtocolError {
                                 peer_id: peer_id.clone(),
                                 error: ProtocolError::BadBlockAnnouncesHandshake(err),
@@ -1087,7 +1107,7 @@ where
             let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers().await;
 
             for peer_id in unfulfilled_desired_peers {
-                // TODO: allow more than one simultaneous dial, and distribute the dials so that we don't just return the same peer multiple times in a row while there are other peers waiting
+                // TODO: allow more than one simultaneous dial per peer, and distribute the dials so that we don't just return the same peer multiple times in a row while there are other peers waiting
                 let entry = match pending.num_pending_per_peer.entry(peer_id) {
                     hashbrown::hash_map::Entry::Occupied(_) => continue,
                     hashbrown::hash_map::Entry::Vacant(entry) => entry,
@@ -1127,7 +1147,9 @@ where
             }
 
             // No valid desired peer has been found.
-            // We register a waker, unlock the mutex, and wait until the waker is called.
+            // We register a waker, unlock the mutex, and wait until the waker is invoked.
+            // The rest of the code of this state machine makes sure to invoke the waker when
+            // there is a potential new desired peer or known address.
             // TODO: if `fill_out_slots` is called multiple times simultaneously, all but the first will deadlock
             let mut pending_lock: Option<MutexGuard<_>> = Some(pending_lock);
             future::poll_fn(move |cx| {
@@ -1414,21 +1436,19 @@ where
     ///
     /// Has no effect if the connection that sends the request no longer exists.
     pub async fn respond(self, agent_version: &str) {
-        // TODO: restore
-        /*let response = {
-            let guarded = self.service.guarded.lock().await;
-
+        let response = {
             // The connection referred to by `self.id` might no longer exist anymore.
             // `self.connection_index` might no longer exist anymore or correspond to a different
             // connection. As such, if it exists, we need to compare its id with `self.id` to make
             // sure it still matches.
-            let observed_addr = match guarded.connections.get(self.connection_index) {
+            // TODO: restore somehow
+            let observed_addr = /*match guarded.connections.get(self.connection_index) {
                 Some(c) => match &c.reached {
                     Some(r) if r.inner_id == self.id => &c.address,
                     _ => return,
                 },
                 None => return,
-            };
+            }*/return;
 
             protocol::build_identify_response(protocol::IdentifyResponse {
                 protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
@@ -1459,7 +1479,7 @@ where
             .service
             .inner
             .respond(self.request_id, Ok(response))
-            .await;*/
+            .await;
     }
 }
 
