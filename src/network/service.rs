@@ -1064,8 +1064,7 @@ where
 
     /// Spawns new outgoing connections in order to fill empty outgoing slots.
     // TODO: give more control, with number of slots and node choice
-    // TODO: chain_index is unused
-    pub async fn fill_out_slots<'a>(&self, chain_index: usize) -> StartConnect {
+    pub async fn fill_out_slots<'a>(&self) -> StartConnect {
         loop {
             let mut pending_lock = self.pending.lock().await;
             let pending = &mut *pending_lock; // Prevents borrow checker issues.
@@ -1164,7 +1163,9 @@ where
 #[derive(Debug)]
 #[must_use]
 pub struct StartConnect {
+    /// Identifier of this connection request. Must be passed back later.
     pub id: PendingId,
+    /// Address to attempt to connect to.
     pub multiaddr: multiaddr::Multiaddr,
     /// [`PeerId`] that is expected to be reached with this connection attempt.
     pub expected_peer_id: PeerId,

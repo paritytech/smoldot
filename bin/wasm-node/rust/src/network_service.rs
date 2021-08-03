@@ -323,62 +323,58 @@ impl NetworkService {
         );
 
         // Spawn tasks dedicated to opening connections.
-        // TODO: spawn several, or do things asynchronously, so that we try open multiple connections simultaneously
-        for chain_index in 0..num_chains {
-            (network_service.guarded.try_lock().unwrap().tasks_executor)(
-                "connections-open".into(),
-                Box::pin({
-                    // TODO: keeping a Weak here doesn't really work to shut down tasks
-                    let network_service = Arc::downgrade(&network_service);
-                    async move {
-                        loop {
-                            let network_service = match network_service.upgrade() {
-                                Some(ns) => ns,
-                                None => {
-                                    return;
-                                }
-                            };
-
-                            // TODO: should have a more robust way of limiting the number of connections
-                            if network_service.peers_list().await.count() >= 10 {
-                                continue;
+        (network_service.guarded.try_lock().unwrap().tasks_executor)(
+            "connections-open".into(),
+            Box::pin({
+                // TODO: keeping a Weak here doesn't really work to shut down tasks
+                let network_service = Arc::downgrade(&network_service);
+                async move {
+                    loop {
+                        let network_service = match network_service.upgrade() {
+                            Some(ns) => ns,
+                            None => {
+                                return;
                             }
+                        };
 
-                            let start_connect =
-                                network_service.network.fill_out_slots(chain_index).await;
-
-                            let is_important_peer = network_service
-                                .important_nodes
-                                .contains(&start_connect.expected_peer_id);
-
-                            // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
-                            // into a `Future<dyn Output = Result<TcpStream, ...>>`.
-                            let socket = {
-                                log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
-                                ffi::Connection::connect(&start_connect.multiaddr.to_string())
-                            };
-
-                            // TODO: handle dialing timeout here
-
-                            let network_service2 = network_service.clone();
-                            (network_service.guarded.lock().await.tasks_executor)(
-                                format!("connection-{}", start_connect.expected_peer_id),
-                                Box::pin({
-                                    connection_task(
-                                        socket,
-                                        network_service2,
-                                        start_connect.id,
-                                        start_connect.expected_peer_id,
-                                        start_connect.multiaddr,
-                                        is_important_peer,
-                                    )
-                                }),
-                            );
+                        // TODO: should have a more robust way of limiting the number of connections
+                        if network_service.peers_list().await.count() >= 10 {
+                            continue;
                         }
+
+                        let start_connect = network_service.network.fill_out_slots().await;
+
+                        let is_important_peer = network_service
+                            .important_nodes
+                            .contains(&start_connect.expected_peer_id);
+
+                        // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
+                        // into a `Future<dyn Output = Result<TcpStream, ...>>`.
+                        let socket = {
+                            log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
+                            ffi::Connection::connect(&start_connect.multiaddr.to_string())
+                        };
+
+                        // TODO: handle dialing timeout here
+
+                        let network_service2 = network_service.clone();
+                        (network_service.guarded.lock().await.tasks_executor)(
+                            format!("connection-{}", start_connect.expected_peer_id),
+                            Box::pin({
+                                connection_task(
+                                    socket,
+                                    network_service2,
+                                    start_connect.id,
+                                    start_connect.expected_peer_id,
+                                    start_connect.multiaddr,
+                                    is_important_peer,
+                                )
+                            }),
+                        );
                     }
-                }),
-            );
-        }
+                }
+            }),
+        );
 
         // Spawn tasks dedicated to the Kademlia discovery.
         for chain_index in 0..num_chains {

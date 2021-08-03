@@ -527,9 +527,10 @@ where
     /// [`Peers::read_write`].
     #[must_use]
     pub async fn add_incoming_connection(&self) -> ConnectionId {
+        let mut guarded = self.guarded.lock().await;
+
         // A slab entry is first reserved without being inserted, so that the state remains
         // consistent if the user cancels the returned future.
-        let mut guarded = self.guarded.lock().await;
         let entry = guarded.connections_peer_index.vacant_entry();
         let connection_id = self.inner.insert(false, entry.key()).await;
         entry.insert(None);
@@ -547,12 +548,26 @@ where
     /// [`Peers::read_write`].
     #[must_use]
     pub async fn add_outgoing_connection(&self, expected_peer_id: &PeerId) -> ConnectionId {
+        let mut guarded = self.guarded.lock().await;
+        let guarded = &mut *guarded;
+
         // A slab entry is first reserved without being inserted, so that the state remains
         // consistent if the user cancels the returned future.
-        let mut guarded = self.guarded.lock().await;
         let entry = guarded.connections_peer_index.vacant_entry();
         let connection_id = self.inner.insert(true, entry.key()).await;
-        entry.insert(None);
+
+        let peer_index = if let Some(idx) = guarded.peer_indices.get(expected_peer_id) {
+            *idx
+        } else {
+            let idx = guarded.peers.insert(Peer {
+                desired: false,
+                peer_id: expected_peer_id.clone(),
+            });
+            guarded.peer_indices.insert(expected_peer_id.clone(), idx);
+            idx
+        };
+
+        entry.insert(Some(peer_index));
         connection_id
 
         // TODO: finish
@@ -1099,8 +1114,9 @@ struct Guarded {
     peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
 
     /// Each connection stored in [`Peers::inner`] has a `usize` user data that is an index within
-    /// this slab. The items are indices within [`Guarded::peers`], or `None` if the handshake of
-    /// the connection isn't finished yet.
+    /// this slab. The items are indices within [`Guarded::peers`].
+    /// Contains `None` if and only if the connection is an incoming connection whose handshake
+    /// isn't finished yet.
     connections_peer_index: slab::Slab<Option<usize>>,
 
     connections_by_peer: BTreeSet<(PeerId, libp2p::ConnectionId)>,
