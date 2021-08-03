@@ -235,14 +235,12 @@ where
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
                     max_notification_size: 32768, // TODO: arbitrary
-                    bootstrap_nodes: chain.bootstrap_nodes.clone(),
                 })
                 .chain(iter::once(libp2p::NotificationProtocolConfig {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
                     max_notification_size: 32768, // TODO: arbitrary
-                    bootstrap_nodes: chain.bootstrap_nodes.clone(),
                 }))
                 .chain({
                     // The `has_grandpa_protocol` flag controls whether the chain uses GrandPa.
@@ -254,11 +252,6 @@ where
                         fallback_protocol_names: Vec::new(),
                         max_handshake_size: 256,      // TODO: arbitrary
                         max_notification_size: 32768, // TODO: arbitrary
-                        bootstrap_nodes: if chain.grandpa_protocol_config.is_some() {
-                            chain.bootstrap_nodes.clone()
-                        } else {
-                            Vec::new()
-                        },
                     })
                 })
             })
@@ -345,12 +338,18 @@ where
 
         let mut initial_desired_substreams = BTreeSet::new();
 
-        for (peer_id, multiaddr) in config.known_nodes {
+        for (node_index, (peer_id, multiaddr)) in config.known_nodes.into_iter().enumerate() {
             // Register membership of this peer on this chain.
-            for notifications_protocol in
-                0..(config.chains.len() * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-            {
-                initial_desired_substreams.insert((peer_id.clone(), notifications_protocol));
+            for (chain_index, chain) in config.chains.iter().enumerate() {
+                if !chain.bootstrap_nodes.iter().any(|n| *n == node_index) {
+                    continue;
+                }
+
+                for notifications_protocol in (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+                    .map(|n| n + NOTIFICATIONS_PROTOCOLS_PER_CHAIN * chain_index)
+                {
+                    initial_desired_substreams.insert((peer_id.clone(), notifications_protocol));
+                }
             }
 
             // TODO: filter duplicates?

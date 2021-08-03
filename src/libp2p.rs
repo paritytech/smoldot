@@ -195,10 +195,6 @@ pub struct NotificationProtocolConfig {
 
     /// Maximum size, in bytes, of a notification that can be received.
     pub max_notification_size: usize,
-
-    /// List of node identities that are known to belong to this overlay network. The node
-    /// identities are indices in [`Config::known_nodes`].
-    pub bootstrap_nodes: Vec<usize>,
 }
 
 /// Identifier of a connection spawned by the [`Network`].

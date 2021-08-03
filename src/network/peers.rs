@@ -95,13 +95,13 @@ pub struct Config {
     ///
     /// # Context
     ///
-    /// The [`Network`] maintains an internal buffer of the events returned by
-    /// [`Network::next_event`]. When [`Network::read_write`] is called, an event might get pushed
+    /// The [`Peers`] maintains an internal buffer of the events returned by
+    /// [`Peers::next_event`]. When [`Peers::read_write`] is called, an event might get pushed
     /// to this buffer. If this buffer is full, back-pressure will be applied to the connections
     /// in order to prevent new events from being pushed.
     ///
-    /// This value is important if [`Network::next_event`] is called at a slower than the calls to
-    /// [`Network::read_write`] generate events.
+    /// This value is important if [`Peers::next_event`] is called at a slower than the calls to
+    /// [`Peers::read_write`] generate events.
     pub pending_api_events_buffer_size: NonZeroUsize,
 
     // TODO: don't use BTreeSet
@@ -199,8 +199,8 @@ where
         }
     }
 
-    /// Returns the list the overlay networks originally passed as [`Config::notification_protocols`].
-    // TODO: rename
+    /// Returns the list the overlay networks originally passed as
+    /// [`Config::notification_protocols`].
     pub fn notification_protocols(
         &self,
     ) -> impl ExactSizeIterator<Item = &libp2p::NotificationProtocolConfig> {
@@ -222,7 +222,7 @@ where
 
     /// Returns the next event produced by the service.
     ///
-    /// This function should be called at a high enough rate that [`Network::read_write`] can
+    /// This function should be called at a high enough rate that [`Peers::read_write`] can
     /// continue pushing events to the internal buffer of events. Failure to call this function
     /// often enough will lead to connections being back-pressured.
     /// See also [`Config::pending_api_events_buffer_size`].
@@ -834,8 +834,8 @@ where
     ///
     /// An error happens if there is no suitable connection for that request, if the connection
     /// closes while the request is in progress, if the request or response doesn't respect
-    /// the protocol limits (see [`ConfigRequestResponse`]), or if the remote takes too much time
-    /// to answer.
+    /// the protocol limits (see [`libp2p::ConfigRequestResponse`]), or if the remote takes too
+    /// much time to answer.
     ///
     /// As the API of this module is inherently subject to race conditions, it is never possible
     /// to guarantee that this function will succeed. [`RequestError::ConnectionClosed`] should
@@ -1015,8 +1015,8 @@ pub enum Event<TConn> {
         request_payload: Vec<u8>,
     },
 
-    /// A previously-emitted [`RequestIn`] is now obsolete. This event is for informative purpose
-    /// and does **not** invalidate the [`RequestIn`].
+    /// A previously-emitted [`Event::RequestIn`] is now obsolete. This event is for informative
+    /// purpose and does **not** invalidate the [`RequestId`].
     RequestInCancel {
         /// Identifier for this request.
         id: RequestId,
@@ -1038,7 +1038,7 @@ pub enum Event<TConn> {
         handshake: Vec<u8>,
     },
 
-    /// A previously-emitted [`DesiredInNotificationId`] is now obsolete. This event is for
+    /// A previously-emitted [`Event::DesiredInNotificationId`] is now obsolete. This event is for
     /// informative purpose and does **not** invalidate the [`DesiredInNotificationId`]. Use
     /// [`Peers::in_notification_refuse`] if you no longer care about this request.
     DesiredInNotificationCancel {
