@@ -149,7 +149,7 @@ pub struct Config {
     /// Number of connections containers should initially allocate for.
     pub capacity: usize,
 
-    pub overlay_networks: Vec<OverlayNetworkConfig>,
+    pub notification_protocols: Vec<NotificationProtocolConfig>,
 
     pub request_response_protocols: Vec<ConfigRequestResponse>,
 
@@ -179,8 +179,8 @@ pub struct Config {
 
 /// Configuration for a specific overlay network.
 ///
-/// See [`Config::overlay_networks`].
-pub struct OverlayNetworkConfig {
+/// See [`Config::notification_protocols`].
+pub struct NotificationProtocolConfig {
     /// Name of the protocol negotiated on the wire.
     pub protocol_name: String,
 
@@ -225,7 +225,7 @@ pub struct Network<TConn, TNow> {
     noise_key: connection::NoiseKey,
 
     /// See [`OverlayNetwork`].
-    overlay_networks: Arc<[OverlayNetwork]>,
+    notification_protocols: Arc<[OverlayNetwork]>,
 
     /// See [`Config::request_response_protocols`].
     request_response_protocols: Vec<ConfigRequestResponse>,
@@ -245,7 +245,7 @@ pub struct Network<TConn, TNow> {
 /// This struct is a slight variation to [`OverlayNetworkConfig`].
 struct OverlayNetwork {
     /// See [`OverlayNetworkConfig`].
-    config: OverlayNetworkConfig,
+    config: NotificationProtocolConfig,
 }
 
 /// Fields of [`Network`] behind a mutex.
@@ -319,15 +319,15 @@ where
     pub fn new(config: Config) -> Self {
         let (events_tx, events_rx) = mpsc::channel(config.pending_api_events_buffer_size.get() - 1);
 
-        let overlay_networks = config
-            .overlay_networks
+        let notification_protocols = config
+            .notification_protocols
             .into_iter()
             .map(|config| OverlayNetwork { config })
             .collect::<Arc<[_]>>();
 
         Network {
             noise_key: config.noise_key,
-            overlay_networks,
+            notification_protocols,
             request_response_protocols: config.request_response_protocols,
             ping_protocol: config.ping_protocol,
             events_rx: Mutex::new(events_rx),
@@ -358,7 +358,7 @@ where
         let connection_index = guarded.connections.insert(Arc::new(Mutex::new(Connection {
             connection: ConnectionInner::Handshake(handshake::HealthyHandshake::new(is_initiator)),
             id: connection_id,
-            overlay_networks: self.overlay_networks.clone(),
+            notification_protocols: self.notification_protocols.clone(),
             pending_event: None,
             waker: None,
             user_data,
@@ -385,9 +385,11 @@ where
         &self.noise_key
     }
 
-    /// Returns the list the overlay networks originally passed as [`Config::overlay_networks`].
-    pub fn overlay_networks(&self) -> impl ExactSizeIterator<Item = &OverlayNetworkConfig> {
-        self.overlay_networks.iter().map(|v| &v.config)
+    /// Returns the list the overlay networks originally passed as [`Config::notification_protocols`].
+    pub fn notification_protocols(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &NotificationProtocolConfig> {
+        self.notification_protocols.iter().map(|v| &v.config)
     }
 
     /// Returns the list the request-response protocols originally passed as
@@ -892,7 +894,7 @@ where
         let randomness_seed = [0; 32]; // TODO: self.randomness_seeds.lock().await.gen(); annoying because of async and future cancellation stuff
         established::Config {
             notifications_protocols: self
-                .overlay_networks
+                .notification_protocols
                 .iter()
                 .flat_map(|net| {
                     let max_handshake_size = net.config.max_handshake_size;
@@ -946,8 +948,8 @@ pub enum Event<TConn> {
     // TODO: add reason for shutdown
     Shutdown {
         id: ConnectionId,
-        out_overlay_network_indices: Vec<usize>,
-        in_overlay_network_indices: Vec<usize>,
+        out_notification_protocols_indices: Vec<usize>,
+        in_notification_protocols_indices: Vec<usize>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
@@ -1132,8 +1134,8 @@ struct Connection<TConn, TNow> {
     /// State machine of the underlying connection.
     connection: ConnectionInner<TNow>,
 
-    /// Copy of [`Network::overlay_networks`].
-    overlay_networks: Arc<[OverlayNetwork]>,
+    /// Copy of [`Network::notification_protocols`].
+    notification_protocols: Arc<[OverlayNetwork]>,
 
     /// Copy of the id of the connection.
     id: ConnectionId,
@@ -1586,8 +1588,8 @@ where
                     .events_tx
                     .try_send(Event::Shutdown {
                         id: self.id,
-                        in_overlay_network_indices,
-                        out_overlay_network_indices,
+                        in_notification_protocols_indices: in_overlay_network_indices,
+                        out_notification_protocols_indices: out_overlay_network_indices,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();

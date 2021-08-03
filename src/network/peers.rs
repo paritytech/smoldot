@@ -77,7 +77,7 @@ pub struct Config {
     /// Capacity to initially reserve to the list of peers.
     pub peers_capacity: usize,
 
-    pub overlay_networks: Vec<libp2p::OverlayNetworkConfig>,
+    pub notification_protocols: Vec<libp2p::NotificationProtocolConfig>,
 
     pub request_response_protocols: Vec<libp2p::ConfigRequestResponse>,
 
@@ -179,7 +179,7 @@ where
             inner: libp2p::Network::new(libp2p::Config {
                 capacity: config.connections_capacity,
                 noise_key: config.noise_key,
-                overlay_networks: config.overlay_networks,
+                notification_protocols: config.notification_protocols,
                 request_response_protocols: config.request_response_protocols,
                 ping_protocol: config.ping_protocol,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
@@ -199,10 +199,12 @@ where
         }
     }
 
-    /// Returns the list the overlay networks originally passed as [`Config::overlay_networks`].
+    /// Returns the list the overlay networks originally passed as [`Config::notification_protocols`].
     // TODO: rename
-    pub fn overlay_networks(&self) -> impl ExactSizeIterator<Item = &libp2p::OverlayNetworkConfig> {
-        self.inner.overlay_networks()
+    pub fn notification_protocols(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &libp2p::NotificationProtocolConfig> {
+        self.inner.notification_protocols()
     }
 
     /// Returns the list the request-response protocols originally passed as
@@ -384,8 +386,8 @@ where
                 }
                 libp2p::Event::Shutdown {
                     id,
-                    out_overlay_network_indices,
-                    in_overlay_network_indices,
+                    out_notification_protocols_indices: out_overlay_network_indices,
+                    in_notification_protocols_indices: in_overlay_network_indices,
                     user_data,
                 } => {
                     todo!()

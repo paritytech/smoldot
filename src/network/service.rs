@@ -226,18 +226,18 @@ where
     pub fn new(config: Config) -> Self {
         // The order of protocols here is important, as it defines the values of `protocol_index`
         // to pass to libp2p or that libp2p produces.
-        let overlay_networks = config
+        let notification_protocols = config
             .chains
             .iter()
             .flat_map(|chain| {
-                iter::once(libp2p::OverlayNetworkConfig {
+                iter::once(libp2p::NotificationProtocolConfig {
                     protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
                     max_notification_size: 32768, // TODO: arbitrary
                     bootstrap_nodes: chain.bootstrap_nodes.clone(),
                 })
-                .chain(iter::once(libp2p::OverlayNetworkConfig {
+                .chain(iter::once(libp2p::NotificationProtocolConfig {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
@@ -249,7 +249,7 @@ where
                     // Note, however, that GrandPa is technically left enabled (but unused) on all
                     // chains, in order to make the rest of the code of this module more
                     // comprehensible.
-                    iter::once(libp2p::OverlayNetworkConfig {
+                    iter::once(libp2p::NotificationProtocolConfig {
                         protocol_name: "/paritytech/grandpa/1".to_string(),
                         fallback_protocol_names: Vec::new(),
                         max_handshake_size: 256,      // TODO: arbitrary
@@ -368,7 +368,7 @@ where
                 noise_key: config.noise_key,
                 randomness_seed: inner_randomness_seed,
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
-                overlay_networks,
+                notification_protocols,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
                 initial_desired_peers: Default::default(), // Empty
                 initial_desired_substreams,
@@ -1459,7 +1459,7 @@ where
                     .chain(
                         self.service
                             .inner
-                            .overlay_networks()
+                            .notification_protocols()
                             .map(|p| &p.protocol_name[..]),
                     ),
             })
