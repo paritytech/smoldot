@@ -170,7 +170,7 @@ pub struct ChainNetwork<TNow> {
 
 struct PendingConnections {
     /// For each peer, the number of pending attempts.
-    peers: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
+    num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
 
     /// Keys of this slab are [`PendingId`]s. Values are . TODO:
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
@@ -367,7 +367,7 @@ where
             }),
             to_process_pre_event: crossbeam_queue::SegQueue::new(),
             pending: Mutex::new(PendingConnections {
-                peers,
+                num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses: potential_addresses,
                 fill_out_slots_waker: None,
@@ -621,11 +621,11 @@ where
 
         // Update `lock.peers`.
         {
-            let value = lock.peers.get_mut(expected_peer_id).unwrap();
+            let value = lock.num_pending_per_peer.get_mut(expected_peer_id).unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                lock.peers.remove(expected_peer_id).unwrap();
+                lock.num_pending_per_peer.remove(expected_peer_id).unwrap();
             }
         }
 
@@ -656,11 +656,14 @@ where
 
         // Update `lock.peers`.
         {
-            let value = lock.peers.get_mut(&expected_peer_id).unwrap();
+            let value = lock
+                .num_pending_per_peer
+                .get_mut(&expected_peer_id)
+                .unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                lock.peers.remove(&expected_peer_id).unwrap();
+                lock.num_pending_per_peer.remove(&expected_peer_id).unwrap();
             }
         }
 
@@ -1062,16 +1065,30 @@ where
         //}
     }
 
-    /// Spawns new outgoing connections in order to fill empty outgoing slots.
+    /// Allocates a [`PendingId`] and returns a [`StartConnect`] indicating a multiaddress that
+    /// the API user must try to dial.
+    ///
+    /// Later, the API user must use [`ChainNetwork::pending_outcome_ok`] or
+    /// [`ChainNetwork::pending_outcome_err`] to report how the connection attempt went.
+    ///
+    /// If no outgoing connection is desired, the method waits until there is one.
+    // TODO: document the timeout system
     // TODO: give more control, with number of slots and node choice
-    pub async fn fill_out_slots<'a>(&self) -> StartConnect {
+    pub async fn next_start_connect<'a>(&self) -> StartConnect {
         loop {
             let mut pending_lock = self.pending.lock().await;
             let pending = &mut *pending_lock; // Prevents borrow checker issues.
 
+            // Ask the underlying state machine which nodes are desired but don't have any
+            // associated connection attempt yet.
+            // Since the underlying state machine is only made aware of connections in
+            // `pending_outcome_ok`, we must filter out nodes that already have an associated
+            // `PendingId`.
             let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers().await;
+
             for peer_id in unfulfilled_desired_peers {
-                let entry = match pending.peers.entry(peer_id) {
+                // TODO: allow more than one simultaneous dial, and distribute the dials so that we don't just return the same peer multiple times in a row while there are other peers waiting
+                let entry = match pending.num_pending_per_peer.entry(peer_id) {
                     hashbrown::hash_map::Entry::Occupied(_) => continue,
                     hashbrown::hash_map::Entry::Vacant(entry) => entry,
                 };
@@ -1109,6 +1126,8 @@ where
                 return start_connect;
             }
 
+            // No valid desired peer has been found.
+            // We register a waker, unlock the mutex, and wait until the waker is called.
             // TODO: if `fill_out_slots` is called multiple times simultaneously, all but the first will deadlock
             let mut pending_lock: Option<MutexGuard<_>> = Some(pending_lock);
             future::poll_fn(move |cx| {

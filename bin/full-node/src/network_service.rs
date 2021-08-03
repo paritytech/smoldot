@@ -398,7 +398,7 @@ impl NetworkService {
                         }
                     };
 
-                    let start_connect = network_service.network.fill_out_slots().await;
+                    let start_connect = network_service.network.next_start_connect().await;
 
                     let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                     let _enter = span.enter();
