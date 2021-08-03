@@ -1038,7 +1038,7 @@ pub enum Event<TConn> {
         handshake: Vec<u8>,
     },
 
-    /// A previously-emitted [`:DesiredInNotificationId`] is now obsolete. This event is for
+    /// A previously-emitted [`DesiredInNotificationId`] is now obsolete. This event is for
     /// informative purpose and does **not** invalidate the [`DesiredInNotificationId`]. Use
     /// [`Peers::in_notification_refuse`] if you no longer care about this request.
     DesiredInNotificationCancel {
