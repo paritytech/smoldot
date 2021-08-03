@@ -71,7 +71,7 @@ export async function start(config) {
 
     } else if (message.kind == 'chainAddedOk') {
       const expected = pendingConfirmations.pop();
-      const chainId = message.chainId;
+      let chainId = message.chainId; // Later set to null when the chain is removed.
 
       if (!!chainsJsonRpcCallbacks[chainId]) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
@@ -83,19 +83,24 @@ export async function start(config) {
         sendJsonRpc: (request) => {
           if (workerError)
             throw workerError;
-          if (!chainsJsonRpcCallbacks[message.chainId])
+          if (chainId === null)
+            throw new SmoldotError('Chain has already been removed');
+          if (!chainsJsonRpcCallbacks[chainId])
             throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
           worker.postMessage({ ty: 'request', request, chainId });
         },
         remove: () => {
           if (workerError)
             throw workerError;
+          if (chainId === null)
+            throw new SmoldotError('Chain has already been removed');
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
           // response concerning that `chainId` to arrive after the `remove` function has
           // returned. We solve that by removing the callback immediately.
-          delete chainsJsonRpcCallbacks[message.chainId];
+          delete chainsJsonRpcCallbacks[chainId];
+          chainId = null;
         },
         // Hacky internal method that later lets us access the `chainId` of this chain for
         // implementation reasons.
@@ -150,11 +155,13 @@ export async function start(config) {
 
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {
-        for (var chain of options.potentialRelayChains) {
+        for (const chain of options.potentialRelayChains) {
           // The content of `options.potentialRelayChains` are supposed to be chains earlier
           // returned by `addChain`. The hacky `__internal_smoldot_id` method lets us obtain the
           // internal ID of these chains.
           const id = chain.__internal_smoldot_id();
+          if (id === null) // It is possible for `id` to be null if it has earlier been removed.
+            continue;
           potentialRelayChainsIds.push(id);
         }
       }
