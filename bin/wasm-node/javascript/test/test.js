@@ -21,7 +21,7 @@ import * as client from "../src/index.js";
 
 const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
 
-test('invalid chain spec throw error', async t => {
+test('invalid chain spec throws error', async t => {
   await client
     .start({ logCallback: () => { } })
     .then(client => client.addChain({
