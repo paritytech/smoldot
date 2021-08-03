@@ -144,12 +144,11 @@ pub struct ChainNetwork<TNow> {
     inner: peers::Peers<multiaddr::Multiaddr, TNow>,
 
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
-    /// [`ChainNetwork::libp2p`]. This event might lead to some asynchronous post-processing
-    /// being needed. Because the user can interrupt the future returned by
-    /// [`ChainNetwork::next_event`] at any point in time, this post-processing cannot be
-    /// immediately performed, as the user could could interrupt the future and lose the event.
-    /// Instead, the necessary post-processing is stored in this field. This field is then
-    /// processed before the next event is pulled.
+    /// [`libp2p::Network`]. This event might lead to some asynchronous post-processing being
+    /// needed. Because the user can interrupt the future returned by [`ChainNetwork::next_event`]
+    /// at any point in time, this post-processing cannot be immediately performed, as the user
+    /// could interrupt the future and lose the event. Instead, the necessary post-processing is
+    /// stored in this field. This field is then processed before the next event is pulled.
     to_process_pre_event: crossbeam_queue::SegQueue<ToProcessPreEvent>,
 
     /// Extra fields protected by a `Mutex` and that relate to pending outgoing connections.
@@ -189,8 +188,9 @@ struct PendingConnections {
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
 
-    /// Waker to wake up when [`ChainNetwork::fill_out_slots`] should be called again by the user.
-    fill_out_slots_waker: Option<Waker>,
+    /// Waker to wake up when [`ChainNetwork::next_start_connect`] should be called again by the
+    /// user.
+    next_start_connect_waker: Option<Waker>,
 }
 
 /// See [`ChainNetwork::to_process_pre_event`]
@@ -377,7 +377,7 @@ where
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses: potential_addresses,
-                fill_out_slots_waker: None,
+                next_start_connect_waker: None,
             }),
             chain_grandpa_config: Mutex::new(chain_grandpa_config),
             chain_configs: config.chains,
@@ -604,7 +604,7 @@ where
             .await
     }
 
-    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
     /// success of the dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
@@ -652,7 +652,7 @@ where
         connection_id
     }
 
-    /// After calling [`ChainNetwork::fill_out_slots`], notifies the [`ChainNetwork`] of the
+    /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
     /// failure of the dialing attempt.
     ///
     /// See also [`ChainNetwork::pending_outcome_ok`].
@@ -678,7 +678,7 @@ where
             }
         }
 
-        if let Some(waker) = lock.fill_out_slots_waker.take() {
+        if let Some(waker) = lock.next_start_connect_waker.take() {
             waker.wake();
         }
     }
@@ -746,7 +746,7 @@ where
                     peer_is_desired,
                 } if num_peer_connections == 0 => {
                     if peer_is_desired {
-                        todo!() // TODO: notify Waker for fill_out_slots
+                        todo!() // TODO: notify Waker for next_start_connect
                     }
 
                     return Event::Disconnected {
@@ -899,7 +899,7 @@ where
                     }
 
                     // TODO: something like that:
-                    /*if let Some(waker) = guarded.fill_out_slots_waker.take() {
+                    /*if let Some(waker) = guarded.next_start_connect_waker.take() {
                         waker.wake();
                     }*/
                 }
@@ -1155,11 +1155,11 @@ where
             // We register a waker, unlock the mutex, and wait until the waker is invoked.
             // The rest of the code of this state machine makes sure to invoke the waker when
             // there is a potential new desired peer or known address.
-            // TODO: if `fill_out_slots` is called multiple times simultaneously, all but the first will deadlock
+            // TODO: if `next_start_connect` is called multiple times simultaneously, all but the first will deadlock
             let mut pending_lock: Option<MutexGuard<_>> = Some(pending_lock);
             future::poll_fn(move |cx| {
                 if let Some(mut pending_lock) = pending_lock.take() {
-                    pending_lock.fill_out_slots_waker = Some(cx.waker().clone());
+                    pending_lock.next_start_connect_waker = Some(cx.waker().clone());
                     Poll::Pending
                 } else {
                     Poll::Ready(())
