@@ -353,7 +353,6 @@ where
         let connection_index = guarded.connections.insert(Arc::new(Mutex::new(Connection {
             connection: ConnectionInner::Handshake(handshake::HealthyHandshake::new(is_initiator)),
             id: connection_id,
-            notification_protocols: self.notification_protocols.clone(),
             pending_event: None,
             waker: None,
             user_data,
@@ -1129,9 +1128,6 @@ pub enum OpenNotificationsSubstreamError {
 struct Connection<TConn, TNow> {
     /// State machine of the underlying connection.
     connection: ConnectionInner<TNow>,
-
-    /// Copy of [`Network::notification_protocols`].
-    notification_protocols: Arc<[OverlayNetwork]>,
 
     /// Copy of the id of the connection.
     id: ConnectionId,
