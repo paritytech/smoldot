@@ -1063,16 +1063,18 @@ where
             peer_id::PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
         };
 
+        // TODO: implement Kademlia properly
+
         // Select a random peer to query.
 
         let request_data = kademlia::build_find_node_request(random_peer_id.as_bytes());
-        /*if let Some(target) = self.libp2p.peers_list_lock().await.next() {
+        if let Some(target) = self.inner.peers_list().await.next() {
             // TODO: better peer selection
             let response = self
-                .libp2p
+                .inner
                 .request(
                     now,
-                    target,
+                    &target,
                     self.protocol_index(chain_index, 2),
                     request_data,
                 )
@@ -1085,9 +1087,9 @@ where
                 outcome: decoded,
                 chain_index,
             })
-        } else {*/
-        Err(DiscoveryError::NoPeer)
-        //}
+        } else {
+            Err(DiscoveryError::NoPeer)
+        }
     }
 
     /// Allocates a [`PendingId`] and returns a [`StartConnect`] indicating a multiaddress that

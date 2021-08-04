@@ -1174,7 +1174,13 @@ impl<TConn> Guarded<TConn> {
             return *idx;
         }
 
-        todo!()
+        let index = self.peers.insert(Peer {
+            desired: false,
+            peer_id: peer_id.clone(),
+        });
+
+        self.peer_indices.insert(peer_id.clone(), index);
+        index
     }
 }
 
