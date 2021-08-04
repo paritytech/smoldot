@@ -218,6 +218,10 @@ enum ToProcessPreEvent {
         notifications_protocol_index: usize,
         notification: Vec<u8>,
     },
+    SendGrandpaNeighborPacket {
+        peer_id: PeerId,
+        notifications_protocol_index: usize,
+    },
     WakeNextStartConnect,
 }
 
@@ -717,6 +721,7 @@ where
             match guarded.to_process_pre_event.as_mut() {
                 None => {}
                 Some(ToProcessPreEvent::AcceptNotificationsIn { id, handshake_back }) => {
+                    // TODO: use Result
                     self.inner
                         .in_notification_accept(*id, handshake_back.clone())
                         .await;
@@ -746,6 +751,36 @@ where
                         )
                         .await;
                     guarded.to_process_pre_event = None;
+                }
+                Some(ToProcessPreEvent::SendGrandpaNeighborPacket {
+                    peer_id,
+                    notifications_protocol_index,
+                }) => {
+                    // Grandpa notification has been opened. Send neighbor packet.
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    let grandpa_config = self.chain_grandpa_config.lock().await[chain_index]
+                        .as_ref()
+                        .unwrap()
+                        .clone();
+                    let notification =
+                        protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
+                            round_number: grandpa_config.round_number,
+                            set_id: grandpa_config.set_id,
+                            commit_finalized_height: grandpa_config.commit_finalized_height,
+                        })
+                        .scale_encoding()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
+
+                    // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
+                    guarded.to_process_pre_event = Some(ToProcessPreEvent::QueueNotification {
+                        peer_id: peer_id.clone(),
+                        notifications_protocol_index: *notifications_protocol_index,
+                        notification,
+                    });
                 }
                 Some(ToProcessPreEvent::WakeNextStartConnect) => {
                     // Note that it can be dangerous to lock a second mutex while `guarded` is
@@ -843,32 +878,15 @@ where
                     } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
                     {
                         // Grandpa notification has been opened. Send neighbor packet.
-                        // TODO: futures cancellation problem; put the entire thing in to_process_pre_event
-                        let grandpa_config = self.chain_grandpa_config.lock().await[chain_index]
-                            .as_ref()
-                            .unwrap()
-                            .clone();
-                        let packet =
-                            protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
-                                round_number: grandpa_config.round_number,
-                                set_id: grandpa_config.set_id,
-                                commit_finalized_height: grandpa_config.commit_finalized_height,
-                            })
-                            .scale_encoding()
-                            .fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            });
-
-                        // Sending the notification isn't done immediately because of
-                        // futures-cancellation-related concerns.
+                        // This isn't done immediately because of futures-cancellation-related
+                        // concerns.
                         // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
                         debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event = Some(ToProcessPreEvent::QueueNotification {
-                            peer_id,
-                            notifications_protocol_index,
-                            notification: packet,
-                        });
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::SendGrandpaNeighborPacket {
+                                peer_id,
+                                notifications_protocol_index,
+                            });
                     } else {
                         unreachable!()
                     }
