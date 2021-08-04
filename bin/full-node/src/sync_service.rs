@@ -171,8 +171,8 @@ fn start_sync(
             // This is the maximum number of blocks between two consecutive justifications.
             1024
         },
-        source_selection_randomness_seed: rand::random(),
-        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
+        max_disjoint_headers: 1024,
+        max_requests_per_block: NonZeroU32::new(3).unwrap(),
         download_ahead_blocks: {
             // Assuming a verification speed of 1k blocks/sec and a 95% latency of one second,
             // the number of blocks to download ahead of time in order to not block is 1000.
