@@ -828,7 +828,13 @@ where
         notifications_protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) {
-        //todo!()
+        // TODO: implement this better
+        let notification = notification.into();
+        for peer in self.peers_list().await {
+            let _ = self
+                .queue_notification(&peer, notifications_protocol_index, notification.clone())
+                .await;
+        }
     }
 
     /// Sends a request to the given peer, and waits for a response.
