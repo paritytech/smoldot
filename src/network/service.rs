@@ -169,7 +169,7 @@ pub struct ChainNetwork<TNow> {
 /// See [`ChainNetwork::guarded`].
 struct Guarded {
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
-    /// [`libp2p::Network`]. This event might lead to some asynchronous post-processing being
+    /// [`peers::Peers`]. This event might lead to some asynchronous post-processing being
     /// needed. Because the user can interrupt the future returned by [`ChainNetwork::next_event`]
     /// at any point in time, this post-processing cannot be immediately performed, as the user
     /// could interrupt the future and lose the event. Instead, the necessary post-processing is
