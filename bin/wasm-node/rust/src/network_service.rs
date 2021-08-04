@@ -323,7 +323,7 @@ impl NetworkService {
         );
 
         // Spawn tasks dedicated to opening connections.
-        // TODO: spawn multiple of these and t weak the `connection_task`, so that we limit ourselves to N simultaneous connection openings, to please some ISPs
+        // TODO: spawn multiple of these and tweak the `connection_task`, so that we limit ourselves to N simultaneous connection openings, to please some ISPs
         (network_service.guarded.try_lock().unwrap().tasks_executor)(
             "connections-open".into(),
             Box::pin({
@@ -337,11 +337,6 @@ impl NetworkService {
                                 return;
                             }
                         };
-
-                        // TODO: should have a more robust way of limiting the number of connections
-                        if network_service.peers_list().await.count() >= 10 {
-                            continue;
-                        }
 
                         let start_connect = network_service.network.next_start_connect().await;
 
