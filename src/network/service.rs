@@ -200,7 +200,7 @@ struct PendingConnections {
     next_start_connect_waker: Option<Waker>,
 }
 
-/// See [`ChainNetwork::to_process_pre_event`]
+/// See [`Guarded::to_process_pre_event`]
 enum ToProcessPreEvent {
     AcceptNotificationsIn {
         id: peers::DesiredInNotificationId,
