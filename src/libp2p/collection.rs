@@ -268,7 +268,7 @@ struct Guarded<TConn, TNow> {
 
 /// See [`Guarded::connection_overlays`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-pub enum SubstreamDirection {
+enum SubstreamDirection {
     /// Substream opened by the remote.
     In,
     /// Substream opened by the local node.
