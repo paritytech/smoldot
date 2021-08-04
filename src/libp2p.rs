@@ -238,9 +238,9 @@ pub struct Network<TConn, TNow> {
 
 /// State of a specific overlay network.
 ///
-/// This struct is a slight variation to [`OverlayNetworkConfig`].
+/// This struct is a slight variation to [`NotificationProtocolConfig`].
 struct OverlayNetwork {
-    /// See [`OverlayNetworkConfig`].
+    /// See [`NotificationProtocolConfig`].
     config: NotificationProtocolConfig,
 }
 

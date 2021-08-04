@@ -1163,7 +1163,7 @@ struct Guarded<TConn> {
     // TODO: doc
     desired_out_notifications: slab::Slab<(libp2p::ConnectionId, usize)>,
 
-    /// Each [`RequestIn`] points to this slab. Contains the arguments to pass when calling
+    /// Each [`RequestId`] points to this slab. Contains the arguments to pass when calling
     /// [`libp2p::Network::respond_in_request`].
     requests_in: slab::Slab<(ConnectionId, libp2p::connection::established::SubstreamId)>,
 }
