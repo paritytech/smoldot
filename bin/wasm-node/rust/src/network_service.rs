@@ -43,10 +43,10 @@ use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     informant::HashDisplay,
     libp2p::{
+        collection::ConnectionError,
         connection::{self, handshake::HandshakeError},
         multiaddr::Multiaddr,
         peer_id::PeerId,
-        ConnectionError,
     },
     network::{protocol, service},
 };
@@ -95,7 +95,7 @@ pub struct NetworkService {
     guarded: Mutex<Guarded>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<ffi::Instant, (), ()>,
+    network: service::ChainNetwork<ffi::Instant>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -155,12 +155,7 @@ impl NetworkService {
                 role: protocol::Role::Light,
             });
 
-            known_nodes.extend(
-                chain
-                    .bootstrap_nodes
-                    .into_iter()
-                    .map(|(peer_id, addr)| ((), peer_id, addr)),
-            );
+            known_nodes.extend(chain.bootstrap_nodes);
         }
 
         let network_service = Arc::new(NetworkService {
@@ -170,7 +165,8 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 chains,
                 known_nodes,
-                listen_addresses: Vec::new(), // TODO:
+                connections_capacity: 100, // TODO: ?
+                peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 16
@@ -196,7 +192,11 @@ impl NetworkService {
                                 }
                             };
 
-                            match network_service.network.next_event().await {
+                            match network_service
+                                .network
+                                .next_event(ffi::Instant::now())
+                                .await
+                            {
                                 service::Event::Connected(peer_id) => {
                                     log::info!(target: "network", "Connected to {}", peer_id);
                                 }
@@ -323,68 +323,54 @@ impl NetworkService {
         );
 
         // Spawn tasks dedicated to opening connections.
-        // TODO: spawn several, or do things asynchronously, so that we try open multiple connections simultaneously
-        for chain_index in 0..num_chains {
-            (network_service.guarded.try_lock().unwrap().tasks_executor)(
-                "connections-open".into(),
-                Box::pin({
-                    // TODO: keeping a Weak here doesn't really work to shut down tasks
-                    let network_service = Arc::downgrade(&network_service);
-                    async move {
-                        loop {
-                            // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
-                            ffi::Delay::new(Duration::from_secs(1)).await;
-
-                            let network_service = match network_service.upgrade() {
-                                Some(ns) => ns,
-                                None => {
-                                    return;
-                                }
-                            };
-
-                            // TODO: should have a more robust way of limiting the number of connections
-                            if network_service.peers_list().await.count() >= 10 {
-                                continue;
+        // TODO: spawn multiple of these and tweak the `connection_task`, so that we limit ourselves to N simultaneous connection openings, to please some ISPs
+        (network_service.guarded.try_lock().unwrap().tasks_executor)(
+            "connections-open".into(),
+            Box::pin({
+                // TODO: keeping a Weak here doesn't really work to shut down tasks
+                let network_service = Arc::downgrade(&network_service);
+                async move {
+                    loop {
+                        let network_service = match network_service.upgrade() {
+                            Some(ns) => ns,
+                            None => {
+                                return;
                             }
+                        };
 
-                            let start_connect =
-                                match network_service.network.fill_out_slots(chain_index).await {
-                                    Some(sc) => sc,
-                                    None => continue,
-                                };
+                        let start_connect = network_service.network.next_start_connect().await;
 
-                            let is_important_peer = network_service
-                                .important_nodes
-                                .contains(&start_connect.expected_peer_id);
+                        let is_important_peer = network_service
+                            .important_nodes
+                            .contains(&start_connect.expected_peer_id);
 
-                            // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
-                            // into a `Future<dyn Output = Result<TcpStream, ...>>`.
-                            let socket = {
-                                log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
-                                ffi::Connection::connect(&start_connect.multiaddr.to_string())
-                            };
+                        // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
+                        // into a `Future<dyn Output = Result<TcpStream, ...>>`.
+                        let socket = {
+                            log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
+                            ffi::Connection::connect(&start_connect.multiaddr.to_string())
+                        };
 
-                            // TODO: handle dialing timeout here
+                        // TODO: handle dialing timeout here
 
-                            let network_service2 = network_service.clone();
-                            (network_service.guarded.lock().await.tasks_executor)(
-                                format!("connection-{}", start_connect.expected_peer_id),
-                                Box::pin({
-                                    connection_task(
-                                        socket,
-                                        network_service2,
-                                        start_connect.id,
-                                        start_connect.expected_peer_id,
-                                        start_connect.multiaddr,
-                                        is_important_peer,
-                                    )
-                                }),
-                            );
-                        }
+                        let network_service2 = network_service.clone();
+                        (network_service.guarded.lock().await.tasks_executor)(
+                            format!("connection-{}", start_connect.expected_peer_id),
+                            Box::pin({
+                                connection_task(
+                                    socket,
+                                    network_service2,
+                                    start_connect.id,
+                                    start_connect.expected_peer_id,
+                                    start_connect.multiaddr,
+                                    is_important_peer,
+                                )
+                            }),
+                        );
                     }
-                }),
-            );
-        }
+                }
+            }),
+        );
 
         // Spawn tasks dedicated to the Kademlia discovery.
         for chain_index in 0..num_chains {
@@ -415,7 +401,7 @@ impl NetworkService {
                                         log::trace!(target: "connections", "Discovered {}", peer_id);
                                     }
 
-                                    insert.insert(|_| ()).await;
+                                    insert.insert().await;
                                 }
                                 Err(error) => {
                                     log::warn!(target: "connections", "Problem during discovery: {}", error);
@@ -427,34 +413,6 @@ impl NetworkService {
             );
         }
 
-        (network_service.guarded.try_lock().unwrap().tasks_executor)(
-            "substreams-open".into(),
-            Box::pin({
-                // TODO: keeping a Weak here doesn't really work to shut down tasks
-                let network_service = Arc::downgrade(&network_service);
-                async move {
-                    loop {
-                        // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
-                        ffi::Delay::new(Duration::from_secs(1)).await;
-
-                        let network_service = match network_service.upgrade() {
-                            Some(ns) => ns,
-                            None => {
-                                return;
-                            }
-                        };
-
-                        network_service
-                            .network
-                            .next_substream()
-                            .await
-                            .open(ffi::Instant::now())
-                            .await;
-                    }
-                }
-            }),
-        );
-
         (network_service, receivers)
     }
 
@@ -462,7 +420,7 @@ impl NetworkService {
     // TODO: more docs
     pub async fn blocks_request(
         self: Arc<Self>,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of future longevity issue
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
@@ -470,7 +428,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .blocks_request(ffi::Instant::now(), target.clone(), chain_index, config)
+            .blocks_request(ffi::Instant::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -487,7 +445,7 @@ impl NetworkService {
     // TODO: more docs
     pub async fn grandpa_warp_sync_request(
         self: Arc<Self>,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of future longevity issue
         chain_index: usize,
         begin_hash: [u8; 32],
     ) -> Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError> {
@@ -498,7 +456,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .grandpa_warp_sync_request(ffi::Instant::now(), target.clone(), chain_index, begin_hash)
+            .grandpa_warp_sync_request(ffi::Instant::now(), &target, chain_index, begin_hash)
             .await;
 
         if let Ok(response) = result.as_ref() {
@@ -546,7 +504,7 @@ impl NetworkService {
     pub async fn storage_proof_request(
         self: Arc<Self>,
         chain_index: usize,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
         log::debug!(
@@ -559,7 +517,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .storage_proof_request(ffi::Instant::now(), target.clone(), chain_index, config)
+            .storage_proof_request(ffi::Instant::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -579,7 +537,7 @@ impl NetworkService {
     pub async fn call_proof_request<'a>(
         self: Arc<Self>,
         chain_index: usize,
-        target: PeerId,
+        target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, service::CallProofRequestError> {
         log::debug!(
@@ -592,7 +550,7 @@ impl NetworkService {
 
         let result = self
             .network
-            .call_proof_request(ffi::Instant::now(), target.clone(), chain_index, config)
+            .call_proof_request(ffi::Instant::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -707,10 +665,7 @@ async fn connection_task(
         }
     };
 
-    let id = network_service
-        .network
-        .pending_outcome_ok(pending_id, ())
-        .await;
+    let id = network_service.network.pending_outcome_ok(pending_id).await;
 
     log::debug!(
         target: "connections",

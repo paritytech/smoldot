@@ -24,7 +24,7 @@ import * as process from 'process';
 // Adjust these chain specs for the chain you want to connect to.
 import * as fs from 'fs';
 
-const chainSpec = fs.readFileSync('../../westend.json', 'utf8');
+const chainSpec = fs.readFileSync('../../polkadot.json', 'utf8');
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity

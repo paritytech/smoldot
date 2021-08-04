@@ -111,7 +111,7 @@ pub struct NetworkService {
     guarded: parking_lot::Mutex<Guarded>,
 
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<Instant, (), ()>,
+    network: service::ChainNetwork<Instant>,
 }
 
 /// Fields of [`NetworkService`] behind a mutex.
@@ -197,7 +197,7 @@ impl NetworkService {
             let mut bootstrap_nodes = Vec::with_capacity(chain.bootstrap_nodes.len());
             for (peer_id, addr) in chain.bootstrap_nodes {
                 bootstrap_nodes.push(known_nodes.len());
-                known_nodes.push(((), peer_id, addr));
+                known_nodes.push((peer_id, addr));
             }
 
             chains.push(service::ChainConfig {
@@ -230,7 +230,8 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 chains,
                 known_nodes,
-                listen_addresses: Vec::new(), // TODO:
+                connections_capacity: 100, // TODO: ?
+                peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 64
@@ -253,7 +254,7 @@ impl NetworkService {
                             }
                         };
 
-                        match network_service.network.next_event().await {
+                        match network_service.network.next_event(Instant::now()).await {
                             service::Event::Connected(peer_id) => {
                                 tracing::debug!(%peer_id, "connected");
                             }
@@ -369,7 +370,7 @@ impl NetworkService {
                         {
                             Ok(insert) => {
                                 insert
-                                    .insert(|_| ())
+                                    .insert()
                                     .instrument(tracing::debug_span!("insert"))
                                     .await
                             }
@@ -383,71 +384,47 @@ impl NetworkService {
             }));
         }
 
-        // Spawn tasks dedicated to opening connections.
-        // TODO: spawn several, or do things asynchronously, so that we try open multiple connections simultaneously
-        for chain_index in 0..network_service.network.num_chains() {
-            (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-                let network_service = Arc::downgrade(&network_service);
-                async move {
-                    loop {
-                        // TODO: very crappy way of not spamming the network service ; instead we should wake this task up when a disconnect or a discovery happens
-                        futures_timer::Delay::new(Duration::from_secs(1)).await;
-
-                        let network_service = match network_service.upgrade() {
-                            Some(ns) => ns,
-                            None => {
-                                tracing::debug!("task-finish");
-                                return;
-                            }
-                        };
-
-                        let start_connect = match network_service.network.fill_out_slots(chain_index).await {
-                            Some(sc) => sc,
-                            None => continue,
-                        };
-
-                        let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
-                        let _enter = span.enter();
-
-                        // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-                        // a `Future<dyn Output = Result<TcpStream, ...>>`.
-                        let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
-                            Ok(socket) => socket,
-                            Err(_) => {
-                                tracing::debug!(%start_connect.multiaddr, "not-tcp");
-                                network_service.network.pending_outcome_err(start_connect.id).await;
-                                continue;
-                            }
-                        };
-
-                        // TODO: handle dialing timeout here
-
-                        let network_service2 = network_service.clone();
-                        (network_service.guarded.lock().tasks_executor)(Box::pin({
-                            connection_task(socket, network_service2, start_connect.id).instrument(
-                                tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
-                            )
-                        }));
-                    }
-                }
-                .instrument(tracing::debug_span!(parent: None, "tcp-dial"))
-            }))
-        }
-
+        // Spawn task dedicated to opening connections.
         (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-            let network_service = network_service.clone();
+            let network_service = Arc::downgrade(&network_service);
             async move {
-                // TODO: stop the task if the network service is destroyed
                 loop {
-                    network_service
-                        .network
-                        .next_substream()
-                        .await
-                        .open(Instant::now())
-                        .await;
+                    // TODO: stupid way to shut down task
+                    let network_service = match network_service.upgrade() {
+                        Some(ns) => ns,
+                        None => {
+                            tracing::debug!("task-finish");
+                            return;
+                        }
+                    };
+
+                    let start_connect = network_service.network.next_start_connect().await;
+
+                    let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
+                    let _enter = span.enter();
+
+                    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
+                    // a `Future<dyn Output = Result<TcpStream, ...>>`.
+                    let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
+                        Ok(socket) => socket,
+                        Err(_) => {
+                            tracing::debug!(%start_connect.multiaddr, "not-tcp");
+                            network_service.network.pending_outcome_err(start_connect.id).await;
+                            continue;
+                        }
+                    };
+
+                    // TODO: handle dialing timeout here
+
+                    let network_service2 = network_service.clone();
+                    (network_service.guarded.lock().tasks_executor)(Box::pin({
+                        connection_task(socket, network_service2, start_connect.id).instrument(
+                            tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
+                        )
+                    }));
                 }
             }
-            .instrument(tracing::debug_span!(parent: None, "substreams-open"))
+            .instrument(tracing::debug_span!(parent: None, "tcp-dial"))
         }));
 
         Ok((network_service, receivers))
@@ -464,12 +441,12 @@ impl NetworkService {
     #[tracing::instrument(skip(self))]
     pub async fn blocks_request(
         self: Arc<Self>,
-        target: PeerId,
+        target: PeerId, // TODO: by value?
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
         self.network
-            .blocks_request(Instant::now(), target, chain_index, config)
+            .blocks_request(Instant::now(), &target, chain_index, config)
             .await
     }
 }
@@ -500,7 +477,7 @@ async fn connection_task(
         }
     };
 
-    let id = network_service.network.pending_outcome_ok(id, ()).await;
+    let id = network_service.network.pending_outcome_ok(id).await;
 
     // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
     // out and waiting a bit before actually sending it out, in order to potentially merge
