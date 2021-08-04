@@ -761,12 +761,16 @@ where
     ) {
         let mut guarded = self.guarded.lock().await;
 
-        // TODO: rename overlay network index
-        let (connection_id, overlay_network_index) =
+        let (connection_id, notifications_protocol_index) =
             *guarded.desired_out_notifications.get(id.0).unwrap();
 
         self.inner
-            .open_notifications_substream(connection_id, overlay_network_index, now, handshake)
+            .open_notifications_substream(
+                connection_id,
+                notifications_protocol_index,
+                now,
+                handshake,
+            )
             .await;
 
         // Only remove from the list at the end, in case the user cancels the future returned by
@@ -1155,8 +1159,9 @@ struct Guarded<TConn> {
     /// state of the corresponding outbound notifications substream.
     peers_notifications_out: BTreeMap<(usize, usize), NotificationsOutState>,
 
-    /// Each [`DesiredInNotificationId`] points to this slab.
-    // TODO: doc
+    /// Each [`DesiredInNotificationId`] points to this slab. Contains the connection and
+    /// notifications protocol index to accept or refuse. Items are always initially set to `Some`,
+    /// but they can be set to `None` if the remote cancels its request.
     desired_in_notifications: slab::Slab<Option<(libp2p::ConnectionId, usize)>>,
 
     /// Each [`DesiredOutNotificationId`] points to this slab.

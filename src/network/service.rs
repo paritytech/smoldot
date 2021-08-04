@@ -143,13 +143,9 @@ pub struct ChainNetwork<TNow> {
     /// Underlying data structure.
     inner: peers::Peers<multiaddr::Multiaddr, TNow>,
 
-    /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
-    /// [`libp2p::Network`]. This event might lead to some asynchronous post-processing being
-    /// needed. Because the user can interrupt the future returned by [`ChainNetwork::next_event`]
-    /// at any point in time, this post-processing cannot be immediately performed, as the user
-    /// could interrupt the future and lose the event. Instead, the necessary post-processing is
-    /// stored in this field. This field is then processed before the next event is pulled.
-    to_process_pre_event: crossbeam_queue::SegQueue<ToProcessPreEvent>,
+    /// Extra fields protected by a `Mutex`. Must only be locked around
+    /// [`ChainNetwork::next_event`].
+    guarded: Mutex<Guarded>,
 
     /// Extra fields protected by a `Mutex` and that relate to pending outgoing connections.
     pending: Mutex<PendingConnections>,
@@ -165,6 +161,17 @@ pub struct ChainNetwork<TNow> {
 
     /// Generator for randomness.
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
+}
+
+/// See [`ChainNetwork::guarded`].
+struct Guarded {
+    /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
+    /// [`libp2p::Network`]. This event might lead to some asynchronous post-processing being
+    /// needed. Because the user can interrupt the future returned by [`ChainNetwork::next_event`]
+    /// at any point in time, this post-processing cannot be immediately performed, as the user
+    /// could interrupt the future and lose the event. Instead, the necessary post-processing is
+    /// stored in this field. This field is then processed before the next event is pulled.
+    to_process_pre_event: Option<ToProcessPreEvent>,
 }
 
 /// See [`ChainNetwork::pending`].
@@ -211,6 +218,7 @@ enum ToProcessPreEvent {
         notifications_protocol_index: usize,
         notification: Vec<u8>,
     },
+    WakeNextStartConnect,
 }
 
 // Update this when a new request response protocol is added.
@@ -372,7 +380,9 @@ where
                 initial_desired_peers: Default::default(), // Empty
                 initial_desired_substreams,
             }),
-            to_process_pre_event: crossbeam_queue::SegQueue::new(),
+            guarded: Mutex::new(Guarded {
+                to_process_pre_event: None,
+            }),
             pending: Mutex::new(PendingConnections {
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
@@ -438,9 +448,6 @@ where
     pub async fn set_local_grandpa_state(&self, chain_index: usize, grandpa_state: GrandpaState) {
         let mut chain_grandpa_configs = self.chain_grandpa_config.lock().await;
 
-        // Store this state for later, in case we open new Grandpa substreams.
-        *chain_grandpa_configs[chain_index].as_mut().unwrap() = grandpa_state;
-
         // Bytes of the neighbor packet to send out.
         let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
             round_number: grandpa_state.round_number,
@@ -454,7 +461,6 @@ where
         });
 
         // Now sending out.
-        // TODO: futures cancellation issue; do we care?
         let _ = self
             .inner
             .broadcast_notification(
@@ -462,6 +468,11 @@ where
                 packet.clone(),
             )
             .await;
+
+        // Update the locally-stored state, but only after the notification has been broadcasted.
+        // This way, if the user cancels the future while `broadcast_notification` is executing,
+        // the whole operation is cancelled.
+        *chain_grandpa_configs[chain_index].as_mut().unwrap() = grandpa_state;
     }
 
     /// Sends a blocks request to the given peer.
@@ -696,38 +707,55 @@ where
     /// produced, and calling this function multiple times is therefore discouraged.
     // TODO: this `now` parameter, it's a hack
     pub async fn next_event(&'_ self, now: TNow) -> Event<'_, TNow> {
-        loop {
-            if let Some(to_process_pre_event) = self.to_process_pre_event.pop() {
-                // TODO: cancellation issues since the thing is already popped 🤦
-                match to_process_pre_event {
-                    ToProcessPreEvent::AcceptNotificationsIn { id, handshake_back } => {
-                        self.inner.in_notification_accept(id, handshake_back).await;
-                    }
-                    ToProcessPreEvent::RefuseNotificationsIn { id } => {
-                        self.inner.in_notification_refuse(id).await;
-                    }
-                    ToProcessPreEvent::NotificationsOut { id, handshake } => {
-                        self.inner
-                            .open_out_notification(id, now.clone(), handshake)
-                            .await;
-                    }
-                    ToProcessPreEvent::QueueNotification {
-                        peer_id,
-                        notifications_protocol_index,
-                        notification,
-                    } => {
-                        let _ = self
-                            .inner
-                            .queue_notification(
-                                &peer_id,
-                                notifications_protocol_index,
-                                notification,
-                            )
-                            .await;
-                    }
-                }
+        let mut guarded = self.guarded.lock().await;
+        let guarded = &mut *guarded;
 
-                continue;
+        loop {
+            // First, process `to_process_pre_event`.
+            // We don't do `to_process_pre_event.take()` in order to handle the possibility where
+            // the user cancels the future during an `await` point.
+            match guarded.to_process_pre_event.as_mut() {
+                None => {}
+                Some(ToProcessPreEvent::AcceptNotificationsIn { id, handshake_back }) => {
+                    self.inner
+                        .in_notification_accept(*id, handshake_back.clone())
+                        .await;
+                    guarded.to_process_pre_event = None;
+                }
+                Some(ToProcessPreEvent::RefuseNotificationsIn { id }) => {
+                    self.inner.in_notification_refuse(*id).await;
+                    guarded.to_process_pre_event = None;
+                }
+                Some(ToProcessPreEvent::NotificationsOut { id, handshake }) => {
+                    self.inner
+                        .open_out_notification(*id, now.clone(), handshake.clone())
+                        .await;
+                    guarded.to_process_pre_event = None;
+                }
+                Some(ToProcessPreEvent::QueueNotification {
+                    peer_id,
+                    notifications_protocol_index,
+                    notification,
+                }) => {
+                    let _ = self
+                        .inner
+                        .queue_notification(
+                            peer_id,
+                            *notifications_protocol_index,
+                            notification.clone(),
+                        )
+                        .await;
+                    guarded.to_process_pre_event = None;
+                }
+                Some(ToProcessPreEvent::WakeNextStartConnect) => {
+                    // Note that it can be dangerous to lock a second mutex while `guarded` is
+                    // already locked. In practice, `guarded` is only ever locked within
+                    // `next_event`, making this safe.
+                    if let Some(waker) = self.pending.lock().await.next_start_connect_waker.take() {
+                        waker.wake();
+                    }
+                    guarded.to_process_pre_event = None;
+                }
             }
 
             match self.inner.next_event().await {
@@ -746,7 +774,9 @@ where
                     peer_is_desired,
                 } if num_peer_connections == 0 => {
                     if peer_is_desired {
-                        todo!() // TODO: notify Waker for next_start_connect
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::WakeNextStartConnect);
                     }
 
                     return Event::Disconnected {
@@ -833,12 +863,12 @@ where
                         // Sending the notification isn't done immediately because of
                         // futures-cancellation-related concerns.
                         // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
-                        self.to_process_pre_event
-                            .push(ToProcessPreEvent::QueueNotification {
-                                peer_id,
-                                notifications_protocol_index,
-                                notification: packet,
-                            });
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event = Some(ToProcessPreEvent::QueueNotification {
+                            peer_id,
+                            notifications_protocol_index,
+                            notification: packet,
+                        });
                     } else {
                         unreachable!()
                     }
@@ -881,8 +911,9 @@ where
 
                     // Indicating the handshake isn't done immediately because of
                     // futures-cancellation-related concerns.
-                    self.to_process_pre_event
-                        .push(ToProcessPreEvent::NotificationsOut { id, handshake });
+                    debug_assert!(guarded.to_process_pre_event.is_none());
+                    guarded.to_process_pre_event =
+                        Some(ToProcessPreEvent::NotificationsOut { id, handshake });
                 }
                 peers::Event::NotificationsOutClose {
                     notifications_protocol_index,
@@ -898,10 +929,8 @@ where
                         };
                     }
 
-                    // TODO: something like that:
-                    /*if let Some(waker) = guarded.next_start_connect_waker.take() {
-                        waker.wake();
-                    }*/
+                    debug_assert!(guarded.to_process_pre_event.is_none());
+                    guarded.to_process_pre_event = Some(ToProcessPreEvent::WakeNextStartConnect);
                 }
                 peers::Event::NotificationsInClose {
                     peer_id,
@@ -980,11 +1009,11 @@ where
                         if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
                             // Refusing the substream isn't done immediately because of
                             // futures-cancellation-related concerns.
-                            self.to_process_pre_event.push(
-                                ToProcessPreEvent::RefuseNotificationsIn {
+                            debug_assert!(guarded.to_process_pre_event.is_none());
+                            guarded.to_process_pre_event =
+                                Some(ToProcessPreEvent::RefuseNotificationsIn {
                                     id: desired_in_notification_id,
-                                },
-                            );
+                                });
 
                             return Event::ProtocolError {
                                 peer_id: peer_id.clone(),
@@ -1008,8 +1037,9 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        self.to_process_pre_event
-                            .push(ToProcessPreEvent::AcceptNotificationsIn {
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::AcceptNotificationsIn {
                                 id: desired_in_notification_id,
                                 handshake_back: handshake,
                             });
@@ -1018,8 +1048,9 @@ where
                     {
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        self.to_process_pre_event
-                            .push(ToProcessPreEvent::AcceptNotificationsIn {
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::AcceptNotificationsIn {
                                 id: desired_in_notification_id,
                                 handshake_back: Vec::new(),
                             });
@@ -1034,8 +1065,9 @@ where
 
                         // Accepting the substream isn't done immediately because of
                         // futures-cancellation-related concerns.
-                        self.to_process_pre_event
-                            .push(ToProcessPreEvent::AcceptNotificationsIn {
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event =
+                            Some(ToProcessPreEvent::AcceptNotificationsIn {
                                 id: desired_in_notification_id,
                                 handshake_back: handshake,
                             });
