@@ -45,7 +45,7 @@
 //! does *not* invalidate its [`RequestId`].
 //!
 
-use crate::libp2p::{self, PeerId};
+use crate::libp2p::{self, collection, PeerId};
 
 use alloc::{
     collections::{btree_map, BTreeMap, BTreeSet},
@@ -66,6 +66,11 @@ use futures::{
 }; // TODO: no_std-ize
 use rand::{Rng as _, SeedableRng as _};
 
+pub use collection::{
+    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionError, ConnectionReadyFuture,
+    NotificationProtocolConfig,
+};
+
 /// Configuration for a [`Peers`].
 pub struct Config {
     /// Seed for the randomness within the networking state machine.
@@ -77,9 +82,9 @@ pub struct Config {
     /// Capacity to initially reserve to the list of peers.
     pub peers_capacity: usize,
 
-    pub notification_protocols: Vec<libp2p::NotificationProtocolConfig>,
+    pub notification_protocols: Vec<NotificationProtocolConfig>,
 
-    pub request_response_protocols: Vec<libp2p::ConfigRequestResponse>,
+    pub request_response_protocols: Vec<ConfigRequestResponse>,
 
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
@@ -111,10 +116,10 @@ pub struct Config {
     pub initial_desired_substreams: BTreeSet<(PeerId, usize)>,
 }
 
-pub use libp2p::ConnectionId;
+pub use collection::ConnectionId;
 
 pub struct Peers<TConn, TNow> {
-    inner: libp2p::Network<usize, TNow>,
+    inner: collection::Network<usize, TNow>,
 
     guarded: Mutex<Guarded<TConn>>,
 }
@@ -176,7 +181,7 @@ where
         let connections_peer_index = slab::Slab::with_capacity(config.connections_capacity);
 
         Peers {
-            inner: libp2p::Network::new(libp2p::Config {
+            inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
                 noise_key: config.noise_key,
                 notification_protocols: config.notification_protocols,
@@ -203,7 +208,7 @@ where
     /// [`Config::notification_protocols`].
     pub fn notification_protocols(
         &self,
-    ) -> impl ExactSizeIterator<Item = &libp2p::NotificationProtocolConfig> {
+    ) -> impl ExactSizeIterator<Item = &NotificationProtocolConfig> {
         self.inner.notification_protocols()
     }
 
@@ -211,7 +216,7 @@ where
     /// [`Config::request_response_protocols`].
     pub fn request_response_protocols(
         &self,
-    ) -> impl ExactSizeIterator<Item = &libp2p::ConfigRequestResponse> {
+    ) -> impl ExactSizeIterator<Item = &ConfigRequestResponse> {
         self.inner.request_response_protocols()
     }
 
@@ -296,7 +301,7 @@ where
 
             // If `maybe_inner_event` is `None`, that means some ahead-of-events processing needs
             // to be performed. No event has been grabbed from `self.inner`.
-            let inner_event: libp2p::Event<_> = match maybe_inner_event {
+            let inner_event: collection::Event<_> = match maybe_inner_event {
                 Some(ev) => ev,
                 None => {
                     // We can't use `take()` because the call to `accept_notifications_in` might
@@ -339,7 +344,7 @@ where
             debug_assert!(guarded.to_process_pre_event.is_none());
 
             match inner_event {
-                libp2p::Event::HandshakeFinished {
+                collection::Event::HandshakeFinished {
                     id,
                     peer_id,
                     user_data,
@@ -354,8 +359,8 @@ where
                         let num = guarded
                             .connections_by_peer
                             .range(
-                                (peer_id.clone(), libp2p::ConnectionId::min_value())
-                                    ..=(peer_id.clone(), libp2p::ConnectionId::max_value()),
+                                (peer_id.clone(), collection::ConnectionId::min_value())
+                                    ..=(peer_id.clone(), collection::ConnectionId::max_value()),
                             )
                             .count();
                         NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
@@ -384,7 +389,7 @@ where
                         peer_id,
                     };
                 }
-                libp2p::Event::Shutdown {
+                collection::Event::Shutdown {
                     id,
                     out_notification_protocols_indices: out_overlay_network_indices,
                     in_notification_protocols_indices: in_overlay_network_indices,
@@ -393,7 +398,7 @@ where
                     todo!()
                 }
 
-                libp2p::Event::RequestIn {
+                collection::Event::RequestIn {
                     id,
                     substream_id,
                     protocol_index,
@@ -419,7 +424,7 @@ where
                     };
                 }
 
-                libp2p::Event::NotificationsOutAccept {
+                collection::Event::NotificationsOutAccept {
                     id,
                     notifications_protocol_index,
                     remote_handshake,
@@ -451,7 +456,7 @@ where
                     };
                 }
 
-                libp2p::Event::NotificationsOutClose {
+                collection::Event::NotificationsOutClose {
                     id,
                     notifications_protocol_index,
                     user_data,
@@ -475,7 +480,7 @@ where
                     };*/
                 }
 
-                libp2p::Event::NotificationsInOpen {
+                collection::Event::NotificationsInOpen {
                     id: connection_id,
                     notifications_protocol_index,
                     remote_handshake: handshake,
@@ -500,7 +505,7 @@ where
                     };
                 }
 
-                libp2p::Event::NotificationsIn {
+                collection::Event::NotificationsIn {
                     notifications_protocol_index,
                     notification,
                     user_data,
@@ -518,7 +523,7 @@ where
                     };
                 }
 
-                libp2p::Event::NotificationsInClose {
+                collection::Event::NotificationsInClose {
                     notifications_protocol_index,
                     user_data,
                     ..
@@ -800,13 +805,13 @@ where
 
         match result {
             Ok(()) => Ok(()),
-            Err(libp2p::QueueNotificationError::InvalidConnection) => {
+            Err(collection::QueueNotificationError::InvalidConnection) => {
                 Err(QueueNotificationError::NotConnected)
             } // TODO: better handling of this situation?
-            Err(libp2p::QueueNotificationError::NoSubstream) => {
+            Err(collection::QueueNotificationError::NoSubstream) => {
                 Err(QueueNotificationError::NoSubstream)
             } // TODO: better handling of this situation?
-            Err(libp2p::QueueNotificationError::QueueFull) => {
+            Err(collection::QueueNotificationError::QueueFull) => {
                 Err(QueueNotificationError::QueueFull)
             }
         }
@@ -838,8 +843,8 @@ where
     ///
     /// An error happens if there is no suitable connection for that request, if the connection
     /// closes while the request is in progress, if the request or response doesn't respect
-    /// the protocol limits (see [`libp2p::ConfigRequestResponse`]), or if the remote takes too
-    /// much time to answer.
+    /// the protocol limits (see [`ConfigRequestResponse`]), or if the remote takes too much time
+    /// to answer.
     ///
     /// As the API of this module is inherently subject to race conditions, it is never possible
     /// to guarantee that this function will succeed. [`RequestError::ConnectionClosed`] should
@@ -875,9 +880,9 @@ where
 
         match result {
             Ok(r) => Ok(r),
-            Err(libp2p::RequestError::InvalidConnection) => Err(RequestError::ConnectionClosed),
-            Err(libp2p::RequestError::ConnectionClosed) => Err(RequestError::ConnectionClosed),
-            Err(libp2p::RequestError::Connection(err)) => Err(RequestError::Connection(err)),
+            Err(collection::RequestError::InvalidConnection) => Err(RequestError::ConnectionClosed),
+            Err(collection::RequestError::ConnectionClosed) => Err(RequestError::ConnectionClosed),
+            Err(collection::RequestError::Connection(err)) => Err(RequestError::Connection(err)),
         }
     }
 
@@ -916,7 +921,7 @@ where
         now: TNow,
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
-    ) -> Result<libp2p::ReadWrite<TNow>, libp2p::ConnectionError> {
+    ) -> Result<collection::ReadWrite<TNow>, collection::ConnectionError> {
         self.inner
             .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
             .await
@@ -940,11 +945,11 @@ where
         &self,
         guarded: &MutexGuard<'_, Guarded<TConn>>,
         target: &PeerId,
-    ) -> Option<libp2p::ConnectionId> {
+    ) -> Option<collection::ConnectionId> {
         // TODO: stupid cloning
         for (_, connection_id) in guarded.connections_by_peer.range(
-            (target.clone(), libp2p::ConnectionId::min_value())
-                ..=(target.clone(), libp2p::ConnectionId::max_value()),
+            (target.clone(), collection::ConnectionId::min_value())
+                ..=(target.clone(), collection::ConnectionId::max_value()),
         ) {
             return Some(*connection_id);
         }
@@ -1153,7 +1158,7 @@ struct Guarded<TConn> {
     /// and only if the connection is an incoming connection whose handshake isn't finished yet.
     connections: slab::Slab<(Option<usize>, TConn)>,
 
-    connections_by_peer: BTreeSet<(PeerId, libp2p::ConnectionId)>,
+    connections_by_peer: BTreeSet<(PeerId, collection::ConnectionId)>,
 
     /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Values are the
     /// state of the corresponding outbound notifications substream.
@@ -1162,14 +1167,14 @@ struct Guarded<TConn> {
     /// Each [`DesiredInNotificationId`] points to this slab. Contains the connection and
     /// notifications protocol index to accept or refuse. Items are always initially set to `Some`,
     /// but they can be set to `None` if the remote cancels its request.
-    desired_in_notifications: slab::Slab<Option<(libp2p::ConnectionId, usize)>>,
+    desired_in_notifications: slab::Slab<Option<(collection::ConnectionId, usize)>>,
 
     /// Each [`DesiredOutNotificationId`] points to this slab.
     // TODO: doc
-    desired_out_notifications: slab::Slab<(libp2p::ConnectionId, usize)>,
+    desired_out_notifications: slab::Slab<(collection::ConnectionId, usize)>,
 
     /// Each [`RequestId`] points to this slab. Contains the arguments to pass when calling
-    /// [`libp2p::Network::respond_in_request`].
+    /// [`collection::Network::respond_in_request`].
     requests_in: slab::Slab<(ConnectionId, libp2p::connection::established::SubstreamId)>,
 }
 
@@ -1199,7 +1204,7 @@ enum NotificationsOutState {
 enum ToProcessPreEvent {
     StartOutSubstreamOpen {
         peer_id: PeerId,
-        connection_id: libp2p::ConnectionId,
+        connection_id: collection::ConnectionId,
         notification_protocols_indices: Vec<usize>,
     },
 }

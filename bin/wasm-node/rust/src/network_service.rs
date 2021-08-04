@@ -43,10 +43,10 @@ use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     informant::HashDisplay,
     libp2p::{
+        collection::ConnectionError,
         connection::{self, handshake::HandshakeError},
         multiaddr::Multiaddr,
         peer_id::PeerId,
-        ConnectionError,
     },
     network::{protocol, service},
 };

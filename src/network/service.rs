@@ -15,11 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::libp2p::{self, connection, discovery::kademlia, multiaddr, peer_id, PeerId};
-use crate::network::{
+use crate::libp2p::{
+    connection,
+    discovery::kademlia,
+    multiaddr, peer_id,
     peers::{self, QueueNotificationError},
-    protocol,
+    PeerId,
 };
+use crate::network::protocol;
 use crate::util;
 
 use alloc::{
@@ -41,7 +44,7 @@ use futures::{
 };
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
-pub use crate::network::peers::ConnectionId;
+pub use crate::libp2p::peers::ConnectionId;
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
@@ -242,13 +245,13 @@ where
             .chains
             .iter()
             .flat_map(|chain| {
-                iter::once(libp2p::NotificationProtocolConfig {
+                iter::once(peers::NotificationProtocolConfig {
                     protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
                     max_notification_size: 32768, // TODO: arbitrary
                 })
-                .chain(iter::once(libp2p::NotificationProtocolConfig {
+                .chain(iter::once(peers::NotificationProtocolConfig {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
                     fallback_protocol_names: Vec::new(),
                     max_handshake_size: 256,      // TODO: arbitrary
@@ -259,7 +262,7 @@ where
                     // Note, however, that GrandPa is technically left enabled (but unused) on all
                     // chains, in order to make the rest of the code of this module more
                     // comprehensible.
-                    iter::once(libp2p::NotificationProtocolConfig {
+                    iter::once(peers::NotificationProtocolConfig {
                         protocol_name: "/paritytech/grandpa/1".to_string(),
                         fallback_protocol_names: Vec::new(),
                         max_handshake_size: 256,      // TODO: arbitrary
@@ -271,26 +274,26 @@ where
 
         // The order of protocols here is important, as it defines the values of `protocol_index`
         // to pass to libp2p or that libp2p produces.
-        let request_response_protocols = iter::once(libp2p::ConfigRequestResponse {
+        let request_response_protocols = iter::once(peers::ConfigRequestResponse {
             name: "/ipfs/id/1.0.0".into(),
-            inbound_config: libp2p::ConfigRequestResponseIn::Empty,
+            inbound_config: peers::ConfigRequestResponseIn::Empty,
             max_response_size: 4096,
             inbound_allowed: true,
             timeout: Duration::from_secs(20),
         })
         .chain(config.chains.iter().flat_map(|chain| {
             // TODO: limits are arbitrary
-            iter::once(libp2p::ConfigRequestResponse {
+            iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/2", chain.protocol_id),
-                inbound_config: libp2p::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
                 max_response_size: 10 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
                 timeout: Duration::from_secs(20),
             })
-            .chain(iter::once(libp2p::ConfigRequestResponse {
+            .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/light/2", chain.protocol_id),
-                inbound_config: libp2p::ConfigRequestResponseIn::Payload {
+                inbound_config: peers::ConfigRequestResponseIn::Payload {
                     max_size: 1024 * 512,
                 },
                 max_response_size: 10 * 1024 * 1024,
@@ -298,17 +301,17 @@ where
                 inbound_allowed: false,
                 timeout: Duration::from_secs(20),
             }))
-            .chain(iter::once(libp2p::ConfigRequestResponse {
+            .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/kad", chain.protocol_id),
-                inbound_config: libp2p::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
                 max_response_size: 1024 * 1024,
                 // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
                 inbound_allowed: false,
                 timeout: Duration::from_secs(20),
             }))
-            .chain(iter::once(libp2p::ConfigRequestResponse {
+            .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
-                inbound_config: libp2p::ConfigRequestResponseIn::Payload { max_size: 32 },
+                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 32 },
                 max_response_size: 128 * 1024 * 1024, // TODO: this is way too large at the moment ; see https://github.com/paritytech/substrate/pull/8578
                 // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
@@ -1232,7 +1235,7 @@ where
         now: TNow,
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
-    ) -> Result<ReadWrite<TNow>, libp2p::ConnectionError> {
+    ) -> Result<ReadWrite<TNow>, peers::ConnectionError> {
         let inner = self
             .inner
             .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
@@ -1467,7 +1470,7 @@ pub struct ReadWrite<TNow> {
 
     /// [`ChainNetwork::read_write`] should be called again when this
     /// [`libp2p::ConnectionReadyFuture`] returns `Ready`.
-    pub wake_up_future: libp2p::ConnectionReadyFuture,
+    pub wake_up_future: peers::ConnectionReadyFuture,
 
     /// If `true`, the writing side the connection must be closed. Will always remain to `true`
     /// after it has been set.
