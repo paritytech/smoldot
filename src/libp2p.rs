@@ -21,8 +21,8 @@ pub mod async_rw_with_buffers;
 pub mod collection;
 pub mod connection;
 pub mod discovery;
-pub mod peers;
 pub mod peer_id;
+pub mod peers;
 
 pub use multiaddr::Multiaddr;
 #[doc(inline)]
