@@ -228,9 +228,6 @@ pub struct Network<TConn, TNow> {
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
 
-    /// Generator for randomness seeds given to the established connections.
-    randomness_seeds: Mutex<ChaCha20Rng>,
-
     /// Receiver connected to [`Guarded::events_tx`].
     events_rx: Mutex<mpsc::Receiver<Event<TConn>>>,
 }
@@ -264,6 +261,9 @@ struct Guarded<TConn, TNow> {
     /// duplicated here in order to avoid race conditions.
     connection_overlays:
         BTreeMap<(usize, usize, SubstreamDirection, SubstreamState), established::SubstreamId>,
+
+    /// Generator for randomness seeds given to the established connections.
+    randomness_seeds: ChaCha20Rng,
 }
 
 /// See [`Guarded::connection_overlays`].
@@ -335,8 +335,8 @@ where
                 ),
                 connections: slab::Slab::with_capacity(config.capacity),
                 connection_overlays: BTreeMap::new(),
+                randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             }),
-            randomness_seeds: Mutex::new(ChaCha20Rng::from_seed(config.randomness_seed)),
         }
     }
 
@@ -346,12 +346,16 @@ where
     /// it has been initiated by the remote.
     pub async fn insert(&self, is_initiator: bool, user_data: TConn) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
+        let guarded = &mut *guarded;
 
         let connection_id = guarded.next_connection_id;
         guarded.next_connection_id.0 += 1;
 
         let connection_index = guarded.connections.insert(Arc::new(Mutex::new(Connection {
-            connection: ConnectionInner::Handshake(handshake::HealthyHandshake::new(is_initiator)),
+            connection: ConnectionInner::Handshake {
+                handshake: handshake::HealthyHandshake::new(is_initiator),
+                randomness_seed: guarded.randomness_seeds.gen(),
+            },
             id: connection_id,
             pending_event: None,
             waker: None,
@@ -554,7 +558,7 @@ where
                 handshake.into(),
                 overlay_network_index,
             ),
-            ConnectionInner::Handshake(_) => {
+            ConnectionInner::Handshake { .. } => {
                 return Err(OpenNotificationsSubstreamError::NotEstablished)
             }
             ConnectionInner::Errored(_) | ConnectionInner::Dead => {
@@ -885,8 +889,7 @@ where
         Ok(read_write)
     }
 
-    fn build_connection_config(&self) -> established::Config {
-        let randomness_seed = [0; 32]; // TODO: self.randomness_seeds.lock().await.gen(); annoying because of async and future cancellation stuff
+    fn build_connection_config(&self, randomness_seed: [u8; 32]) -> established::Config {
         established::Config {
             notifications_protocols: self
                 .notification_protocols
@@ -1205,7 +1208,10 @@ where
                 Ok(())
             }
 
-            ConnectionInner::Handshake(mut handshake) => {
+            ConnectionInner::Handshake {
+                mut handshake,
+                randomness_seed,
+            } => {
                 let mut incoming_buffer = match incoming_buffer {
                     Some(b) => b,
                     None => {
@@ -1248,7 +1254,10 @@ where
                         handshake::Handshake::Healthy(updated_handshake)
                             if num_written == 0 && num_read == 0 =>
                         {
-                            self.connection = ConnectionInner::Handshake(updated_handshake);
+                            self.connection = ConnectionInner::Handshake {
+                                handshake: updated_handshake,
+                                randomness_seed,
+                            };
                             break;
                         }
                         handshake::Handshake::Healthy(updated_handshake) => {
@@ -1261,9 +1270,10 @@ where
                             debug_assert!(self.pending_event.is_none());
                             self.pending_event =
                                 Some(PendingEvent::HandshakeFinished(remote_peer_id));
-                            self.connection = ConnectionInner::Established(
-                                connection.into_connection(parent.build_connection_config()),
-                            );
+                            self.connection =
+                                ConnectionInner::Established(connection.into_connection(
+                                    parent.build_connection_config(randomness_seed),
+                                ));
                             break;
                         }
                         handshake::Handshake::NoiseKeyRequired(key) => {
@@ -1591,7 +1601,18 @@ where
 }
 
 enum ConnectionInner<TNow> {
-    Handshake(handshake::HealthyHandshake),
+    Handshake {
+        handshake: handshake::HealthyHandshake,
+
+        /// Seed that will be used to initialize randomness when building the
+        /// [`established::Established`].
+        /// This seed is computed during the handshake in order to avoid locking a `Mutex` (and
+        /// having to deal with future-cancellation-related issues) when the handshake is over.
+        /// While it seems a bit dangerous to leave a randomness seed in plain memory, the
+        /// randomness isn't used for anything critical or related to cryptography, but only for
+        /// example to avoid hash collision attacks.
+        randomness_seed: [u8; 32],
+    },
     Established(
         established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
     ),
