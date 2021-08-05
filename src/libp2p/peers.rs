@@ -482,9 +482,9 @@ where
                 }
 
                 collection::Event::NotificationsOutClose {
-                    id,
                     notifications_protocol_index,
                     user_data: local_connection_index,
+                    ..
                 } => {
                     let peer_index = guarded.connections[local_connection_index].0.unwrap();
                     let notification_out = guarded
@@ -492,13 +492,26 @@ where
                         .get_mut(&(peer_index, notifications_protocol_index))
                         .unwrap();
 
-                    // TODO: finish here
+                    debug_assert!(matches!(
+                        notification_out.open,
+                        NotificationsOutOpenState::Open | NotificationsOutOpenState::Opening
+                    ));
+                    let was_open = matches!(notification_out.open, NotificationsOutOpenState::Open);
+                    notification_out.open = NotificationsOutOpenState::Closed;
 
-                    // TODO: report
-                    /*return Event::NotificationsOutClose {
-                        peer_id: guarded.peers[peer_index].peer_id.clone(),
-                        notifications_protocol_index,
-                    };*/
+                    // Remove entry from map if it has become useless.
+                    if !notification_out.desired {
+                        guarded
+                            .peers_notifications_out
+                            .remove(&(peer_index, notifications_protocol_index));
+                    }
+
+                    if was_open {
+                        return Event::NotificationsOutClose {
+                            peer_id: guarded.peers[peer_index].peer_id.clone(),
+                            notifications_protocol_index,
+                        };
+                    }
                 }
 
                 collection::Event::NotificationsInOpen {
@@ -1272,6 +1285,10 @@ impl<TConn> Guarded<TConn> {
     }
 }
 
+/// See [`Guarded::peers_notifications_out`].
+///
+/// Note that the state where `desired` is `true` and `open` is `Closed` means that the remote
+/// has refused or has closed the substream.
 struct NotificationsOutState {
     desired: bool,
     open: NotificationsOutOpenState,
