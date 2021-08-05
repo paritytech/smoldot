@@ -41,12 +41,12 @@
 //!
 //! # About `u32`s and JavaScript
 //!
-//! Many functions below provide a `u32` to the outside. In reality, however, the WebAssembly
-//! specification doesn't mention unsigned integers. Only signed integers (and floating points) can
-//! be passed through the FFI layer.
+//! Many functions below accept as parameter or return a `u32`. In reality, however, the
+//! WebAssembly specification doesn't mention unsigned integers. Only signed integers (and
+//! floating points) can be passed through the FFI layer.
 //!
 //! This isn't important when the Rust code provides a value that must later be provided back, as
-//! the conversion from the guest to the host is symmetrical with the conversion from the host to
+//! the conversion from the guest to the host is symmetrical to the conversion from the host to
 //! the guest.
 //!
 //! It is, however, important when the value needs to be interpreted from the host side, such as
