@@ -216,8 +216,8 @@ pub extern "C" fn init(max_log_level: u32) {
 /// This must be used in the context of [`add_chain`] and other functions that similarly require
 /// passing data of variable length.
 ///
-/// > **Note**: You must likely need to do `>>> 0` on the return value. See the module-level
-/// >           documentation.
+/// > **Note**: If using JavaScript as the host, you likely need to perform `>>> 0` on the return
+/// >           value. See the module-level documentation.
 #[no_mangle]
 pub extern "C" fn alloc(len: u32) -> u32 {
     super::alloc(len)
