@@ -34,12 +34,18 @@ export default (config) => {
         // Must throw an error. A human-readable message can be found in the WebAssembly memory in
         // the given buffer.
         throw: (ptr, len) => {
+            ptr >>>= 0;
+            len >>>= 0;
+
             const message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
             throw new Error(message);
         },
 
         // Used by the Rust side to emit a JSON-RPC response or subscription notification.
         json_rpc_respond: (ptr, len, chainId) => {
+            ptr >>>= 0;
+            len >>>= 0;
+
             let message = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
             if (config.jsonRpcCallback) {
                 config.jsonRpcCallback(message, chainId);
@@ -49,6 +55,11 @@ export default (config) => {
         // Used by the Rust side to emit a log entry.
         // See also the `max_log_level` parameter in the configuration.
         log: (level, target_ptr, target_len, message_ptr, message_len) => {
+            target_ptr >>>= 0;
+            target_len >>>= 0;
+            message_ptr >>>= 0;
+            message_len >>>= 0;
+
             if (config.logCallback) {
                 let target = Buffer.from(config.instance.exports.memory.buffer)
                     .toString('utf8', target_ptr, target_ptr + target_len);
@@ -83,6 +94,10 @@ export default (config) => {
         // Must create a new connection object. This implementation stores the created object in
         // `connections`.
         connection_new: (id, addr_ptr, addr_len, error_ptr_ptr) => {
+            addr_ptr >>>= 0;
+            addr_len >>>= 0;
+            error_ptr_ptr >>>= 0;
+
             try {
                 if (!!connections[id]) {
                     throw new Error("internal error: connection already allocated");
@@ -121,13 +136,13 @@ export default (config) => {
                     connection.onclose = (event) => {
                         const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
                         const len = Buffer.byteLength(message, 'utf8');
-                        const ptr = config.instance.exports.alloc(len);
+                        const ptr = config.instance.exports.alloc(len) >>> 0;
                         Buffer.from(config.instance.exports.memory.buffer).write(message, ptr);
                         config.instance.exports.connection_closed(id, ptr, len);
                     };
                     connection.onmessage = (msg) => {
                         const message = Buffer.from(msg.data);
-                        const ptr = config.instance.exports.alloc(message.length);
+                        const ptr = config.instance.exports.alloc(message.length) >>> 0;
                         message.copy(Buffer.from(config.instance.exports.memory.buffer), ptr);
                         config.instance.exports.connection_message(id, ptr, message.length);
                     };
@@ -154,14 +169,14 @@ export default (config) => {
                         // whether it was caused by an error.
                         const message = hasError ? "Error" : "Closed gracefully";
                         const len = Buffer.byteLength(message, 'utf8');
-                        const ptr = config.instance.exports.alloc(len);
+                        const ptr = config.instance.exports.alloc(len) >>> 0;
                         Buffer.from(config.instance.exports.memory.buffer).write(message, ptr);
                         config.instance.exports.connection_closed(id, ptr, len);
                     });
                     connection.on('error', () => { });
                     connection.on('data', (message) => {
                         if (connection.destroyed) return;
-                        const ptr = config.instance.exports.alloc(message.length);
+                        const ptr = config.instance.exports.alloc(message.length) >>> 0;
                         message.copy(Buffer.from(config.instance.exports.memory.buffer), ptr);
                         config.instance.exports.connection_message(id, ptr, message.length);
                     });
@@ -177,7 +192,7 @@ export default (config) => {
                 const errorStr = error.toString();
                 const mem = Buffer.from(config.instance.exports.memory.buffer);
                 const len = Buffer.byteLength(errorStr, 'utf8');
-                const ptr = config.instance.exports.alloc(len);
+                const ptr = config.instance.exports.alloc(len) >>> 0;
                 mem.write(errorStr, ptr);
                 mem.writeUInt32LE(ptr, error_ptr_ptr);
                 mem.writeUInt32LE(len, error_ptr_ptr + 4);
@@ -205,6 +220,9 @@ export default (config) => {
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
         connection_send: (id, ptr, len) => {
+            ptr >>>= 0;
+            len >>>= 0;
+
             let data = Buffer.from(config.instance.exports.memory.buffer).slice(ptr, ptr + len);
             let connection = connections[id];
             if (connection.send) {

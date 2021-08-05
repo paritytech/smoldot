@@ -39,6 +39,21 @@
 //! must be implemented. Several functions required by the Wasi ABI are also used. The best place
 //! to find documentation at the moment is <https://docs.rs/wasi>.
 //!
+//! # About `u32`s and JavaScript
+//!
+//! Many functions below accept as parameter or return a `u32`. In reality, however, the
+//! WebAssembly specification doesn't mention unsigned integers. Only signed integers (and
+//! floating points) can be passed through the FFI layer.
+//!
+//! This isn't important when the Rust code provides a value that must later be provided back, as
+//! the conversion from the guest to the host is symmetrical to the conversion from the host to
+//! the guest.
+//!
+//! It is, however, important when the value needs to be interpreted from the host side, such as
+//! for example the return value of [`alloc`]. When using JavaScript as the host, you must do
+//! `>>> 0` on all the `u32` values before interpreting them, in order to be certain than they
+//! are treated as unsigned integers by the JavaScript.
+//!
 
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
@@ -200,6 +215,9 @@ pub extern "C" fn init(max_log_level: u32) {
 ///
 /// This must be used in the context of [`add_chain`] and other functions that similarly require
 /// passing data of variable length.
+///
+/// > **Note**: If using JavaScript as the host, you likely need to perform `>>> 0` on the return
+/// >           value. See the module-level documentation.
 #[no_mangle]
 pub extern "C" fn alloc(len: u32) -> u32 {
     super::alloc(len)
