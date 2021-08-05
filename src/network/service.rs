@@ -1434,15 +1434,14 @@ where
         for (peer_id, addrs) in self.outcome {
             // TODO: hack
             // TODO: futures cancellation issue
-            self.service
-                .inner
-                .set_peer_notifications_out_desired(
-                    &peer_id,
-                    (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                        .map(|n| n + chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN),
-                    true,
-                )
-                .await;
+            for protocol in (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+                .map(|n| n + chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+            {
+                self.service
+                    .inner
+                    .set_peer_notifications_out_desired(&peer_id, protocol, true)
+                    .await;
+            }
 
             let existing_addrs = lock.potential_addresses.entry(peer_id).or_default();
             for addr in addrs {
