@@ -36,20 +36,20 @@ let state = null;
 const injectMessage = (instance, message) => {
   if (message.ty == 'request') {
     const len = Buffer.byteLength(message.request, 'utf8');
-    const ptr = instance.exports.alloc(len);
+    const ptr = instance.exports.alloc(len) >>> 0;
     Buffer.from(instance.exports.memory.buffer).write(message.request, ptr);
     instance.exports.json_rpc_send(ptr, len, message.chainId);
 
   } else if (message.ty == 'addChain') {
     // Write the chain specification into memory.
     const chainSpecLen = Buffer.byteLength(message.chainSpec, 'utf8');
-    const chainSpecPtr = instance.exports.alloc(chainSpecLen);
+    const chainSpecPtr = instance.exports.alloc(chainSpecLen) >>> 0;
     Buffer.from(instance.exports.memory.buffer)
       .write(message.chainSpec, chainSpecPtr);
 
     // Write the potential relay chains into memory.
     const potentialRelayChainsLen = message.potentialRelayChains.length;
-    const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4);
+    const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
     for (let idx in message.potentialRelayChains) {
       Buffer.from(instance.exports.memory.buffer)
         .writeUInt32LE(message.potentialRelayChains[idx], potentialRelayChainsPtr + idx * 4);
