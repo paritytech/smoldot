@@ -1071,7 +1071,14 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 user_data,
                             };
                         }
-                        _err => todo!("{:?}", _err), // TODO:
+                        _ => {
+                            // TODO: differentiate between actual error and protocol unavailable?
+                            substream.reset();
+                            return Some(Event::NotificationsOutReject {
+                                id: substream_id,
+                                user_data,
+                            });
+                        }
                     }
                 }
                 Substream::NotificationsOutHandshakeRecv {
