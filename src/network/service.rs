@@ -425,10 +425,13 @@ where
     ///
     /// After this function has returned, you must process the connection with
     /// [`ChainNetwork::read_write`].
+    ///
+    /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
+    /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
+    /// libp2p protocol, its own address, in which case we send it.
     #[must_use]
     pub async fn add_incoming_connection(
         &self,
-        local_listen_address: &multiaddr::Multiaddr,
         remote_addr: multiaddr::Multiaddr,
     ) -> ConnectionId {
         self.inner.add_incoming_connection(remote_addr).await
