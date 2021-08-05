@@ -430,10 +430,7 @@ where
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
     /// libp2p protocol, its own address, in which case we send it.
     #[must_use]
-    pub async fn add_incoming_connection(
-        &self,
-        remote_addr: multiaddr::Multiaddr,
-    ) -> ConnectionId {
+    pub async fn add_incoming_connection(&self, remote_addr: multiaddr::Multiaddr) -> ConnectionId {
         self.inner.add_incoming_connection(remote_addr).await
     }
 
