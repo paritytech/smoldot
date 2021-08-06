@@ -50,6 +50,11 @@ impl Module {
         config.cranelift_nan_canonicalization(true);
         config.cranelift_opt_level(wasmtime::OptLevel::Speed);
         config.async_support(true);
+        // The default value of `wasm_backtrace_details` is `Environment`, which reads the
+        // `WASMTIME_BACKTRACE_DETAILS` environment variable to determine whether or not to keep
+        // debug info. However we don't want any of the behaviour of our code to rely on any
+        // environment variables whatsoever. Whether to use `Enable` or `Disable` below isn't
+        // very important, so long as it is not `Environment`.
         config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
         let engine = wasmtime::Engine::new(&config)
             .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
