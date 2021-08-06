@@ -586,7 +586,6 @@ where
     ///
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
-    #[must_use]
     pub async fn add_incoming_connection(&self, user_data: TConn) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
 
@@ -607,7 +606,6 @@ where
     ///
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
-    #[must_use]
     pub async fn add_outgoing_connection(
         &self,
         expected_peer_id: &PeerId,
@@ -642,7 +640,6 @@ where
     /// associated connection. An associated connection is either a fully established connection
     /// with that peer, or an outgoing connection that is still handshaking but expects to reach
     /// that peer.
-    #[must_use]
     pub async fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = PeerId> {
         let guarded = self.guarded.lock().await;
 
@@ -1036,10 +1033,14 @@ where
     ) -> Option<collection::ConnectionId> {
         let peer_index = *guarded.peer_indices.get(target)?;
 
-        for (_, connection_id) in guarded.established_connections_by_peer.range(
-            (peer_index, collection::ConnectionId::min_value())
-                ..=(peer_index, collection::ConnectionId::max_value()),
-        ) {
+        if let Some((_, connection_id)) = guarded
+            .established_connections_by_peer
+            .range(
+                (peer_index, collection::ConnectionId::min_value())
+                    ..=(peer_index, collection::ConnectionId::max_value()),
+            )
+            .next()
+        {
             return Some(*connection_id);
         }
 

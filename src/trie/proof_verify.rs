@@ -214,7 +214,7 @@ pub fn trie_node_info<'a, 'b>(
         };
 
         // Iterating over this partial key, checking if it matches `expected_nibbles_iter`.
-        while let Some(nibble) = partial_key.next() {
+        for nibble in partial_key {
             match expected_nibbles_iter.next() {
                 None => {
                     return Ok(TrieNodeInfo {

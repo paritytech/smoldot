@@ -118,7 +118,7 @@ impl PrefixScan {
 
                 for child_nibble in info.children.next_nibbles() {
                     let mut next_query = Vec::with_capacity(query.len() + 1);
-                    next_query.extend_from_slice(&query);
+                    next_query.extend_from_slice(query);
                     next_query.push(child_nibble);
                     next.push(next_query);
                 }

@@ -1277,7 +1277,7 @@ where
                             break;
                         }
                         handshake::Handshake::NoiseKeyRequired(key) => {
-                            handshake = key.resume(&parent.noise_key).into();
+                            handshake = key.resume(&parent.noise_key);
                         }
                     }
                 }
@@ -1285,7 +1285,7 @@ where
                 Ok(())
             }
 
-            ConnectionInner::Errored(err) => return Err(err),
+            ConnectionInner::Errored(err) => Err(err),
             ConnectionInner::Dead => panic!(),
             ConnectionInner::Poisoned => unreachable!(),
         }

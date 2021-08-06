@@ -824,16 +824,16 @@ impl ReadyToRun {
             HostFunction::ext_storage_set_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(1);
-                return HostVm::ExternalStorageSet(ExternalStorageSet {
+                HostVm::ExternalStorageSet(ExternalStorageSet {
                     key_ptr,
                     key_size,
                     value: Some((value_ptr, value_size)),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_storage_get_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                return HostVm::ExternalStorageGet(ExternalStorageGet {
+                HostVm::ExternalStorageGet(ExternalStorageGet {
                     key_ptr,
                     key_size,
                     calling: id,
@@ -841,13 +841,13 @@ impl ReadyToRun {
                     offset: 0,
                     max_size: u32::max_value(),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_storage_read_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_out_ptr, value_out_size) = expect_pointer_size_raw!(1);
                 let offset = expect_u32!(2);
-                return HostVm::ExternalStorageGet(ExternalStorageGet {
+                HostVm::ExternalStorageGet(ExternalStorageGet {
                     key_ptr,
                     key_size,
                     calling: id,
@@ -855,20 +855,20 @@ impl ReadyToRun {
                     offset,
                     max_size: value_out_size,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_storage_clear_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                return HostVm::ExternalStorageSet(ExternalStorageSet {
+                HostVm::ExternalStorageSet(ExternalStorageSet {
                     key_ptr,
                     key_size,
                     value: None,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_storage_exists_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                return HostVm::ExternalStorageGet(ExternalStorageGet {
+                HostVm::ExternalStorageGet(ExternalStorageGet {
                     key_ptr,
                     key_size,
                     calling: id,
@@ -876,16 +876,16 @@ impl ReadyToRun {
                     offset: 0,
                     max_size: 0,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_storage_clear_prefix_version_1 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
-                return HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
                     prefix_ptr,
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove: None,
-                });
+                })
             }
             HostFunction::ext_storage_clear_prefix_version_2 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
@@ -902,40 +902,38 @@ impl ReadyToRun {
                     }
                 };
 
-                return HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
+                HostVm::ExternalStorageClearPrefix(ExternalStorageClearPrefix {
                     prefix_ptr,
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove,
-                });
+                })
             }
             HostFunction::ext_storage_root_version_1 => {
-                return HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
+                HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
             }
             HostFunction::ext_storage_changes_root_version_1 => {
                 // TODO: there's a parameter
-                return HostVm::ExternalStorageChangesRoot(ExternalStorageChangesRoot {
-                    inner: self.inner,
-                });
+                HostVm::ExternalStorageChangesRoot(ExternalStorageChangesRoot { inner: self.inner })
             }
             HostFunction::ext_storage_next_key_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                return HostVm::ExternalStorageNextKey(ExternalStorageNextKey {
+                HostVm::ExternalStorageNextKey(ExternalStorageNextKey {
                     key_ptr,
                     key_size,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_storage_append_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(1);
-                return HostVm::ExternalStorageAppend(ExternalStorageAppend {
+                HostVm::ExternalStorageAppend(ExternalStorageAppend {
                     key_ptr,
                     key_size,
                     value_ptr,
                     value_size,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_storage_child_set_version_1 => todo!(),
             HostFunction::ext_storage_child_get_version_1 => todo!(),
@@ -955,9 +953,7 @@ impl ReadyToRun {
                 }
 
                 self.inner.within_storage_transaction = true;
-                return HostVm::StartStorageTransaction(StartStorageTransaction {
-                    inner: self.inner,
-                });
+                HostVm::StartStorageTransaction(StartStorageTransaction { inner: self.inner })
             }
             HostFunction::ext_storage_rollback_transaction_version_1 => {
                 if !self.inner.within_storage_transaction {
@@ -968,10 +964,10 @@ impl ReadyToRun {
                 }
 
                 self.inner.within_storage_transaction = false;
-                return HostVm::EndStorageTransaction {
+                HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: true,
-                };
+                }
             }
             HostFunction::ext_storage_commit_transaction_version_1 => {
                 if !self.inner.within_storage_transaction {
@@ -982,10 +978,10 @@ impl ReadyToRun {
                 }
 
                 self.inner.within_storage_transaction = false;
-                return HostVm::EndStorageTransaction {
+                HostVm::EndStorageTransaction {
                     resume: EndStorageTransaction { inner: self.inner },
                     rollback: false,
-                };
+                }
             }
             HostFunction::ext_default_child_storage_get_version_1 => todo!(),
             HostFunction::ext_default_child_storage_read_version_1 => todo!(),
@@ -1020,10 +1016,10 @@ impl ReadyToRun {
                     }
                 };
 
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_crypto_sr25519_public_keys_version_1 => todo!(),
             HostFunction::ext_crypto_sr25519_generate_version_1 => todo!(),
@@ -1046,10 +1042,10 @@ impl ReadyToRun {
                         .is_ok()
                 };
 
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_crypto_sr25519_verify_version_2 => {
                 let success = {
@@ -1071,10 +1067,10 @@ impl ReadyToRun {
                         .is_ok()
                 };
 
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
@@ -1156,18 +1152,18 @@ impl ReadyToRun {
                 )
             }
             HostFunction::ext_crypto_start_batch_verify_version_1 => {
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     resume_value: None,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     // TODO: wrong! this is a dummy implementation meaning that all
                     // signature verifications are always successful
                     resume_value: Some(vm::WasmValue::I32(1)),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_hashing_keccak_256_version_1 => {
                 let mut keccak = tiny_keccak::Keccak::v256();
@@ -1262,21 +1258,21 @@ impl ReadyToRun {
             HostFunction::ext_offchain_index_set_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
                 let (value_ptr, value_size) = expect_pointer_size_raw!(1);
-                return HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
                     value: Some((value_ptr, value_size)),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_offchain_index_clear_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
-                return HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
+                HostVm::ExternalOffchainStorageSet(ExternalOffchainStorageSet {
                     key_ptr,
                     key_size,
                     value: None,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_offchain_is_validator_version_1 => todo!(),
             HostFunction::ext_offchain_submit_transaction_version_1 => todo!(),
@@ -1368,10 +1364,10 @@ impl ReadyToRun {
                 };
 
                 let log_entry = format!("{}", num);
-                return HostVm::LogEmit(LogEmit {
+                HostVm::LogEmit(LogEmit {
                     inner: self.inner,
                     log_entry,
-                });
+                })
             }
             HostFunction::ext_misc_print_utf8_version_1 => {
                 let data = str::from_utf8(expect_pointer_size!(0).as_ref()).map(|s| s.to_owned());
@@ -1389,25 +1385,25 @@ impl ReadyToRun {
                     }
                 };
 
-                return HostVm::LogEmit(LogEmit {
+                HostVm::LogEmit(LogEmit {
                     inner: self.inner,
                     log_entry,
-                });
+                })
             }
             HostFunction::ext_misc_print_hex_version_1 => {
                 let log_entry = hex::encode(expect_pointer_size!(0));
-                return HostVm::LogEmit(LogEmit {
+                HostVm::LogEmit(LogEmit {
                     inner: self.inner,
                     log_entry,
-                });
+                })
             }
             HostFunction::ext_misc_runtime_version_version_1 => {
                 let (wasm_blob_ptr, wasm_blob_size) = expect_pointer_size_raw!(0);
-                return HostVm::CallRuntimeVersion(CallRuntimeVersion {
+                HostVm::CallRuntimeVersion(CallRuntimeVersion {
                     inner: self.inner,
                     wasm_blob_ptr,
                     wasm_blob_size,
-                });
+                })
             }
             HostFunction::ext_allocator_malloc_version_1 => {
                 let size = expect_u32!(0);
@@ -1430,10 +1426,10 @@ impl ReadyToRun {
                 };
 
                 let ptr_i32 = i32::from_ne_bytes(ptr.to_ne_bytes());
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     resume_value: Some(vm::WasmValue::I32(ptr_i32)),
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_allocator_free_version_1 => {
                 let pointer = expect_u32!(0);
@@ -1451,10 +1447,10 @@ impl ReadyToRun {
                     }
                 };
 
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     resume_value: None,
                     inner: self.inner,
-                });
+                })
             }
             HostFunction::ext_logging_log_version_1 => {
                 let _log_level = expect_u32!(0);
@@ -1476,18 +1472,18 @@ impl ReadyToRun {
                     }
                 };
 
-                return HostVm::LogEmit(LogEmit {
+                HostVm::LogEmit(LogEmit {
                     inner: self.inner,
                     log_entry,
-                });
+                })
             }
             HostFunction::ext_logging_max_level_version_1 => {
                 // TODO: always returns `0` at the moment (which means "Off"); make this configurable?
                 // see https://github.com/paritytech/substrate/blob/bb22414e9729fa6ffc3b3126c57d3a9f2b85a2ff/primitives/core/src/lib.rs#L341
-                return HostVm::ReadyToRun(ReadyToRun {
+                HostVm::ReadyToRun(ReadyToRun {
                     resume_value: Some(vm::WasmValue::I32(0)),
                     inner: self.inner,
-                });
+                })
             }
         }
     }
@@ -1970,7 +1966,7 @@ pub struct CallRuntimeVersion {
 
 impl CallRuntimeVersion {
     /// Returns the Wasm code whose runtime version must be provided.
-    pub fn wasm_code<'a>(&'a self) -> impl AsRef<[u8]> + 'a {
+    pub fn wasm_code(&'_ self) -> impl AsRef<[u8]> + '_ {
         self.inner
             .vm
             .read_memory(self.wasm_blob_ptr, self.wasm_blob_size)

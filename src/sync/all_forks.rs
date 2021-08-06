@@ -729,7 +729,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         }
 
         // If the block is already part of the local tree of blocks, nothing more to do.
-        if self.chain.contains_non_finalized_block(&header_hash) {
+        if self.chain.contains_non_finalized_block(header_hash) {
             return HeaderFromSourceOutcome::AlreadyInChain;
         }
 

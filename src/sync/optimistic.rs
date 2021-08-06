@@ -423,10 +423,10 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`SourceId`] is invalid.
     ///
-    pub fn remove_source<'a>(
-        &'a mut self,
+    pub fn remove_source(
+        &'_ mut self,
         source_id: SourceId,
-    ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + 'a) {
+    ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
         let src_user_data = self.inner.sources.remove(&source_id).unwrap().user_data;
         let drain = RequestsDrain {
             iter: self.inner.verification_queue.iter_mut().fuse(),
@@ -437,7 +437,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
 
     /// Returns the list of sources in this state machine.
     pub fn sources(&'_ self) -> impl ExactSizeIterator<Item = SourceId> + '_ {
-        self.inner.sources.keys().map(|id| *id)
+        self.inner.sources.keys().copied()
     }
 
     pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
