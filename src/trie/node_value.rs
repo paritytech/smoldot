@@ -325,7 +325,7 @@ impl HashOrInline {
             HashOrInline::Inline(curr) => {
                 if curr.try_extend_from_slice(data).is_err() {
                     let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
-                    hasher.update(&curr);
+                    hasher.update(curr);
                     hasher.update(data);
                     *self = HashOrInline::Hasher(hasher);
                 }

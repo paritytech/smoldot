@@ -89,7 +89,7 @@ impl JitPrototype {
         heap_pages: HeapPages,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
-        let store = wasmtime::Store::new(&module.inner.engine());
+        let store = wasmtime::Store::new(module.inner.engine());
 
         let mut imported_memory = None;
         let shared = Rc::new(RefCell::new(Shared {

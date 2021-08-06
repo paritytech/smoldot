@@ -429,7 +429,6 @@ where
     /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
     /// libp2p protocol, its own address, in which case we send it.
-    #[must_use]
     pub async fn add_incoming_connection(&self, remote_addr: multiaddr::Multiaddr) -> ConnectionId {
         self.inner.add_incoming_connection(remote_addr).await
     }
@@ -573,12 +572,12 @@ where
     /// necessary entries), as it is impossible to know this from just the proof itself. As such,
     /// this method is just an optimization. When performing the actual call, regular storage proof
     /// requests should be performed if the key is not present in the call proof response.
-    pub async fn call_proof_request<'a>(
+    pub async fn call_proof_request(
         &self,
         now: TNow,
         target: &peer_id::PeerId,
         chain_index: usize,
-        config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
+        config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
     ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
         let request_data =
             protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
@@ -634,7 +633,6 @@ where
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    #[must_use]
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
         let mut lock = self.pending.lock().await;
         let lock = &mut *lock; // Prevents borrow checker issues.
@@ -659,7 +657,7 @@ where
         }
 
         // Update `lock.potential_addresses`.
-        if let Some(entry) = lock.potential_addresses.get_mut(&expected_peer_id) {
+        if let Some(entry) = lock.potential_addresses.get_mut(expected_peer_id) {
             if !entry.iter().any(|a| *a == *multiaddr) {
                 entry.push(multiaddr.clone());
             }
@@ -860,7 +858,7 @@ where
                                 Err(err) => {
                                     // TODO: close the substream?
                                     return Event::ProtocolError {
-                                        peer_id: peer_id.clone(),
+                                        peer_id,
                                         error: ProtocolError::BadBlockAnnouncesHandshake(err),
                                     };
                                 }
@@ -869,7 +867,7 @@ where
                         // TODO: compare genesis hash with ours
 
                         return Event::ChainConnected {
-                            peer_id: peer_id.clone(),
+                            peer_id,
                             chain_index,
                             best_hash: *remote_handshake.best_hash,
                             best_number: remote_handshake.best_number,
@@ -945,7 +943,7 @@ where
 
                     if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         return Event::ChainDisconnected {
-                            peer_id: peer_id.clone(),
+                            peer_id,
                             chain_index,
                         };
                     }
@@ -977,14 +975,14 @@ where
                     if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         if let Err(err) = protocol::decode_block_announce(&notification) {
                             return Event::ProtocolError {
-                                peer_id: peer_id.clone(),
+                                peer_id,
                                 error: ProtocolError::BadBlockAnnounce(err),
                             };
                         }
 
                         return Event::BlockAnnounce {
                             chain_index,
-                            peer_id: peer_id.clone(),
+                            peer_id,
                             announce: EncodedBlockAnnounce(notification),
                         };
                     } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
@@ -997,7 +995,7 @@ where
                                 Ok(n) => n,
                                 Err(err) => {
                                     return Event::ProtocolError {
-                                        peer_id: peer_id.clone(),
+                                        peer_id,
                                         error: ProtocolError::BadGrandpaNotification(err),
                                     };
                                 }
@@ -1037,7 +1035,7 @@ where
                                 });
 
                             return Event::ProtocolError {
-                                peer_id: peer_id.clone(),
+                                peer_id,
                                 error: ProtocolError::BadBlockAnnouncesHandshake(err),
                             };
                         }

@@ -42,7 +42,7 @@ pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseError> 
         None => return Err(ParseError::UnknownNotification(call_def.method)),
     };
 
-    let call = match MethodCall::from_defs(&call_def.method, call_def.params_json) {
+    let call = match MethodCall::from_defs(call_def.method, call_def.params_json) {
         Ok(c) => c,
         Err(error) => return Err(ParseError::Method { request_id, error }),
     };

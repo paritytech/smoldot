@@ -381,9 +381,9 @@ pub struct GrandpaAuthority {
 impl GrandpaAuthority {
     /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
     /// encoding of that object.
-    pub fn scale_encoding<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
+    pub fn scale_encoding(
+        &'_ self,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
         GrandpaAuthorityRef::from(self).scale_encoding()
     }
 }

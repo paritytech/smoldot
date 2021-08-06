@@ -172,9 +172,11 @@ impl UnsignedNoiseKey {
             PublicKey::Ed25519(libp2p_public_ed25519_key).to_protobuf_encoding();
 
         let handshake_message = {
-            let mut protobuf = payload_proto::NoiseHandshakePayload::default();
-            protobuf.identity_key = libp2p_pubkey_protobuf;
-            protobuf.identity_sig = signature.to_vec();
+            let protobuf = payload_proto::NoiseHandshakePayload {
+                identity_key: libp2p_pubkey_protobuf,
+                identity_sig: signature.to_vec(),
+                ..Default::default()
+            };
 
             let mut msg = Vec::with_capacity(protobuf.encoded_len());
             protobuf.encode(&mut msg).unwrap();

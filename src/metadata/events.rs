@@ -130,8 +130,8 @@ pub enum EventsStorageKeyError {
 fn twox_128(data: &[u8], dest: &mut [u8; 16]) {
     let mut h0 = twox_hash::XxHash::with_seed(0);
     let mut h1 = twox_hash::XxHash::with_seed(1);
-    h0.write(&data);
-    h1.write(&data);
+    h0.write(data);
+    h1.write(data);
     let r0 = h0.finish();
     let r1 = h1.finish();
 

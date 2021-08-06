@@ -777,7 +777,7 @@ impl Inner {
 /// encoded storage value.
 fn append_to_storage_value(value: &mut Vec<u8>, to_add: &[u8]) {
     let (curr_len, curr_len_encoded_size) =
-        match util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&value) {
+        match util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(value) {
             Ok((rest, l)) => (l, value.len() - rest.len()),
             Err(_) => {
                 value.clear();
