@@ -2412,6 +2412,7 @@ dependencies = [
  "lazy_static",
  "log",
  "lru",
+ "nom",
  "pin-project",
  "rand 0.8.3",
  "serde_json",
