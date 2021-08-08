@@ -535,7 +535,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 HeaderFromSourceOutcome::HeaderVerify => {
                     return AncestrySearchResponseOutcome::Verify;
                 }
-                HeaderFromSourceOutcome::TooOld => {
+                HeaderFromSourceOutcome::TooOld { .. } => {
                     // Block is below the finalized block number.
                     // Ancestry searches never request any block earlier than the finalized block
                     // number. `TooOld` can happen if the source is misbehaving, but also if the
@@ -618,7 +618,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             is_best,
         ) {
             HeaderFromSourceOutcome::HeaderVerify => BlockAnnounceOutcome::HeaderVerify,
-            HeaderFromSourceOutcome::TooOld => BlockAnnounceOutcome::TooOld,
+            HeaderFromSourceOutcome::TooOld {
+                announce_block_height,
+                finalized_block_height,
+            } => BlockAnnounceOutcome::TooOld {
+                announce_block_height,
+                finalized_block_height,
+            },
             HeaderFromSourceOutcome::AlreadyInChain => BlockAnnounceOutcome::AlreadyInChain,
             HeaderFromSourceOutcome::NotFinalizedChain => BlockAnnounceOutcome::NotFinalizedChain,
             HeaderFromSourceOutcome::Disjoint => BlockAnnounceOutcome::Disjoint,
@@ -699,7 +705,10 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         // Code below does `header.number - 1`. Make sure that `header.number` isn't 0.
         if header.number == 0 {
-            return HeaderFromSourceOutcome::TooOld;
+            return HeaderFromSourceOutcome::TooOld {
+                announce_block_height: 0,
+                finalized_block_height: self.chain.finalized_block_header().number,
+            };
         }
 
         // No matter what is done below, start by updating the view the state machine maintains
@@ -725,7 +734,10 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
         if header.number <= self.chain.finalized_block_header().number {
-            return HeaderFromSourceOutcome::TooOld;
+            return HeaderFromSourceOutcome::TooOld {
+                announce_block_height: header.number,
+                finalized_block_height: self.chain.finalized_block_header().number,
+            };
         }
 
         // If the block is already part of the local tree of blocks, nothing more to do.
@@ -888,7 +900,12 @@ enum HeaderFromSourceOutcome {
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
-    TooOld,
+    TooOld {
+        /// Height of the announced block.
+        announce_block_height: u64,
+        /// Height of the currently finalized block.
+        finalized_block_height: u64,
+    },
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
     AlreadyInChain,
@@ -909,7 +926,12 @@ pub enum BlockAnnounceOutcome {
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
-    TooOld,
+    TooOld {
+        /// Height of the announced block.
+        announce_block_height: u64,
+        /// Height of the currently finalized block.
+        finalized_block_height: u64,
+    },
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
     AlreadyInChain,
