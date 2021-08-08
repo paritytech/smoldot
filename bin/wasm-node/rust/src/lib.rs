@@ -474,7 +474,6 @@ impl Client {
 
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
     /// JSON-RPC requests and subscriptions.
-    // TODO: not the case ^
     ///
     /// Be aware that the [`ChainId`] might be reused if [`Client::add_chain`] is called again
     /// later.
@@ -484,6 +483,13 @@ impl Client {
     /// as the relay chain of a parachain.
     pub fn remove_chain(&mut self, id: ChainId) {
         let removed_chain = self.public_api_chains.remove(id.0);
+        if let Some((_, abort)) = &removed_chain.json_rpc_service {
+            // Instantly aborts the task that sends back responses.
+            // This works only because Wasm is single-threaded, otherwise it would be possible for
+            // another thread to still be polling that task.
+            abort.abort();
+        }
+
         self.public_api_chains.shrink_to_fit();
 
         let running_chain = self.chains_by_key.get_mut(&removed_chain.key).unwrap();
@@ -597,14 +603,6 @@ struct PublicApiChain {
         >,
         future::AbortHandle,
     )>,
-}
-
-impl Drop for PublicApiChain {
-    fn drop(&mut self) {
-        if let Some((_, abort)) = &self.json_rpc_service {
-            abort.abort();
-        }
-    }
 }
 
 /// Sends back a response or a notification to the JSON-RPC client.
