@@ -498,18 +498,15 @@ fn add_chain(
 
     let mut client_lock = CLIENT.lock().unwrap();
 
-    let chain_id = client_lock
+    client_lock
         .as_mut()
         .unwrap()
         .add_chain(super::AddChainConfig {
             specification: str::from_utf8(&chain_spec).unwrap(),
             json_rpc_running: json_rpc_running != 0,
             potential_relay_chains: potential_relay_chains.into_iter(),
-        });
-
-    let chain_id: u32 = chain_id.into();
-    assert_ne!(chain_id, u32::max_value());
-    chain_id
+        })
+        .into()
 }
 
 fn remove_chain(chain_id: u32) {
