@@ -498,7 +498,7 @@ fn add_chain(
 
     let mut client_lock = CLIENT.lock().unwrap();
 
-    let result = client_lock
+    let chain_id = client_lock
         .as_mut()
         .unwrap()
         .add_chain(super::AddChainConfig {
@@ -507,14 +507,9 @@ fn add_chain(
             potential_relay_chains: potential_relay_chains.into_iter(),
         });
 
-    match result {
-        Ok(chain_id) => {
-            let chain_id: u32 = chain_id.into();
-            assert_ne!(chain_id, u32::max_value());
-            chain_id
-        }
-        Err(_) => u32::max_value(),
-    }
+    let chain_id: u32 = chain_id.into();
+    assert_ne!(chain_id, u32::max_value());
+    chain_id
 }
 
 fn remove_chain(chain_id: u32) {
@@ -523,6 +518,42 @@ fn remove_chain(chain_id: u32) {
         .as_mut()
         .unwrap()
         .remove_chain(super::ChainId::from(chain_id))
+}
+
+fn chain_is_ok(chain_id: u32) -> u32 {
+    let mut client_lock = CLIENT.lock().unwrap();
+    if client_lock
+        .as_mut()
+        .unwrap()
+        .chain_is_erroneous(super::ChainId::from(chain_id))
+        .is_some()
+    {
+        0
+    } else {
+        1
+    }
+}
+
+fn chain_error_len(chain_id: u32) -> u32 {
+    let mut client_lock = CLIENT.lock().unwrap();
+    let len = client_lock
+        .as_mut()
+        .unwrap()
+        .chain_is_erroneous(super::ChainId::from(chain_id))
+        .map(|msg| msg.as_bytes().len())
+        .unwrap_or(0);
+    u32::try_from(len).unwrap()
+}
+
+fn chain_error_ptr(chain_id: u32) -> u32 {
+    let mut client_lock = CLIENT.lock().unwrap();
+    let ptr = client_lock
+        .as_mut()
+        .unwrap()
+        .chain_is_erroneous(super::ChainId::from(chain_id))
+        .map(|msg| msg.as_bytes().as_ptr() as usize)
+        .unwrap_or(0);
+    u32::try_from(ptr).unwrap()
 }
 
 lazy_static::lazy_static! {
