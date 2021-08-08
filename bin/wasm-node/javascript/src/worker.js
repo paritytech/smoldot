@@ -17,7 +17,7 @@
 
 import { Buffer } from 'buffer';
 import * as compat from './compat-nodejs.js';
-import { default as smoldot_js_builder } from './bindings-smoldot-js.js';
+import { default as smoldot_js_builder } from './bindings-smoldot-light.js';
 import { default as wasi_builder } from './bindings-wasi.js';
 
 import { default as wasm_base64 } from './autogen/wasm.js';
@@ -84,7 +84,7 @@ const startInstance = async (config) => {
   // cross-platform cross-bundler approach.
   const wasmBytecode = new Uint8Array(Buffer.from(wasm_base64, 'base64'));
 
-  // Used to bind with the smoldot-js bindings. See the `bindings-smoldot-js.js` file.
+  // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
   const smoldotJsConfig = {
     logCallback: (level, target, message) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
