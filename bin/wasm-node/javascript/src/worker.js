@@ -17,7 +17,7 @@
 
 import { Buffer } from 'buffer';
 import * as compat from './compat-nodejs.js';
-import { default as smoldot_js_builder } from './bindings-smoldot-light.js';
+import { default as smoldot_light_builder } from './bindings-smoldot-light.js';
 import { default as wasi_builder } from './bindings-wasi.js';
 
 import { default as wasm_base64 } from './autogen/wasm.js';
@@ -99,7 +99,7 @@ const startInstance = async (config) => {
     forbidWss: config.forbidWss,
   };
 
-  const { bindings: smoldotJsBindings } = smoldot_js_builder(smoldotJsConfig);
+  const { bindings: smoldotJsBindings } = smoldot_light_builder(smoldotJsConfig);
 
   // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
   const wasiConfig = {};
