@@ -2401,7 +2401,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smoldot-js"
+name = "smoldot-light"
 version = "0.3.7"
 dependencies = [
  "blake2-rfc",
