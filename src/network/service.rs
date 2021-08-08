@@ -35,12 +35,13 @@ use core::{
     fmt, iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
-    task::{Poll, Waker},
+    task::Poll,
     time::Duration,
 };
 use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
+    task::AtomicWaker,
 };
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
@@ -164,6 +165,10 @@ pub struct ChainNetwork<TNow> {
 
     /// Generator for randomness.
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
+
+    /// Waker to wake up when [`ChainNetwork::next_start_connect`] should be called again by the
+    /// user.
+    next_start_connect_waker: AtomicWaker,
 }
 
 /// See [`ChainNetwork::guarded`].
@@ -197,10 +202,6 @@ struct PendingConnections {
     // TODO: never cleaned up until addresses are actually tried; the idea is to eventually use Kademlia k-buckets only
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
-
-    /// Waker to wake up when [`ChainNetwork::next_start_connect`] should be called again by the
-    /// user.
-    next_start_connect_waker: Option<Waker>,
 }
 
 /// See [`Guarded::to_process_pre_event`]
@@ -225,7 +226,6 @@ enum ToProcessPreEvent {
         peer_id: PeerId,
         notifications_protocol_index: usize,
     },
-    WakeNextStartConnect,
 }
 
 // Update this when a new request response protocol is added.
@@ -394,11 +394,11 @@ where
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses: potential_addresses,
-                next_start_connect_waker: None,
             }),
             chain_grandpa_config: Mutex::new(chain_grandpa_config),
             chain_configs: config.chains,
             randomness: Mutex::new(randomness),
+            next_start_connect_waker: AtomicWaker::new(),
         }
     }
 
@@ -694,9 +694,7 @@ where
             }
         }
 
-        if let Some(waker) = lock.next_start_connect_waker.take() {
-            waker.wake();
-        }
+        self.next_start_connect_waker.wake();
     }
 
     /// Returns the next event produced by the service.
@@ -783,15 +781,6 @@ where
                         notification,
                     });
                 }
-                Some(ToProcessPreEvent::WakeNextStartConnect) => {
-                    // Note that it can be dangerous to lock a second mutex while `guarded` is
-                    // already locked. In practice, `guarded` is only ever locked within
-                    // `next_event`, making this safe.
-                    if let Some(waker) = self.pending.lock().await.next_start_connect_waker.take() {
-                        waker.wake();
-                    }
-                    guarded.to_process_pre_event = None;
-                }
             }
 
             match self.inner.next_event().await {
@@ -810,9 +799,7 @@ where
                     peer_is_desired,
                 } if num_peer_connections == 0 => {
                     if peer_is_desired {
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::WakeNextStartConnect);
+                        self.next_start_connect_waker.wake();
                     }
 
                     return Event::Disconnected {
@@ -948,8 +935,7 @@ where
                         };
                     }
 
-                    debug_assert!(guarded.to_process_pre_event.is_none());
-                    guarded.to_process_pre_event = Some(ToProcessPreEvent::WakeNextStartConnect);
+                    self.next_start_connect_waker.wake();
                 }
                 peers::Event::NotificationsInClose {
                     peer_id,
@@ -1211,8 +1197,9 @@ where
             // TODO: if `next_start_connect` is called multiple times simultaneously, all but the first will deadlock
             let mut pending_lock: Option<MutexGuard<_>> = Some(pending_lock);
             future::poll_fn(move |cx| {
-                if let Some(mut pending_lock) = pending_lock.take() {
-                    pending_lock.next_start_connect_waker = Some(cx.waker().clone());
+                if let Some(_lock) = pending_lock.take() {
+                    self.next_start_connect_waker.register(cx.waker());
+                    drop(_lock);
                     Poll::Pending
                 } else {
                     Poll::Ready(())
@@ -1448,6 +1435,8 @@ where
                 }
             }
         }
+
+        self.service.next_start_connect_waker.wake();
     }
 }
 
