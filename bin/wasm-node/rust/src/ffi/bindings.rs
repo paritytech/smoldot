@@ -240,14 +240,12 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// If `json_rpc_running` is 0, then no JSON-RPC service will be started and all JSON-RPC requests
 /// targeting this chain will return an error. This can be used to save up resources.
 ///
-/// Returns:
-///
-/// - (2^32-1) if an error happened.
-/// - Any other value to indicate success. This value is an identifier that will be used to refer
-/// to this chain.
-///
+/// If an error happens during the creation of the chain, a chain id will be allocated
+/// nonetheless, and must later be de-allocated by calling [`remove_chain`]. This allocated chain,
+/// however, will be in an erroneous state. Use [`chain_is_ok`] to determine whether this function
+/// was successful. If not, use [`chain_error_len`] and [`chain_error_ptr`] to obtain the error
+/// message.
 #[no_mangle]
-// TODO: clean up the returned error code system; maybe return an error string as well; difficulty is how to deal with the FFI boundary
 pub extern "C" fn add_chain(
     chain_spec_pointer: u32,
     chain_spec_len: u32,
@@ -266,9 +264,41 @@ pub extern "C" fn add_chain(
 
 /// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
 /// subscriptions and cancels all in-progress requests corresponding to that chain.
+///
+/// If the removed chain was an erroneous chain, calling this function will invalidate the pointer
+/// returned by [`chain_error_ptr`].
 #[no_mangle]
 pub extern "C" fn remove_chain(chain_id: u32) {
     super::remove_chain(chain_id)
+}
+
+/// Returns `1` if creating this chain was successful. Otherwise, returns `0`.
+///
+/// If `0` is returned, use [`chain_error_len`] and [`chain_error_ptr`] to obtain an error
+/// message.
+#[no_mangle]
+pub extern "C" fn chain_is_ok(chain_id: u32) -> u32 {
+    super::chain_is_ok(chain_id)
+}
+
+/// Returns the length of the error message stored for this chain.
+///
+/// Must only be called on an erroneous chain. Use [`chain_is_ok`] to determine whether a chain is
+/// in an erroneous state. Returns `0` if the chain isn't erroneous.
+#[no_mangle]
+pub extern "C" fn chain_error_len(chain_id: u32) -> u32 {
+    super::chain_error_len(chain_id)
+}
+
+/// Returns a pointer to the error message stored for this chain. The error message is a UTF-8
+/// string starting at the memory offset returned by this function, and whose length can be
+/// determined by calling [`chain_error_len`].
+///
+/// Must only be called on an erroneous chain. Use [`chain_is_ok`] to determine whether a chain is
+/// in an erroneous state. Returns `0` if the chain isn't erroneous.
+#[no_mangle]
+pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
+    super::chain_error_ptr(chain_id)
 }
 
 /// Emit a JSON-RPC request towards the given chain previously added using [`add_chain`].

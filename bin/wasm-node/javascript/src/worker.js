@@ -55,18 +55,25 @@ const injectMessage = (instance, message) => {
         .writeUInt32LE(message.potentialRelayChains[idx], potentialRelayChainsPtr + idx * 4);
     }
 
-    const result = instance.exports.add_chain(
+    // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
+    // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
+    // has succeeeded or not.
+    // Note that `add_chain` properly de-allocates buffers even if it failed.
+    const chainId = instance.exports.add_chain(
       chainSpecPtr, chainSpecLen,
       message.jsonRpcRunning,
       potentialRelayChainsPtr, potentialRelayChainsLen
     );
 
-    if (result >= 0x80000000 || result < 0) { // TODO: really crappy error code handling
-      // TODO: better error message
-      // Note that `add_chain` properly de-allocates buffers even if it failed.
-      compat.postMessage({ kind: 'chainAddedErr', error: new Error('Failed to initialize chain') });
+    if (instance.exports.chain_is_ok(chainId) != 0) {
+      compat.postMessage({ kind: 'chainAddedOk', chainId });
     } else {
-      compat.postMessage({ kind: 'chainAddedOk', chainId: result });
+      const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
+      const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
+      const errorMsg = Buffer.from(instance.exports.memory.buffer)
+        .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
+      instance.exports.remove_chain(chainId);
+      compat.postMessage({ kind: 'chainAddedErr', error: new Error(errorMsg) });
     }
 
   } else if (message.ty == 'removeChain') {
