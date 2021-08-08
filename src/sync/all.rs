@@ -768,7 +768,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     all_forks::BlockAnnounceOutcome::HeaderVerify => {
                         BlockAnnounceOutcome::HeaderVerify
                     }
-                    all_forks::BlockAnnounceOutcome::TooOld => BlockAnnounceOutcome::TooOld,
+                    all_forks::BlockAnnounceOutcome::TooOld {
+                        announce_block_height,
+                        finalized_block_height,
+                    } => BlockAnnounceOutcome::TooOld {
+                        announce_block_height,
+                        finalized_block_height,
+                    },
                     all_forks::BlockAnnounceOutcome::AlreadyInChain => {
                         BlockAnnounceOutcome::AlreadyInChain
                     }
@@ -1053,7 +1059,12 @@ pub enum BlockAnnounceOutcome {
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
-    TooOld,
+    TooOld {
+        /// Height of the announced block.
+        announce_block_height: u64,
+        /// Height of the currently finalized block.
+        finalized_block_height: u64,
+    },
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
     AlreadyInChain,
