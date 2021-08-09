@@ -303,6 +303,30 @@ impl RuntimeService {
         (current, rx)
     }
 
+    // TODO: doc
+    pub fn recent_best_block_runtime_lock<'a: 'b, 'b>(
+        self: &'a Arc<RuntimeService>,
+        method: &'b str,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
+    ) -> impl Future<
+        Output = Result<(RuntimeLock<'a>, executor::host::HostVmPrototype), RuntimeCallError>,
+    > + 'b {
+        async move {
+            let lock = self.latest_known_runtime.lock().await;
+            debug_assert_eq!(
+                lock.runtime_block_hash,
+                header::hash_from_scale_encoded_header(&lock.runtime_block_header)
+            );
+
+            let virtual_machine = lock.virtual_machine.take().unwrap();
+            RuntimeLock {
+                lock,
+                runtime_block_header,
+                call_proof,
+            }
+        }
+    }
+
     /// Start performing a runtime call using the best block, or a recent best block.
     ///
     /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,

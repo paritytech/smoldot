@@ -876,9 +876,10 @@ async fn validate_transaction(
     let (runtime_call_lock, runtime) = relay_chain_sync
         .recent_best_block_runtime_call(
             validate::VALIDATION_FUNCTION_NAME,
-            validate::validate_transaction_runtime_parameters(
+            validate::validate_transaction_runtime_parameters_v3(
                 iter::once(scale_encoded_transaction.as_ref()),
                 source,
+                &[0; 32], // TODO: no
             ),
         )
         .await
