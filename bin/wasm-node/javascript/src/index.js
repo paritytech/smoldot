@@ -63,6 +63,22 @@ export async function start(config) {
   // JSON-RPC response even though we've already sent a `removeChain` message to it.
   let chainsJsonRpcCallbacks = new Map();
 
+  // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
+  // still alive.
+  // If this liveness ping isn't received for a long time, an error is reported in the logs.
+  // The first check is delayed in order to account for the fact that the worker has to perform
+  // an expensive initialization step when initializing the Wasm VM.
+  let livenessTimeout = null;
+  const resetLivenessTimeout = () => {
+    if (livenessTimeout !== null)
+      clearTimeout(livenessTimeout);
+    livenessTimeout = setTimeout(() => {
+      livenessTimeout = null;
+      logCallback(1, 'smoldot', 'Smoldot worker appears unresponsive');
+    }, 7000);
+  };
+  setTimeout(() => resetLivenessTimeout(), 10000);
+
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
     if (message.kind == 'jsonrpc') {
@@ -118,6 +134,9 @@ export async function start(config) {
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
+
+    } else if (message.kind == 'livenessPing') {
+      resetLivenessTimeout();
 
     } else {
       console.error('Unknown message type', message);
