@@ -662,7 +662,7 @@ impl serde::Serialize for RuntimeVersion {
             apis: self
                 .apis
                 .iter()
-                .map(|(name, version)| (HexString(name.to_vec()), *version))
+                .map(|(name_hash, version)| (HexString(name_hash.to_vec()), *version))
                 .collect(),
         }
         .serialize(serializer)
