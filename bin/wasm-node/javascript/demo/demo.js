@@ -28,7 +28,7 @@ const chainSpec = fs.readFileSync('../../westend.json', 'utf8');
 const parachainSpec = fs.readFileSync('../../westend-westmint.json', 'utf8');
 
 const client = smoldot.start({
-    maxLogLevel: 4,  // Can be increased for more verbosity
+    maxLogLevel: 3,  // Can be increased for more verbosity
     forbidTcp: false,
     forbidWs: false,
     forbidWss: false,
