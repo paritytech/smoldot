@@ -236,7 +236,12 @@ impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CoreVersionApi {
     /// Blake2 hash of length 8 of the name of the API.
+    ///
+    /// > **Note**: Available APIs can be found by searching for `decl_runtime_apis!` in the
+    /// >           Substrate code base. The value stored in this field is the blake2 hash of
+    /// >           length 8 of the trait name declared within `decl_runtime_apis!`.
     pub name_hash: [u8; 8],
+
     /// Version of the module. Typical values are `1`, `2`, `3`, ...
     pub version: u32,
 }
