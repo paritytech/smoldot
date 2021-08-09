@@ -28,7 +28,7 @@ const chainSpec = fs.readFileSync('../../westend.json', 'utf8');
 const parachainSpec = fs.readFileSync('../../westend-westmint.json', 'utf8');
 
 const client = smoldot.start({
-    maxLogLevel: 3,  // Can be increased for more verbosity
+    maxLogLevel: 4,  // Can be increased for more verbosity
     forbidTcp: false,
     forbidWs: false,
     forbidWss: false,
@@ -77,7 +77,12 @@ wsServer.on('request', function (request) {
     if (request.resource == '/relay') {
         chain = client.then(async client => {
             return {
-                relay: await client.addChain({ chainSpec })
+                relay: await client.addChain({
+                    chainSpec,
+                    jsonRpcCallback: (resp) => {
+                        connection.sendUTF(resp);
+                    },
+                })
             };
         });
 
