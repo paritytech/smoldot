@@ -881,7 +881,7 @@ impl Background {
                         transaction_version: runtime_spec.transaction_version.map(u64::from),
                         apis: runtime_spec
                             .apis
-                            .map(|api| (api.name, api.version))
+                            .map(|api| (api.name_hash, api.version))
                             .collect(),
                     })
                     .unwrap()
@@ -929,7 +929,7 @@ impl Background {
                                                     .map(u64::from),
                                                 apis: runtime_spec
                                                     .apis
-                                                    .map(|api| (api.name, api.version))
+                                                    .map(|api| (api.name_hash, api.version))
                                                     .collect(),
                                             })
                                             .unwrap()
@@ -1007,7 +1007,7 @@ impl Background {
                             transaction_version: runtime_spec.transaction_version.map(u64::from),
                             apis: runtime_spec
                                 .apis
-                                .map(|api| (api.name, api.version))
+                                .map(|api| (api.name_hash, api.version))
                                 .collect(),
                         })
                         .to_json_response(request_id)
