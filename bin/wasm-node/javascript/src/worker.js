@@ -156,3 +156,9 @@ compat.setOnMessage((message) => {
     injectMessage(state, message);
   }
 });
+
+// Periodically send a ping message to the outside, as a way to report liveness.
+setInterval(() => {
+  // `compat.postMessage` is the same as `postMessage`, but works across environments.
+  compat.postMessage({ kind: 'livenessPing' });
+}, 2500);
