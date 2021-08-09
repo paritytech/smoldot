@@ -45,7 +45,7 @@ use futures::{
 };
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
-pub use crate::libp2p::peers::ConnectionId;
+pub use crate::libp2p::{collection::ReadWrite, peers::ConnectionId};
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
@@ -1221,18 +1221,9 @@ where
         incoming_buffer: Option<&[u8]>,
         outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
     ) -> Result<ReadWrite<TNow>, peers::ConnectionError> {
-        let inner = self
-            .inner
+        self.inner
             .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
-            .await?;
-
-        Ok(ReadWrite {
-            read_bytes: inner.read_bytes,
-            written_bytes: inner.written_bytes,
-            wake_up_after: inner.wake_up_after,
-            wake_up_future: inner.wake_up_future,
-            write_close: inner.write_close,
-        })
+            .await
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -1438,32 +1429,6 @@ where
 
         self.service.next_start_connect_waker.wake();
     }
-}
-
-/// Outcome of calling [`ChainNetwork::read_write`].
-pub struct ReadWrite<TNow> {
-    /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
-    /// should no longer be present the next time [`ChainNetwork::read_write`] is called.
-    pub read_bytes: usize,
-
-    /// Number of bytes written to the outgoing buffer. These bytes should be sent out to the
-    /// remote. The rest of the outgoing buffer is left untouched.
-    pub written_bytes: usize,
-
-    /// If `Some`, [`ChainNetwork::read_write`] should be called again when the point in time
-    /// reaches the value in the `Option`.
-    pub wake_up_after: Option<TNow>,
-
-    /// [`ChainNetwork::read_write`] should be called again when this
-    /// [`peers::ConnectionReadyFuture`] returns `Ready`.
-    pub wake_up_future: peers::ConnectionReadyFuture,
-
-    /// If `true`, the writing side the connection must be closed. Will always remain to `true`
-    /// after it has been set.
-    ///
-    /// If, after calling [`ChainNetwork::read_write`], the returned [`ReadWrite`] contains `true`
-    /// here, and the inbound buffer is `None`, then the [`ConnectionId`] is now invalid.
-    pub write_close: bool,
 }
 
 /// See [`Event::IdentifyRequestIn`].
