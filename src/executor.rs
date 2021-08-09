@@ -235,9 +235,8 @@ impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
 /// One API that the runtime supports.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CoreVersionApi {
-    /// Name of the API.
-    // TODO: explain what it means exactly
-    pub name: [u8; 8],
+    /// Blake2 hash of length 8 of the name of the API.
+    pub name_hash: [u8; 8],
     /// Version of the module. Typical values are `1`, `2`, `3`, ...
     pub version: u32,
 }
@@ -302,7 +301,7 @@ fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
             nom::number::complete::le_u32,
         )),
         move |(name, version)| CoreVersionApi {
-            name: <[u8; 8]>::try_from(name).unwrap(),
+            name_hash: <[u8; 8]>::try_from(name).unwrap(),
             version,
         },
     )(bytes)
