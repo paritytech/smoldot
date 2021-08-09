@@ -25,6 +25,7 @@ import * as process from 'process';
 import * as fs from 'fs';
 
 const chainSpec = fs.readFileSync('../../westend.json', 'utf8');
+const parachainSpec = fs.readFileSync('../../westend-westmint.json', 'utf8');
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
@@ -38,14 +39,16 @@ const client = smoldot.start({
 // is established, but smoldot will de-duplicate them and only connect to the chain once.
 // By calling it now, we let smoldot start syncing that chain in the background even before a
 // WebSocket connection has been established.
-const healthChecker = smoldot.healthChecker();
 client
-    .then(client => client.addChain({
-        chainSpec,
-        jsonRpcCallback: (response) => healthChecker.responsePassThrough(response)
-    }))
-    .then(chain => {
-        healthChecker.start((request) => chain.sendJsonRpc(request), (health) => console.log(health));
+    .then(async client => {
+        const relay = await client.addChain({
+            chainSpec,
+        });
+
+        await client.addChain({
+            chainSpec: parachainSpec,
+            potentialRelayChains: [relay]
+        })
     })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
@@ -59,7 +62,7 @@ let server = http.createServer(function (request, response) {
 
 server.listen(9944, function () {
     console.log('Server is listening on port 9944');
-    console.log('Visit https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944');
+    console.log('Visit https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frelay (relay chain) or https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fparachain (parachain)');
 });
 
 let wsServer = new websocket.server({
@@ -69,25 +72,52 @@ let wsServer = new websocket.server({
 
 wsServer.on('request', function (request) {
     const connection = request.accept(request.requestedProtocols[0], request.origin);
+
+    let chain;
+    if (request.resource == '/relay') {
+        chain = client.then(async client => {
+            return {
+                relay: await client.addChain({ chainSpec })
+            };
+        });
+
+    } else if (request.resource == '/parachain') {
+        chain = client.then(async client => {
+            const relay = await client.addChain({
+                chainSpec,
+            });
+
+            const para = await client.addChain({
+                chainSpec: parachainSpec,
+                jsonRpcCallback: (resp) => {
+                    connection.sendUTF(resp);
+                },
+                potentialRelayChains: [relay]
+            });
+
+            return { relay, para };
+        });
+    } else {
+        request.reject(404);
+    }
+
     console.log((new Date()) + ' Connection accepted.');
 
-    const chain = client.then(client => {
-        return client.addChain({
-            chainSpec,
-            jsonRpcCallback: (resp) => {
-                connection.sendUTF(resp);
-            },
-        })
-            .catch((error) => {
-                console.error("Error while adding chain: " + error);
-                process.exit(1);
-            })
-    });
+    chain
+        .catch((error) => {
+            console.error("Error while adding chain: " + error);
+            process.exit(1);
+        });
 
     connection.on('message', function (message) {
         if (message.type === 'utf8') {
             chain
-                .then(chain => chain.sendJsonRpc(message.utf8Data))
+                .then(chain => {
+                    if (chain.para)
+                        chain.para.sendJsonRpc(message.utf8Data);
+                    else
+                        chain.relay.sendJsonRpc(message.utf8Data);
+                })
                 .catch((error) => {
                     console.error("Error during JSON-RPC request: " + error);
                     process.exit(1);
@@ -99,6 +129,10 @@ wsServer.on('request', function (request) {
 
     connection.on('close', function (reasonCode, description) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
-        chain.then(chain => chain.remove()).catch(() => { });
+        chain.then(chain => {
+            chain.relay.remove();
+            if (chain.para)
+                chain.para.remove();
+        }).catch(() => { });
     });
 });
