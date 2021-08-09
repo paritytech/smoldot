@@ -37,10 +37,11 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{network_service, runtime_service, sync_service, transactions_service};
+use crate::{ffi, network_service, runtime_service, sync_service, transactions_service};
 
 use futures::{
     channel::{mpsc, oneshot},
+    future::FusedFuture as _,
     lock::Mutex,
     prelude::*,
 };
@@ -60,6 +61,7 @@ use std::{
     pin::Pin,
     str,
     sync::{atomic, Arc},
+    time::Duration,
 };
 
 /// Configuration for a JSON-RPC service.
@@ -214,7 +216,10 @@ impl JsonRpcService {
                                 // It is important for `new_requests_rx` to be unlocked before
                                 // awaiting on `handle_request`.
                                 match message {
-                                    Some(m) => background.handle_request(m).await,
+                                    Some(m) => {
+                                        with_long_time_warning(background.handle_request(&m), &m)
+                                            .await
+                                    }
                                     None => return, // Foreground is closed.
                                 }
                             }
@@ -301,6 +306,43 @@ impl JsonRpcService {
         // The sender is stored in the background task, and the background task never ends before
         // the foreground. We can thus unwrap safely.
         lock.next().await.unwrap()
+    }
+}
+
+/// Runs a future but prints a warning if it takes a long time to complete.
+fn with_long_time_warning<'a, T: Future + 'a>(
+    future: T,
+    json_rpc_request: &'a str,
+) -> impl Future<Output = T::Output> + 'a {
+    let mut warn_after = ffi::Delay::new(Duration::from_secs(1)).fuse();
+
+    async move {
+        let future = future.fuse();
+        futures::pin_mut!(future);
+
+        loop {
+            futures::select! {
+                _ = warn_after => {
+                    log::warn!(
+                        "JSON-RPC request is taking a long time: {:?}{}",
+                        if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
+                            else { &json_rpc_request[..] },
+                        if json_rpc_request.len() > 100 { "…" } else { "" }
+                    );
+                }
+                out = future => {
+                    if warn_after.is_terminated() {
+                        log::info!(
+                            "JSON-RPC request has finished after taking a long time: {:?}{}",
+                            if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
+                                else { &json_rpc_request[..] },
+                            if json_rpc_request.len() > 100 { "…" } else { "" }
+                        );
+                    }
+                    return out
+                },
+            }
+        }
     }
 }
 
@@ -413,9 +455,9 @@ struct Blocks {
 }
 
 impl Background {
-    async fn handle_request(&self, json_rpc_request: String) {
+    async fn handle_request(&self, json_rpc_request: &str) {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
-        let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
+        let (request_id, call) = match methods::parse_json_call(json_rpc_request) {
             Ok(v) => v,
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
