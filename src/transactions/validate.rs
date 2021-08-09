@@ -280,7 +280,7 @@ pub fn validate_transaction(
             let version = runtime_spec
                 .decode()
                 .apis
-                .find(|api| api.name == expected.as_ref())
+                .find(|api| api.name_hash == expected.as_ref())
                 .map(|api| api.version);
             (version, runtime)
         }
