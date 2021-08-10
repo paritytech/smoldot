@@ -40,16 +40,7 @@ const client = smoldot.start({
 // By calling it now, we let smoldot start syncing that chain in the background even before a
 // WebSocket connection has been established.
 client
-    .then(async client => {
-        const relay = await client.addChain({
-            chainSpec,
-        });
-
-        await client.addChain({
-            chainSpec: parachainSpec,
-            potentialRelayChains: [relay]
-        })
-    })
+    .then(client => client.addChain({ chainSpec }))
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
