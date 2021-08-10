@@ -1309,6 +1309,8 @@ async fn start_parachain(
                         });
 
                         // TODO: `_tx` is immediately discarded; the feature isn't actually fully implemented
+                        // TODO: a `mem::forget` is used in order to avoid issues in other parts of the code, but is a complete hack
+                        core::mem::forget(_tx);
                     }
                     ToBackground::PeersAssumedKnowBlock { send_back, .. } => {
                         let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
