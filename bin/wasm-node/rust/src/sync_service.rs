@@ -914,9 +914,11 @@ async fn start_relay_chain(
                 has_new_best = false;
 
                 let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                // TODO: remove expired senders
-                for notif in &mut best_notifications {
-                    let _ = notif.send(scale_encoded_header.clone());
+                for index in (0..best_notifications.len()).rev() {
+                    let mut notif = best_notifications.swap_remove(index);
+                    if notif.send(scale_encoded_header.clone()).is_ok() {
+                        best_notifications.push(notif);
+                    }
                 }
 
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
@@ -962,9 +964,11 @@ async fn start_relay_chain(
                 }
 
                 let scale_encoded_header = sync.finalized_block_header().scale_encoding_vec();
-                // TODO: remove expired senders
-                for notif in &mut finalized_notifications {
-                    let _ = notif.send(scale_encoded_header.clone());
+                for index in (0..finalized_notifications.len()).rev() {
+                    let mut notif = finalized_notifications.swap_remove(index);
+                    if notif.send(scale_encoded_header.clone()).is_ok() {
+                        finalized_notifications.push(notif);
+                    }
                 }
 
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
