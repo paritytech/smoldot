@@ -1801,7 +1801,10 @@ async fn payment_query_info(
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
     let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .recent_best_block_runtime_call("TransactionPaymentApi_query_info", iter::once(&extrinsic))
+        .recent_best_block_runtime_call(
+            json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
+            json_rpc::payment_info::payment_info_parameters(extrinsic),
+        )
         .await
         .map_err(PaymentQueryInfoError::Call)?;
 
@@ -1809,8 +1812,8 @@ async fn payment_query_info(
 
     let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
         virtual_machine,
-        function_to_call: "TransactionPaymentApi_query_info",
-        parameter: iter::once(&extrinsic),
+        function_to_call: json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
+        parameter: json_rpc::payment_info::payment_info_parameters(extrinsic),
     }) {
         Ok(vm) => vm,
         Err((err, prototype)) => {
@@ -1819,37 +1822,20 @@ async fn payment_query_info(
         }
     };
 
-    fn decode_payment_info(
-        value: &[u8],
-    ) -> Result<methods::RuntimeDispatchInfo, PaymentQueryInfoError> {
-        nom::combinator::all_consuming(nom::combinator::map(
-            nom::sequence::tuple((
-                nom::number::complete::le_u64,
-                nom::combinator::map_opt(nom::number::complete::u8, |n| match n {
-                    0 => Some(methods::DispatchClass::Normal),
-                    1 => Some(methods::DispatchClass::Operational),
-                    2 => Some(methods::DispatchClass::Mandatory),
-                    _ => None,
-                }),
-                nom::number::complete::le_u64,
-            )),
-            |(weight, class, partial_fee)| methods::RuntimeDispatchInfo {
-                weight,
-                class,
-                partial_fee,
-            },
-        ))(value)
-        .map(|(_, v)| v)
-        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| PaymentQueryInfoError::DecodeError)
-    }
-
     loop {
         match runtime_call {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let output = success.virtual_machine.value().as_ref().to_owned();
-                let decoded = decode_payment_info(&output)?;
+                let decoded = json_rpc::payment_info::decode_payment_info(
+                    success.virtual_machine.value().as_ref(),
+                );
+
                 runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                break Ok(decoded);
+                match decoded {
+                    Ok(d) => break Ok(d),
+                    Err(err) => {
+                        return Err(PaymentQueryInfoError::DecodeError(err));
+                    }
+                }
             }
             read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                 runtime_call_lock.unlock(error.prototype);
@@ -1882,5 +1868,5 @@ enum PaymentQueryInfoError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
-    DecodeError,
+    DecodeError(json_rpc::payment_info::DecodeError),
 }
