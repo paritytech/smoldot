@@ -1014,14 +1014,41 @@ async fn start_relay_chain(
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: stupid to re-encode header
-                            // TODO: log the outcome
                             match sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify => {},
-                                all::BlockAnnounceOutcome::TooOld => {},
-                                all::BlockAnnounceOutcome::AlreadyInChain => {},
-                                all::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
-                                all::BlockAnnounceOutcome::Disjoint {} => {},
+                                all::BlockAnnounceOutcome::HeaderVerify |
+                                all::BlockAnnounceOutcome::AlreadyInChain => {
+                                    log::debug!(
+                                        target: "sync-verify",
+                                        "Processed block announce from {}", peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::Disjoint {} => {
+                                    log::debug!(
+                                        target: "sync-verify",
+                                        "Processed block announce from {} (disjoint)", peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::TooOld { announce_block_height, .. } => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Block announce header height (#{}) from {} is below finalized block",
+                                        announce_block_height, peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::NotFinalizedChain => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Block announce from {} isn't part of finalized chain",
+                                        peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::InvalidHeader(err) => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Failed to decode block announce header from {}: {}",
+                                        peer_id, err
+                                    );
+                                },
                             }
                         },
                         network_service::Event::GrandpaCommitMessage { chain_index, message }
@@ -1282,6 +1309,8 @@ async fn start_parachain(
                         });
 
                         // TODO: `_tx` is immediately discarded; the feature isn't actually fully implemented
+                        // TODO: a `mem::forget` is used in order to avoid issues in other parts of the code, but is a complete hack
+                        core::mem::forget(_tx);
                     }
                     ToBackground::PeersAssumedKnowBlock { send_back, .. } => {
                         let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\

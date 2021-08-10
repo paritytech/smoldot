@@ -17,7 +17,7 @@
 
 import { Buffer } from 'buffer';
 import * as compat from './compat-nodejs.js';
-import { default as smoldot_js_builder } from './bindings-smoldot-js.js';
+import { default as smoldot_light_builder } from './bindings-smoldot-light.js';
 import { default as wasi_builder } from './bindings-wasi.js';
 
 import { default as wasm_base64 } from './autogen/wasm.js';
@@ -55,18 +55,25 @@ const injectMessage = (instance, message) => {
         .writeUInt32LE(message.potentialRelayChains[idx], potentialRelayChainsPtr + idx * 4);
     }
 
-    const result = instance.exports.add_chain(
+    // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
+    // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
+    // has succeeeded or not.
+    // Note that `add_chain` properly de-allocates buffers even if it failed.
+    const chainId = instance.exports.add_chain(
       chainSpecPtr, chainSpecLen,
       message.jsonRpcRunning,
       potentialRelayChainsPtr, potentialRelayChainsLen
     );
 
-    if (result >= 0x80000000 || result < 0) { // TODO: really crappy error code handling
-      // TODO: better error message
-      // Note that `add_chain` properly de-allocates buffers even if it failed.
-      compat.postMessage({ kind: 'chainAddedErr', error: new Error('Failed to initialize chain') });
+    if (instance.exports.chain_is_ok(chainId) != 0) {
+      compat.postMessage({ kind: 'chainAddedOk', chainId });
     } else {
-      compat.postMessage({ kind: 'chainAddedOk', chainId: result });
+      const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
+      const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
+      const errorMsg = Buffer.from(instance.exports.memory.buffer)
+        .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
+      instance.exports.remove_chain(chainId);
+      compat.postMessage({ kind: 'chainAddedErr', error: new Error(errorMsg) });
     }
 
   } else if (message.ty == 'removeChain') {
@@ -84,7 +91,7 @@ const startInstance = async (config) => {
   // cross-platform cross-bundler approach.
   const wasmBytecode = new Uint8Array(Buffer.from(wasm_base64, 'base64'));
 
-  // Used to bind with the smoldot-js bindings. See the `bindings-smoldot-js.js` file.
+  // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
   const smoldotJsConfig = {
     logCallback: (level, target, message) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
@@ -99,7 +106,7 @@ const startInstance = async (config) => {
     forbidWss: config.forbidWss,
   };
 
-  const { bindings: smoldotJsBindings } = smoldot_js_builder(smoldotJsConfig);
+  const { bindings: smoldotJsBindings } = smoldot_light_builder(smoldotJsConfig);
 
   // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
   const wasiConfig = {};
@@ -149,3 +156,9 @@ compat.setOnMessage((message) => {
     injectMessage(state, message);
   }
 });
+
+// Periodically send a ping message to the outside, as a way to report liveness.
+setInterval(() => {
+  // `compat.postMessage` is the same as `postMessage`, but works across environments.
+  compat.postMessage({ kind: 'livenessPing' });
+}, 2500);
