@@ -500,7 +500,7 @@ pub struct RuntimeVersion {
 pub struct RuntimeDispatchInfo {
     pub weight: u64,
     pub class: DispatchClass,
-    pub partial_fee: u64,
+    pub partial_fee: u128,
 }
 
 #[derive(Debug, Copy, Clone)]

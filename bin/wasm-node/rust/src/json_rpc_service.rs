@@ -727,22 +727,21 @@ impl Background {
                         .await;
                 }
             }
-            methods::MethodCall::payment_queryInfo { extrinsic: _, hash } => {
+            methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
                 assert!(hash.is_none()); // TODO: handle when hash != None
-                                         // TODO: complete hack
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::payment_queryInfo(methods::RuntimeDispatchInfo {
-                            weight: 220429000,                     // TODO: no
-                            class: methods::DispatchClass::Normal, // TODO: no
-                            partial_fee: 15600000001,              // TODO: no
-                        })
-                        .to_json_response(request_id),
-                    )
-                    .await;
+
+                let response = match payment_query_info(&self.runtime_service, &extrinsic.0).await {
+                    Ok(info) => {
+                        methods::Response::payment_queryInfo(info).to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                };
+
+                let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::rpc_methods {} => {
                 let _ = self
@@ -1793,4 +1792,81 @@ enum AnnounceNonceError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+}
+
+async fn payment_query_info(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+    extrinsic: &[u8],
+) -> Result<methods::RuntimeDispatchInfo, PaymentQueryInfoError> {
+    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
+    // order to know where the parachains are.
+    let (runtime_call_lock, virtual_machine) = relay_chain_sync
+        .recent_best_block_runtime_call(
+            json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
+            json_rpc::payment_info::payment_info_parameters(extrinsic),
+        )
+        .await
+        .map_err(PaymentQueryInfoError::Call)?;
+
+    // TODO: move the logic below in the `src` directory
+
+    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+        virtual_machine,
+        function_to_call: json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
+        parameter: json_rpc::payment_info::payment_info_parameters(extrinsic),
+    }) {
+        Ok(vm) => vm,
+        Err((err, prototype)) => {
+            runtime_call_lock.unlock(prototype);
+            return Err(PaymentQueryInfoError::StartError(err));
+        }
+    };
+
+    loop {
+        match runtime_call {
+            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                let decoded = json_rpc::payment_info::decode_payment_info(
+                    success.virtual_machine.value().as_ref(),
+                );
+
+                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
+                match decoded {
+                    Ok(d) => break Ok(d),
+                    Err(err) => {
+                        return Err(PaymentQueryInfoError::DecodeError(err));
+                    }
+                }
+            }
+            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_call_lock.unlock(error.prototype);
+                break Err(PaymentQueryInfoError::ReadOnlyRuntime(error.detail));
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(
+                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
+                        );
+                        return Err(PaymentQueryInfoError::Call(err));
+                    }
+                };
+                runtime_call = get.inject_value(storage_value.map(iter::once));
+            }
+            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                todo!() // TODO:
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+            }
+        }
+    }
+}
+
+#[derive(derive_more::Display)]
+enum PaymentQueryInfoError {
+    Call(runtime_service::RuntimeCallError),
+    StartError(host::StartErr),
+    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    DecodeError(json_rpc::payment_info::DecodeError),
 }
