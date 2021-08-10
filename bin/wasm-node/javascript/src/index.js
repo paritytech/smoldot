@@ -86,7 +86,7 @@ export async function start(config) {
       if (cb) cb(message.data);
 
     } else if (message.kind == 'chainAddedOk') {
-      const expected = pendingConfirmations.pop();
+      const expected = pendingConfirmations.shift();
       let chainId = message.chainId; // Later set to null when the chain is removed.
 
       if (chainsJsonRpcCallbacks.has(chainId)) // Sanity check.
@@ -124,13 +124,13 @@ export async function start(config) {
       });
 
     } else if (message.kind == 'chainAddedErr') {
-      const expected = pendingConfirmations.pop();
+      const expected = pendingConfirmations.shift();
       // `expected` was pushed by the `addChain` method.
       // Reject the promise that `addChain` returned to the user.
       expected.reject(message.error);
 
     } else if (message.kind == 'chainRemoved') {
-      pendingConfirmations.pop();
+      pendingConfirmations.shift();
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
