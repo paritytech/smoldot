@@ -35,10 +35,14 @@ jobs:
   wasm-node-check:
     name: Check javascript node
     runs-on: ubuntu-latest
-    container:
-      image: rust
     steps:
+    - run: docker run -it polkadot --chain polkadot-dev
     - uses: actions/checkout@v2.3.4
+    - uses: actions-rs/toolchain@v1
+      with:
+        # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
+        toolchain: stable
+        profile: minimal
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.4.0
       with:
