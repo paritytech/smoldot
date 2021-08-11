@@ -36,7 +36,8 @@ jobs:
     name: Check javascript node
     runs-on: ubuntu-latest
     steps:
-    - run: docker run -d parity/polkadot:v0.9.8 --chain polkadot-dev --unsafe-rpc-external --unsafe-ws-external && sleep 15
+    # Note: feel free to update the Polkadot version here when one is released
+    - run: docker run --network host -d parity/polkadot:v0.9.8 --chain polkadot-dev --unsafe-rpc-external --unsafe-ws-external && sleep 15
     - run: curl http://localhost:9933/
     - uses: actions/checkout@v2.3.4
     - uses: actions-rs/toolchain@v1
