@@ -41,7 +41,7 @@ jobs:
       run: docker run --network host -d parity/polkadot:v0.9.8 --chain polkadot-dev --unsafe-rpc-external --unsafe-ws-external
     - name: Wait for node to be up
       run: |
-        bash -c 'while true; do curl -X POST -H "Content-Type: application/json" localhost:9933; if [ $? -eq 0 ]; then break; fi; sleep 1; done'
+        bash -c 'while true; do curl -X POST -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"system_health\",\"params\":[]}" localhost:9933; if [ $? -eq 0 ]; then break; fi; sleep 1; done'
     - uses: actions/checkout@v2.3.4
     - uses: actions-rs/toolchain@v1
       with:
