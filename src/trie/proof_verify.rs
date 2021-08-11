@@ -394,7 +394,7 @@ impl Children {
 }
 
 /// Possible error returned by [`verify_proof`]
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Trie root wasn't found in the proof.
     TrieRootNotFound,

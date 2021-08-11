@@ -1511,10 +1511,21 @@ pub enum StorageProofRequestError {
 }
 
 /// Error returned by [`ChainNetwork::call_proof_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum CallProofRequestError {
     Request(peers::RequestError),
     Decode(protocol::DecodeCallProofResponseError),
+}
+
+impl CallProofRequestError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        match self {
+            CallProofRequestError::Request(_) => true,
+            CallProofRequestError::Decode(_) => false,
+        }
+    }
 }
 
 /// Error returned by [`ChainNetwork::grandpa_warp_sync_request`].

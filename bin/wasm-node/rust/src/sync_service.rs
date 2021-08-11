@@ -485,6 +485,7 @@ impl SyncService {
     }
 
     // TODO: documentation
+    // TODO: there's no proof that the call proof is actually correct
     pub async fn call_proof_query<'a>(
         self: Arc<Self>,
         block_number: u64,
@@ -510,7 +511,13 @@ impl SyncService {
                 .await;
 
             match result {
-                Ok(value) => return Ok(value),
+                Ok(value) if !value.is_empty() => return Ok(value),
+                // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
+                Ok(_) => outcome_errors.push(service::CallProofRequestError::Request(
+                    smoldot::libp2p::peers::RequestError::Connection(
+                        smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
+                    ),
+                )),
                 Err(err) => {
                     outcome_errors.push(err);
                 }
@@ -573,11 +580,19 @@ pub enum StorageQueryErrorDetail {
 }
 
 /// Error that can happen when calling [`SyncService::call_proof_query`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CallProofQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
     pub errors: Vec<service::CallProofRequestError>,
+}
+
+impl CallProofQueryError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        self.errors.iter().all(|err| err.is_network_problem())
+    }
 }
 
 impl fmt::Display for CallProofQueryError {

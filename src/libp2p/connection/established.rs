@@ -1532,7 +1532,7 @@ pub enum Error {
 }
 
 /// Error that can happen during a request in a request-response scheme.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum RequestError {
     /// Remote hasn't answered in time.
     Timeout,

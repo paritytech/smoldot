@@ -544,7 +544,7 @@ impl<I, P> fmt::Debug for InProgress<I, P> {
 }
 
 /// Error that can happen during the negotiation.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error while decoding a frame length, or frame size limit reached.
     Frame(leb128::FramedError),
