@@ -197,10 +197,7 @@ impl JsonRpcService {
 
                 {
                     let mut blocks = background.blocks.try_lock().unwrap();
-                    blocks.known_blocks.put(
-                        best_block_hash,
-                        header::decode(&best_block_header).unwrap().into(),
-                    );
+                    blocks.known_blocks.put(best_block_hash, best_block_header);
                     blocks.best_block = best_block_hash;
                     blocks.finalized_block = best_block_hash;
                 }
@@ -249,9 +246,8 @@ impl JsonRpcService {
                                     // As a small trick, we re-query the finalized block from
                                     // `known_blocks` in order to ensure that it never leaves the
                                     // LRU cache.
-                                    let header = header::decode(&block).unwrap().into();
                                     blocks.known_blocks.get(&blocks.finalized_block);
-                                    blocks.known_blocks.put(hash, header);
+                                    blocks.known_blocks.put(hash, block);
                                 },
                                 None => return,
                             }
@@ -260,10 +256,9 @@ impl JsonRpcService {
                             match block {
                                 Some(block) => {
                                     let hash = header::hash_from_scale_encoded_header(&block);
-                                    let header = header::decode(&block).unwrap().into();
                                     let mut blocks = background.blocks.lock().await;
                                     blocks.finalized_block = hash;
-                                    blocks.known_blocks.put(hash, header);
+                                    blocks.known_blocks.put(hash, block);
                                 },
                                 None => return,
                             }
@@ -415,7 +410,7 @@ struct Background {
     transactions_service: Arc<transactions_service::TransactionsService>,
 
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
-    // TODO: move somewhere else
+    // TODO: move somewhere else?
     blocks: Mutex<Blocks>,
 
     /// Hash of the genesis block.
@@ -445,7 +440,7 @@ struct Blocks {
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
     ///
     /// Always contains `best_block` and `finalized_block`.
-    known_blocks: lru::LruCache<[u8; 32], header::Header>,
+    known_blocks: lru::LruCache<[u8; 32], Vec<u8>>,
 
     /// Hash of the current best block.
     best_block: [u8; 32],
@@ -771,7 +766,20 @@ impl Background {
                 let block_hash = blocks.best_block;
                 let (state_root, block_number) = {
                     let block = blocks.known_blocks.get(&block_hash).unwrap();
-                    (block.state_root, block.number)
+                    match header::decode(block) {
+                        Ok(d) => (*d.state_root, d.number),
+                        Err(_) => {
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::ServerError(
+                                    -32000,
+                                    "Failed to decode block header",
+                                ),
+                                None,
+                            );
+                            return;
+                        }
+                    }
                 };
                 drop(blocks);
 
@@ -1318,7 +1326,9 @@ impl Background {
                     if blocks
                         .known_blocks
                         .get(&blocks.best_block)
-                        .map_or(false, |h| h.number == n) =>
+                        .map_or(false, |h| {
+                            header::decode(&h).map_or(false, |h| h.number == n)
+                        }) =>
                 {
                     methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
                         .to_json_response(request_id)
@@ -1327,7 +1337,9 @@ impl Background {
                     if blocks
                         .known_blocks
                         .get(&blocks.finalized_block)
-                        .map_or(false, |h| h.number == n) =>
+                        .map_or(false, |h| {
+                            header::decode(&h).map_or(false, |h| h.number == n)
+                        }) =>
                 {
                     methods::Response::chain_getBlockHash(methods::HashHexString(
                         blocks.finalized_block,
@@ -1687,15 +1699,14 @@ impl Background {
 
         async move {
             // TODO: risk of deadlock here?
-            // TODO: restore
-            /*{
-                let mut blocks = self.blocks;
+            {
+                let mut blocks = self.blocks.lock().await;
                 let blocks = &mut *blocks;
 
                 if let Some(header) = blocks.known_blocks.get(&hash) {
-                    return Ok(header.scale_encoding_vec());
+                    return Ok(header.clone());
                 }
-            }*/
+            }
 
             // Header isn't known locally. Ask the networ
             let fut = sync_service.block_query(
@@ -1711,7 +1722,12 @@ impl Background {
             // Note that the `block_query` method guarantees that the header is present
             // and valid.
             if let Ok(block) = result {
-                Ok(block.header.unwrap())
+                let header = block.header.unwrap();
+                debug_assert_eq!(header::hash_from_scale_encoded_header(&header), hash);
+
+                let mut blocks = self.blocks.lock().await;
+                blocks.known_blocks.put(hash, header.clone());
+                Ok(header)
             } else {
                 Err(())
             }
