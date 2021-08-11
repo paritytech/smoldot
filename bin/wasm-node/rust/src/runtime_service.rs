@@ -352,8 +352,8 @@ impl RuntimeService {
 
                 // Perform the call proof request.
                 // Note that `latest_known_runtime` is not locked.
-                // If the call proof fail, do as if the proof was empty. This will enable the
-                // fallback consisting in performing individual storage proof requests.
+                // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
+                // TODO: also, an empty proof will be reported as an error right now, which is weird
                 let call_proof = self
                     .sync_service
                     .clone()
@@ -366,7 +366,7 @@ impl RuntimeService {
                         },
                     )
                     .await
-                    .unwrap_or(Vec::new());
+                    .map_err(RuntimeCallError::CallProof);
 
                 // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
                 // in-between.
@@ -478,7 +478,7 @@ impl RuntimeService {
 pub struct RuntimeCallLock<'a> {
     lock: MutexGuard<'a, LatestKnownRuntime>,
     runtime_block_header: Vec<u8>,
-    call_proof: Vec<Vec<u8>>,
+    call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
 impl<'a> RuntimeCallLock<'a> {
@@ -500,10 +500,15 @@ impl<'a> RuntimeCallLock<'a> {
     /// invalid.
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(&self, requested_key: &[u8]) -> Result<Option<&[u8]>, RuntimeCallError> {
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
         match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
             requested_key: &requested_key,
             trie_root_hash: self.block_storage_root(),
-            proof: self.call_proof.iter().map(|v| &v[..]),
+            proof: call_proof.iter().map(|v| &v[..]),
         }) {
             Ok(v) => Ok(v),
             Err(err) => Err(RuntimeCallError::StorageRetrieval(err)),
@@ -525,11 +530,16 @@ impl<'a> RuntimeCallLock<'a> {
         let mut to_find = vec![trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>()];
         let mut output = Vec::new();
 
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
         for key in mem::replace(&mut to_find, Vec::new()) {
             let node_info = proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
                 requested_key: key.iter().cloned(),
                 trie_root_hash: &self.block_storage_root(),
-                proof: self.call_proof.iter().map(|v| &v[..]),
+                proof: call_proof.iter().map(|v| &v[..]),
             })
             .map_err(RuntimeCallError::StorageRetrieval)?;
 
@@ -604,7 +614,7 @@ pub enum RuntimeError {
 }
 
 /// Error that can happen when calling a runtime function.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum RuntimeCallError {
     /// Runtime of the best block isn't valid.
     #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
@@ -613,6 +623,9 @@ pub enum RuntimeCallError {
     // TODO: change error type?
     #[display(fmt = "Error in call proof: {}", _0)]
     StorageRetrieval(proof_verify::Error),
+    /// Error while retrieving the call proof from the network.
+    #[display(fmt = "Error when retrieving the call proof: {}", _0)]
+    CallProof(sync_service::CallProofQueryError),
 }
 
 impl RuntimeCallError {
@@ -624,6 +637,7 @@ impl RuntimeCallError {
             // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
             RuntimeCallError::StorageRetrieval(proof_verify::Error::TrieRootNotFound) => true,
             RuntimeCallError::StorageRetrieval(_) => false,
+            RuntimeCallError::CallProof(err) => err.is_network_problem(),
         }
     }
 }

@@ -1204,7 +1204,7 @@ pub enum Event<TConn> {
 }
 
 /// Error potentially returned by [`Peers::request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum RequestError {
     /// Not connected to target.
     NotConnected,
