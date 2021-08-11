@@ -175,7 +175,7 @@ impl FramedInProgress {
 }
 
 /// Error potentially returned by [`FramedInProgress::update`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum FramedError {
     /// The variable-length prefix is too large and cannot possibly represent a valid size.
     LengthPrefixTooLarge,
