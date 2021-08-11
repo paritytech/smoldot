@@ -342,7 +342,7 @@ impl SqliteFullDatabase {
             .bind(1, i64::try_from(header.number).unwrap())
             .unwrap();
         statement.bind(2, &block_hash[..]).unwrap();
-        statement.bind(3, &scale_encoded_header[..]).unwrap();
+        statement.bind(3, scale_encoded_header).unwrap();
         statement.next().unwrap();
 
         let mut statement = connection

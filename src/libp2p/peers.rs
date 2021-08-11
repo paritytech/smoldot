@@ -54,7 +54,6 @@ use alloc::{
 };
 use core::{
     convert::TryFrom as _,
-    iter,
     num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Sub},
     task::Poll,

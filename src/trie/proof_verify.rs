@@ -169,7 +169,7 @@ pub fn trie_node_info<'a, 'b>(
         let has_storage_value = (node_value[0] & 0x40) != 0;
 
         // Iterator to the partial key found in the node value of `proof_iter`.
-        let mut partial_key = {
+        let partial_key = {
             // Length of the partial key, in nibbles.
             let pk_len = {
                 let mut accumulator = usize::from(node_value[0] & 0x3f);
