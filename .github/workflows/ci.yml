@@ -37,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - run: docker run parity/polkadot --chain polkadot-dev
+    - run: curl http://localhost:9933/
     - uses: actions/checkout@v2.3.4
     - uses: actions-rs/toolchain@v1
       with:
