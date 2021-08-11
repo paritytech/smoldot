@@ -630,7 +630,7 @@ impl<'a> DigestRef<'a> {
     }
 
     /// Try to decode a list of digest items, from their SCALE encoding.
-    fn from_scale_bytes(mut scale_encoded: &'a [u8]) -> Result<(Self, &'a [u8]), Error> {
+    fn from_scale_bytes(scale_encoded: &'a [u8]) -> Result<(Self, &'a [u8]), Error> {
         let (scale_encoded, digest_logs_len) =
             crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(scale_encoded)
                 .map_err(|_| Error::DigestItemLenDecodeError)?;

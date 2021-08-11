@@ -60,7 +60,7 @@
 use crate::util::leb128;
 
 use alloc::{vec, vec::Vec};
-use core::{cmp, fmt, iter, mem, slice, str};
+use core::{cmp, fmt, iter, mem, str};
 
 /// Configuration of a multistream-select protocol.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

@@ -47,7 +47,7 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::{fmt, iter, slice};
+use core::{fmt, iter};
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
 /// Configuration for [`run`].

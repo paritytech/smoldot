@@ -393,7 +393,7 @@ where
             pending: Mutex::new(PendingConnections {
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-                potential_addresses: potential_addresses,
+                potential_addresses,
             }),
             chain_grandpa_config: Mutex::new(chain_grandpa_config),
             chain_configs: config.chains,

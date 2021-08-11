@@ -359,7 +359,7 @@ impl BlockBuild {
 
                     shared.stage = new_stage;
 
-                    match parse_apply_extrinsic_output(&success.virtual_machine.value().as_ref()) {
+                    match parse_apply_extrinsic_output(success.virtual_machine.value().as_ref()) {
                         Ok(Ok(Ok(()))) => {}
                         Ok(Ok(Err(error))) => {
                             return BlockBuild::Finished(Err(
@@ -388,7 +388,7 @@ impl BlockBuild {
                     Stage::ApplyExtrinsic(_),
                 ) => {
                     let result = match parse_apply_extrinsic_output(
-                        &success.virtual_machine.value().as_ref(),
+                        success.virtual_machine.value().as_ref(),
                     ) {
                         Ok(r) => r,
                         Err(err) => return BlockBuild::Finished(Err(err)),
