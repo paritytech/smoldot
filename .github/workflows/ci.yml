@@ -49,7 +49,7 @@ jobs:
     - uses: actions/setup-node@v2.4.0
       with:
         node-version: '12'
-    - run: sudo apt-get update && apt install -y binaryen # For `wasm-opt`
+    - run: sudo apt-get update && sudo apt install -y binaryen # For `wasm-opt`
     - run: cd bin/wasm-node/javascript && npm install-ci-test
 
   check-features:
