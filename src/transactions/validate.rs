@@ -18,7 +18,7 @@
 //! Runtime call to obtain the transactions validity status.
 
 use crate::{
-    executor::{host, runtime_host},
+    executor::{self, host, runtime_host},
     header, util,
 };
 
@@ -180,6 +180,10 @@ pub enum UnknownTransaction {
 pub enum Error {
     /// Error while decoding the block header against which to make the call.
     InvalidHeader(header::Error),
+    /// Failed to determine the runtime version of the runtime.
+    RuntimeVersion(executor::CoreVersionError),
+    /// Transaction validation API version unrecognized.
+    UnknownApiVersion,
     /// Error while starting the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
     WasmStart(host::StartErr),
@@ -209,10 +213,27 @@ pub enum TransactionValidityError {
 }
 
 /// Produces the input to pass to the `TaggedTransactionQueue_validate_transaction` runtime call.
-pub fn validate_transaction_runtime_parameters(
-    scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+pub fn validate_transaction_runtime_parameters_v2<'a>(
+    scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
     source: TransactionSource,
-) -> impl Iterator<Item = impl AsRef<[u8]>> + Clone {
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+    validate_transaction_runtime_parameters_inner(scale_encoded_transaction, source, &[])
+}
+
+/// Produces the input to pass to the `TaggedTransactionQueue_validate_transaction` runtime call.
+pub fn validate_transaction_runtime_parameters_v3<'a>(
+    scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
+    source: TransactionSource,
+    block_hash: &'a [u8; 32],
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
+    validate_transaction_runtime_parameters_inner(scale_encoded_transaction, source, block_hash)
+}
+
+fn validate_transaction_runtime_parameters_inner<'a>(
+    scale_encoded_transaction: impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a,
+    source: TransactionSource,
+    block_hash: &'a [u8],
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
     // The `TaggedTransactionQueue_validate_transaction` function expects a SCALE-encoded
     // `(source, tx)`. The encoding is performed manually in order to avoid performing
     // redundant data copies.
@@ -224,7 +245,12 @@ pub fn validate_transaction_runtime_parameters(
 
     iter::once(source)
         .map(either::Left)
-        .chain(scale_encoded_transaction.map(either::Right))
+        .chain(
+            scale_encoded_transaction
+                .map(either::Right)
+                .map(either::Right),
+        )
+        .chain(iter::once(block_hash).map(either::Left).map(either::Right))
 }
 
 /// Name of the runtime function to call in order to validate a transaction.
@@ -245,56 +271,114 @@ pub fn decode_validate_transaction_return_value(
 pub fn validate_transaction(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Query {
-    // The `Core_initialize_block` function called below expects a partially-initialized
-    // SCALE-encoded header. Importantly, passing the entire header will lead to different code
-    // paths in the runtime and not match what Substrate does.
-    let decoded_header = match header::decode(config.scale_encoded_header) {
-        Ok(h) => h,
-        Err(err) => {
+    // The parameters of the function, and whether to call `Core_initialize_block` beforehand,
+    // depend on the API version.
+    // TODO: should the runtime spec be cached into the `HostVmPrototype`?
+    let (api_version, virtual_machine) = match executor::core_version(config.runtime) {
+        (Ok(runtime_spec), runtime) => {
+            let expected = blake2_rfc::blake2b::blake2b(8, &[], b"TaggedTransactionQueue");
+            let version = runtime_spec
+                .decode()
+                .apis
+                .find(|api| api.name_hash == expected.as_ref())
+                .map(|api| api.version);
+            (version, runtime)
+        }
+        (Err(err), virtual_machine) => {
             return Query::Finished {
-                result: Err(Error::InvalidHeader(err)),
-                virtual_machine: config.runtime,
+                result: Err(Error::RuntimeVersion(err)),
+                virtual_machine,
             }
         }
     };
 
-    // Start the call to `Core_initialize_block`.
-    let vm = runtime_host::run(runtime_host::Config {
-        virtual_machine: config.runtime,
-        function_to_call: "Core_initialize_block",
-        parameter: header::HeaderRef {
-            parent_hash: &header::hash_from_scale_encoded_header(config.scale_encoded_header),
-            number: decoded_header.number + 1,
-            extrinsics_root: &[0; 32],
-            state_root: &[0; 32],
-            digest: header::DigestRef::empty(),
+    match api_version {
+        Some(2) => {
+            // In version 2, we need to call `Core_initialize_block` beforehand.
+
+            // The `Core_initialize_block` function called below expects a partially-initialized
+            // SCALE-encoded header. Importantly, passing the entire header will lead to different code
+            // paths in the runtime and not match what Substrate does.
+            let decoded_header = match header::decode(config.scale_encoded_header) {
+                Ok(h) => h,
+                Err(err) => {
+                    return Query::Finished {
+                        result: Err(Error::InvalidHeader(err)),
+                        virtual_machine,
+                    }
+                }
+            };
+
+            // Start the call to `Core_initialize_block`.
+            let vm = runtime_host::run(runtime_host::Config {
+                virtual_machine,
+                function_to_call: "Core_initialize_block",
+                parameter: header::HeaderRef {
+                    parent_hash: &decoded_header.hash(),
+                    number: decoded_header.number + 1,
+                    extrinsics_root: &[0; 32],
+                    state_root: &[0; 32],
+                    digest: header::DigestRef::empty(),
+                }
+                .scale_encoding(),
+                top_trie_root_calculation_cache: None,
+                storage_top_trie_changes: hashbrown::HashMap::with_capacity_and_hasher(
+                    64, // Rough estimate.
+                    Default::default(),
+                ),
+                offchain_storage_changes: hashbrown::HashMap::default(),
+            });
+
+            // Information used later, after `Core_initialize_block` is done.
+            let stage1 = Stage1 {
+                transaction_source: config.source,
+                scale_encoded_transaction: config.scale_encoded_transaction.fold(
+                    Vec::new(),
+                    |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    },
+                ),
+            };
+
+            match vm {
+                Ok(vm) => Query::from_step1(vm, stage1),
+                Err((err, virtual_machine)) => Query::Finished {
+                    result: Err(Error::WasmStart(err)),
+                    virtual_machine,
+                },
+            }
         }
-        .scale_encoding(),
-        top_trie_root_calculation_cache: None,
-        storage_top_trie_changes: hashbrown::HashMap::with_capacity_and_hasher(
-            64, // Rough estimate.
-            Default::default(),
-        ),
-        offchain_storage_changes: hashbrown::HashMap::default(),
-    });
+        Some(3) => {
+            // In version 3, we don't need to call `Core_initialize_block`.
 
-    // Information used later, after `Core_initialize_block` is done.
-    let stage1 = Stage1 {
-        transaction_source: config.source,
-        scale_encoded_transaction: config
-            .scale_encoded_transaction
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            }),
-    };
+            let vm = runtime_host::run(runtime_host::Config {
+                virtual_machine,
+                function_to_call: VALIDATION_FUNCTION_NAME,
+                parameter: validate_transaction_runtime_parameters_v3(
+                    config.scale_encoded_transaction,
+                    config.source,
+                    &header::hash_from_scale_encoded_header(config.scale_encoded_header),
+                ),
+                top_trie_root_calculation_cache: None,
+                storage_top_trie_changes: hashbrown::HashMap::default(),
+                offchain_storage_changes: hashbrown::HashMap::default(),
+            });
 
-    match vm {
-        Ok(vm) => Query::from_step1(vm, stage1),
-        Err((err, virtual_machine)) => Query::Finished {
-            result: Err(Error::WasmStart(err)),
-            virtual_machine,
-        },
+            match vm {
+                Ok(vm) => Query::from_step2(vm, Stage2 {}),
+                Err((err, virtual_machine)) => Query::Finished {
+                    result: Err(Error::WasmStart(err)),
+                    virtual_machine,
+                },
+            }
+        }
+        _ => {
+            return Query::Finished {
+                result: Err(Error::UnknownApiVersion),
+                virtual_machine,
+            }
+        }
     }
 }
 
@@ -362,7 +446,7 @@ impl Query {
                 let vm = runtime_host::run(runtime_host::Config {
                     virtual_machine: success.virtual_machine.into_prototype(),
                     function_to_call: VALIDATION_FUNCTION_NAME,
-                    parameter: validate_transaction_runtime_parameters(
+                    parameter: validate_transaction_runtime_parameters_v2(
                         iter::once(info.scale_encoded_transaction),
                         info.transaction_source,
                     ),

@@ -303,6 +303,24 @@ impl RuntimeService {
         (current, rx)
     }
 
+    // TODO: doc
+    pub fn recent_best_block_runtime_lock<'a: 'b, 'b>(
+        self: &'a Arc<RuntimeService>,
+    ) -> impl Future<Output = RuntimeLock<'a>> + 'b {
+        async move {
+            let lock = self.latest_known_runtime.lock().await;
+            debug_assert_eq!(
+                lock.runtime_block_hash,
+                header::hash_from_scale_encoded_header(&lock.runtime_block_header)
+            );
+
+            RuntimeLock {
+                service: self,
+                lock,
+            }
+        }
+    }
+
     /// Start performing a runtime call using the best block, or a recent best block.
     ///
     /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,
@@ -470,6 +488,81 @@ impl RuntimeService {
             .lock()
             .await
             .best_near_head_of_chain
+    }
+}
+
+/// See [`RuntimeService::recent_best_block_runtime_lock`].
+#[must_use]
+pub struct RuntimeLock<'a> {
+    service: &'a Arc<RuntimeService>,
+    lock: MutexGuard<'a, LatestKnownRuntime>,
+}
+
+impl<'a> RuntimeLock<'a> {
+    /// Returns the SCALE-encoded header of the block the call is being made against.
+    pub fn block_scale_encoded_header(&self) -> &[u8] {
+        &self.lock.runtime_block_header
+    }
+
+    /// Returns the hash of the block the call is being made against.
+    pub fn block_hash(&self) -> &[u8; 32] {
+        &self.lock.runtime_block_hash
+    }
+
+    pub fn runtime(&self) -> &executor::host::HostVmPrototype {
+        // TODO: don't unwrap?
+        self.lock
+            .runtime
+            .as_ref()
+            .unwrap()
+            .virtual_machine
+            .as_ref()
+            .unwrap()
+    }
+
+    pub async fn start<'b>(
+        mut self,
+        method: &'b str,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
+    ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
+        // TODO: DRY :-/ this whole thing is messy
+
+        // Perform the call proof request.
+        // Note that `latest_known_runtime` is not locked.
+        // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
+        // TODO: also, an empty proof will be reported as an error right now, which is weird
+        let call_proof = self
+            .service
+            .sync_service
+            .clone()
+            .call_proof_query(
+                header::decode(&self.lock.runtime_block_header)
+                    .unwrap()
+                    .number,
+                protocol::CallProofRequestConfig {
+                    block_hash: self.lock.runtime_block_hash,
+                    method,
+                    parameter_vectored: parameter_vectored.clone(),
+                },
+            )
+            .await
+            .map_err(RuntimeCallError::CallProof);
+
+        let runtime = self
+            .lock
+            .runtime
+            .as_mut()
+            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
+
+        let virtual_machine = runtime.virtual_machine.take().unwrap();
+        let runtime_block_header = self.lock.runtime_block_header.clone(); // TODO: clone :-/
+        let lock = RuntimeCallLock {
+            lock: self.lock,
+            runtime_block_header,
+            call_proof,
+        };
+
+        Ok((lock, virtual_machine))
     }
 }
 
