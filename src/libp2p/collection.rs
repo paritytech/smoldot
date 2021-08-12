@@ -1167,20 +1167,19 @@ where
                 mut handshake,
                 randomness_seed,
             } => {
-                let incoming_buffer = match read_write.incoming_buffer {
-                    Some(b) => b,
-                    None => {
-                        debug_assert_eq!(read_write.read_bytes, 0);
-                        read_write.close_write();
-                        debug_assert!(self.pending_event.is_none());
-                        self.pending_event = Some(PendingEvent::Disconnect);
-                        return Ok(());
-                    }
-                };
-
                 // TODO: check timeout
 
                 loop {
+                    let incoming_buffer = match read_write.incoming_buffer {
+                        Some(b) => b,
+                        None => {
+                            read_write.close_write();
+                            debug_assert!(self.pending_event.is_none());
+                            self.pending_event = Some(PendingEvent::Disconnect);
+                            return Ok(());
+                        }
+                    };
+
                     let (result, num_read, num_written) = match handshake.read_write(
                         incoming_buffer,
                         match read_write.outgoing_buffer.as_mut() {
