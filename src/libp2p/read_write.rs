@@ -88,7 +88,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             advance_buf(&mut outgoing_buffer.0, cmp::min(num, out_buf_0_len));
             advance_buf(&mut outgoing_buffer.1, num.saturating_sub(out_buf_0_len));
             if outgoing_buffer.0.is_empty() {
-                mem::swap(&mut outgoing_buffer.0, &mut outgoing_buffer.1);
+                mem::swap::<&mut [u8]>(&mut outgoing_buffer.0, &mut outgoing_buffer.1);
             }
         } else {
             assert_eq!(num, 0);
