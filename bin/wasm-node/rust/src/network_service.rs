@@ -47,6 +47,7 @@ use smoldot::{
         connection::{self, handshake::HandshakeError},
         multiaddr::Multiaddr,
         peer_id::PeerId,
+        read_write::ReadWrite,
     },
     network::{protocol, service},
 };
@@ -679,13 +680,20 @@ async fn connection_task(
     let mut write_buffer = vec![0; 4096];
 
     loop {
-        let read_buffer = websocket.read_buffer().now_or_never().unwrap_or(Some(&[]));
-
         let now = ffi::Instant::now();
 
-        let read_write = match network_service
+        let mut read_write = ReadWrite {
+            now,
+            incoming_buffer: websocket.read_buffer().now_or_never().unwrap_or(Some(&[])),
+            outgoing_buffer: Some((&mut write_buffer, &mut [])),
+            read_bytes: 0,
+            written_bytes: 0,
+            wake_up_after: None,
+        };
+
+        let wake_up_future = match network_service
             .network
-            .read_write(id, now, read_buffer, (&mut write_buffer, &mut []))
+            .read_write(id, &mut read_write)
             .await
         {
             Ok(rw) => rw,
@@ -719,25 +727,30 @@ async fn connection_task(
             }
         };
 
-        let read_buffer_has_data = read_buffer.map_or(false, |b| !b.is_empty());
-        let read_buffer_closed = read_buffer.is_none();
-
-        if read_write.write_close && read_buffer_closed {
+        if read_write.is_dead() {
             log::debug!(target: "connections", "Connection({:?}, {}) => Closed gracefully", id, expected_peer_id);
             return;
         }
 
-        if read_write.written_bytes != 0 {
-            websocket.send(&write_buffer[..read_write.written_bytes]);
+        let read_buffer_has_data = read_write.incoming_buffer.map_or(false, |b| !b.is_empty());
+        let read_buffer_closed = read_write.incoming_buffer.is_none();
+        let read_bytes = read_write.read_bytes;
+        let written_bytes = read_write.written_bytes;
+        let wake_up_after = read_write.wake_up_after;
+
+        drop(read_write);
+
+        if written_bytes != 0 {
+            websocket.send(&write_buffer[..written_bytes]);
         }
 
-        websocket.advance_read_cursor(read_write.read_bytes);
+        websocket.advance_read_cursor(read_bytes);
 
         // Starting from here, we block (or not) the current task until more processing needs
         // to happen.
 
         // Future ready when the connection state machine requests more processing.
-        let poll_after = if let Some(wake_up) = read_write.wake_up_after {
+        let poll_after = if let Some(wake_up) = wake_up_after {
             if wake_up > now {
                 let dur = wake_up - now;
                 future::Either::Left(ffi::Delay::new(dur))
@@ -750,18 +763,18 @@ async fn connection_task(
         .fuse();
 
         // Future that is woken up when new data is ready on the socket.
-        let read_buffer_ready =
-            if !(read_buffer_has_data && read_write.read_bytes == 0) && !read_buffer_closed {
-                future::Either::Left(websocket.read_buffer())
-            } else {
-                future::Either::Right(future::pending())
-            };
+        let read_buffer_ready = if !(read_buffer_has_data && read_bytes == 0) && !read_buffer_closed
+        {
+            future::Either::Left(websocket.read_buffer())
+        } else {
+            future::Either::Right(future::pending())
+        };
 
         // Wait until either some data is ready on the socket, or the connection state machine
         // has been requested to be polled again.
         futures::pin_mut!(read_buffer_ready);
         future::select(
-            future::select(read_buffer_ready, read_write.wake_up_future),
+            future::select(read_buffer_ready, wake_up_future),
             poll_after,
         )
         .await;

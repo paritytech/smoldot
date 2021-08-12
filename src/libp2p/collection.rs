@@ -135,6 +135,7 @@ use rand::Rng as _;
 use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
+pub use super::read_write::ReadWrite;
 pub use established::{ConfigRequestResponse, ConfigRequestResponseIn};
 pub use multiaddr::Multiaddr;
 #[doc(inline)]
@@ -840,14 +841,11 @@ where
     ///
     /// Panics if `connection_id` isn't a valid connection.
     ///
-    // TODO: document the `write_close` thing
-    pub async fn read_write<'a>(
+    pub async fn read_write(
         &self,
         connection_id: ConnectionId,
-        now: TNow,
-        incoming_buffer: Option<&[u8]>,
-        outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
-    ) -> Result<ReadWrite<TNow>, ConnectionError> {
+        read_write: &'_ mut ReadWrite<'_, TNow>,
+    ) -> Result<ConnectionReadyFuture, ConnectionError> {
         let connection_arc: Arc<Mutex<Connection<_, _>>> = {
             // TODO: ideally we wouldn't need to lock `guarded`, to reduce the possibility of lock contention
             let guarded = self.guarded.lock().await;
@@ -861,14 +859,6 @@ where
 
         let (tx, rx) = oneshot::channel();
 
-        let mut read_write = ReadWrite {
-            read_bytes: 0,
-            written_bytes: 0,
-            wake_up_after: None,
-            wake_up_future: ConnectionReadyFuture(rx),
-            write_close: false,
-        };
-
         connection_lock.waker = Some(tx);
 
         // TODO: not great to have this exact block of code twice; also, should be a loop normally, but it's complicated because of having to advance buffers
@@ -878,7 +868,7 @@ where
             debug_assert!(connection_lock.pending_event.is_none());
         }
 
-        connection_lock.read_write(now, self, incoming_buffer, outgoing_buffer, &mut read_write)?;
+        connection_lock.read_write(self, read_write)?;
 
         if connection_lock.pending_event.is_some() {
             let mut guarded = self.guarded.lock().await;
@@ -886,7 +876,7 @@ where
             debug_assert!(connection_lock.pending_event.is_none());
         }
 
-        Ok(read_write)
+        Ok(ConnectionReadyFuture(rx))
     }
 
     fn build_connection_config(&self, randomness_seed: [u8; 32]) -> established::Config {
@@ -1041,32 +1031,6 @@ impl<TConn> Event<TConn> {
     }
 }
 
-/// Outcome of calling [`Network::read_write`].
-pub struct ReadWrite<TNow> {
-    /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
-    /// should no longer be present the next time [`Network::read_write`] is called.
-    pub read_bytes: usize,
-
-    /// Number of bytes written to the outgoing buffer. These bytes should be sent out to the
-    /// remote. The rest of the outgoing buffer is left untouched.
-    pub written_bytes: usize,
-
-    /// If `Some`, [`Network::read_write`] should be called again when the point in time
-    /// reaches the value in the `Option`.
-    pub wake_up_after: Option<TNow>,
-
-    /// [`Network::read_write`] should be called again when this [`ConnectionReadyFuture`]
-    /// returns `Ready`.
-    pub wake_up_future: ConnectionReadyFuture,
-
-    /// If `true`, the writing side the connection must be closed. Will always remain to `true`
-    /// after it has been set.
-    ///
-    /// If, after calling [`Network::read_write`], the returned [`ReadWrite`] contains `true` here,
-    /// and the inbound buffer is `None`, then the [`ConnectionId`] is now invalid.
-    pub write_close: bool,
-}
-
 /// Future ready when a connection has data to give out via [`Network::read_write`].
 #[pin_project::pin_project]
 pub struct ConnectionReadyFuture(#[pin] oneshot::Receiver<()>);
@@ -1155,41 +1119,32 @@ where
 {
     fn read_write<'a>(
         &mut self,
-        now: TNow,
         parent: &Network<TConn, TNow>,
-        incoming_buffer: Option<&[u8]>,
-        mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
         read_write: &mut ReadWrite<TNow>,
     ) -> Result<(), ConnectionError> {
         debug_assert!(self.pending_event.is_none());
 
         match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
             ConnectionInner::Established(connection) => {
-                match connection.read_write(now, incoming_buffer, outgoing_buffer) {
-                    Ok(read_write_result) => {
-                        read_write.read_bytes += read_write_result.read_bytes;
-                        read_write.written_bytes += read_write_result.written_bytes;
-                        debug_assert!(read_write.wake_up_after.is_none());
-                        read_write.wake_up_after = read_write_result.wake_up_after;
-                        read_write.write_close = read_write_result.write_close;
-
-                        if read_write.write_close && incoming_buffer.is_none() {
+                match connection.read_write(read_write) {
+                    Ok((connection, event)) => {
+                        if read_write.is_dead() {
                             self.connection = ConnectionInner::Dead;
                         } else {
-                            self.connection =
-                                ConnectionInner::Established(read_write_result.connection);
+                            self.connection = ConnectionInner::Established(connection);
                         }
 
-                        if read_write_result.read_bytes != 0
-                            || read_write_result.written_bytes != 0
-                            || read_write_result.event.is_some()
+                        // TODO: should instead check if it was advanced since before we call connection.read_write
+                        if read_write.read_bytes != 0
+                            || read_write.written_bytes != 0
+                            || event.is_some()
                         {
                             if let Some(waker) = self.waker.take() {
                                 let _ = waker.send(());
                             }
                         }
 
-                        if let Some(event) = read_write_result.event {
+                        if let Some(event) = event {
                             debug_assert!(self.pending_event.is_none());
                             self.pending_event = Some(PendingEvent::Inner(event));
                         }
@@ -1212,11 +1167,11 @@ where
                 mut handshake,
                 randomness_seed,
             } => {
-                let mut incoming_buffer = match incoming_buffer {
+                let incoming_buffer = match read_write.incoming_buffer {
                     Some(b) => b,
                     None => {
                         debug_assert_eq!(read_write.read_bytes, 0);
-                        read_write.write_close = true;
+                        read_write.close_write();
                         debug_assert!(self.pending_event.is_none());
                         self.pending_event = Some(PendingEvent::Disconnect);
                         return Ok(());
@@ -1228,7 +1183,10 @@ where
                 loop {
                     let (result, num_read, num_written) = match handshake.read_write(
                         incoming_buffer,
-                        (&mut outgoing_buffer.0, &mut outgoing_buffer.1),
+                        match read_write.outgoing_buffer.as_mut() {
+                            Some((a, b)) => (a, b),
+                            None => (&mut [], &mut []),
+                        },
                     ) {
                         Ok(rw) => rw,
                         Err(err) => {
@@ -1236,19 +1194,8 @@ where
                         }
                     };
 
-                    read_write.read_bytes += num_read;
-                    read_write.written_bytes += num_written;
-
-                    // TODO: dirty code
-                    incoming_buffer = &incoming_buffer[num_read..];
-                    let out_buf_0_len = outgoing_buffer.0.len();
-                    outgoing_buffer = (
-                        &mut outgoing_buffer.0[cmp::min(num_written, out_buf_0_len)..],
-                        &mut outgoing_buffer.1[num_written.saturating_sub(out_buf_0_len)..],
-                    );
-                    if outgoing_buffer.0.is_empty() {
-                        outgoing_buffer = (outgoing_buffer.1, outgoing_buffer.0);
-                    }
+                    read_write.advance_read(num_read);
+                    read_write.advance_write(num_written);
 
                     match result {
                         handshake::Handshake::Healthy(updated_handshake)

@@ -67,7 +67,7 @@ use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionError, ConnectionReadyFuture,
-    NotificationProtocolConfig,
+    NotificationProtocolConfig, ReadWrite,
 };
 
 /// Configuration for a [`Peers`].
@@ -990,16 +990,12 @@ where
     /// Panics if `connection_id` isn't a valid connection.
     ///
     // TODO: document
-    pub async fn read_write<'a>(
+    pub async fn read_write(
         &self,
         connection_id: ConnectionId,
-        now: TNow,
-        incoming_buffer: Option<&[u8]>,
-        outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
-    ) -> Result<collection::ReadWrite<TNow>, collection::ConnectionError> {
-        self.inner
-            .read_write(connection_id, now, incoming_buffer, outgoing_buffer)
-            .await
+        read_write: &'_ mut ReadWrite<'_, TNow>,
+    ) -> Result<ConnectionReadyFuture, collection::ConnectionError> {
+        self.inner.read_write(connection_id, read_write).await
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
