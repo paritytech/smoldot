@@ -91,7 +91,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
                 mem::swap(&mut outgoing_buffer.0, &mut outgoing_buffer.1);
             }
         } else {
-            assert_ne!(num, 0);
+            assert_eq!(num, 0);
         }
     }
 
