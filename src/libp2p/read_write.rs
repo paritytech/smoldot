@@ -65,8 +65,8 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
     /// Panics if `num` is superior to the size of the available buffer.
     ///
     pub fn advance_read(&mut self, num: usize) {
-        self.read_bytes += num;
         if let Some(ref mut incoming_buffer) = self.incoming_buffer {
+            self.read_bytes += num;
             *incoming_buffer = &incoming_buffer[num..];
         } else {
             assert_eq!(num, 0);
