@@ -220,7 +220,7 @@ where
     /// buffers. In order to avoid unnecessary memory allocations, only one [`Event`] is returned
     /// at a time. Consequently, this method returns as soon as an event is available, even if the
     /// buffers haven't finished being read. Call this method in a loop until these two values are
-    /// both 0 and [`ReadWrite::event`] is `None`.
+    /// both 0 and the returned [`Event`] is `None`.
     ///
     /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
     ///
@@ -1353,7 +1353,7 @@ where
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubstreamId(yamux::SubstreamId);
 
-/// Event that happened on the connection. See [`ReadWrite::event`].
+/// Event that happened on the connection. See [`Established::read_write`].
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
