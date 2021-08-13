@@ -513,9 +513,10 @@ async fn connection_task(
             read_bytes: 0,
             written_bytes: 0,
             wake_up_after: None,
+            wake_up_future: None,
         };
 
-        let connection_ready_future = match network_service
+        match network_service
             .network
             .read_write(id, &mut read_write)
             .await
@@ -554,6 +555,11 @@ async fn connection_task(
         let written_bytes = read_write.written_bytes;
         let write_closed = read_write.outgoing_buffer.is_none();
         let wake_up_after = read_write.wake_up_after;
+        let wake_up_future = if let Some(wake_up_future) = read_write.wake_up_future {
+            future::Either::Left(wake_up_future)
+        } else {
+            future::Either::Right(future::pending())
+        };
 
         if write_closed && !tcp_socket.is_closed() {
             tcp_socket.close();
@@ -581,7 +587,7 @@ async fn connection_task(
                     "socket-ready"
                 );
             },
-            _ = connection_ready_future.fuse() => {},
+            _ = wake_up_future.fuse() => {},
             () = poll_after => {
                 // Nothing to do, but guarantees that we loop again.
                 tracing::event!(

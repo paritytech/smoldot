@@ -19,6 +19,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use core::{cmp, mem};
+use futures::future::{self, BoxFuture, Future, FutureExt as _};
 
 // TODO: documentation
 
@@ -49,7 +50,9 @@ pub struct ReadWrite<'a, TNow> {
 
     /// If `Some`, the socket must be waken up after the given `TNow` is reached.
     pub wake_up_after: Option<TNow>,
-    // TODO: what about pub wake_up_future: ConnectionReadyFuture,
+
+    /// If `Some`, the socket must be waken up after the given future is ready.
+    pub wake_up_future: Option<BoxFuture<'static, ()>>,
 }
 
 impl<'a, TNow> ReadWrite<'a, TNow> {
@@ -122,6 +125,24 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             Some(ref mut t) => *t = after.clone(),
             ref mut t @ None => *t = Some(after.clone()),
         }
+    }
+
+    pub fn wake_up_when(&mut self, when: impl Future<Output = ()> + Send + 'static) {
+        let current = match self.wake_up_future.take() {
+            Some(f) => f,
+            None => {
+                self.wake_up_future = Some(when.boxed());
+                return;
+            }
+        };
+
+        self.wake_up_future = Some(
+            async move {
+                futures::pin_mut!(when);
+                future::select(current, when).await;
+            }
+            .boxed(),
+        );
     }
 }
 

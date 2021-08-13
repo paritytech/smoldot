@@ -845,7 +845,7 @@ where
         &self,
         connection_id: ConnectionId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> Result<ConnectionReadyFuture, ConnectionError> {
+    ) -> Result<(), ConnectionError> {
         let connection_arc: Arc<Mutex<Connection<_, _>>> = {
             // TODO: ideally we wouldn't need to lock `guarded`, to reduce the possibility of lock contention
             let guarded = self.guarded.lock().await;
@@ -858,7 +858,7 @@ where
         let mut connection_lock = &mut *connection_lock;
 
         let (tx, rx) = oneshot::channel();
-
+        read_write.wake_up_when(ConnectionReadyFuture(rx));
         connection_lock.waker = Some(tx);
 
         // TODO: not great to have this exact block of code twice; also, should be a loop normally, but it's complicated because of having to advance buffers
@@ -876,7 +876,7 @@ where
             debug_assert!(connection_lock.pending_event.is_none());
         }
 
-        Ok(ConnectionReadyFuture(rx))
+        Ok(())
     }
 
     fn build_connection_config(&self, randomness_seed: [u8; 32]) -> established::Config {

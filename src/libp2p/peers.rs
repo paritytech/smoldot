@@ -994,7 +994,7 @@ where
         &self,
         connection_id: ConnectionId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> Result<ConnectionReadyFuture, collection::ConnectionError> {
+    ) -> Result<(), collection::ConnectionError> {
         self.inner.read_write(connection_id, read_write).await
     }
 

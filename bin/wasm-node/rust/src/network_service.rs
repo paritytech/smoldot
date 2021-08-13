@@ -689,9 +689,10 @@ async fn connection_task(
             read_bytes: 0,
             written_bytes: 0,
             wake_up_after: None,
+            wake_up_future: None,
         };
 
-        let wake_up_future = match network_service
+        match network_service
             .network
             .read_write(id, &mut read_write)
             .await
@@ -737,6 +738,12 @@ async fn connection_task(
         let read_bytes = read_write.read_bytes;
         let written_bytes = read_write.written_bytes;
         let wake_up_after = read_write.wake_up_after;
+
+        let wake_up_future = if let Some(wake_up_future) = read_write.wake_up_future.take() {
+            future::Either::Left(wake_up_future)
+        } else {
+            future::Either::Right(future::pending())
+        };
 
         drop(read_write);
 

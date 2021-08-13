@@ -1218,7 +1218,7 @@ where
         &self,
         connection_id: ConnectionId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> Result<peers::ConnectionReadyFuture, peers::ConnectionError> {
+    ) -> Result<(), peers::ConnectionError> {
         self.inner.read_write(connection_id, read_write).await
     }
 
