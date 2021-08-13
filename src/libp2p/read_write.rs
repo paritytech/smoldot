@@ -127,6 +127,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         }
     }
 
+    /// Sets [`ReadWrite::wake_up_future`] to `select(wake_up_future, when)`.
     pub fn wake_up_when(&mut self, when: impl Future<Output = ()> + Send + 'static) {
         let current = match self.wake_up_future.take() {
             Some(f) => f,
