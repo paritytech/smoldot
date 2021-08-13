@@ -119,7 +119,7 @@
 use super::connection::{established, handshake, NoiseKey};
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{
-    cmp, iter, mem,
+    iter, mem,
     num::NonZeroUsize,
     ops::{Add, Sub},
     pin::Pin,
@@ -1126,17 +1126,17 @@ where
 
         match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
             ConnectionInner::Established(connection) => {
+                let rw_before = (read_write.read_bytes, read_write.written_bytes);
+
                 match connection.read_write(read_write) {
                     Ok((connection, event)) => {
-                        if read_write.is_dead() {
+                        if read_write.is_dead() && event.is_none() {
                             self.connection = ConnectionInner::Dead;
                         } else {
                             self.connection = ConnectionInner::Established(connection);
                         }
 
-                        // TODO: should instead check if it was advanced since before we call connection.read_write
-                        if read_write.read_bytes != 0
-                            || read_write.written_bytes != 0
+                        if rw_before != (read_write.read_bytes, read_write.written_bytes)
                             || event.is_some()
                         {
                             if let Some(waker) = self.waker.take() {
