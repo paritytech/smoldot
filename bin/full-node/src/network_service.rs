@@ -35,6 +35,7 @@ use smoldot::{
         async_rw_with_buffers, connection,
         multiaddr::{Multiaddr, Protocol},
         peer_id::PeerId,
+        read_write::ReadWrite,
     },
     network::{protocol, service},
 };
@@ -505,9 +506,19 @@ async fn connection_task(
 
         let now = Instant::now();
 
-        let read_write = match network_service
+        let mut read_write = ReadWrite {
+            now,
+            incoming_buffer: read_buffer.map(|b| b.0),
+            outgoing_buffer: write_buffer,
+            read_bytes: 0,
+            written_bytes: 0,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        match network_service
             .network
-            .read_write(id, now, read_buffer.map(|b| b.0), write_buffer.unwrap())
+            .read_write(id, &mut read_write)
             .await
         {
             Ok(rw) => rw,
@@ -517,17 +528,20 @@ async fn connection_task(
             }
         };
 
-        if read_write.read_bytes != 0 || read_write.written_bytes != 0 || read_write.write_close {
+        if read_write.read_bytes != 0
+            || read_write.written_bytes != 0
+            || read_write.outgoing_buffer.is_none()
+        {
             tracing::event!(
                 tracing::Level::TRACE,
                 read = read_write.read_bytes,
                 written = read_write.written_bytes,
                 "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
-                "write-close" = read_write.write_close,
+                "write-close" = read_write.outgoing_buffer.is_none(),
             );
         }
 
-        if read_write.write_close && read_buffer.is_none() {
+        if read_write.outgoing_buffer.is_none() && read_buffer.is_none() {
             // Make sure to finish closing the TCP socket.
             tcp_socket
                 .flush_close()
@@ -537,14 +551,24 @@ async fn connection_task(
             return;
         }
 
-        if read_write.write_close && !tcp_socket.is_closed() {
+        let read_bytes = read_write.read_bytes;
+        let written_bytes = read_write.written_bytes;
+        let write_closed = read_write.outgoing_buffer.is_none();
+        let wake_up_after = read_write.wake_up_after;
+        let wake_up_future = if let Some(wake_up_future) = read_write.wake_up_future {
+            future::Either::Left(wake_up_future)
+        } else {
+            future::Either::Right(future::pending())
+        };
+
+        if write_closed && !tcp_socket.is_closed() {
             tcp_socket.close();
             tracing::info!("write-closed");
         }
 
-        tcp_socket.advance(read_write.read_bytes, read_write.written_bytes);
+        tcp_socket.advance(read_bytes, written_bytes);
 
-        let mut poll_after = if let Some(wake_up) = read_write.wake_up_after {
+        let mut poll_after = if let Some(wake_up) = wake_up_after {
             if wake_up > now {
                 let dur = wake_up - now;
                 future::Either::Left(futures_timer::Delay::new(dur))
@@ -563,7 +587,7 @@ async fn connection_task(
                     "socket-ready"
                 );
             },
-            _ = read_write.wake_up_future.fuse() => {},
+            _ = wake_up_future.fuse() => {},
             () = poll_after => {
                 // Nothing to do, but guarantees that we loop again.
                 tracing::event!(

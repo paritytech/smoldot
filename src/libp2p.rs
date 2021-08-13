@@ -23,6 +23,7 @@ pub mod connection;
 pub mod discovery;
 pub mod peer_id;
 pub mod peers;
+pub mod read_write;
 
 pub use multiaddr::Multiaddr;
 #[doc(inline)]
