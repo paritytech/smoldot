@@ -211,25 +211,15 @@ impl<TNow, TRqUd, TNotifUd> Established<TNow, TRqUd, TNotifUd>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    /// Reads data coming from the socket from `incoming_data`, updates the internal state machine,
-    /// and writes data destined to the socket to `outgoing_buffer`.
+    /// Reads data coming from the socket, updates the internal state machine, and writes data
+    /// destined to the socket through the [`ReadWrite`].
     ///
-    /// `incoming_data` should be `None` if the remote has closed their writing side.
-    ///
-    /// The returned structure contains the number of bytes read and written from/to the two
-    /// buffers. In order to avoid unnecessary memory allocations, only one [`Event`] is returned
-    /// at a time. Consequently, this method returns as soon as an event is available, even if the
-    /// buffers haven't finished being read. Call this method in a loop until these two values are
-    /// both 0 and the returned [`Event`] is `None`.
-    ///
-    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
-    ///
-    /// The current time must be passed via the `now` parameter. This is used internally in order
-    /// to keep track of ping times and timeouts. The returned structure optionally contains a
-    /// `TNow` representing the moment after which this method should be called again.
+    /// In order to avoid unnecessary memory allocations, only one [`Event`] is returned at a time.
+    /// Consequently, this method returns as soon as an event is available, even if the buffers
+    /// haven't finished being read. Call this method in a loop until the number of bytes read and
+    /// written are both 0, and the returned [`Event`] is `None`.
     ///
     /// If an error is returned, the socket should be entirely shut down.
-    // TODO: should take the in and out buffers as iterators, to allow for vectored reads/writes; tricky because an impl Iterator<Item = &mut [u8]> + Clone is impossible to build
     // TODO: in case of error, we're supposed to first send a yamux goaway frame
     pub fn read_write<'a>(
         mut self,

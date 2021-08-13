@@ -20,6 +20,8 @@
 
 use core::{cmp, mem};
 
+// TODO: documentation
+
 #[must_use]
 pub struct ReadWrite<'a, TNow> {
     pub now: TNow,
