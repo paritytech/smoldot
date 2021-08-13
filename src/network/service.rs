@@ -180,6 +180,9 @@ struct Guarded {
     /// could interrupt the future and lose the event. Instead, the necessary post-processing is
     /// stored in this field. This field is then processed before the next event is pulled.
     to_process_pre_event: Option<ToProcessPreEvent>,
+
+    /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
+    open_chains: hashbrown::HashSet<(PeerId, usize), ahash::RandomState>,
 }
 
 /// See [`ChainNetwork::pending`].
@@ -207,11 +210,18 @@ struct PendingConnections {
 /// See [`Guarded::to_process_pre_event`]
 enum ToProcessPreEvent {
     AcceptNotificationsIn {
+        peer_id: PeerId,
+        notifications_protocol_index: usize,
         id: peers::DesiredInNotificationId,
         handshake_back: Vec<u8>,
     },
     RefuseNotificationsIn {
         id: peers::DesiredInNotificationId,
+    },
+    SetDesired {
+        peer_id: PeerId,
+        notifications_protocol_index: usize,
+        desired: bool,
     },
     NotificationsOut {
         id: peers::DesiredOutNotificationId,
@@ -340,6 +350,17 @@ where
             )
         };
 
+        let open_chains = {
+            let k0 = randomness.next_u64();
+            let k1 = randomness.next_u64();
+            let k2 = randomness.next_u64();
+            let k3 = randomness.next_u64();
+            hashbrown::HashSet::with_capacity_and_hasher(
+                config.peers_capacity * config.chains.len(),
+                ahash::RandomState::with_seeds(k0, k1, k2, k3),
+            )
+        };
+
         let mut potential_addresses = {
             let k0 = randomness.next_u64();
             let k1 = randomness.next_u64();
@@ -389,6 +410,7 @@ where
             }),
             guarded: Mutex::new(Guarded {
                 to_process_pre_event: None,
+                open_chains,
             }),
             pending: Mutex::new(PendingConnections {
                 num_pending_per_peer: peers,
@@ -719,15 +741,44 @@ where
             // the user cancels the future during an `await` point.
             match guarded.to_process_pre_event.as_mut() {
                 None => {}
-                Some(ToProcessPreEvent::AcceptNotificationsIn { id, handshake_back }) => {
-                    // TODO: use Result
-                    self.inner
+                Some(ToProcessPreEvent::AcceptNotificationsIn {
+                    peer_id,
+                    notifications_protocol_index,
+                    id,
+                    handshake_back,
+                }) => {
+                    if self
+                        .inner
                         .in_notification_accept(*id, handshake_back.clone())
-                        .await;
-                    guarded.to_process_pre_event = None;
+                        .await
+                        .is_ok()
+                    {
+                        guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
+                            peer_id: peer_id.clone(), // TODO: clone :(
+                            notifications_protocol_index: *notifications_protocol_index,
+                            desired: true,
+                        });
+                        continue;
+                    } else {
+                        guarded.to_process_pre_event = None;
+                    }
                 }
                 Some(ToProcessPreEvent::RefuseNotificationsIn { id }) => {
                     self.inner.in_notification_refuse(*id).await;
+                    guarded.to_process_pre_event = None;
+                }
+                Some(ToProcessPreEvent::SetDesired {
+                    peer_id,
+                    notifications_protocol_index,
+                    desired,
+                }) => {
+                    self.inner
+                        .set_peer_notifications_out_desired(
+                            peer_id,
+                            *notifications_protocol_index,
+                            *desired,
+                        )
+                        .await;
                     guarded.to_process_pre_event = None;
                 }
                 Some(ToProcessPreEvent::NotificationsOut { id, handshake }) => {
@@ -853,6 +904,10 @@ where
 
                         // TODO: compare genesis hash with ours
 
+                        let _was_inserted =
+                            guarded.open_chains.insert((peer_id.clone(), chain_index));
+                        debug_assert!(_was_inserted);
+
                         return Event::ChainConnected {
                             peer_id,
                             chain_index,
@@ -929,6 +984,10 @@ where
                         notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
+                        let _was_removed =
+                            guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
+                        debug_assert!(_was_removed);
+
                         return Event::ChainDisconnected {
                             peer_id,
                             chain_index,
@@ -941,23 +1000,35 @@ where
                     peer_id,
                     notifications_protocol_index,
                 } => {
-                    // TODO: ?
+                    debug_assert!(guarded.to_process_pre_event.is_none());
+                    guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
+                        peer_id,
+                        notifications_protocol_index,
+                        desired: false,
+                    });
                 }
                 peers::Event::NotificationsIn {
                     notifications_protocol_index,
                     peer_id,
                     notification,
                 } => {
+                    let chain_index =
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: think about possible race conditions regarding missing block
                     // announcements, as the remote will think we know it's at a certain block
                     // while we ignored its announcement ; it isn't problematic as long as blocks
                     // are generated continuously, as announcements will be generated periodically
                     // as well and the state will no longer mismatch
-                    // TODO: restore ^
+                    // TODO: cloning of peer_id :(
+                    if guarded
+                        .open_chains
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        continue;
+                    }
 
-                    let chain_index =
-                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
                         if let Err(err) = protocol::decode_block_announce(&notification) {
                             return Event::ProtocolError {
@@ -1045,6 +1116,8 @@ where
                         debug_assert!(guarded.to_process_pre_event.is_none());
                         guarded.to_process_pre_event =
                             Some(ToProcessPreEvent::AcceptNotificationsIn {
+                                peer_id,
+                                notifications_protocol_index,
                                 id: desired_in_notification_id,
                                 handshake_back: handshake,
                             });
@@ -1056,6 +1129,8 @@ where
                         debug_assert!(guarded.to_process_pre_event.is_none());
                         guarded.to_process_pre_event =
                             Some(ToProcessPreEvent::AcceptNotificationsIn {
+                                peer_id,
+                                notifications_protocol_index,
                                 id: desired_in_notification_id,
                                 handshake_back: Vec::new(),
                             });
@@ -1073,6 +1148,8 @@ where
                         debug_assert!(guarded.to_process_pre_event.is_none());
                         guarded.to_process_pre_event =
                             Some(ToProcessPreEvent::AcceptNotificationsIn {
+                                peer_id,
+                                notifications_protocol_index,
                                 id: desired_in_notification_id,
                                 handshake_back: handshake,
                             });
