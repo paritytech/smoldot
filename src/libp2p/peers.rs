@@ -48,7 +48,7 @@
 use crate::libp2p::{self, collection, PeerId};
 
 use alloc::{
-    collections::{btree_map, BTreeMap, BTreeSet},
+    collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
     string::String,
     vec::Vec,
 };
@@ -193,7 +193,7 @@ where
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
             }),
             guarded: Mutex::new(Guarded {
-                to_process_pre_event: None,
+                pending_desired_out_notifs: VecDeque::with_capacity(0), // TODO: capacity?
                 connections: connections_peer_index,
                 established_connections_by_peer: BTreeSet::new(),
                 peer_indices,
@@ -257,8 +257,8 @@ where
             // task B locks `self.guarded` before task A could. Some kind of locking must be
             // performed to prevent this.
             //
-            // Additionally, `guarded` contains some fields, such as `to_process_pre_event`, that
-            // need to be processed ahead of events. Because processing these fields requires
+            // Additionally, `guarded` contains some fields, such as `pending_desired_out_notifs`,
+            // that need to be processed ahead of events. Because processing these fields requires
             // using `await`, this processing can be interrupted by the user, and as such no event
             // should be grabbed in that situation.
             //
@@ -285,7 +285,7 @@ where
                         Poll::Pending => return Poll::Pending,
                     };
 
-                    if lock.to_process_pre_event.is_some() {
+                    if !lock.pending_desired_out_notifs.is_empty() {
                         return Poll::Ready((lock, None));
                     }
 
@@ -306,53 +306,13 @@ where
             let inner_event: collection::Event<_> = match maybe_inner_event {
                 Some(ev) => ev,
                 None => {
-                    // We can't use `take()` because the call to `accept_notifications_in` might
-                    // be interrupted by the user. The field is set to `None` only after the call
-                    // has succeeded.
-                    match guarded.to_process_pre_event.as_mut().unwrap() {
-                        ToProcessPreEvent::StartOutSubstreamOpen {
-                            peer_index,
-                            connection_id,
-                            notification_protocols_indices: notifications_protocol_indices,
-                        } if !notifications_protocol_indices.is_empty() => {
-                            let notifications_protocol_index =
-                                notifications_protocol_indices.pop().unwrap();
-
-                            let notif_out_state = match guarded
-                                .peers_notifications_out
-                                .get_mut(&(*peer_index, notifications_protocol_index))
-                            {
-                                Some(s) => s,
-                                None => continue,
-                            };
-
-                            if !notif_out_state.desired
-                                || !matches!(
-                                    notif_out_state.open,
-                                    NotificationsOutOpenState::Closed
-                                )
-                            {
-                                continue;
-                            }
-
-                            let id =
-                                DesiredOutNotificationId(guarded.desired_out_notifications.insert(
-                                    (*peer_index, *connection_id, notifications_protocol_index),
-                                ));
-
-                            notif_out_state.open = NotificationsOutOpenState::ApiHandshakeWait(id);
-
-                            return Event::DesiredOutNotification {
-                                id,
-                                peer_id: guarded.peers[*peer_index].peer_id.clone(),
-                                notifications_protocol_index,
-                            };
-                        }
-                        ToProcessPreEvent::StartOutSubstreamOpen { .. } => {}
-                    }
-
-                    guarded.to_process_pre_event = None;
-                    continue;
+                    let (id, peer_id, notifications_protocol_index) =
+                        guarded.pending_desired_out_notifs.pop_front().unwrap();
+                    return Event::DesiredOutNotification {
+                        id,
+                        peer_id,
+                        notifications_protocol_index,
+                    };
                 }
             };
 
@@ -360,12 +320,12 @@ where
             // locked from before the event has been grabbed.
             // In order to avoid futures cancellation issues, no `await` should be used below. If
             // something requires asynchronous processing, it should instead be written to
-            // `self.to_process_pre_event`.
-            debug_assert!(guarded.to_process_pre_event.is_none());
+            // `self.pending_desired_out_notifs`.
+            debug_assert!(guarded.pending_desired_out_notifs.is_empty());
 
             match inner_event {
                 collection::Event::HandshakeFinished {
-                    id,
+                    id: connection_id,
                     peer_id,
                     user_data: local_connection_index,
                 } => {
@@ -373,7 +333,7 @@ where
                     let peer_index = guarded.peer_index_or_insert(&peer_id);
                     guarded
                         .established_connections_by_peer
-                        .insert((peer_index, id));
+                        .insert((peer_index, connection_id));
                     guarded.connections[local_connection_index].0 = Some(peer_index);
 
                     let num_peer_connections = {
@@ -395,18 +355,36 @@ where
                             .range(
                                 (peer_index, usize::min_value())..=(peer_index, usize::max_value()),
                             )
+                            .filter(|(_, v)| {
+                                // Since this check happens only at the first connection, all
+                                // substreams are necessarily closed.
+                                debug_assert!(matches!(v.open, NotificationsOutOpenState::Closed));
+                                v.desired
+                            })
                             .map(|((_, index), _)| *index)
                             .collect::<Vec<_>>();
 
-                        // Opening the desired substreams in `next_event` is a bit of a hack, but
-                        // it is acceptable.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::StartOutSubstreamOpen {
-                                peer_index,
-                                connection_id: id,
-                                notification_protocols_indices,
-                            });
+                        for idx in notification_protocols_indices {
+                            let id = DesiredOutNotificationId(
+                                guarded.desired_out_notifications.insert((
+                                    peer_index,
+                                    connection_id,
+                                    idx,
+                                )),
+                            );
+
+                            guarded
+                                .peers_notifications_out
+                                .get_mut(&(peer_index, idx))
+                                .unwrap()
+                                .open = NotificationsOutOpenState::ApiHandshakeWait(id);
+
+                            guarded.pending_desired_out_notifs.push_back((
+                                id,
+                                peer_id.clone(),
+                                idx,
+                            ));
+                        }
                     }
 
                     return Event::Connected {
@@ -424,7 +402,7 @@ where
                     let (expected_peer_index, user_data) =
                         guarded.connections.remove(local_connection_index);
 
-                    // TODO: clean up guarded.peers and guarded.peer_indices here
+                    // TODO: clean up guarded.peers and guarded.peer_indices and guarded.peers_notifications_out and guarded.pending_desired_out_notifs here
 
                     todo!()
                 }
@@ -712,13 +690,24 @@ where
             // If substream is closed, try to open it.
             if matches!(current_state.open, NotificationsOutOpenState::Closed) {
                 if let Some(connection_id) = self.connection_id_for_peer(&guarded, peer_id) {
-                    let out = DesiredOutNotificationId(guarded.desired_out_notifications.insert((
+                    let id = DesiredOutNotificationId(guarded.desired_out_notifications.insert((
                         peer_index,
                         connection_id,
                         notification_protocol,
                     )));
 
-                    todo!() // TODO: finish
+                    // TODO: should use `current_state` instead, but this causes difficulties calling `connection_id_for_peer`
+                    guarded
+                        .peers_notifications_out
+                        .get_mut(&(peer_index, notification_protocol))
+                        .unwrap()
+                        .open = NotificationsOutOpenState::ApiHandshakeWait(id);
+
+                    guarded.pending_desired_out_notifs.push_back((
+                        id,
+                        peer_id.clone(),
+                        notification_protocol,
+                    ));
                 }
             }
         } else {
@@ -1221,13 +1210,12 @@ pub enum QueueNotificationError {
 }
 
 struct Guarded<TConn> {
-    /// In the [`Peers::next_event`] function, an event is grabbed from the underlying
-    /// [`Peers::inner`]. This event might lead to some asynchronous post-processing being needed.
-    /// Because the user can interrupt the future returned by [`Peers::next_event`] at any point
-    /// in time, this post-processing cannot be immediately performed, as the user could could
-    /// interrupt the future and lose the event. Instead, the necessary post-processing is stored
-    /// in this field. This field is then processed before the next event is pulled.
-    to_process_pre_event: Option<ToProcessPreEvent>,
+    /// When a [`DesiredOutNotificationId`] is allocated, the values of the fields of the
+    /// corresponding [`Event::DesiredOutNotification`] are added to this FIFO queue.
+    /// This list is later processed in the [`Peers::next_event`] function, ahead of grabbing an
+    /// event from the underlying [`Peers::inner`].
+    // TODO: explain why it can't grow unbounded
+    pending_desired_out_notifs: VecDeque<(DesiredOutNotificationId, PeerId, usize)>,
 
     /// List of all peer identities known to the state machine.
     // TODO: never cleaned up
@@ -1295,15 +1283,6 @@ enum NotificationsOutOpenState {
     ApiHandshakeWait(DesiredOutNotificationId),
     Opening,
     Open,
-}
-
-/// See [`Guarded::to_process_pre_event`]
-enum ToProcessPreEvent {
-    StartOutSubstreamOpen {
-        peer_index: usize, // TODO: can it become obsolete?
-        connection_id: collection::ConnectionId,
-        notification_protocols_indices: Vec<usize>,
-    },
 }
 
 /// See [`Guarded::peers`]
