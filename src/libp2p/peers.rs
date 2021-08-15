@@ -404,6 +404,7 @@ where
 
                     // TODO: clean up guarded.peers and guarded.peer_indices and guarded.peers_notifications_out and guarded.pending_desired_out_notifs here
 
+                    // TODO: guarded.try_clean_up(peer_index);
                     todo!()
                 }
 
@@ -651,6 +652,7 @@ where
         let mut guarded = self.guarded.lock().await;
         let peer_index = guarded.peer_index_or_insert(peer_id);
         guarded.peers[peer_index].desired = desired;
+        guarded.try_clean_up_peer(peer_index);
     }
 
     /// Sets the given combinations of notification protocol and [`PeerId`] as "desired".
@@ -711,6 +713,7 @@ where
                 }
             }
         } else {
+            // guarded.try_clean_up(peer_index);
             todo!()
         }
     }
@@ -1218,11 +1221,9 @@ struct Guarded<TConn> {
     pending_desired_out_notifs: VecDeque<(DesiredOutNotificationId, PeerId, usize)>,
 
     /// List of all peer identities known to the state machine.
-    // TODO: never cleaned up
     peers: slab::Slab<Peer>,
 
     /// For each known peer, the corresponding index within [`Guarded::peers`].
-    // TODO: never cleaned up
     peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
 
     /// Each connection (handshaking or established) stored in [`Peers::inner`] has a `usize` user
@@ -1266,6 +1267,44 @@ impl<TConn> Guarded<TConn> {
 
         self.peer_indices.insert(peer_id.clone(), index);
         index
+    }
+
+    /// Checks the state of the given `peer_index`. If there is no difference between this peer's
+    /// state and no the default state, removes the peer from the data structure altogether.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given `peer_index` is invalid.
+    ///
+    fn try_clean_up_peer(&mut self, peer_index: usize) {
+        if self.peers[peer_index].desired {
+            return;
+        }
+
+        if self
+            .established_connections_by_peer
+            .range(
+                (peer_index, collection::ConnectionId::min_value())
+                    ..=(peer_index, collection::ConnectionId::max_value()),
+            )
+            .count()
+            != 0
+        {
+            return;
+        }
+
+        if self
+            .peers_notifications_out
+            .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
+            .count()
+            != 0
+        {
+            return;
+        }
+
+        let peer_id = self.peers.remove(peer_index).peer_id;
+        let _index = self.peer_indices.remove(&peer_id).unwrap();
+        debug_assert_eq!(_index, peer_index);
     }
 }
 
