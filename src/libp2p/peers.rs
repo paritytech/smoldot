@@ -1302,6 +1302,15 @@ impl<TConn> Guarded<TConn> {
             return;
         }
 
+        // TODO: O(n)
+        if self
+            .connections
+            .iter()
+            .any(|(_, (idx, _))| *idx == Some(peer_index))
+        {
+            return;
+        }
+
         let peer_id = self.peers.remove(peer_index).peer_id;
         let _index = self.peer_indices.remove(&peer_id).unwrap();
         debug_assert_eq!(_index, peer_index);
