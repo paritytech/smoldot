@@ -924,6 +924,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 }
 
                 // Download the runtime code of this new best block.
+                // TODO: don't unwrap?
                 let new_best_block_decoded = header::decode(&new_best_block).unwrap();
                 let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
                 let code_query_result = runtime_service
@@ -988,16 +989,15 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     (new_code, new_heap_pages)
                 };
 
-                // `runtime_block_hash` is always updated in order to have the most recent
-                // block possible.
-                latest_known_runtime.runtime_block_hash = new_best_block_hash;
-                latest_known_runtime.runtime_block_header = new_best_block.clone();
-
                 // `continue` if there wasn't any change in `:code` and `:heappages`.
                 if new_code == latest_known_runtime.runtime_code
                     && new_heap_pages == latest_known_runtime.heap_pages
                 {
                     runtime_matches_best_block = true;
+                    // `runtime_block_hash` is always updated in order to have the most recent
+                    // block possible.
+                    latest_known_runtime.runtime_block_hash = new_best_block_hash;
+                    latest_known_runtime.runtime_block_header = new_best_block.clone();
                     continue;
                 }
 
@@ -1006,12 +1006,16 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 if runtime_matches_best_block {
                     log::info!(
                         target: "runtime",
-                        "New runtime code detected around block #{} (block number might be wrong)",
+                        "Runtime code change detected between block #{} and block #{}",
+                        // TODO: don't unwrap?
+                        header::decode(&latest_known_runtime.runtime_block_header).unwrap().number,
                         new_best_block_decoded.number
                     );
                 }
 
                 runtime_matches_best_block = true;
+                latest_known_runtime.runtime_block_hash = new_best_block_hash;
+                latest_known_runtime.runtime_block_header = new_best_block.clone();
                 latest_known_runtime.runtime_code = new_code;
                 latest_known_runtime.heap_pages = new_heap_pages;
                 latest_known_runtime.runtime = SuccessfulRuntime::from_params(
