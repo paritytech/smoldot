@@ -299,7 +299,7 @@ where
                 max_response_size: 10 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
-                timeout: Duration::from_secs(20),
+                timeout: Duration::from_secs(6),
             })
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/light/2", chain.protocol_id),
@@ -309,7 +309,7 @@ where
                 max_response_size: 10 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
-                timeout: Duration::from_secs(20),
+                timeout: Duration::from_secs(6),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/kad", chain.protocol_id),
@@ -317,7 +317,7 @@ where
                 max_response_size: 1024 * 1024,
                 // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
                 inbound_allowed: false,
-                timeout: Duration::from_secs(20),
+                timeout: Duration::from_secs(6),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
@@ -325,7 +325,7 @@ where
                 max_response_size: 128 * 1024 * 1024, // TODO: this is way too large at the moment ; see https://github.com/paritytech/substrate/pull/8578
                 // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
-                timeout: Duration::from_secs(20),
+                timeout: Duration::from_secs(6),
             }))
         }))
         .collect();
