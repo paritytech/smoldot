@@ -195,7 +195,7 @@ where
             guarded: Mutex::new(Guarded {
                 pending_desired_out_notifs: VecDeque::with_capacity(0), // TODO: capacity?
                 connections: connections_peer_index,
-                established_connections_by_peer: BTreeSet::new(),
+                connections_by_peer: BTreeMap::new(),
                 peer_indices,
                 peers,
                 peers_notifications_out,
@@ -329,20 +329,25 @@ where
                     peer_id,
                     user_data: local_connection_index,
                 } => {
-                    // TODO: compare with expected peer_id?
+                    if let Some(expected_peer_id) = guarded.connections[local_connection_index].0 {
+                        // TODO: compare with expected peer_id
+                        // TODO: ensure consistency of connections_by_peer
+                    }
+
                     let peer_index = guarded.peer_index_or_insert(&peer_id);
                     guarded
-                        .established_connections_by_peer
-                        .insert((peer_index, connection_id));
+                        .connections_by_peer
+                        .insert((peer_index, connection_id), true); // TODO: ensure consistency
                     guarded.connections[local_connection_index].0 = Some(peer_index);
 
                     let num_peer_connections = {
                         let num = guarded
-                            .established_connections_by_peer
+                            .connections_by_peer
                             .range(
                                 (peer_index, collection::ConnectionId::min_value())
                                     ..=(peer_index, collection::ConnectionId::max_value()),
                             )
+                            .filter(|(_, established)| **established)
                             .count();
                         NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
                     };
@@ -597,6 +602,7 @@ where
         let entry = guarded.connections.vacant_entry();
         let connection_id = self.inner.insert(true, entry.key()).await;
 
+        // TODO: could use `peer_index_or_insert` but causes borrowck issues
         let peer_index = if let Some(idx) = guarded.peer_indices.get(expected_peer_id) {
             *idx
         } else {
@@ -608,10 +614,15 @@ where
             idx
         };
 
+        debug_assert!(!guarded
+            .connections_by_peer
+            .contains_key(&(peer_index, connection_id)));
+        guarded
+            .connections_by_peer
+            .insert((peer_index, connection_id), false);
+
         entry.insert((Some(peer_index), user_data));
         connection_id
-
-        // TODO: finish
     }
 
     /// Returns the list of [`PeerId`]s that have been marked as desired, but that don't have any
@@ -627,21 +638,33 @@ where
             .peers
             .iter()
             .filter(|(_, p)| p.desired)
-            .map(|(_, p)| p.peer_id.clone())
+            .map(|(peer_index, _)| peer_index)
             .collect::<BTreeSet<_>>();
 
         for ((_, peer_index), state) in &guarded.peers_notifications_out {
             if state.desired {
-                desired.insert(guarded.peers[*peer_index].peer_id.clone());
+                desired.insert(*peer_index);
             }
         }
 
-        // TODO: unfinished, must remove the pending connections
-        /*for _ in guarded.connections_by_peer.range(()) {
+        let mut out = Vec::with_capacity(desired.len());
+        for peer_index in desired {
+            if guarded
+                .connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .count()
+                != 0
+            {
+                continue;
+            }
 
-        }*/
+            out.push(guarded.peers[peer_index].peer_id.clone());
+        }
 
-        desired.into_iter()
+        out.into_iter()
     }
 
     /// Sets the "desired" flag of the given [`PeerId`].
@@ -999,7 +1022,7 @@ where
             .iter()
             .filter(|(peer_index, _)| {
                 guarded
-                    .established_connections_by_peer
+                    .connections_by_peer
                     .range(
                         (*peer_index, ConnectionId::min_value())
                             ..=(*peer_index, ConnectionId::max_value()),
@@ -1020,12 +1043,13 @@ where
     ) -> Option<collection::ConnectionId> {
         let peer_index = *guarded.peer_indices.get(target)?;
 
-        if let Some((_, connection_id)) = guarded
-            .established_connections_by_peer
+        if let Some(((_, connection_id), _)) = guarded
+            .connections_by_peer
             .range(
                 (peer_index, collection::ConnectionId::min_value())
                     ..=(peer_index, collection::ConnectionId::max_value()),
             )
+            .filter(|(_, established)| **established)
             .next()
         {
             return Some(*connection_id);
@@ -1233,8 +1257,9 @@ struct Guarded<TConn> {
     connections: slab::Slab<(Option<usize>, TConn)>,
 
     /// List of all established connections, as a tuple of `(peer_index, connection_id)`.
-    /// `peer_index` is the index in [`Guarded::peers`].
-    established_connections_by_peer: BTreeSet<(usize, collection::ConnectionId)>,
+    /// `peer_index` is the index in [`Guarded::peers`]. Values are `bool` indicating whether the
+    /// connection is fully established: `true` if fully established, `false` if handshaking.
+    connections_by_peer: BTreeMap<(usize, collection::ConnectionId), bool>,
 
     /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Values are the
     /// state of the corresponding outbound notifications substream.
@@ -1282,7 +1307,7 @@ impl<TConn> Guarded<TConn> {
         }
 
         if self
-            .established_connections_by_peer
+            .connections_by_peer
             .range(
                 (peer_index, collection::ConnectionId::min_value())
                     ..=(peer_index, collection::ConnectionId::max_value()),
