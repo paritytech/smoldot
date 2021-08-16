@@ -1022,7 +1022,7 @@ where
                     // are generated continuously, as announcements will be generated periodically
                     // as well and the state will no longer mismatch
                     // TODO: cloning of peer_id :(
-                    if guarded
+                    if !guarded
                         .open_chains
                         .contains(&(peer_id.clone(), chain_index))
                     {
