@@ -160,7 +160,8 @@ impl JsonRpcService {
             new_requests_rx: Mutex::new(new_requests_rx),
             responses_sender: Mutex::new(responses_sender),
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
-            max_subscriptions: config.max_subscriptions,
+            max_subscriptions: usize::try_from(config.max_subscriptions)
+                .unwrap_or(usize::max_value()),
             chain_name: config.chain_spec.name().to_owned(),
             chain_ty: config.chain_spec.chain_type().to_owned(),
             chain_is_live: config.chain_spec.has_live_network(),
@@ -385,8 +386,7 @@ struct Background {
     new_child_tasks_tx: Mutex<mpsc::UnboundedSender<future::BoxFuture<'static, ()>>>,
 
     /// See [`Config::max_subscriptions`].
-    // TODO: not enforced
-    max_subscriptions: u32,
+    max_subscriptions: usize,
 
     /// Name of the chain, as found in the chain specification.
     chain_name: String,
@@ -895,19 +895,29 @@ impl Background {
                 let _ = self.responses_sender.lock().await.send(response).await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                let subscription = self
-                    .next_subscription
-                    .fetch_add(1, atomic::Ordering::Relaxed)
-                    .to_string();
+                let (subscription, mut unsubscribe_rx) =
+                    match self.alloc_subscription(SubscriptionTy::RuntimeSpec).await {
+                        Ok(v) => v,
+                        Err(()) => {
+                            let _ = self
+                                .responses_sender
+                                .lock()
+                                .await
+                                .send(json_rpc::parse::build_error_response(
+                                    request_id,
+                                    json_rpc::parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        "Too many active subscriptions",
+                                    ),
+                                    None,
+                                ))
+                                .await;
+                            return;
+                        }
+                    };
 
                 let (current_specs, spec_changes) =
                     self.runtime_service.subscribe_runtime_version().await;
-
-                let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-                self.subscriptions.lock().await.insert(
-                    (subscription.clone(), SubscriptionTy::RuntimeSpec),
-                    unsubscribe_tx,
-                );
 
                 let _ = self
                     .responses_sender
@@ -1223,21 +1233,31 @@ impl Background {
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
     async fn submit_and_watch_extrinsic(&self, request_id: &str, transaction: methods::HexString) {
+        let (subscription, mut unsubscribe_rx) =
+            match self.alloc_subscription(SubscriptionTy::Transaction).await {
+                Ok(v) => v,
+                Err(()) => {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ))
+                        .await;
+                    return;
+                }
+            };
+
         let mut transaction_updates = self
             .transactions_service
             .submit_and_watch_extrinsic(transaction.0, 16)
             .await;
-
-        let subscription = self
-            .next_subscription
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.lock().await.insert(
-            (subscription.clone(), SubscriptionTy::Transaction),
-            unsubscribe_tx,
-        );
 
         let confirmation = methods::Response::author_submitAndWatchExtrinsic(&subscription)
             .to_json_response(request_id);
@@ -1361,16 +1381,26 @@ impl Background {
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
     async fn subscribe_all_heads(&self, request_id: &str) {
-        let subscription = self
-            .next_subscription
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.lock().await.insert(
-            (subscription.clone(), SubscriptionTy::AllHeads),
-            unsubscribe_tx,
-        );
+        let (subscription, mut unsubscribe_rx) =
+            match self.alloc_subscription(SubscriptionTy::AllHeads).await {
+                Ok(v) => v,
+                Err(()) => {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ))
+                        .await;
+                    return;
+                }
+            };
 
         let mut blocks_list = {
             let subscribe_all = self.sync_service.subscribe_all(16).await;
@@ -1426,16 +1456,26 @@ impl Background {
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
     async fn subscribe_new_heads(&self, request_id: &str) {
-        let subscription = self
-            .next_subscription
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.lock().await.insert(
-            (subscription.clone(), SubscriptionTy::NewHeads),
-            unsubscribe_tx,
-        );
+        let (subscription, mut unsubscribe_rx) =
+            match self.alloc_subscription(SubscriptionTy::NewHeads).await {
+                Ok(v) => v,
+                Err(()) => {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ))
+                        .await;
+                    return;
+                }
+            };
 
         let mut blocks_list = {
             let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
@@ -1487,16 +1527,28 @@ impl Background {
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
     async fn subscribe_finalized_heads(&self, request_id: &str) {
-        let subscription = self
-            .next_subscription
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.lock().await.insert(
-            (subscription.clone(), SubscriptionTy::FinalizedHeads),
-            unsubscribe_tx,
-        );
+        let (subscription, mut unsubscribe_rx) = match self
+            .alloc_subscription(SubscriptionTy::FinalizedHeads)
+            .await
+        {
+            Ok(v) => v,
+            Err(()) => {
+                let _ = self
+                    .responses_sender
+                    .lock()
+                    .await
+                    .send(json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Too many active subscriptions",
+                        ),
+                        None,
+                    ))
+                    .await;
+                return;
+            }
+        };
 
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
@@ -1550,16 +1602,26 @@ impl Background {
 
     /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
     async fn subscribe_storage(&self, request_id: &str, list: Vec<methods::HexString>) {
-        let subscription = self
-            .next_subscription
-            .fetch_add(1, atomic::Ordering::Relaxed)
-            .to_string();
-
-        let (unsubscribe_tx, mut unsubscribe_rx) = oneshot::channel();
-        self.subscriptions.lock().await.insert(
-            (subscription.clone(), SubscriptionTy::Storage),
-            unsubscribe_tx,
-        );
+        let (subscription, mut unsubscribe_rx) =
+            match self.alloc_subscription(SubscriptionTy::Storage).await {
+                Ok(v) => v,
+                Err(()) => {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ))
+                        .await;
+                    return;
+                }
+            };
 
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {
@@ -1732,6 +1794,27 @@ impl Background {
                 Err(())
             }
         }
+    }
+
+    /// Allocates a new subscription ID. Also checks the maximum number of subscriptions.
+    async fn alloc_subscription(
+        &self,
+        ty: SubscriptionTy,
+    ) -> Result<(String, oneshot::Receiver<String>), ()> {
+        let subscription = self
+            .next_subscription
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            .to_string();
+
+        let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
+        let mut lock = self.subscriptions.lock().await;
+        if lock.len() >= self.max_subscriptions {
+            return Err(());
+        }
+
+        lock.insert((subscription.clone(), ty), unsubscribe_tx);
+
+        Ok((subscription, unsubscribe_rx))
     }
 }
 
