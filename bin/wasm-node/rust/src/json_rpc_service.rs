@@ -310,6 +310,7 @@ fn with_long_time_warning<'a, T: Future + 'a>(
     future: T,
     json_rpc_request: &'a str,
 ) -> impl Future<Output = T::Output> + 'a {
+    let now = ffi::Instant::now();
     let mut warn_after = ffi::Delay::new(Duration::from_secs(1)).fuse();
 
     async move {
@@ -329,7 +330,8 @@ fn with_long_time_warning<'a, T: Future + 'a>(
                 out = future => {
                     if warn_after.is_terminated() {
                         log::info!(
-                            "JSON-RPC request has finished after taking a long time: {:?}{}",
+                            "JSON-RPC request has finished after {}ms: {:?}{}",
+                            now.elapsed().as_millis(),
                             if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
                                 else { &json_rpc_request[..] },
                             if json_rpc_request.len() > 100 { "…" } else { "" }
