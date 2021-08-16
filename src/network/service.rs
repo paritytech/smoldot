@@ -367,7 +367,7 @@ where
             let k2 = randomness.next_u64();
             let k3 = randomness.next_u64();
             hashbrown::HashMap::with_capacity_and_hasher(
-                0, // TODO:
+                config.peers_capacity,
                 ahash::RandomState::with_seeds(k0, k1, k2, k3),
             )
         };
