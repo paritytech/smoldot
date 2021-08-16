@@ -641,7 +641,7 @@ where
             .map(|(peer_index, _)| peer_index)
             .collect::<BTreeSet<_>>();
 
-        for ((_, peer_index), state) in &guarded.peers_notifications_out {
+        for ((peer_index, _), state) in &guarded.peers_notifications_out {
             if state.desired {
                 desired.insert(*peer_index);
             }
