@@ -831,6 +831,7 @@ where
                         notifications_protocol_index: *notifications_protocol_index,
                         notification,
                     });
+                    continue;
                 }
             }
 
