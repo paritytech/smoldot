@@ -256,12 +256,12 @@ struct Guarded<TConn, TNow> {
     /// List of all connections.
     connections: slab::Slab<Arc<Mutex<Connection<TConn, TNow>>>>,
 
-    /// Container that holds tuples of `(connection_index, overlay_index, direction, state)`.
+    /// Container that holds tuples of `(connection_index, overlay_index, direction)`.
     ///
     /// While the list of open substreams is also known to the [`Connection`] struct, it is
     /// duplicated here in order to avoid race conditions.
     connection_overlays:
-        BTreeMap<(usize, usize, SubstreamDirection, SubstreamState), established::SubstreamId>,
+        BTreeMap<(usize, usize, SubstreamDirection), (established::SubstreamId, SubstreamState)>,
 
     /// Generator for randomness seeds given to the established connections.
     randomness_seeds: ChaCha20Rng,
@@ -529,25 +529,11 @@ where
 
         // Verify that the connection doesn't already already have a substream with the same
         // overlay network index.
-        if guarded
-            .connection_overlays
-            .range(
-                (
-                    connection_index,
-                    overlay_network_index,
-                    SubstreamDirection::Out,
-                    SubstreamState::min_value(),
-                )
-                    ..=(
-                        connection_index,
-                        overlay_network_index,
-                        SubstreamDirection::Out,
-                        SubstreamState::max_value(),
-                    ),
-            )
-            .count()
-            != 0
-        {
+        if guarded.connection_overlays.contains_key(&(
+            connection_index,
+            overlay_network_index,
+            SubstreamDirection::Out,
+        )) {
             return Err(OpenNotificationsSubstreamError::DuplicateSubstream);
         }
 
@@ -581,9 +567,8 @@ where
                 connection_index,
                 overlay_network_index,
                 SubstreamDirection::Out,
-                SubstreamState::Pending,
             ),
-            substream_id,
+            (substream_id, SubstreamState::Pending),
         );
         debug_assert!(_prev_value.is_none());
 
@@ -635,15 +620,18 @@ where
                 .ok_or(QueueNotificationError::InvalidConnection)?;
 
             // Find a substream on this connection.
-            let substream_id = *guarded
+            let (substream_id, state) = *guarded
                 .connection_overlays
                 .get(&(
                     connection_index,
                     overlay_network_index,
                     SubstreamDirection::Out,
-                    SubstreamState::Open,
                 ))
                 .ok_or(QueueNotificationError::NoSubstream)?;
+
+            if !matches!(state, SubstreamState::Open) {
+                return Err(QueueNotificationError::NoSubstream);
+            }
 
             let connection_arc = guarded.connections[connection_index].clone();
 
@@ -698,10 +686,9 @@ where
                 connection_index,
                 overlay_network_index,
                 SubstreamDirection::In,
-                SubstreamState::Pending,
             )) {
-                Some(id) => *id,
-                None => return, // TODO: too defensive
+                Some((id, SubstreamState::Pending)) => *id,
+                _ => return, // TODO: too defensive
             };
 
             (guarded.connections[connection_index].clone(), substream_id)
@@ -728,10 +715,9 @@ where
             connection_index,
             overlay_network_index,
             SubstreamDirection::In,
-            SubstreamState::Pending,
         )) {
-            Some(id) => id,
-            None => return, // TODO: too defensive
+            Some((id, SubstreamState::Pending)) => id,
+            _ => return, // TODO: too defensive
         };
 
         if let Some(connection) = connection_lock.connection.as_established() {
@@ -761,9 +747,8 @@ where
                 connection_index,
                 overlay_network_index,
                 SubstreamDirection::In,
-                SubstreamState::Open,
             ),
-            substream_id,
+            (substream_id, SubstreamState::Open),
         );
         debug_assert!(_previous_value.is_none());
     }
@@ -1279,13 +1264,11 @@ where
                                 connection_index,
                                 usize::min_value(),
                                 SubstreamDirection::min_value(),
-                                SubstreamState::min_value(),
                             )
                                 ..=(
                                     connection_index,
                                     usize::max_value(),
                                     SubstreamDirection::max_value(),
-                                    SubstreamState::max_value(),
                                 )
                         )
                         .count(),
@@ -1333,12 +1316,6 @@ where
                     connection_index,
                     overlay_network_index,
                     SubstreamDirection::In,
-                    SubstreamState::Pending,
-                )) || guarded.connection_overlays.contains_key(&(
-                    connection_index,
-                    overlay_network_index,
-                    SubstreamDirection::In,
-                    SubstreamState::Open,
                 )) {
                     // There was already a substream with that protocol. Immediately refuse the
                     // new one.
@@ -1355,9 +1332,8 @@ where
                         connection_index,
                         overlay_network_index,
                         SubstreamDirection::In,
-                        SubstreamState::Pending,
                     ),
-                    id,
+                    (id, SubstreamState::Pending),
                 );
 
                 guarded
@@ -1378,10 +1354,9 @@ where
                     connection_index,
                     overlay_network_index,
                     SubstreamDirection::In,
-                    SubstreamState::Pending,
                 ));
 
-                debug_assert_eq!(_value_in, Some(_substream_id));
+                debug_assert_eq!(_value_in, Some((_substream_id, SubstreamState::Pending)));
             }
             PendingEvent::Inner(established::Event::NotificationIn { id, notification }) => {
                 let overlay_network_index = *self
@@ -1391,12 +1366,18 @@ where
                     .notifications_substream_user_data_mut(id)
                     .unwrap();
 
-                debug_assert!(guarded.connection_overlays.contains_key(&(
-                    connection_index,
-                    overlay_network_index,
-                    SubstreamDirection::In,
+                debug_assert_eq!(
+                    guarded
+                        .connection_overlays
+                        .get(&(
+                            connection_index,
+                            overlay_network_index,
+                            SubstreamDirection::In,
+                        ))
+                        .unwrap()
+                        .1,
                     SubstreamState::Open,
-                )));
+                );
 
                 guarded
                     .events_tx
@@ -1423,18 +1404,16 @@ where
                     connection_index,
                     overlay_network_index,
                     SubstreamDirection::Out,
-                    SubstreamState::Pending,
                 ));
-                debug_assert_eq!(_value_removed, Some(id));
+                debug_assert_eq!(_value_removed, Some((id, SubstreamState::Pending)));
 
                 let _prev_value = guarded.connection_overlays.insert(
                     (
                         connection_index,
                         overlay_network_index,
                         SubstreamDirection::Out,
-                        SubstreamState::Open,
                     ),
-                    id,
+                    (id, SubstreamState::Open),
                 );
                 debug_assert_eq!(_prev_value, None);
 
@@ -1456,9 +1435,8 @@ where
                     connection_index,
                     overlay_network_index,
                     SubstreamDirection::Out,
-                    SubstreamState::Pending,
                 ));
-                debug_assert_eq!(_value_removed, Some(id));
+                debug_assert_eq!(_value_removed, Some((id, SubstreamState::Pending)));
 
                 guarded
                     .events_tx
@@ -1480,9 +1458,8 @@ where
                     connection_index,
                     overlay_network_index,
                     SubstreamDirection::Out,
-                    SubstreamState::Open,
                 ));
-                debug_assert_eq!(_value_removed, Some(id));
+                debug_assert_eq!(_value_removed, Some((id, SubstreamState::Open)));
 
                 guarded
                     .events_tx
@@ -1501,22 +1478,20 @@ where
                             connection_index,
                             usize::min_value(),
                             SubstreamDirection::min_value(),
-                            SubstreamState::min_value(),
                         )
                             ..=(
                                 connection_index,
                                 usize::max_value(),
                                 SubstreamDirection::max_value(),
-                                SubstreamState::max_value(),
                             ),
                     )
-                    .map(|(key, _)| *key)
+                    .map(|(key, (_, state))| (*key, *state))
                     .collect::<Vec<_>>();
 
                 let mut out_overlay_network_indices = Vec::with_capacity(substreams.len());
                 let mut in_overlay_network_indices = Vec::with_capacity(substreams.len());
 
-                for (_, overlay_network_index, direction, state) in substreams {
+                for ((_, overlay_network_index, direction), state) in substreams {
                     match state {
                         SubstreamState::Pending => continue,
                         SubstreamState::Open => {}
