@@ -69,20 +69,13 @@ wsServer.on('request', function (request) {
     let chain;
     if (request.resource == '/relay') {
         chain = client.then(async client => {
-            const healthChecker = smoldot.healthChecker();
-            const relay = await client.addChain({
-                chainSpec,
-                jsonRpcCallback: (resp) => {
-                    const newResp = healthChecker.responsePassThrough(resp);
-                    if (newResp)
-                        connection.sendUTF(newResp);
-                },
-            });
-            healthChecker.setSendJsonRpc(relay.sendJsonRpc);
-            healthChecker.start((health) => console.log(health));
             return {
-                healthChecker,
-                relay,
+                relay: await client.addChain({
+                    chainSpec,
+                    jsonRpcCallback: (resp) => {
+                        connection.sendUTF(resp);
+                    },
+                })
             };
         });
 
@@ -124,7 +117,7 @@ wsServer.on('request', function (request) {
                     if (chain.para)
                         chain.para.sendJsonRpc(message.utf8Data);
                     else
-                        chain.healthChecker.sendJsonRpc(message.utf8Data);
+                        chain.relay.sendJsonRpc(message.utf8Data);
                 })
                 .catch((error) => {
                     console.error("Error during JSON-RPC request: " + error);
@@ -139,7 +132,6 @@ wsServer.on('request', function (request) {
     connection.on('close', function (reasonCode, description) {
         console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
         chain.then(chain => {
-            chain.healthChecker.stop();
             chain.relay.remove();
             if (chain.para)
                 chain.para.remove();
