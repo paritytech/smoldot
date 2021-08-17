@@ -1131,7 +1131,7 @@ impl Background {
                     // subscriptions (as opposed to the `runtime_service`), it is also the
                     // `sync_service` that is used to determine `is_syncing`.
                     is_syncing: !self.sync_service.is_near_head_of_chain_heuristic().await,
-                    peers: u64::try_from(self.network_service.peers_list().await.count())
+                    peers: u64::try_from(self.sync_service.syncing_peers().await.len())
                         .unwrap_or(u64::max_value()),
                     should_have_peers: self.chain_is_live,
                 })
