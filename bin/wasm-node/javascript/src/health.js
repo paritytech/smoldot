@@ -153,9 +153,10 @@ export function healthChecker() {
                     // Response doesn't concern us.
                     if (parsedResponse.id) {
                         // Need to remove the `extern:` prefix.
-                        if (!parsedResponse.id.startsWith('extern:'))
+                        if (typeof parsedResponse.id === 'string' && !parsedResponse.id.startsWith('extern:'))
                             throw new Error('State inconsistency in health checker');
-                        const newId = JSON.parse(parsedResponse.id.slice('extern:'.length));
+                        const newId = JSON.parse(typeof parsedResponse.id === 'string' ? parsedResponse.id.slice('extern:'.length) : parsedResponse.id);
+                        console.log('newId is', newId);
                         parsedResponse.id = newId;
                     }
 
