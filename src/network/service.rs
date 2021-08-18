@@ -493,7 +493,7 @@ where
             .inner
             .broadcast_notification(
                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                packet.clone(),
+                packet,
             )
             .await;
 
