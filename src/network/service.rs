@@ -906,6 +906,22 @@ where
                             guarded.open_chains.insert((peer_id.clone(), chain_index));
                         debug_assert!(_was_inserted);
 
+                        // TODO: futures cancellation issues
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                &peer_id,
+                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                                true,
+                            )
+                            .await;
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                &peer_id,
+                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                                true,
+                            )
+                            .await;
+
                         return Event::ChainConnected {
                             peer_id,
                             chain_index,
@@ -985,6 +1001,22 @@ where
                         let _was_removed =
                             guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
                         debug_assert!(_was_removed);
+
+                        // TODO: futures cancellation issues
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                &peer_id,
+                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                                false,
+                            )
+                            .await;
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                &peer_id,
+                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                                false,
+                            )
+                            .await;
 
                         return Event::ChainDisconnected {
                             peer_id,
@@ -1481,14 +1513,14 @@ where
         for (peer_id, addrs) in self.outcome {
             // TODO: hack
             // TODO: futures cancellation issue
-            for protocol in (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                .map(|n| n + chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-            {
-                self.service
-                    .inner
-                    .set_peer_notifications_out_desired(&peer_id, protocol, true)
-                    .await;
-            }
+            self.service
+                .inner
+                .set_peer_notifications_out_desired(
+                    &peer_id,
+                    chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+                    true,
+                )
+                .await;
 
             let existing_addrs = lock.potential_addresses.entry(peer_id).or_default();
             for addr in addrs {
