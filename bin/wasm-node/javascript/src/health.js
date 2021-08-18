@@ -21,8 +21,7 @@
 //
 // In order to use it, start by creating a health checker, and call `setSendJsonRpc` to set the
 // way to send a JSON-RPC request to a chain. The health checker is disabled by default. Use
-// `start()` in order to start the health checks. The `start()` function must be passed a function
-// that the health checker can use to send JSON-RPC requests to the chain, and a callback called
+// `start()` in order to start the health checks. The `start()` function must be passed a callback called
 // when an update to the health of the node is available.
 //
 // In order to send a JSON-RPC request to the chain, you **must** use the `sendJsonRpc` function
