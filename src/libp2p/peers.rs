@@ -329,23 +329,42 @@ where
                     peer_id,
                     user_data: local_connection_index,
                 } => {
-                    if let Some(expected_peer_id) = guarded.connections[local_connection_index].0 {
-                        // TODO: compare with expected peer_id
-                        // TODO: ensure consistency of connections_by_peer
-                    }
+                    let actual_peer_index = guarded.peer_index_or_insert(&peer_id);
 
-                    let peer_index = guarded.peer_index_or_insert(&peer_id);
-                    guarded
-                        .connections_by_peer
-                        .insert((peer_index, connection_id), true); // TODO: ensure consistency
-                    guarded.connections[local_connection_index].0 = Some(peer_index);
+                    if let Some(expected_peer_index) = guarded.connections[local_connection_index].0
+                    {
+                        if expected_peer_index != actual_peer_index {
+                            let _was_in = guarded
+                                .connections_by_peer
+                                .remove(&(expected_peer_index, connection_id));
+                            debug_assert_eq!(_was_in, Some(false));
+                            let _was_in = guarded
+                                .connections_by_peer
+                                .insert((actual_peer_index, connection_id), true);
+                            debug_assert!(_was_in.is_none());
+                            guarded.connections[local_connection_index].0 = Some(actual_peer_index);
+
+                            // TODO: report some kind of error on the outer API layers?
+                        } else {
+                            let _was_in = guarded
+                                .connections_by_peer
+                                .insert((actual_peer_index, connection_id), true);
+                            debug_assert_eq!(_was_in, Some(false));
+                        }
+                    } else {
+                        let _was_in = guarded
+                            .connections_by_peer
+                            .insert((actual_peer_index, connection_id), true);
+                        debug_assert!(_was_in.is_none());
+                        guarded.connections[local_connection_index].0 = Some(actual_peer_index);
+                    }
 
                     let num_peer_connections = {
                         let num = guarded
                             .connections_by_peer
                             .range(
-                                (peer_index, collection::ConnectionId::min_value())
-                                    ..=(peer_index, collection::ConnectionId::max_value()),
+                                (actual_peer_index, collection::ConnectionId::min_value())
+                                    ..=(actual_peer_index, collection::ConnectionId::max_value()),
                             )
                             .filter(|(_, established)| **established)
                             .count();
@@ -358,7 +377,8 @@ where
                         let notification_protocols_indices = guarded
                             .peers_notifications_out
                             .range(
-                                (peer_index, usize::min_value())..=(peer_index, usize::max_value()),
+                                (actual_peer_index, usize::min_value())
+                                    ..=(actual_peer_index, usize::max_value()),
                             )
                             .filter(|(_, v)| {
                                 // Since this check happens only at the first connection, all
@@ -372,7 +392,7 @@ where
                         for idx in notification_protocols_indices {
                             let id = DesiredOutNotificationId(
                                 guarded.desired_out_notifications.insert((
-                                    peer_index,
+                                    actual_peer_index,
                                     connection_id,
                                     idx,
                                 )),
@@ -380,7 +400,7 @@ where
 
                             guarded
                                 .peers_notifications_out
-                                .get_mut(&(peer_index, idx))
+                                .get_mut(&(actual_peer_index, idx))
                                 .unwrap()
                                 .open = NotificationsOutOpenState::ApiHandshakeWait(id);
 
