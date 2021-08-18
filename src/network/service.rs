@@ -491,10 +491,7 @@ where
         // Now sending out.
         let _ = self
             .inner
-            .broadcast_notification(
-                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                packet.clone(),
-            )
+            .broadcast_notification(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2, packet)
             .await;
 
         // Update the locally-stored state, but only after the notification has been broadcasted.
