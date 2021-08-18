@@ -1047,6 +1047,7 @@ where
                         (*peer_index, ConnectionId::min_value())
                             ..=(*peer_index, ConnectionId::max_value()),
                     )
+                    .filter(|(_, established)| **established)
                     .count()
                     != 0
             })
