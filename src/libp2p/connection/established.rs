@@ -852,7 +852,10 @@ where
         substream.queued_bytes()
     }
 
-    /// Closes a notifications substream.
+    /// Closes a notifications substream opened with [`Established::open_notifications_substream`].
+    ///
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
@@ -861,7 +864,12 @@ where
     ///
     pub fn close_notifications_substream(&mut self, id: SubstreamId) {
         let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
+        if !matches!(
+            substream.user_data(),
+            Substream::NotificationsOutNegotiating { .. }
+                | Substream::NotificationsOutHandshakeRecv { .. }
+                | Substream::NotificationsOut { .. }
+        ) {
             panic!()
         }
         *substream.user_data() = Substream::NotificationsOutClosed;
