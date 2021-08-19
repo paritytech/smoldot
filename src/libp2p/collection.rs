@@ -578,14 +578,86 @@ where
     /// Start closing a previously-open notifications substream, or cancels opening a
     /// notifications substream.
     ///
-    /// Has no effect if no notifications substream is open.
-    // TODO: is that a correct API? racy w.r.t. events
+    /// Calling this method will emit a [`Event::NotificationsOutClose`] if there was indeed a
+    /// notifications substream being open or already open.
+    ///
+    /// The interaction of this method with [`Event::NotificationsOutAccept`] and
+    /// [`Event::NotificationsOutClose`] is non-trivial.
+    ///
+    /// It is possible for a [`Event::NotificationsOutAccept`] to be emitted *after* this method
+    /// has been called. In any situation, if a [`Event::NotificationsOutAccept`] regarding this
+    /// notifications protocol is emitted in the past, then a corresponding
+    /// [`Event::NotificationsOutClose`] will always be emitted.
+    ///
+    /// Similarly, it is possible for a [`Event::NotificationsOutClose`] to be emitted right
+    /// before this method is called. For this reason, this method has no effect if no
+    /// notifications substream is open.
+    // TODO: review these comments about events
     pub async fn close_notifications_substream(
         &self,
         connection_id: ConnectionId,
         overlay_network_index: usize,
     ) {
-        todo!()
+        // Because the user can cancel the future at any `await` point, all the asynchronous
+        // operations are performed ahead of any state modification.
+
+        // Obtain the connect to use to send the request.
+        let (connection_index, connection_arc): (_, Arc<Mutex<Connection<_, _>>>) = {
+            let guarded = self.guarded.lock().await;
+            let connection_index = *match guarded.connections_by_id.get(&connection_id) {
+                Some(idx) => idx,
+                None => return,
+            };
+
+            (
+                connection_index,
+                guarded.connections[connection_index].clone(),
+            )
+        };
+
+        // As explained in the implementation notes at the top, `guarded` must always be locked
+        // after the connection.
+        let mut connection_lock = connection_arc.lock().await;
+        let mut guarded = self.guarded.lock().await;
+
+        // Verify that the connection is still the same as was found before `guarded` got unlocked
+        // and locked again.
+        match guarded.connections.get_mut(connection_index) {
+            Some(c) if Arc::ptr_eq(c, &connection_arc) => {}
+            _ => return,
+        }
+
+        // In order to guarantee a proper ordering of events, any pending event must first be
+        // delivered.
+        connection_lock.propagate_pending_event(&mut guarded).await;
+        debug_assert!(connection_lock.pending_event.is_none());
+
+        // Verify that there is indeed a substream being opened or already open.
+        let (substream_id, substream_state) = match guarded.connection_overlays.remove(&(
+            connection_index,
+            overlay_network_index,
+            SubstreamDirection::Out,
+        )) {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Update the state of the inner connection state machine.
+        match &mut connection_lock.connection {
+            ConnectionInner::Established(established) => {
+                established.close_notifications_substream(substream_id)
+            }
+            ConnectionInner::Handshake { .. }
+            | ConnectionInner::Errored(_)
+            | ConnectionInner::Dead
+            | ConnectionInner::Poisoned => unreachable!(),
+        };
+
+        // Wake up the task dedicated to this connection in order for the substream to be
+        // effectively closed.
+        if let Some(waker) = connection_lock.waker.take() {
+            let _ = waker.send(());
+        }
     }
 
     /// Adds a notification to the queue of notifications to send to the given peer.
