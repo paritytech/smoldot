@@ -575,6 +575,19 @@ where
         Ok(())
     }
 
+    /// Start closing a previously-open notifications substream, or cancels opening a
+    /// notifications substream.
+    ///
+    /// Has no effect if no notifications substream is open.
+    // TODO: is that a correct API? racy w.r.t. events
+    pub async fn close_notifications_substream(
+        &self,
+        connection_id: ConnectionId,
+        overlay_network_index: usize,
+    ) {
+        todo!()
+    }
+
     /// Adds a notification to the queue of notifications to send to the given peer.
     ///
     /// Each substream maintains a queue of notifications to be sent to the remote. This method
