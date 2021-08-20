@@ -662,12 +662,13 @@ where
             debug_assert!(!buf.is_empty());
 
             let to_write = cmp::min(buf.len(), read_write.outgoing_buffer_available());
-            if to_write == 0 {
-                return false;
-            }
 
             read_write.write_out(&buf[..to_write]);
             message_offset = 0;
+
+            if to_write < buf.len() {
+                return false;
+            }
         }
 
         true
