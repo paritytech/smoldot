@@ -107,12 +107,74 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         self.outgoing_buffer = None;
     }
 
+    /// Returns the size of the data available in the incoming buffer.
+    pub fn incoming_buffer_available(&self) -> usize {
+        self.incoming_buffer
+            .as_ref()
+            .map(|buf| buf.len())
+            .unwrap_or(0)
+    }
+
+    /// Returns an iterator that pops bytes from [`ReadWrite::incoming_buffer`]. Whenever the
+    /// iterator advances, [`ReadWrite::read_bytes`] is increased by 1.
+    pub fn incoming_bytes_iter<'b>(&'b mut self) -> IncomingBytes<'a, 'b, TNow> {
+        IncomingBytes { me: self }
+    }
+
+    /// Extracts a certain number of bytes from [`ReadWrite::incoming_buffer`] and updates
+    /// [`ReadWrite::read_bytes`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if `N` is super to the number of bytes available.
+    ///
+    pub fn read_bytes<const N: usize>(&mut self) -> [u8; N] {
+        let mut out: [u8; N] = [0; N];
+        match self.incoming_buffer {
+            Some(buf) => {
+                assert!(buf.len() >= N);
+                out.copy_from_slice(&buf[..N]);
+                self.advance_read(N);
+            }
+            None => assert_eq!(N, 0),
+        };
+        out
+    }
+
     /// Returns the size of the available outgoing buffer.
     pub fn outgoing_buffer_available(&self) -> usize {
         self.outgoing_buffer
             .as_ref()
             .map(|(a, b)| a.len() + b.len())
             .unwrap_or(0)
+    }
+
+    /// Copies the content of `data` to [`ReadWrite::outgoing_buffer`] and increases
+    /// [`ReadWrite::written_bytes`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if `data.len() > self.outgoing_buffer_available()`.
+    ///
+    pub fn write_out(&mut self, data: &[u8]) {
+        let outgoing_buffer = match &mut self.outgoing_buffer {
+            Some(b) => b,
+            None => {
+                assert!(data.is_empty());
+                return;
+            }
+        };
+
+        assert!(data.len() <= outgoing_buffer.0.len() + outgoing_buffer.1.len());
+
+        let to_copy_buf1 = cmp::min(outgoing_buffer.0.len(), data.len());
+        let to_copy_buf2 = data.len() - to_copy_buf1;
+        debug_assert_eq!(to_copy_buf1 + to_copy_buf2, data.len());
+
+        outgoing_buffer.0[..to_copy_buf1].copy_from_slice(&data[..to_copy_buf1]);
+        outgoing_buffer.1[..to_copy_buf2].copy_from_slice(&data[to_copy_buf1..][..to_copy_buf2]);
+
+        self.advance_write(data.len());
     }
 
     /// Sets [`ReadWrite::wake_up_after`] to `min(wake_up_after, after)`.
@@ -151,3 +213,37 @@ fn advance_buf(buf: &mut &mut [u8], n: usize) {
     let tmp = mem::take(buf);
     *buf = &mut tmp[n..];
 }
+
+/// See [`ReadWrite::incoming_bytes_iter`].
+pub struct IncomingBytes<'a, 'b, TNow> {
+    me: &'b mut ReadWrite<'a, TNow>,
+}
+
+impl<'a, 'b, TNow> Iterator for IncomingBytes<'a, 'b, TNow> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<u8> {
+        match &mut self.me.incoming_buffer {
+            Some(ref mut buf) => {
+                if buf.is_empty() {
+                    return None;
+                }
+
+                let byte = buf[0];
+                *buf = &buf[1..];
+                self.me.read_bytes += 1;
+                Some(byte)
+            }
+            None => return None,
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self.me.incoming_buffer {
+            Some(b) => (b.len(), Some(b.len())),
+            None => (0, Some(0)),
+        }
+    }
+}
+
+impl<'a, 'b, TNow> ExactSizeIterator for IncomingBytes<'a, 'b, TNow> {}
