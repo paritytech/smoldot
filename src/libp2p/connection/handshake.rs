@@ -137,7 +137,7 @@ impl HealthyHandshake {
 
                     return match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
-                            if read_write.outgoing_buffer_available() != 0 {
+                            if read_write.outgoing_buffer_available() == 0 {
                                 self.state = NegotiationState::EncryptionProtocol {
                                     negotiation: updated,
                                     is_initiator,
@@ -222,6 +222,7 @@ impl HealthyHandshake {
                         )
                         .map_err(HandshakeError::Noise)?;
                     assert_eq!(num_read, read_write.incoming_buffer_available()); // TODO: not necessarily true; situation is a bit complicated; see noise module
+                    read_write.advance_read(num_read);
 
                     // Allocate a temporary buffer where to put the unencrypted data that should
                     // later be encrypted and written out.
