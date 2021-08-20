@@ -806,7 +806,7 @@ pub struct PayloadDecodeError(prost::DecodeError);
 
 #[cfg(test)]
 mod tests {
-    use super::{NoiseHandshake, NoiseKey};
+    use super::{NoiseHandshake, NoiseKey, ReadWrite};
 
     #[test]
     fn handshake_basic_works() {
@@ -832,18 +832,36 @@ mod tests {
                     NoiseHandshake::InProgress(nego) => {
                         if buf_1_to_2.is_empty() {
                             buf_1_to_2.resize(size1, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
-                            handshake1 = updated;
-                            for _ in 0..num_read {
+
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_2_to_1),
+                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+
+                            handshake1 = nego.read_write(&mut read_write).unwrap();
+                            let (read_bytes, written_bytes) =
+                                (read_write.read_bytes, read_write.written_bytes);
+                            for _ in 0..read_bytes {
                                 buf_2_to_1.remove(0);
                             }
-                            buf_1_to_2.truncate(written);
+                            buf_1_to_2.truncate(written_bytes);
                         } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_2_to_1, &mut []).unwrap();
-                            handshake1 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_2_to_1),
+                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            handshake1 = nego.read_write(&mut read_write).unwrap();
+                            for _ in 0..read_write.read_bytes {
                                 buf_2_to_1.remove(0);
                             }
                         }
@@ -855,18 +873,36 @@ mod tests {
                     NoiseHandshake::InProgress(nego) => {
                         if buf_2_to_1.is_empty() {
                             buf_2_to_1.resize(size2, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
-                            handshake2 = updated;
-                            for _ in 0..num_read {
+
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_1_to_2),
+                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+
+                            handshake2 = nego.read_write(&mut read_write).unwrap();
+                            let (read_bytes, written_bytes) =
+                                (read_write.read_bytes, read_write.written_bytes);
+                            for _ in 0..read_bytes {
                                 buf_1_to_2.remove(0);
                             }
-                            buf_2_to_1.truncate(written);
+                            buf_2_to_1.truncate(written_bytes);
                         } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_1_to_2, &mut []).unwrap();
-                            handshake2 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_1_to_2),
+                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            handshake2 = nego.read_write(&mut read_write).unwrap();
+                            for _ in 0..read_write.read_bytes {
                                 buf_1_to_2.remove(0);
                             }
                         }
