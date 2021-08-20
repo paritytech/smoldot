@@ -1250,25 +1250,20 @@ where
                         }
                     };
 
-                    let (result, num_read, num_written) = match handshake.read_write(
-                        incoming_buffer,
-                        match read_write.outgoing_buffer.as_mut() {
-                            Some((a, b)) => (a, b),
-                            None => (&mut [], &mut []),
-                        },
-                    ) {
+                    let (read_before, written_before) =
+                        (read_write.read_bytes, read_write.written_bytes);
+
+                    let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
                         Err(err) => {
                             return Err(ConnectionError::Handshake(err));
                         }
                     };
 
-                    read_write.advance_read(num_read);
-                    read_write.advance_write(num_written);
-
                     match result {
                         handshake::Handshake::Healthy(updated_handshake)
-                            if num_written == 0 && num_read == 0 =>
+                            if (read_before, written_before)
+                                == (read_write.read_bytes, read_write.written_bytes) =>
                         {
                             self.connection = ConnectionInner::Handshake {
                                 handshake: updated_handshake,
