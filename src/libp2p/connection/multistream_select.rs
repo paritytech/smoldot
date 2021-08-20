@@ -640,7 +640,7 @@ where
     /// Write to the given [`ReadWrite`] as many bytes of the message as possible, starting at
     /// `message_offset`.
     ///
-    /// Returns a panic indicating whether the message has been fully written in the buffer.
+    /// Returns a boolean indicating whether the message has been fully written in the buffer.
     ///
     /// # Panic
     ///
