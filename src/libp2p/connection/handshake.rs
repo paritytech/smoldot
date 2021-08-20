@@ -137,14 +137,6 @@ impl HealthyHandshake {
 
                     return match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
-                            if read_write.outgoing_buffer_available() == 0 {
-                                self.state = NegotiationState::EncryptionProtocol {
-                                    negotiation: updated,
-                                    is_initiator,
-                                };
-                                continue;
-                            }
-
                             Ok(Handshake::Healthy(HealthyHandshake {
                                 state: NegotiationState::EncryptionProtocol {
                                     negotiation: updated,
