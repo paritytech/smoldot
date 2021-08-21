@@ -1128,16 +1128,6 @@ pub enum ConnectionError {
     /// Protocol error during the handshake phase.
     #[display(fmt = "{}", _0)]
     Handshake(handshake::HandshakeError),
-    /// Mismatch between the actual [`PeerId`] and the [`PeerId`] expected by the local node.
-    // TODO: unused; move
-    #[display(
-        fmt = "Mismatch between the actual PeerId ({}) and PeerId expected by the local node",
-        actual
-    )]
-    PeerIdMismatch {
-        /// Actual [`PeerId`] that the remote reports.
-        actual: PeerId,
-    },
 }
 
 /// See [`Network::open_notifications_substream`].
