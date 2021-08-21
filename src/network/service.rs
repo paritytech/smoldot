@@ -29,6 +29,7 @@ use alloc::{
     collections::BTreeSet,
     format,
     string::{String, ToString as _},
+    vec,
     vec::Vec,
 };
 use core::{
@@ -220,7 +221,7 @@ enum ToProcessPreEvent {
     },
     SetDesired {
         peer_id: PeerId,
-        notifications_protocol_index: usize,
+        notifications_protocol_indices: Vec<usize>,
         desired: bool,
     },
     NotificationsOut {
@@ -752,7 +753,7 @@ where
                     {
                         guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
                             peer_id: peer_id.clone(), // TODO: clone :(
-                            notifications_protocol_index: *notifications_protocol_index,
+                            notifications_protocol_indices: vec![*notifications_protocol_index],
                             desired: true,
                         });
                         continue;
@@ -765,18 +766,28 @@ where
                     guarded.to_process_pre_event = None;
                 }
                 Some(ToProcessPreEvent::SetDesired {
+                    notifications_protocol_indices,
+                    ..
+                }) if notifications_protocol_indices.is_empty() => {
+                    guarded.to_process_pre_event = None;
+                }
+                Some(ToProcessPreEvent::SetDesired {
                     peer_id,
-                    notifications_protocol_index,
+                    notifications_protocol_indices,
                     desired,
                 }) => {
+                    debug_assert!(!notifications_protocol_indices.is_empty());
+                    let notifications_protocol_index =
+                        *notifications_protocol_indices.last().unwrap();
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
-                            *notifications_protocol_index,
+                            notifications_protocol_index,
                             *desired,
                         )
                         .await;
-                    guarded.to_process_pre_event = None;
+                    notifications_protocol_indices.pop();
+                    continue;
                 }
                 Some(ToProcessPreEvent::NotificationsOut { id, handshake }) => {
                     self.inner
@@ -906,21 +917,15 @@ where
                             guarded.open_chains.insert((peer_id.clone(), chain_index));
                         debug_assert!(_was_inserted);
 
-                        // TODO: futures cancellation issues
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                &peer_id,
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
+                            peer_id: peer_id.clone(),
+                            notifications_protocol_indices: vec![
                                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                                true,
-                            )
-                            .await;
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                &peer_id,
                                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                                true,
-                            )
-                            .await;
+                            ],
+                            desired: true,
+                        });
 
                         return Event::ChainConnected {
                             peer_id,
@@ -1002,21 +1007,15 @@ where
                             guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
                         debug_assert!(_was_removed);
 
-                        // TODO: futures cancellation issues
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                &peer_id,
+                        debug_assert!(guarded.to_process_pre_event.is_none());
+                        guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
+                            peer_id: peer_id.clone(),
+                            notifications_protocol_indices: vec![
                                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                                false,
-                            )
-                            .await;
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                &peer_id,
                                 chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                                false,
-                            )
-                            .await;
+                            ],
+                            desired: false,
+                        });
 
                         return Event::ChainDisconnected {
                             peer_id,
@@ -1033,7 +1032,7 @@ where
                     debug_assert!(guarded.to_process_pre_event.is_none());
                     guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
                         peer_id,
-                        notifications_protocol_index,
+                        notifications_protocol_indices: vec![notifications_protocol_index],
                         desired: false,
                     });
                 }
