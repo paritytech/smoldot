@@ -875,7 +875,7 @@ where
     /// substream.
     ///
     /// If `Ok` is returned, the substream is now considered open. If `Err` is returned, then
-    /// that substream request was obsolete and no substream has been opened.
+    /// no substream has been opened.
     ///
     /// # Panic
     ///
@@ -887,7 +887,7 @@ where
         &self,
         id: DesiredInNotificationId,
         handshake_back: Vec<u8>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), InNotificationAcceptError> {
         let mut guarded = self.guarded.lock().await;
         assert!(guarded.desired_in_notifications.contains(id.0));
 
@@ -896,7 +896,7 @@ where
                 Some(v) => *v,
                 None => {
                     guarded.desired_in_notifications.remove(id.0);
-                    return Err(());
+                    return Err(InNotificationAcceptError::Obsolete);
                 }
             };
 
@@ -1339,6 +1339,14 @@ pub enum RequestError {
     ConnectionClosed,
     /// Error in the context of the connection.
     Connection(libp2p::connection::established::RequestError),
+}
+
+/// Error potentially returned by [`Peers::in_notification_accept`].
+#[derive(Debug, derive_more::Display)]
+pub enum InNotificationAcceptError {
+    /// The request is now obsolete, either because the connection has been shut down or the
+    /// remote has cancelled their request.
+    Obsolete,
 }
 
 /// Error potentially returned by [`Peers::queue_notification`].
