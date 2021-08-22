@@ -102,9 +102,9 @@ impl PrefixScan {
 
                 any_successful_proof = true;
 
-                if info.node_value.is_some() {
-                    // Trie nodes with a value are always aligned to "bytes-keys". In other words, the
-                    // number of nibbles is always even.
+                if info.storage_value.is_some() {
+                    // Trie nodes with a value are always aligned to "bytes-keys". In other words,
+                    // the number of nibbles is always even.
                     debug_assert_eq!(query.len() % 2, 0);
                     let key = query
                         .chunks(2)
