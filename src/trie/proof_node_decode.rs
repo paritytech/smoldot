@@ -59,6 +59,11 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
 
         let pk = &node_value[..pk_len_bytes];
         node_value = &node_value[pk_len_bytes..];
+
+        if (pk_len % 2) == 1 && (pk[0] & 0xf0) != 0 {
+            return Err(Error::InvalidPartialKeyPadding);
+        }
+
         pk
     };
 
@@ -167,6 +172,7 @@ impl<'a> Iterator for PartialKey<'a> {
         loop {
             let nibble = self.inner.next()?;
             if self.skip_first {
+                debug_assert_eq!(u8::from(nibble), 0);
                 self.skip_first = false;
                 continue;
             }
@@ -196,6 +202,8 @@ pub enum Error {
     PartialKeyLenOverflow,
     /// Node value ends within partial key.
     PartialKeyTooShort,
+    /// If partial key is of uneven length, then it must be padded with `0`.
+    InvalidPartialKeyPadding,
     /// End of data within the children bitmap.
     ChildrenBitmapTooShort,
     /// Error while decoding length of child.
