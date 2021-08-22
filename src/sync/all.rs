@@ -802,7 +802,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (
                 AllSyncInner::AllForks(sync),
                 RequestDetail::BlocksRequest {
-                    ascending: false,
+                    ascending: false, // TODO: ?
                     first_block_hash: Some(first_block_hash),
                     first_block_height,
                     num_blocks,
@@ -836,7 +836,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (
                 AllSyncInner::Optimistic { inner },
                 RequestDetail::BlocksRequest {
-                    ascending: false,
+                    ascending: true, // TODO: ?
                     first_block_height,
                     num_blocks,
                     ..
