@@ -319,7 +319,7 @@ define_methods! {
     state_queryStorageAt(keys: Vec<HexString>, at: Option<HashHexString>) -> Vec<StorageChangeSet>, // TODO:
     state_subscribeRuntimeVersion() -> &'a str [chain_subscribeRuntimeVersion],
     state_subscribeStorage(list: Vec<HexString>) -> &'a str,
-    state_unsubscribeRuntimeVersion() -> bool [chain_unsubscribeRuntimeVersion],
+    state_unsubscribeRuntimeVersion(subscription: &'a str) -> bool [chain_unsubscribeRuntimeVersion],
     state_unsubscribeStorage(subscription: &'a str) -> bool,
     system_accountNextIndex(account: AccountId) -> u64,
     system_addReservedPeer() -> (), // TODO:
