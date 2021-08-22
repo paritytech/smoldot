@@ -37,7 +37,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{ffi, network_service, runtime_service, sync_service, transactions_service};
+use crate::{ffi, runtime_service, sync_service, transactions_service};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -68,10 +68,6 @@ use std::{
 pub struct Config<'a> {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
-
-    /// Service responsible for the networking of the chain, and index of the chain within the
-    /// network service to handle.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
@@ -167,7 +163,6 @@ impl JsonRpcService {
             chain_is_live: config.chain_spec.has_live_network(),
             chain_properties_json: config.chain_spec.properties().to_owned(),
             peer_id_base58: config.peer_id.to_base58(),
-            network_service: config.network_service.0,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
@@ -402,8 +397,6 @@ struct Background {
     /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
     peer_id_base58: String,
 
-    /// See [`Config::network_service`].
-    network_service: Arc<network_service::NetworkService>,
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
     /// See [`Config::runtime_service`].
