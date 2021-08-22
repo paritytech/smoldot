@@ -1624,7 +1624,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     finalized_blocks,
                 }
             }
-            optimistic::BlockVerification::Reset { mut sync, .. } => {
+            optimistic::BlockVerification::Reset { sync, .. } => {
                 BlockVerification::Error {
                     sync: AllSync {
                         inner: AllSyncInner::Optimistic { inner: sync },
@@ -1861,7 +1861,7 @@ fn all_forks_request_convert(rq_params: all_forks::RequestParams) -> RequestDeta
         first_block_hash: Some(rq_params.first_block_hash),
         first_block_height: rq_params.first_block_height,
         num_blocks: rq_params.num_blocks,
-        request_bodies: false,
+        request_bodies: false, // TODO: true if full?
         request_headers: true,
         request_justification: true,
     }
@@ -1869,11 +1869,11 @@ fn all_forks_request_convert(rq_params: all_forks::RequestParams) -> RequestDeta
 
 fn optimistic_request_convert(rq_params: optimistic::RequestDetail) -> RequestDetail {
     RequestDetail::BlocksRequest {
-        ascending: false,
+        ascending: true, // TODO: ?!?!
         first_block_hash: None,
         first_block_height: rq_params.block_height.get(),
         num_blocks: rq_params.num_blocks.into(),
-        request_bodies: false,
+        request_bodies: true, // TODO: only if full?
         request_headers: true,
         request_justification: true,
     }

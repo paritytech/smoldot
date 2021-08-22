@@ -768,17 +768,15 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
     pub fn start(mut self, now_from_unix_epoch: Duration) -> BlockVerification<TRq, TSrc, TBl> {
         // Extract the block to process.
         // Be aware that `source_id` might refer to an obsolete source.
-        let (block, source_id) = self
-            .inner
-            .verification_queue
-            .get_mut(0)
-            .map(|b| match &mut b.ty {
-                VerificationQueueEntryTy::Queued { blocks, source } => {
-                    (blocks.pop_front().unwrap(), *source)
-                }
-                _ => unreachable!(),
-            })
-            .unwrap();
+        let verif_queue_front = self.inner.verification_queue.get_mut(0).unwrap();
+        let (block, source_id) = match &mut verif_queue_front.ty {
+            VerificationQueueEntryTy::Queued { blocks, source } => {
+                (blocks.pop_front().unwrap(), *source)
+            }
+            _ => unreachable!(),
+        };
+        verif_queue_front.block_height =
+            NonZeroU64::new(verif_queue_front.block_height.get() + 1).unwrap();
 
         if self.inner.finalized_runtime.is_some() {
             BlockVerification::from(
