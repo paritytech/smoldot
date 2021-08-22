@@ -784,7 +784,7 @@ where
                     user_data,
                 }
             }
-            _ => panic!(),
+            _ => return, // TODO: too defensive, should be panic!()
         }
     }
 
