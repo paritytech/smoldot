@@ -442,7 +442,6 @@ impl Client {
                             tasks_executor: Box::new({
                                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                             }),
-                            network_service: (running_chain.network_service.clone(), 0),
                             sync_service: running_chain.sync_service,
                             transactions_service: running_chain.transactions_service,
                             runtime_service: running_chain.runtime_service,
