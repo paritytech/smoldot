@@ -18,7 +18,10 @@
 use super::nibble;
 use core::{convert::TryFrom as _, iter, slice};
 
-/// Decodes a node value found in a proof into its components.
+/// Decodes a node value found in a trie proof into its components.
+///
+/// This function can decode both nodes found in non-compact proofs and nodes found in compact
+/// proofs.
 pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
     if node_value.is_empty() {
         return Err(Error::Empty);
