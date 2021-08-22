@@ -476,8 +476,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     }
 
     /// Returns an iterator that yields all the requests whose outcome is no longer desired.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
-        self.inner.obsolete_requests.keys().copied()
+    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> + '_ {
+        self.inner
+            .obsolete_requests
+            .iter()
+            .map(|(id, (_, ud))| (*id, ud))
     }
 
     /// Returns an iterator that yields all requests that could be started.
@@ -688,7 +691,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                         }
                     }
                 },
-                _ => return ProcessOne::AllSync { sync: self },
+                _ => return ProcessOne::Idle { sync: self },
             }
         }
 
@@ -711,7 +714,7 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No processing is necessary.
     ///
     /// Calling [`OptimisticSync::process_one`] again is unnecessary.
-    AllSync {
+    Idle {
         /// The state machine.
         /// The [`OptimisticSync::process_one`] method takes ownership of the
         /// [`OptimisticSync`]. This field yields it back.
