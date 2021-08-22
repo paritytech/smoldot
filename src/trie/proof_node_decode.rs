@@ -232,8 +232,6 @@ pub enum Error {
     TooLong,
 }
 
-// TODO: tests
-
 #[cfg(test)]
 mod tests {
     use super::super::nibble;
