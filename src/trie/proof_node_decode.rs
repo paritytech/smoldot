@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::nibble;
-use core::{convert::TryFrom as _, iter, slice};
+use core::{convert::TryFrom as _, fmt, iter, slice};
 
 /// Decodes a node value found in a proof into its components.
 pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
@@ -121,6 +121,7 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
 }
 
 /// Decoded node value. Returned by [`decode`].
+#[derive(Debug)]
 pub struct Decoded<'a> {
     /// Iterator to the nibbles of the partial key of the node.
     pub partial_key: PartialKey<'a>,
@@ -184,6 +185,18 @@ impl<'a> Iterator for PartialKey<'a> {
 }
 
 impl<'a> ExactSizeIterator for PartialKey<'a> {}
+
+impl<'a> fmt::Debug for PartialKey<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        const HEX_TABLE: &[u8] = b"0123456789abcdef";
+        write!(f, "0x")?;
+        for nibble in self.clone() {
+            let chr = HEX_TABLE[usize::from(u8::from(nibble))];
+            write!(f, "{}", char::from(chr))?;
+        }
+        Ok(())
+    }
+}
 
 /// Possible error returned by [`decode`].
 #[derive(Debug, Clone, derive_more::Display)]
