@@ -636,7 +636,7 @@ impl<'a> RuntimeCallLock<'a> {
             })
             .map_err(RuntimeCallError::StorageRetrieval)?;
 
-            if node_info.node_value.is_some() {
+            if node_info.storage_value.is_some() {
                 assert_eq!(key.len() % 2, 0);
                 output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
             }
