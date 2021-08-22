@@ -46,7 +46,12 @@ use smoldot::{
     trie::{self, prefix_proof, proof_verify},
 };
 use std::{
-    collections::HashMap, convert::TryFrom as _, fmt, iter, num::NonZeroU32, pin::Pin, sync::Arc,
+    collections::HashMap,
+    convert::TryFrom as _,
+    fmt, iter,
+    num::{NonZeroU32, NonZeroU64},
+    pin::Pin,
+    sync::Arc,
 };
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
@@ -724,7 +729,7 @@ async fn start_relay_chain(
                 match request {
                     all::RequestDetail::BlocksRequest {
                         first_block_hash,
-                        first_block_height: _,
+                        first_block_height,
                         ascending,
                         num_blocks,
                         request_headers,
@@ -737,9 +742,15 @@ async fn start_relay_chain(
                             peer_id,
                             network_chain_index,
                             network::protocol::BlocksRequestConfig {
-                                start: network::protocol::BlocksRequestConfigStart::Hash(
-                                    first_block_hash,
-                                ),
+                                start: if let Some(first_block_hash) = first_block_hash {
+                                    network::protocol::BlocksRequestConfigStart::Hash(
+                                        first_block_hash,
+                                    )
+                                } else {
+                                    network::protocol::BlocksRequestConfigStart::Number(
+                                        NonZeroU64::new(first_block_height).unwrap(), // TODO: unwrap?
+                                    )
+                                },
                                 desired_count: NonZeroU32::new(
                                     u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                                 )
@@ -921,6 +932,9 @@ async fn start_relay_chain(
                             }
                         }
                     }
+
+                    // Can't verify header and body in non-full mode.
+                    all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
                 }
             }
 
