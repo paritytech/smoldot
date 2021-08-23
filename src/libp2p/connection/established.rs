@@ -78,10 +78,11 @@ pub struct Established<TNow, TRqUd, TNotifUd> {
 /// Extra fields. Segregated in order to solve borrowing questions.
 struct Inner<TNow, TRqUd, TNotifUd> {
     /// State of the various substreams of the connection.
-    /// Consists in a collection of substreams, each of which holding a [`Substream`] object.
+    /// Consists in a collection of substreams, each of which holding a [`Substream`] object, or
+    /// `None` if the substream has been reset.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
-    yamux: yamux::Yamux<substream::Substream<TNow, TRqUd, TNotifUd>>,
+    yamux: yamux::Yamux<Option<substream::Substream<TNow, TRqUd, TNotifUd>>>,
 
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
@@ -234,61 +235,7 @@ where
                         }
                     };
 
-                    match user_data {
-                        Substream::Poisoned => unreachable!(),
-                        Substream::InboundNegotiating(_) => {}
-                        Substream::NegotiationFailed => {}
-                        Substream::RequestOutNegotiating { user_data, .. }
-                        | Substream::RequestOut { user_data, .. } => {
-                            if let Some(t) = &self.inner.next_timeout {
-                                read_write.wake_up_after(t);
-                            }
-                            return Ok((
-                                self,
-                                Some(Event::Response {
-                                    id: SubstreamId(substream_id),
-                                    user_data,
-                                    response: Err(RequestError::SubstreamClosed),
-                                }),
-                            ));
-                        }
-                        Substream::RequestInRecv { .. } => {}
-                        Substream::RequestInSend { .. } => {}
-                        Substream::NotificationsInHandshake { .. } => {}
-                        Substream::NotificationsInWait { protocol_index, .. } => {
-                            if let Some(t) = &self.inner.next_timeout {
-                                read_write.wake_up_after(t);
-                            }
-                            return Ok((
-                                self,
-                                Some(Event::NotificationsInOpenCancel {
-                                    id: SubstreamId(substream_id),
-                                    protocol_index,
-                                }),
-                            ));
-                        }
-                        Substream::NotificationsIn { .. } => {
-                            // TODO: report to user
-                            todo!()
-                        }
-                        Substream::NotificationsInRefused => {}
-                        Substream::PingIn(_) => {}
-                        Substream::NotificationsOutClosed => {}
-                        Substream::NotificationsOut { user_data, .. }
-                        | Substream::NotificationsOutHandshakeRecv { user_data, .. }
-                        | Substream::NotificationsOutNegotiating { user_data, .. } => {
-                            if let Some(t) = &self.inner.next_timeout {
-                                read_write.wake_up_after(t);
-                            }
-                            return Ok((
-                                self,
-                                Some(Event::NotificationsOutReject {
-                                    id: SubstreamId(substream_id),
-                                    user_data,
-                                }),
-                            ));
-                        }
-                    }
+                    // TODO: finish here
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
@@ -387,7 +334,11 @@ where
                 wake_up_future: None,
             };
 
-            substream.read_write(&mut substream_read_write);
+            let (substream_update, event) = substream
+                .take()
+                .unwrap()
+                .read_write(&mut substream_read_write);
+            *substream = Some(substream_update);
 
             debug_assert_eq!(substream_read_write.read_bytes, 0);
             if let Some(wake_up_after) = substream_read_write.wake_up_after {
@@ -397,7 +348,9 @@ where
                 read_write.wake_up_when_boxed(wake_up_future);
             }
 
-            // TODO: return event if any
+            if let Some(event) = event {
+                return Some(event);
+            }
         }
 
         None

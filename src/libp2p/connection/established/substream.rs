@@ -503,7 +503,12 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                     Some(buf) => buf,
                     None => {
                         read_write.close_write();
-                        panic!(); // TODO: return
+                        return Ok((
+                            self,
+                            Some(Event::NotificationsInOpenCancel {
+                                protocol_index,
+                            }),
+                        ));
                     }
                 };
 
