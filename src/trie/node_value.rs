@@ -62,8 +62,8 @@
 //! assert_eq!(
 //!     merkle_value.as_ref(),
 //!     &[
-//!         195, 8, 193, 4, 4, 12, 102, 111, 111, 12, 98, 97, 114, 44, 104, 101, 108, 108, 111,
-//!         32, 119, 111, 114, 108, 100
+//!         195, 8, 193, 4, 4, 44, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 12,
+//!         102, 111, 111, 12, 98, 97, 114
 //!     ]
 //! );
 //! ```
@@ -222,7 +222,17 @@ where
         &children_bitmap.to_le_bytes()[..]
     });
 
-    // Push the merkle values of all the children.
+    // Add our own stored value.
+    if let Some(stored_value) = config.stored_value {
+        // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
+        // quite expensive because we would duplicate the storage value. Instead, we do the
+        // encoding manually by pushing the length then the value.
+        merkle_value_sink
+            .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
+        merkle_value_sink.update(stored_value.as_ref());
+    }
+
+    // Finally, push the merkle values of all the children.
     for child in config.children.clone() {
         let child_merkle_value = match child {
             Some(v) => v,
@@ -235,16 +245,6 @@ where
         merkle_value_sink
             .update(util::encode_scale_compact_usize(child_merkle_value.as_ref().len()).as_ref());
         merkle_value_sink.update(child_merkle_value.as_ref());
-    }
-
-    // Finally, add our own stored value.
-    if let Some(stored_value) = config.stored_value {
-        // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
-        // quite expensive because we would duplicate the storage value. Instead, we do the
-        // encoding manually by pushing the length then the value.
-        merkle_value_sink
-            .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
-        merkle_value_sink.update(stored_value.as_ref());
     }
 
     merkle_value_sink.finalize()
@@ -416,8 +416,8 @@ mod tests {
         assert_eq!(
             obtained.as_ref(),
             &[
-                195, 8, 193, 4, 4, 12, 102, 111, 111, 12, 98, 97, 114, 44, 104, 101, 108, 108, 111,
-                32, 119, 111, 114, 108, 100
+                195, 8, 193, 4, 4, 44, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100, 12,
+                102, 111, 111, 12, 98, 97, 114
             ]
         );
     }
