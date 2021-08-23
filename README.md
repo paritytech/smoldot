@@ -26,6 +26,8 @@ The following list is a best-effort list of packages that must be available on t
 - `pkg-config`
 - `sqlite`
 
+The full client is currently a work in progress and doesn't support many features that the official client supports.
+
 ### Wasm light node
 
 Pre-requisite: in order to run the wasm light node, you must have installed [rustup](https://rustup.rs/).
@@ -43,27 +45,3 @@ There exists multiple objectives behind this repository:
 - Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation, and the documentation of the `main` branch is automatically deployed [here](https://paritytech.github.io/smoldot/smoldot/index.html).
 - Implement a client that is lighter than Substrate, in terms of memory consumption, number of threads, and code size, in order to compile it to WebAssembly and distribute it in webpages.
 - Experiment with a new code architecture, to maybe upstream some components to Substrate and Polkadot.
-
-# Status
-
-As a quick overview, at the time of writing of this README, the following is supported:
-
-- Verifying Babe and Aura blocks.
-- "Executing" blocks, by calling `Core_execute_block`.
-- Verifying GrandPa justifications and GrandPa commit messages.
-- "Optimistic syncing", in other words syncing by assuming that there isn't any fork.
-- Verifying storage trie proofs.
-- The WebSocket JSON-RPC server is in progress, but its design is still changing.
-- An informant.
-- A telemetry client (mostly copy-pasted from Substrate and substrate-telemetry).
-- An unfinished new networking stack.
-- A transaction pool for light clients.
-- A SQLite database for the full client.
-
-The following isn't done yet:
-
-- Authoring blocks isn't supported.
-- Transaction pool for full nodes is non-functional.
-- GrandPa votes gossiping.
-- The changes trie isn't implemented (it is not enabled on Westend, Kusama and Polkadot at the moment).
-- A Prometheus server. While not difficult to implement, it seems a bit overkill to have one at the moment.
