@@ -180,7 +180,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
 }
 
 impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
-    fn make_requests_obsolete(&mut self) {
+    fn make_requests_obsolete(&mut self, chain: &blocks_tree::NonFinalizedTree<Block<TBl>>) {
         let entries = self
             .verification_queue
             .iter()
@@ -204,10 +204,19 @@ impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
                 _ => unreachable!(),
             }
         }
+
+        self.verification_queue.clear();
+        self.verification_queue.push_back(VerificationQueueEntry {
+            block_height: NonZeroU64::new(chain.best_block_header().number + 1).unwrap(),
+            ty: VerificationQueueEntryTy::Missing,
+        });
     }
 
-    fn with_requests_obsoleted(mut self) -> Self {
-        self.make_requests_obsolete();
+    fn with_requests_obsoleted(
+        mut self,
+        chain: &blocks_tree::NonFinalizedTree<Block<TBl>>,
+    ) -> Self {
+        self.make_requests_obsolete(chain);
         self
     }
 }
@@ -815,26 +824,27 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
                     None
                 }
                 Err(err) => {
-                    if let Some(src) = self.inner.sources.get_mut(&source_id) {
-                        src.banned = true;
-                    }
-
-                    // If all sources are banned, unban them.
-                    if self.inner.sources.iter().all(|(_, s)| s.banned) {
-                        for src in self.inner.sources.values_mut() {
-                            src.banned = false;
-                        }
-                    }
-
-                    self.inner.make_requests_obsolete();
-                    self.inner.best_to_finalized_storage_diff = Default::default();
-                    self.inner.best_runtime = None;
-                    self.inner.top_trie_root_calculation_cache = None;
                     Some(err)
                 }
             };
 
             if let Some(error) = error {
+                if let Some(src) = self.inner.sources.get_mut(&source_id) {
+                    src.banned = true;
+                }
+
+                // If all sources are banned, unban them.
+                if self.inner.sources.iter().all(|(_, s)| s.banned) {
+                    for src in self.inner.sources.values_mut() {
+                        src.banned = false;
+                    }
+                }
+
+                self.inner.make_requests_obsolete(&self.chain);
+                self.inner.best_to_finalized_storage_diff = Default::default();
+                self.inner.best_runtime = None;
+                self.inner.top_trie_root_calculation_cache = None;
+
                 let previous_best_height = self.chain.best_block_header().number;
                 BlockVerification::Reset {
                     sync: OptimisticSync {
@@ -1045,19 +1055,19 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                     }
                                 }
 
+                                let chain = blocks_tree::NonFinalizedTree::new(
+                                    shared.inner.finalized_chain_information.clone(),
+                                );
+                                let inner = OptimisticSyncInner {
+                                    best_to_finalized_storage_diff: Default::default(),
+                                    best_runtime: None,
+                                    top_trie_root_calculation_cache: None,
+                                    ..shared.inner.with_requests_obsoleted(&chain)
+                                };
+
                                 break BlockVerification::Reset {
                                     previous_best_height: chain.best_block_header().number,
-                                    sync: OptimisticSync {
-                                        chain: blocks_tree::NonFinalizedTree::new(
-                                            shared.inner.finalized_chain_information.clone(),
-                                        ),
-                                        inner: OptimisticSyncInner {
-                                            best_to_finalized_storage_diff: Default::default(),
-                                            best_runtime: None,
-                                            top_trie_root_calculation_cache: None,
-                                            ..shared.inner.with_requests_obsoleted()
-                                        },
-                                    },
+                                    sync: OptimisticSync { chain, inner },
                                     reason: ResetCause::JustificationError(error),
                                 };
                             }
@@ -1191,19 +1201,19 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         }
                     }
 
+                    let chain = blocks_tree::NonFinalizedTree::new(
+                        shared.inner.finalized_chain_information.clone(),
+                    );
+                    let inner = OptimisticSyncInner {
+                        best_to_finalized_storage_diff: Default::default(),
+                        best_runtime: None,
+                        top_trie_root_calculation_cache: None,
+                        ..shared.inner.with_requests_obsoleted(&chain)
+                    };
+
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
-                        sync: OptimisticSync {
-                            chain: blocks_tree::NonFinalizedTree::new(
-                                shared.inner.finalized_chain_information.clone(),
-                            ),
-                            inner: OptimisticSyncInner {
-                                best_to_finalized_storage_diff: Default::default(),
-                                best_runtime: None,
-                                top_trie_root_calculation_cache: None,
-                                ..shared.inner.with_requests_obsoleted()
-                            },
-                        },
+                        sync: OptimisticSync { chain, inner },
                         reason: ResetCause::InvalidHeader(error),
                     };
                 }
@@ -1221,19 +1231,19 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         }
                     }
 
+                    let chain = blocks_tree::NonFinalizedTree::new(
+                        shared.inner.finalized_chain_information.clone(),
+                    );
+                    let inner = OptimisticSyncInner {
+                        best_to_finalized_storage_diff: Default::default(),
+                        best_runtime: None,
+                        top_trie_root_calculation_cache: None,
+                        ..shared.inner.with_requests_obsoleted(&chain)
+                    };
+
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
-                        sync: OptimisticSync {
-                            chain: blocks_tree::NonFinalizedTree::new(
-                                shared.inner.finalized_chain_information.clone(),
-                            ),
-                            inner: OptimisticSyncInner {
-                                best_to_finalized_storage_diff: Default::default(),
-                                best_runtime: None,
-                                top_trie_root_calculation_cache: None,
-                                ..shared.inner.with_requests_obsoleted()
-                            },
-                        },
+                        sync: OptimisticSync { chain, inner },
                         reason: ResetCause::NonCanonical,
                     };
                 }
@@ -1255,19 +1265,19 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         }
                     }
 
+                    let chain = blocks_tree::NonFinalizedTree::new(
+                        shared.inner.finalized_chain_information.clone(),
+                    );
+                    let inner = OptimisticSyncInner {
+                        best_to_finalized_storage_diff: Default::default(),
+                        best_runtime: None,
+                        top_trie_root_calculation_cache: None,
+                        ..shared.inner.with_requests_obsoleted(&chain)
+                    };
+
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
-                        sync: OptimisticSync {
-                            chain: blocks_tree::NonFinalizedTree::new(
-                                shared.inner.finalized_chain_information.clone(),
-                            ),
-                            inner: OptimisticSyncInner {
-                                best_to_finalized_storage_diff: Default::default(),
-                                best_runtime: None,
-                                top_trie_root_calculation_cache: None,
-                                ..shared.inner.with_requests_obsoleted()
-                            },
-                        },
+                        sync: OptimisticSync { chain, inner },
                         reason: ResetCause::HeaderBodyError(error),
                     };
                 }
