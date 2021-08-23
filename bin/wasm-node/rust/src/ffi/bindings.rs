@@ -39,6 +39,21 @@
 //! must be implemented. Several functions required by the Wasi ABI are also used. The best place
 //! to find documentation at the moment is <https://docs.rs/wasi>.
 //!
+//! # About `u32`s and JavaScript
+//!
+//! Many functions below accept as parameter or return a `u32`. In reality, however, the
+//! WebAssembly specification doesn't mention unsigned integers. Only signed integers (and
+//! floating points) can be passed through the FFI layer.
+//!
+//! This isn't important when the Rust code provides a value that must later be provided back, as
+//! the conversion from the guest to the host is symmetrical to the conversion from the host to
+//! the guest.
+//!
+//! It is, however, important when the value needs to be interpreted from the host side, such as
+//! for example the return value of [`alloc`]. When using JavaScript as the host, you must do
+//! `>>> 0` on all the `u32` values before interpreting them, in order to be certain than they
+//! are treated as unsigned integers by the JavaScript.
+//!
 
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
@@ -72,9 +87,9 @@ extern "C" {
     /// Also used to send subscriptions notifications.
     ///
     /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
-    /// virtual machine at offset `ptr` and with length `len`. `chain_index` is the chain
-    /// that the request was made to. `user_data` is the value that was passed to [`json_rpc_send`].
-    pub fn json_rpc_respond(ptr: u32, len: u32, chain_index: u32, user_data: u32);
+    /// virtual machine at offset `ptr` and with length `len`. `chain_id` is the chain
+    /// that the request was made to.
+    pub fn json_rpc_respond(ptr: u32, len: u32, chain_id: u32);
 
     /// Client is emitting a log entry.
     ///
@@ -183,69 +198,123 @@ extern "C" {
     pub fn connection_send(id: u32, ptr: u32, len: u32);
 }
 
+/// Initializes the client.
+///
+/// This is the first function that must be called. Failure to do so before calling another
+/// method will lead to a Rust panic. Calling this function multiple times will also lead to a
+/// panic.
+///
+/// The client will emit log messages by calling the [`log()`] function, provided the log level is
+/// inferior or equal to the value of `max_log_level` passed here.
+#[no_mangle]
+pub extern "C" fn init(max_log_level: u32) {
+    super::init(max_log_level)
+}
+
 /// Allocates a buffer of the given length, with an alignment of 1.
 ///
-/// This must be used in the context of [`init`].
+/// This must be used in the context of [`add_chain`] and other functions that similarly require
+/// passing data of variable length.
+///
+/// > **Note**: If using JavaScript as the host, you likely need to perform `>>> 0` on the return
+/// >           value. See the module-level documentation.
 #[no_mangle]
 pub extern "C" fn alloc(len: u32) -> u32 {
     super::alloc(len)
 }
 
-/// Initializes the client.
+/// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
 ///
-/// Use [`alloc`] to allocate one buffer for each spec of each chain that needs to be started.
-/// The buffers **must** have been allocated with [`alloc`]. They are freed when this function is
-/// called.
-/// Write the chain specs in these buffers.
+/// Use [`alloc`] to allocate a buffer for the spec of the chain that needs to be started.
+/// Write the chain spec in this buffer as UTF-8. Then, pass the pointer and length (in bytes)
+/// as parameter to this function.
 ///
-/// Then, use [`alloc`] to allocate one additional buffer containing a list of pairs of
-/// little-endian u32s. Each pair must be a pointer and a length to the buffers allocated in the
-/// previous step.
+/// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain
+/// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this
+/// function. If the chain specification refer to a parachain, these chain ids are the ones that
+/// will be looked up to find the corresponding relay chain.
 ///
-/// Then, pass the pointer and length (in bytes) of this last buffer to this function.
+/// These two buffers **must** have been allocated with [`alloc`]. They are freed when this
+/// function is called, even if an error code is returned.
 ///
-/// > **Note**: This API is similar to the one of `writev(2)`, which you might be familiar with.
+/// If `json_rpc_running` is 0, then no JSON-RPC service will be started and all JSON-RPC requests
+/// targeting this chain will return an error. This can be used to save up resources.
 ///
-/// The client will emit log messages by calling the [`log()`] function, provided the log level is
-/// inferior or equal to the value of `max_log_level` passed here.
+/// If an error happens during the creation of the chain, a chain id will be allocated
+/// nonetheless, and must later be de-allocated by calling [`remove_chain`]. This allocated chain,
+/// however, will be in an erroneous state. Use [`chain_is_ok`] to determine whether this function
+/// was successful. If not, use [`chain_error_len`] and [`chain_error_ptr`] to obtain the error
+/// message.
 #[no_mangle]
-pub extern "C" fn init(
-    chain_specs_pointers_ptr: u32,
-    chain_specs_pointers_len: u32,
-    max_log_level: u32,
-) {
-    super::init(
-        chain_specs_pointers_ptr,
-        chain_specs_pointers_len,
-        max_log_level,
+pub extern "C" fn add_chain(
+    chain_spec_pointer: u32,
+    chain_spec_len: u32,
+    json_rpc_running: u32,
+    potential_relay_chains_ptr: u32,
+    potential_relay_chains_len: u32,
+) -> u32 {
+    super::add_chain(
+        chain_spec_pointer,
+        chain_spec_len,
+        json_rpc_running,
+        potential_relay_chains_ptr,
+        potential_relay_chains_len,
     )
 }
 
-/// Emit a JSON-RPC request. If the initialization (see [`init`]) hasn't been started or hasn't
-/// finished yet, the request will still be queued.
+/// Removes a chain previously added using [`add_chain`]. Instantly unsubscribes all the JSON-RPC
+/// subscriptions and cancels all in-progress requests corresponding to that chain.
+///
+/// If the removed chain was an erroneous chain, calling this function will invalidate the pointer
+/// returned by [`chain_error_ptr`].
+#[no_mangle]
+pub extern "C" fn remove_chain(chain_id: u32) {
+    super::remove_chain(chain_id)
+}
+
+/// Returns `1` if creating this chain was successful. Otherwise, returns `0`.
+///
+/// If `0` is returned, use [`chain_error_len`] and [`chain_error_ptr`] to obtain an error
+/// message.
+#[no_mangle]
+pub extern "C" fn chain_is_ok(chain_id: u32) -> u32 {
+    super::chain_is_ok(chain_id)
+}
+
+/// Returns the length of the error message stored for this chain.
+///
+/// Must only be called on an erroneous chain. Use [`chain_is_ok`] to determine whether a chain is
+/// in an erroneous state. Returns `0` if the chain isn't erroneous.
+#[no_mangle]
+pub extern "C" fn chain_error_len(chain_id: u32) -> u32 {
+    super::chain_error_len(chain_id)
+}
+
+/// Returns a pointer to the error message stored for this chain. The error message is a UTF-8
+/// string starting at the memory offset returned by this function, and whose length can be
+/// determined by calling [`chain_error_len`].
+///
+/// Must only be called on an erroneous chain. Use [`chain_is_ok`] to determine whether a chain is
+/// in an erroneous state. Returns `0` if the chain isn't erroneous.
+#[no_mangle]
+pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
+    super::chain_error_ptr(chain_id)
+}
+
+/// Emit a JSON-RPC request towards the given chain previously added using [`add_chain`].
 ///
 /// A buffer containing a UTF-8 JSON-RPC request must be passed as parameter. The format of the
 /// JSON-RPC requests is described in
-/// [the standard JSON-RPC 2.0 specifications](https://www.jsonrpc.org/specification). A pub-sub
+/// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification). A pub-sub
 /// extension is supported.
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
-/// Additionally, an arbitrary value is also passed as a parameter. This value will later be
-/// provided back in [`json_rpc_respond`]. It can also be passed to [`json_rpc_unsubscribe_all`].
-///
 /// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_index: u32, user_data: u32) {
-    super::json_rpc_send(text_ptr, text_len, chain_index, user_data)
-}
-
-/// Unsubscribe all the JSON-RPC subscriptions for a source. Should be called when disconnecting from
-/// a source that's connected to smoldot.
-#[no_mangle]
-pub extern "C" fn json_rpc_unsubscribe_all(user_data: u32) {
-    super::json_rpc_unsubscribe_all(user_data)
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
+    super::json_rpc_send(text_ptr, text_len, chain_id)
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.

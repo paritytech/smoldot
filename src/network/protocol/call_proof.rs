@@ -67,7 +67,7 @@ pub fn build_call_proof_request(
 pub fn decode_call_proof_response(
     response_bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, DecodeCallProofResponseError> {
-    let response = schema::Response::decode(&response_bytes[..])
+    let response = schema::Response::decode(response_bytes)
         .map_err(ProtobufDecodeError)
         .map_err(DecodeCallProofResponseError::ProtobufDecode)?;
 
@@ -96,7 +96,7 @@ pub fn decode_call_proof_response(
 }
 
 /// Error potentially returned by [`decode_call_proof_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum DecodeCallProofResponseError {
     /// Error while decoding the protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),

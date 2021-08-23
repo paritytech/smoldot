@@ -192,7 +192,7 @@ impl ChainSpec {
 
     /// Returns the list of libp2p multiaddresses of the default telemetry servers of the chain.
     // TODO: more strongly typed?
-    pub fn telemetry_endpoints<'a>(&'a self) -> impl Iterator<Item = impl AsRef<str> + 'a> + 'a {
+    pub fn telemetry_endpoints(&'_ self) -> impl Iterator<Item = impl AsRef<str> + '_> + '_ {
         self.client_spec
             .telemetry_endpoints
             .as_ref()

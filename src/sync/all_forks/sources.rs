@@ -83,7 +83,7 @@ impl<TSrc> AllForksSources<TSrc> {
     }
 
     /// Returns the list of all [`SourceId`]s.
-    pub fn keys<'a>(&'a self) -> impl ExactSizeIterator<Item = SourceId> + 'a {
+    pub fn keys(&'_ self) -> impl ExactSizeIterator<Item = SourceId> + '_ {
         self.sources.keys().copied()
     }
 

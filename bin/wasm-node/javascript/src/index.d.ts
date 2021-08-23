@@ -20,26 +20,49 @@ declare class SmoldotError extends Error {
 }
 
 export interface SmoldotClient {
-  sendJsonRpc(rpc: string, chainIndex: number, userData?: number): void;
-  cancelAll(userData: number): void;
+  addChain(options: SmoldotAddChainOptions): Promise<SmoldotChain>;
   terminate(): void;
 }
 
-export type SmoldotJsonRpcCallback = (response: string, chainIndex: number, userData?: number) => void;
+export interface SmoldotChain {
+  sendJsonRpc(rpc: string): void;
+  remove(): void;
+}
+
+export type SmoldotJsonRpcCallback = (response: string) => void;
 export type SmoldotLogCallback = (level: number, target: string, message: string) => void;
 
 export interface SmoldotOptions {
   maxLogLevel?: number;
-  chainSpecs: string[];
-  jsonRpcCallback?: SmoldotJsonRpcCallback;
   logCallback?: SmoldotLogCallback;
   forbidTcp?: boolean;
   forbidWs?: boolean;
   forbidWss?: boolean;
 }
 
+export interface SmoldotAddChainOptions {
+  chainSpec: string;
+  potentialRelayChains?: SmoldotChain[];
+  jsonRpcCallback?: SmoldotJsonRpcCallback;
+}
+
+export interface SmoldotHealth {
+  isSyncing: boolean;
+  peers: number;
+  shouldHavePeers: boolean;
+}
+
+export interface HealthChecker {
+  setSendJsonRpc(sendRequest: (request: string) => void): void;
+  start(healthCallback: (health: SmoldotHealth) => void): void;
+  stop(): void;
+  sendJsonRpc(request: string): void;
+  responsePassThrough(response: string): string | null;
+}
+
 export interface Smoldot {
-  start(options: SmoldotOptions): Promise<SmoldotClient>;
+  start(options?: SmoldotOptions): Promise<SmoldotClient>;
+  healthChecker(): HealthChecker;
 }
 
 export const smoldot: Smoldot;

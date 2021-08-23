@@ -47,7 +47,7 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::{fmt, iter, slice};
+use core::{fmt, iter};
 use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
 /// Configuration for [`run`].
@@ -205,13 +205,7 @@ impl StorageGet {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.as_ref().unwrap()
                 {
-                    struct One(u8);
-                    impl AsRef<[u8]> for One {
-                        fn as_ref(&self) -> &[u8] {
-                            slice::from_ref(&self.0)
-                        }
-                    }
-                    either::Either::Right(value_request.key().map(One).map(either::Either::Right))
+                    either::Right(value_request.key().map(|v| [v]).map(either::Right))
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -309,14 +303,29 @@ impl PrefixKeys {
         }
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(mut self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> RuntimeHostVm {
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(
+        mut self,
+        keys: impl Iterator<Item = impl AsRef<[u8]>>,
+    ) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalStorageClearPrefix(req) => {
                 // TODO: use prefix_remove_update once optimized
                 //top_trie_root_calculation_cache.prefix_remove_update(storage_key);
 
+                // Grab the maximum number of keys to remove, and initialize a counter for the
+                // number of keys removed so far.
+                // While doing `keys.take(...)` would be more simple, we avoid doing so in order
+                // to avoid converting the `u32` to a `usize`.
+                let max_keys_to_remove = req.max_keys_to_remove();
+                let mut keys_removed_so_far = 0u32;
+
                 for key in keys {
+                    // Enforce the maximum number of keys to remove.
+                    if max_keys_to_remove.map_or(false, |max| keys_removed_so_far >= max) {
+                        break;
+                    }
+
                     self.inner
                         .top_trie_root_calculation_cache
                         .as_mut()
@@ -337,6 +346,11 @@ impl PrefixKeys {
                             entry.insert(previous_value);
                         }
                     }
+
+                    // `wrapping_add` is used because the only way `keys_removed_so_far` can be
+                    // equal to `u32::max_value()` at this point is when `max_keys_to_remove`
+                    // is `None`.
+                    keys_removed_so_far = keys_removed_so_far.wrapping_add(1);
                 }
 
                 // TODO: O(n) complexity here
@@ -703,10 +717,10 @@ impl Inner {
                     };
 
                     match super::core_version(vm_prototype) {
-                        Ok((version, _)) => {
+                        (Ok(version), _) => {
                             self.vm = req.resume(Ok(version.as_ref()));
                         }
-                        Err(_) => {
+                        (Err(_), _) => {
                             self.vm = req.resume(Err(()));
                         }
                     }
@@ -763,7 +777,7 @@ impl Inner {
 /// encoded storage value.
 fn append_to_storage_value(value: &mut Vec<u8>, to_add: &[u8]) {
     let (curr_len, curr_len_encoded_size) =
-        match util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&value) {
+        match util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(value) {
             Ok((rest, l)) => (l, value.len() - rest.len()),
             Err(_) => {
                 value.clear();

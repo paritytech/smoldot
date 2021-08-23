@@ -46,9 +46,16 @@
 
 use crate::{ffi, lossy_channel, sync_service};
 
-use futures::{lock::Mutex, prelude::*};
-use smoldot::{chain_spec, executor, header, metadata, network::protocol, trie::proof_verify};
-use std::{iter, pin::Pin, sync::Arc, time::Duration};
+use futures::{
+    lock::{Mutex, MutexGuard},
+    prelude::*,
+};
+use smoldot::{
+    chain_spec, executor, header, metadata,
+    network::protocol,
+    trie::{self, proof_verify},
+};
+use std::{iter, mem, pin::Pin, sync::Arc, time::Duration};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
@@ -60,25 +67,17 @@ pub struct Config<'a> {
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
 
-    /// Specifications of the chain.
+    /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
 
-    /// Hash of the genesis block of the chain.
+    /// Header of the genesis block of the chain, in SCALE encoding.
     ///
     /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
     /// >           [`RuntimeService::new`] function could in theory use the
     /// >           [`Config::chain_spec`] parameter to derive this value, doing so is quite
     /// >           expensive. We prefer to require this value from the upper layer instead, as
     /// >           it is most likely needed anyway.
-    pub genesis_block_hash: [u8; 32],
-
-    /// Hash of the storage trie root of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`RuntimeService::new`] function could in theory use the
-    /// >           [`Config::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead.
-    pub genesis_block_state_root: [u8; 32],
+    pub genesis_block_scale_encoded_header: Vec<u8>,
 }
 
 /// See [the module-level documentation](..).
@@ -120,13 +119,14 @@ impl RuntimeService {
             // simply store an `Err` and continue running.
             // However, in practice, it seems more sane to detect problems in the genesis block.
             let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages)
+                .await
                 .expect("invalid runtime at genesis block");
 
             // As documented in the `metadata` field, we must fill it using the genesis storage.
             let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
             loop {
                 match query {
-                    metadata::Query::Finished(Ok((metadata, vm))) => {
+                    metadata::Query::Finished(Ok(metadata), vm) => {
                         runtime.virtual_machine = Some(vm);
                         runtime.metadata = Some(metadata);
                         break;
@@ -140,19 +140,21 @@ impl RuntimeService {
                             .map(|(_, v)| v);
                         query = get.inject_value(value.map(iter::once));
                     }
-                    metadata::Query::Finished(Err(err)) => {
+                    metadata::Query::Finished(Err(err), _) => {
                         panic!("Unable to generate genesis metadata: {}", err)
                     }
                 }
             }
 
+            debug_assert!(header::decode(&config.genesis_block_scale_encoded_header).is_ok());
             LatestKnownRuntime {
                 runtime: Ok(runtime),
                 runtime_code: code,
                 heap_pages,
-                runtime_block_hash: config.genesis_block_hash,
-                runtime_block_height: 0,
-                runtime_block_state_root: config.genesis_block_state_root,
+                runtime_block_hash: header::hash_from_scale_encoded_header(
+                    &config.genesis_block_scale_encoded_header,
+                ),
+                runtime_block_header: config.genesis_block_scale_encoded_header,
                 runtime_version_subscriptions: Vec::new(),
                 best_blocks_subscriptions: Vec::new(),
                 best_near_head_of_chain: config
@@ -186,8 +188,8 @@ impl RuntimeService {
     pub async fn subscribe_runtime_version(
         self: &Arc<RuntimeService>,
     ) -> (
-        Result<executor::CoreVersion, ()>,
-        NotificationsReceiver<Result<executor::CoreVersion, ()>>,
+        Result<executor::CoreVersion, RuntimeError>,
+        NotificationsReceiver<Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let (tx, rx) = lossy_channel::channel();
         let mut latest_known_runtime = self.latest_known_runtime.lock().await;
@@ -196,16 +198,15 @@ impl RuntimeService {
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
-            .map_err(|&()| ());
+            .map_err(|err| err.clone());
         (current_version, rx)
     }
 
     /// Returns the runtime version of the block with the given hash.
-    // TODO: better error type
     pub async fn runtime_version_of_block(
         self: &Arc<RuntimeService>,
         block_hash: &[u8; 32],
-    ) -> Result<executor::CoreVersion, ()> {
+    ) -> Result<executor::CoreVersion, RuntimeVersionOfBlockError> {
         // If the requested block is the best known block, optimize by
         // immediately returning the cached spec.
         {
@@ -215,7 +216,7 @@ impl RuntimeService {
                     .runtime
                     .as_ref()
                     .map(|r| r.runtime_spec.clone())
-                    .map_err(|&()| ());
+                    .map_err(|err| RuntimeVersionOfBlockError::InvalidRuntime(err.clone()));
             }
         }
 
@@ -239,10 +240,12 @@ impl RuntimeService {
             let header = if let Ok(block) = result {
                 block.header.unwrap()
             } else {
-                return Err(());
+                return Err(RuntimeVersionOfBlockError::NetworkBlockRequest); // TODO: precise error
             };
 
-            *header::decode(&header).map_err(|_| ())?.state_root
+            *header::decode(&header)
+                .map_err(RuntimeVersionOfBlockError::InvalidBlockHeader)?
+                .state_root
         };
 
         // Download the runtime code of this block.
@@ -257,29 +260,29 @@ impl RuntimeService {
             .await;
 
         let (code, heap_pages) = {
-            let mut results = match code_query_result {
-                Ok(c) => c,
-                Err(_) => return Err(()),
-            };
-
+            let mut results =
+                code_query_result.map_err(RuntimeVersionOfBlockError::StorageQuery)?;
             let heap_pages = results.pop().unwrap();
             let code = results.pop().unwrap();
             (code, heap_pages)
         };
 
-        SuccessfulRuntime::from_params(&code, &heap_pages).map(|r| r.runtime_spec)
+        SuccessfulRuntime::from_params(&code, &heap_pages)
+            .await
+            .map(|r| r.runtime_spec)
+            .map_err(RuntimeVersionOfBlockError::InvalidRuntime)
     }
 
     /// Returns the runtime version of the current best block.
     pub async fn best_block_runtime(
         self: &Arc<RuntimeService>,
-    ) -> Result<executor::CoreVersion, ()> {
+    ) -> Result<executor::CoreVersion, RuntimeError> {
         let latest_known_runtime = self.latest_known_runtime.lock().await;
         latest_known_runtime
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
-            .map_err(|&()| ())
+            .map_err(|err| err.clone())
     }
 
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
@@ -302,151 +305,108 @@ impl RuntimeService {
         (current, rx)
     }
 
-    /// Performs a runtime call using the best block, or a recent best block.
+    // TODO: doc
+    pub fn recent_best_block_runtime_lock<'a: 'b, 'b>(
+        self: &'a Arc<RuntimeService>,
+    ) -> impl Future<Output = RuntimeLock<'a>> + 'b {
+        async move {
+            let lock = self.latest_known_runtime.lock().await;
+            debug_assert_eq!(
+                lock.runtime_block_hash,
+                header::hash_from_scale_encoded_header(&lock.runtime_block_header)
+            );
+
+            RuntimeLock {
+                service: self,
+                lock,
+            }
+        }
+    }
+
+    /// Start performing a runtime call using the best block, or a recent best block.
     ///
     /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,
     /// but doesn't know anything about the storage, which the runtime might have to access. In
     /// order to make this work, a "call proof" is performed on the network in order to obtain
     /// the storage values corresponding to this call.
-    pub async fn recent_best_block_runtime_call<'a>(
-        self: &'a Arc<RuntimeService>,
-        method: &str,
-        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-    ) -> Result<Vec<u8>, RuntimeCallError> {
-        self.recent_best_block_runtime_call_inner(method, parameter_vectored)
-            .await
-            .map(|(ret, _)| ret)
-    }
-
-    /// See [`RuntimeService::recent_best_block_runtime_call`].
     ///
-    /// The latest known runtime might be updated during the execution of this function. If you
-    /// call this function, then re-lock the latest known runtime afterwards, you might not find
-    /// the same runtime as the one that has actually performed the call. To solve that, in
-    /// addition to the value generated by the runtime call, also returns a lock to the latest
-    /// known runtime. This can allow inspecting the runtime that has been used in order to
-    /// perform the call.
-    async fn recent_best_block_runtime_call_inner<'a>(
+    /// This method merely starts the runtime call process and returns a lock. While the lock is
+    /// alive, the entire [`RuntimeService`] is frozen. **You are strongly encouraged to not
+    /// perform any asynchronous operation while the lock is active.** The call must be driven
+    /// forward using the methods on the [`RuntimeCallLock`].
+    pub fn recent_best_block_runtime_call<'a: 'b, 'b>(
         self: &'a Arc<RuntimeService>,
-        method: &str,
-        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
-    ) -> Result<(Vec<u8>, futures::lock::MutexGuard<'a, LatestKnownRuntime>), RuntimeCallError>
-    {
-        // `latest_known_runtime` should be kept locked as little as possible.
-        // In order to handle the possibility a runtime upgrade happening during the operation,
-        // every time `latest_known_runtime` is locked, we compare the runtime version stored in
-        // it with the value previously found. If there is a mismatch, the entire runtime call
-        // is restarted from scratch.
-        loop {
-            // Get `runtime_block_hash`, `runtime_block_height` and `runtime_block_state_root`,
-            // the hash, height, and state trie root of a recent best block that uses this runtime.
-            let (spec_version, runtime_block_hash, runtime_block_height, runtime_block_state_root) = {
-                let lock = self.latest_known_runtime.lock().await;
-                (
-                    lock.runtime
-                        .as_ref()
-                        .map_err(|()| RuntimeCallError::InvalidRuntime)?
-                        .runtime_spec
-                        .decode()
-                        .spec_version,
-                    lock.runtime_block_hash,
-                    lock.runtime_block_height,
-                    lock.runtime_block_state_root,
-                )
-            };
-
-            // Perform the call proof request.
-            // Note that `latest_known_runtime` is not locked.
-            // If the call proof fail, do as if the proof was empty. This will enable the
-            // fallback consisting in performing individual storage proof requests.
-            let call_proof = self
-                .sync_service
-                .clone()
-                .call_proof_query(
-                    runtime_block_height,
-                    protocol::CallProofRequestConfig {
-                        block_hash: runtime_block_hash,
-                        method,
-                        parameter_vectored: parameter_vectored.clone(),
-                    },
-                )
-                .await
-                .unwrap_or(Vec::new());
-
-            // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
-            // in-between.
-            let mut latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-            let runtime = latest_known_runtime_lock
-                .runtime
-                .as_mut()
-                .map_err(|()| RuntimeCallError::InvalidRuntime)?;
-            if runtime.runtime_spec.decode().spec_version != spec_version {
-                continue;
-            }
-
-            // Perform the actual runtime call locally.
-            let mut runtime_call = match executor::read_only_runtime_host::run(
-                executor::read_only_runtime_host::Config {
-                    virtual_machine: runtime.virtual_machine.take().unwrap(),
-                    function_to_call: method,
-                    parameter: parameter_vectored,
-                },
-            ) {
-                Ok(vm) => vm,
-                Err((err, prototype)) => {
-                    runtime.virtual_machine = Some(prototype);
-                    return Err(RuntimeCallError::StartError(err));
-                }
-            };
-
+        method: &'b str,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
+    ) -> impl Future<
+        Output = Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError>,
+    > + 'b {
+        // An `async move` has to be used because of borrowing issue.
+        async move {
+            // `latest_known_runtime` should be kept locked as little as possible.
+            // In order to handle the possibility a runtime upgrade happening during the operation,
+            // every time `latest_known_runtime` is locked, we compare the runtime version stored in
+            // it with the value previously found. If there is a mismatch, the entire runtime call
+            // is restarted from scratch.
             loop {
-                match runtime_call {
-                    executor::read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                        if !success.logs.is_empty() {
-                            log::debug!(
-                                target: "runtime",
-                                "Runtime logs: {}",
-                                success.logs
-                            );
-                        }
+                // Get `runtime_block_hash`, `runtime_block_height` and `runtime_block_state_root`,
+                // the hash, height, and state trie root of a recent best block that uses this runtime.
+                let (spec_version, runtime_block_hash, runtime_block_header) = {
+                    let lock = self.latest_known_runtime.lock().await;
+                    debug_assert_eq!(
+                        lock.runtime_block_hash,
+                        header::hash_from_scale_encoded_header(&lock.runtime_block_header)
+                    );
 
-                        let return_value = success.virtual_machine.value().as_ref().to_owned();
-                        runtime.virtual_machine = Some(success.virtual_machine.into_prototype());
-                        return Ok((return_value, latest_known_runtime_lock));
-                    }
-                    executor::read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                        runtime.virtual_machine = Some(error.prototype);
-                        return Err(RuntimeCallError::CallError(error.detail));
-                    }
-                    executor::read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                        let requested_key = get.key_as_vec(); // TODO: optimization: don't use as_vec
-                        let storage_value =
-                            match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                requested_key: &requested_key,
-                                trie_root_hash: &runtime_block_state_root,
-                                proof: call_proof.iter().map(|v| &v[..]),
-                            }) {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    // TODO: shouldn't return if error but do a storage_proof instead
-                                    runtime.virtual_machine = Some(
-                                    executor::read_only_runtime_host::RuntimeHostVm::StorageGet(
-                                        get,
-                                    )
-                                    .into_prototype(),
-                                );
-                                    return Err(RuntimeCallError::StorageRetrieval(err));
-                                }
-                            };
-                        runtime_call = get.inject_value(storage_value.as_ref().map(iter::once));
-                    }
-                    executor::read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                        todo!() // TODO:
-                    }
-                    executor::read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                        runtime_call = storage_root.resume(&runtime_block_state_root);
-                    }
+                    (
+                        lock.runtime
+                            .as_ref()
+                            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
+                            .runtime_spec
+                            .decode()
+                            .spec_version,
+                        lock.runtime_block_hash,
+                        lock.runtime_block_header.clone(),
+                    )
+                };
+
+                // Perform the call proof request.
+                // Note that `latest_known_runtime` is not locked.
+                // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
+                // TODO: also, an empty proof will be reported as an error right now, which is weird
+                let call_proof = self
+                    .sync_service
+                    .clone()
+                    .call_proof_query(
+                        header::decode(&runtime_block_header).unwrap().number,
+                        protocol::CallProofRequestConfig {
+                            block_hash: runtime_block_hash,
+                            method,
+                            parameter_vectored: parameter_vectored.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(RuntimeCallError::CallProof);
+
+                // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
+                // in-between.
+                let mut latest_known_runtime_lock = self.latest_known_runtime.lock().await;
+                let runtime = latest_known_runtime_lock
+                    .runtime
+                    .as_mut()
+                    .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
+                if runtime.runtime_spec.decode().spec_version != spec_version {
+                    continue;
                 }
+
+                let virtual_machine = runtime.virtual_machine.take().unwrap();
+                let lock = RuntimeCallLock {
+                    lock: latest_known_runtime_lock,
+                    runtime_block_header,
+                    call_proof,
+                };
+
+                break Ok((lock, virtual_machine));
             }
         }
     }
@@ -460,47 +420,50 @@ impl RuntimeService {
         // First, try the cache.
         {
             let latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-            if let Ok(runtime) = latest_known_runtime_lock.runtime.as_ref() {
-                if let Some(metadata) = runtime.metadata.as_ref() {
-                    return Ok(metadata.clone());
+            match latest_known_runtime_lock.runtime.as_ref() {
+                Ok(runtime) => {
+                    if let Some(metadata) = runtime.metadata.as_ref() {
+                        return Ok(metadata.clone());
+                    }
                 }
-            } else {
-                return Err(MetadataError::InvalidRuntime);
+                Err(err) => {
+                    return Err(MetadataError::InvalidRuntime(err.clone()));
+                }
             }
         }
 
-        // TODO: duplicated code compared to smoldot's metadata module
-        match self
-            .recent_best_block_runtime_call_inner("Metadata_metadata", iter::empty::<Vec<u8>>())
+        let (mut runtime_call_lock, virtual_machine) = self
+            .recent_best_block_runtime_call("Metadata_metadata", iter::empty::<Vec<u8>>())
             .await
-        {
-            Ok((return_value, mut latest_known_runtime_lock)) => {
-                match metadata::remove_metadata_length_prefix(&return_value) {
-                    Ok(metadata) => {
-                        // TODO: lot of cloning
-                        latest_known_runtime_lock.runtime.as_mut().unwrap().metadata =
-                            Some(metadata.to_vec());
-                        Ok(metadata.to_vec())
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            target: "runtime",
-                            "Failed to call Metadata_metadata on runtime: {}",
-                            error
-                        );
-                        Err(MetadataError::MetadataDecode(error))
+            .map_err(MetadataError::CallError)?;
+
+        let mut query = metadata::query_metadata(virtual_machine);
+        let (metadata_result, virtual_machine) = loop {
+            match query {
+                metadata::Query::Finished(Ok(metadata), virtual_machine) => {
+                    runtime_call_lock.lock.runtime.as_mut().unwrap().metadata =
+                        Some(metadata.clone());
+                    break (Ok(metadata), virtual_machine);
+                }
+                metadata::Query::StorageGet(storage_get) => {
+                    match runtime_call_lock.storage_entry(&storage_get.key_as_vec()) {
+                        Ok(v) => query = storage_get.inject_value(v.map(iter::once)),
+                        Err(err) => {
+                            break (
+                                Err(MetadataError::CallError(err)),
+                                metadata::Query::StorageGet(storage_get).into_prototype(),
+                            );
+                        }
                     }
                 }
+                metadata::Query::Finished(Err(err), virtual_machine) => {
+                    break (Err(MetadataError::MetadataQuery(err)), virtual_machine);
+                }
             }
-            Err(error) => {
-                log::warn!(
-                    target: "runtime",
-                    "Failed to call Metadata_metadata on runtime: {}",
-                    error
-                );
-                Err(MetadataError::CallError(error))
-            }
-        }
+        };
+
+        runtime_call_lock.unlock(virtual_machine);
+        metadata_result
     }
 
     /// Returns true if it is believed that we are near the head of the chain.
@@ -530,22 +493,234 @@ impl RuntimeService {
     }
 }
 
+/// See [`RuntimeService::recent_best_block_runtime_lock`].
+#[must_use]
+pub struct RuntimeLock<'a> {
+    service: &'a Arc<RuntimeService>,
+    lock: MutexGuard<'a, LatestKnownRuntime>,
+}
+
+impl<'a> RuntimeLock<'a> {
+    /// Returns the SCALE-encoded header of the block the call is being made against.
+    pub fn block_scale_encoded_header(&self) -> &[u8] {
+        &self.lock.runtime_block_header
+    }
+
+    /// Returns the hash of the block the call is being made against.
+    pub fn block_hash(&self) -> &[u8; 32] {
+        &self.lock.runtime_block_hash
+    }
+
+    pub fn runtime(&self) -> &executor::host::HostVmPrototype {
+        // TODO: don't unwrap?
+        self.lock
+            .runtime
+            .as_ref()
+            .unwrap()
+            .virtual_machine
+            .as_ref()
+            .unwrap()
+    }
+
+    pub async fn start<'b>(
+        mut self,
+        method: &'b str,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
+    ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
+        // TODO: DRY :-/ this whole thing is messy
+
+        // Perform the call proof request.
+        // Note that `latest_known_runtime` is not locked.
+        // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
+        // TODO: also, an empty proof will be reported as an error right now, which is weird
+        let call_proof = self
+            .service
+            .sync_service
+            .clone()
+            .call_proof_query(
+                header::decode(&self.lock.runtime_block_header)
+                    .unwrap()
+                    .number,
+                protocol::CallProofRequestConfig {
+                    block_hash: self.lock.runtime_block_hash,
+                    method,
+                    parameter_vectored: parameter_vectored.clone(),
+                },
+            )
+            .await
+            .map_err(RuntimeCallError::CallProof);
+
+        let runtime = self
+            .lock
+            .runtime
+            .as_mut()
+            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
+
+        let virtual_machine = runtime.virtual_machine.take().unwrap();
+        let runtime_block_header = self.lock.runtime_block_header.clone(); // TODO: clone :-/
+        let lock = RuntimeCallLock {
+            lock: self.lock,
+            runtime_block_header,
+            call_proof,
+        };
+
+        Ok((lock, virtual_machine))
+    }
+}
+
+/// See [`RuntimeService::recent_best_block_runtime_call`].
+#[must_use]
+pub struct RuntimeCallLock<'a> {
+    lock: MutexGuard<'a, LatestKnownRuntime>,
+    runtime_block_header: Vec<u8>,
+    call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
+}
+
+impl<'a> RuntimeCallLock<'a> {
+    /// Returns the SCALE-encoded header of the block the call is being made against.
+    pub fn block_scale_encoded_header(&self) -> &[u8] {
+        &self.runtime_block_header
+    }
+
+    /// Returns the storage root of the block the call is being made against.
+    pub fn block_storage_root(&self) -> &[u8; 32] {
+        header::decode(&self.runtime_block_header)
+            .unwrap()
+            .state_root
+    }
+
+    /// Finds the given key in the call proof and returns the associated storage value.
+    ///
+    /// Returns an error if the key couldn't be found in the proof, meaning that the proof is
+    /// invalid.
+    // TODO: if proof is invalid, we should give the option to fetch another call proof
+    pub fn storage_entry(&self, requested_key: &[u8]) -> Result<Option<&[u8]>, RuntimeCallError> {
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
+        match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+            requested_key: &requested_key,
+            trie_root_hash: self.block_storage_root(),
+            proof: call_proof.iter().map(|v| &v[..]),
+        }) {
+            Ok(v) => Ok(v),
+            Err(err) => Err(RuntimeCallError::StorageRetrieval(err)),
+        }
+    }
+
+    /// Finds in the call proof the list of keys that match a certain prefix.
+    ///
+    /// Returns an error if not all the keys could be found in the proof, meaning that the proof
+    /// is invalid.
+    ///
+    /// The keys returned are ordered lexicographically.
+    // TODO: if proof is invalid, we should give the option to fetch another call proof
+    pub fn storage_prefix_keys_ordered(
+        &'_ self,
+        prefix: &[u8],
+    ) -> Result<impl Iterator<Item = impl AsRef<[u8]> + '_>, RuntimeCallError> {
+        // TODO: this is sub-optimal as we iterate over the proof multiple times and do a lot of Vec allocations
+        let mut to_find = vec![trie::bytes_to_nibbles(prefix.iter().copied()).collect::<Vec<_>>()];
+        let mut output = Vec::new();
+
+        let call_proof = match &self.call_proof {
+            Ok(p) => p,
+            Err(err) => return Err(err.clone()),
+        };
+
+        for key in mem::replace(&mut to_find, Vec::new()) {
+            let node_info = proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
+                requested_key: key.iter().cloned(),
+                trie_root_hash: &self.block_storage_root(),
+                proof: call_proof.iter().map(|v| &v[..]),
+            })
+            .map_err(RuntimeCallError::StorageRetrieval)?;
+
+            if node_info.storage_value.is_some() {
+                assert_eq!(key.len() % 2, 0);
+                output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
+            }
+
+            match node_info.children {
+                proof_verify::Children::None => {}
+                proof_verify::Children::One(nibble) => {
+                    let mut child = key.clone();
+                    child.push(nibble);
+                    to_find.push(child);
+                }
+                proof_verify::Children::Multiple { children_bitmap } => {
+                    for nibble in trie::all_nibbles() {
+                        if (children_bitmap & (1 << u8::from(nibble))) == 0 {
+                            continue;
+                        }
+
+                        let mut child = key.clone();
+                        child.push(nibble);
+                        to_find.push(child);
+                    }
+                }
+            }
+        }
+
+        // TODO: maybe we could iterate over the proof in an ordered way rather than sorting at the end
+        output.sort();
+        Ok(output.into_iter())
+    }
+
+    /// End the runtime call.
+    ///
+    /// This method **must** be called.
+    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
+        let store_back = &mut self.lock.runtime.as_mut().unwrap().virtual_machine;
+        debug_assert!(store_back.is_none());
+        *store_back = Some(vm);
+    }
+}
+
+impl<'a> Drop for RuntimeCallLock<'a> {
+    fn drop(&mut self) {
+        if self
+            .lock
+            .runtime
+            .as_mut()
+            .unwrap()
+            .virtual_machine
+            .is_none()
+        {
+            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+            panic!()
+        }
+    }
+}
+
+/// Error when analyzing the runtime.
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeError {
+    /// The `:code` key of the storage is empty..
+    CodeNotFound,
+    /// Error while parsing the `:heappages` storage value.
+    InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Error while compiling the runtime.
+    Build(executor::host::NewErr),
+    /// Error when determining the runtime specification.
+    CoreVersion(executor::CoreVersionError),
+}
+
 /// Error that can happen when calling a runtime function.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum RuntimeCallError {
-    /// Error during the runtime call.
-    #[display(fmt = "{}", _0)]
-    CallError(executor::read_only_runtime_host::ErrorDetail),
-    /// Error initializing the runtime call.
-    #[display(fmt = "{}", _0)]
-    StartError(executor::host::StartErr),
     /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid")]
-    InvalidRuntime,
+    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    InvalidRuntime(RuntimeError),
     /// Error while retrieving the storage item from other nodes.
     // TODO: change error type?
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Error in call proof: {}", _0)]
     StorageRetrieval(proof_verify::Error),
+    /// Error while retrieving the call proof from the network.
+    #[display(fmt = "Error when retrieving the call proof: {}", _0)]
+    CallProof(sync_service::CallProofQueryError),
 }
 
 impl RuntimeCallError {
@@ -553,12 +728,11 @@ impl RuntimeCallError {
     /// issue.
     pub fn is_network_problem(&self) -> bool {
         match self {
-            RuntimeCallError::CallError(_) => false,
-            RuntimeCallError::StartError(_) => false,
-            RuntimeCallError::InvalidRuntime => false,
+            RuntimeCallError::InvalidRuntime(_) => false,
             // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
             RuntimeCallError::StorageRetrieval(proof_verify::Error::TrieRootNotFound) => true,
             RuntimeCallError::StorageRetrieval(_) => false,
+            RuntimeCallError::CallProof(err) => err.is_network_problem(),
         }
     }
 }
@@ -570,11 +744,27 @@ pub enum MetadataError {
     #[display(fmt = "{}", _0)]
     CallError(RuntimeCallError),
     /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid")]
-    InvalidRuntime,
-    /// Error while decoding metadata fetched from runtime.
-    #[display(fmt = "{}", _0)]
-    MetadataDecode(metadata::RemoveMetadataLengthPrefixError),
+    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    InvalidRuntime(RuntimeError),
+    /// Error in the metadata-specific runtime API.
+    #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
+    MetadataQuery(metadata::Error),
+}
+
+/// Error that can happen when calling [`RuntimeService::runtime_version_of_block`].
+#[derive(Debug, derive_more::Display)]
+pub enum RuntimeVersionOfBlockError {
+    /// Runtime of the best block isn't valid.
+    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    InvalidRuntime(RuntimeError),
+    /// Error while performing the block request on the network.
+    NetworkBlockRequest, // TODO: precise error
+    /// Failed to decode the header of the block.
+    #[display(fmt = "Failed to decode header of the block: {}", _0)]
+    InvalidBlockHeader(header::Error),
+    /// Error while querying the storage of the block.
+    #[display(fmt = "Error while querying block storage: {}", _0)]
+    StorageQuery(sync_service::StorageQueryError),
 }
 
 struct LatestKnownRuntime {
@@ -582,7 +772,7 @@ struct LatestKnownRuntime {
     /// happened, including a problem when obtaining the runtime specs or the metadata. It is
     /// better to report to the user an error about for example the metadata not being extractable
     /// compared to returning an obsolete version.
-    runtime: Result<SuccessfulRuntime, ()>,
+    runtime: Result<SuccessfulRuntime, RuntimeError>,
 
     /// Undecoded storage value of `:code` corresponding to the [`LatestKnownRuntime::runtime`]
     /// field.
@@ -590,19 +780,18 @@ struct LatestKnownRuntime {
     /// Undecoded storage value of `:heappages` corresponding to the
     /// [`LatestKnownRuntime::runtime`] field.
     heap_pages: Option<Vec<u8>>,
-    /// Hash of a block known to have the runtime found in the [`LatestKnownRuntime::runtime`]
-    /// field. Always updated to a recent block having this runtime.
+    /// SCALE encoding of the header of the block whose hash is
+    /// [`LatestKnownRuntime::runtime_block_hash`]. Guaranteed to always be a valid header.
+    runtime_block_header: Vec<u8>,
+    /// Hash of the header in [`LatestKnownRuntime::runtime_block_header`].
     runtime_block_hash: [u8; 32],
-    /// Height of the block whose hash is [`LatestKnownRuntime::runtime_block_hash`].
-    runtime_block_height: u64,
-    /// Storage trie root of the block whose hash is [`LatestKnownRuntime::runtime_block_hash`].
-    runtime_block_state_root: [u8; 32],
 
     /// List of senders that get notified when the runtime specs of the best block changes.
     /// Whenever [`LatestKnownRuntime::runtime`] is updated, one should emit an item on each
     /// sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
-    runtime_version_subscriptions: Vec<lossy_channel::Sender<Result<executor::CoreVersion, ()>>>,
+    runtime_version_subscriptions:
+        Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,
 
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
@@ -643,27 +832,40 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    fn from_params(code: &Option<Vec<u8>>, heap_pages: &Option<Vec<u8>>) -> Result<Self, ()> {
+    async fn from_params(
+        code: &Option<Vec<u8>>,
+        heap_pages: &Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
+        // once after.
+        super::yield_once().await;
+
         let vm = match executor::host::HostVmPrototype::new(
-            code.as_ref().ok_or(())?,
-            executor::storage_heap_pages_to_value(heap_pages.as_deref()).map_err(|_| ())?,
+            code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
+            executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                .map_err(RuntimeError::InvalidHeapPages)?,
             executor::vm::ExecHint::CompileAheadOfTime,
         ) {
             Ok(vm) => vm,
             Err(error) => {
                 log::warn!(target: "runtime", "Failed to compile best block runtime: {}", error);
-                return Err(());
+                return Err(RuntimeError::Build(error));
             }
         };
 
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
+        // once after.
+        super::yield_once().await;
+
         let (runtime_spec, vm) = match executor::core_version(vm) {
-            Ok(v) => v,
-            Err(_error) => {
+            (Ok(spec), vm) => (spec, vm),
+            (Err(error), _) => {
                 log::warn!(
                     target: "runtime",
-                    "Failed to call Core_version on new runtime",  // TODO: print error message as well ; at the moment the type of the error is `()`
+                    "Failed to call Core_version on runtime: {}",
+                    error
                 );
-                return Err(());
+                return Err(RuntimeError::CoreVersion(error));
             }
         };
 
@@ -732,6 +934,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 }
 
                 // Download the runtime code of this new best block.
+                // TODO: don't unwrap?
                 let new_best_block_decoded = header::decode(&new_best_block).unwrap();
                 let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
                 let code_query_result = runtime_service
@@ -796,17 +999,15 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     (new_code, new_heap_pages)
                 };
 
-                // `runtime_block_hash` is always updated in order to have the most recent
-                // block possible.
-                latest_known_runtime.runtime_block_hash = new_best_block_hash;
-                latest_known_runtime.runtime_block_height = new_best_block_decoded.number;
-                latest_known_runtime.runtime_block_state_root = *new_best_block_decoded.state_root;
-
                 // `continue` if there wasn't any change in `:code` and `:heappages`.
                 if new_code == latest_known_runtime.runtime_code
                     && new_heap_pages == latest_known_runtime.heap_pages
                 {
                     runtime_matches_best_block = true;
+                    // `runtime_block_hash` is always updated in order to have the most recent
+                    // block possible.
+                    latest_known_runtime.runtime_block_hash = new_best_block_hash;
+                    latest_known_runtime.runtime_block_header = new_best_block.clone();
                     continue;
                 }
 
@@ -815,18 +1016,23 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 if runtime_matches_best_block {
                     log::info!(
                         target: "runtime",
-                        "New runtime code detected around block #{} (block number might be wrong)",
+                        "Runtime code change detected between block #{} and block #{}",
+                        // TODO: don't unwrap?
+                        header::decode(&latest_known_runtime.runtime_block_header).unwrap().number,
                         new_best_block_decoded.number
                     );
                 }
 
                 runtime_matches_best_block = true;
+                latest_known_runtime.runtime_block_hash = new_best_block_hash;
+                latest_known_runtime.runtime_block_header = new_best_block.clone();
                 latest_known_runtime.runtime_code = new_code;
                 latest_known_runtime.heap_pages = new_heap_pages;
                 latest_known_runtime.runtime = SuccessfulRuntime::from_params(
                     &latest_known_runtime.runtime_code,
                     &latest_known_runtime.heap_pages,
-                );
+                )
+                .await;
 
                 // Elements in `runtime_version_subscriptions` are removed one by one and inserted
                 // back if the channel is still open.
@@ -838,7 +1044,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                         .runtime
                         .as_ref()
                         .map(|r| r.runtime_spec.clone())
-                        .map_err(|&()| ());
+                        .map_err(|err| err.clone());
                     if subscription.send(to_send).is_ok() {
                         latest_known_runtime
                             .runtime_version_subscriptions

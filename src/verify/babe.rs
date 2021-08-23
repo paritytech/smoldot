@@ -25,7 +25,7 @@
 //!
 //! References:
 //!
-//! - https://research.web3.foundation/en/latest/polkadot/BABE/Babe.html
+//! - <https://research.web3.foundation/en/latest/polkadot/BABE/Babe.html>
 //!
 //! # Overview of BABE
 //!
@@ -460,8 +460,8 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 
     // Success! 🚀
     Ok(VerifySuccess {
-        epoch_transition_target,
         slot_number,
+        epoch_transition_target,
     })
 }
 

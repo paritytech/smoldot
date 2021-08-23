@@ -168,9 +168,36 @@ impl<T> ForkTree<T> {
     /// Panics if the [`NodeIndex`] is invalid.
     ///
     pub fn prune_ancestors(&mut self, node_index: NodeIndex) -> PruneAncestorsIter<T> {
-        // The implementation consists in replacing the content of `self.first_root` with the
-        // content of `self.nodes[node_index].first_child` and updating everything else
-        // accordingly.
+        self.prune_ancestors_inner(node_index, false)
+    }
+
+    /// Removes from the tree any node that isn't either an ancestor or a descendant of the target
+    /// node.
+    ///
+    /// This function is similar to [`ForkTree::prune_ancestors`], except that all nodes returned
+    /// by the iterator are guaranteed to have [`PrunedNode::is_prune_target_ancestor`] equal
+    /// to `false`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn prune_uncles(&mut self, node_index: NodeIndex) -> PruneAncestorsIter<T> {
+        self.prune_ancestors_inner(node_index, true)
+    }
+
+    fn prune_ancestors_inner(
+        &mut self,
+        node_index: NodeIndex,
+        uncles_only: bool,
+    ) -> PruneAncestorsIter<T> {
+        let iter = self.first_root.unwrap();
+
+        // `first_root` is updated ahead of the removal of the nodes. The update strategy is as
+        // follows:
+        // - If `uncles_only`, then it becomes the oldest ancestor of the target node. This is
+        //   done in the loop below at the same time as marking node as `is_prune_target_ancestor`.
+        // - If `!uncles_only`, then it becomes the first child of the target node.
 
         // Set `is_prune_target_ancestor` to true for `node_index` and all its ancestors.
         {
@@ -178,6 +205,11 @@ impl<T> ForkTree<T> {
             loop {
                 debug_assert!(!self.nodes[node].is_prune_target_ancestor);
                 self.nodes[node].is_prune_target_ancestor = true;
+
+                if uncles_only {
+                    self.first_root = Some(node);
+                }
+
                 node = match self.nodes[node].parent {
                     Some(n) => n,
                     None => break,
@@ -185,12 +217,14 @@ impl<T> ForkTree<T> {
             }
         }
 
-        let iter = self.first_root.unwrap();
-        self.first_root = self.nodes[node_index.0].first_child;
+        if !uncles_only {
+            self.first_root = self.nodes[node_index.0].first_child;
+        }
 
         PruneAncestorsIter {
             finished: false,
             tree: self,
+            uncles_only,
             new_final: node_index,
             iter,
             traversing_up: false,
@@ -259,13 +293,13 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if one of the [`NodeIndex`]s is invalid.
     ///
-    pub fn ascend_and_descend<'a>(
-        &'a self,
+    pub fn ascend_and_descend(
+        &'_ self,
         node1: NodeIndex,
         node2: NodeIndex,
     ) -> (
-        impl Iterator<Item = NodeIndex> + 'a,
-        impl Iterator<Item = NodeIndex> + 'a,
+        impl Iterator<Item = NodeIndex> + Clone + '_,
+        impl Iterator<Item = NodeIndex> + Clone + '_,
     ) {
         let common_ancestor = self.common_ancestor(node1, node2);
 
@@ -287,10 +321,10 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn node_to_root_path<'a>(
-        &'a self,
+    pub fn node_to_root_path(
+        &'_ self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    ) -> impl Iterator<Item = NodeIndex> + Clone + '_ {
         iter::successors(Some(node_index), move |n| {
             self.nodes[n.0].parent.map(NodeIndex)
         })
@@ -302,10 +336,10 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn root_to_node_path<'a>(
-        &'a self,
+    pub fn root_to_node_path(
+        &'_ self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + 'a {
+    ) -> impl Iterator<Item = NodeIndex> + Clone + '_ {
         debug_assert!(self.nodes.get(usize::max_value()).is_none());
 
         // First element is an invalid key, each successor is the last element of
@@ -415,6 +449,9 @@ pub struct PruneAncestorsIter<'a, T> {
 
     /// Target of the pruning. Value which `prune_ancestors` has been called with.
     new_final: NodeIndex,
+
+    /// If `true`, `new_final` and its ancestors aren't removed.
+    uncles_only: bool,
 }
 
 impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
@@ -432,7 +469,9 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
             // Instead, just update its parent to be `None` and continue iterating.
             if iter_node.parent == Some(self.new_final.0) {
                 debug_assert!(!self.traversing_up);
-                iter_node.parent = None;
+                if !self.uncles_only {
+                    iter_node.parent = None;
+                }
                 self.iter = if let Some(next_sibling) = iter_node.next_sibling {
                     next_sibling
                 } else {
@@ -444,15 +483,14 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
 
             // If `traversing_up` is false`, try to go down the hierarchy as deeply as possible.
             if !self.traversing_up {
-                if let Some(first_child) = self.tree.nodes[self.iter].first_child {
+                if let Some(first_child) = iter_node.first_child {
                     self.iter = first_child;
                     continue;
                 }
             }
 
-            // Remove node.
-            let removed_node_index = NodeIndex(self.iter);
-            let iter_node = self.tree.nodes.remove(self.iter);
+            // Keep a copy of `self.iter` because we update it now.
+            let maybe_removed_node_index = NodeIndex(self.iter);
 
             // Jump either to its next sibling, or, if it was the last sibling, back to its
             // parent.
@@ -466,8 +504,29 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
                 self.finished = true;
             };
 
+            // Should the node be removed?
+            if self.uncles_only && iter_node.is_prune_target_ancestor {
+                // Reset `is_prune_target_ancestor` for next time we do some pruning.
+                iter_node.is_prune_target_ancestor = false;
+
+                // Update the inter-node relationships.
+                iter_node.next_sibling = None;
+                if iter_node.previous_sibling.take().is_some() {
+                    // Notice the `take()` here ^
+                    if let Some(parent) = iter_node.parent {
+                        debug_assert!(self.tree.nodes[parent].first_child.is_some());
+                        self.tree.nodes[parent].first_child = Some(maybe_removed_node_index.0);
+                    }
+                }
+
+                continue;
+            }
+
+            // Actually remove the node.
+            let iter_node = self.tree.nodes.remove(maybe_removed_node_index.0);
+
             break Some(PrunedNode {
-                index: removed_node_index,
+                index: maybe_removed_node_index,
                 is_prune_target_ancestor: iter_node.is_prune_target_ancestor,
                 user_data: iter_node.data,
             });
@@ -484,7 +543,11 @@ impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
         // Make sure that all elements are removed.
         while let Some(_) = self.next() {}
 
-        debug_assert!(self.tree.get(self.new_final).is_none());
+        if self.uncles_only {
+            debug_assert!(self.tree.first_root.is_some());
+            debug_assert!(self.tree.nodes.get(self.tree.first_root.unwrap()).is_some());
+        }
+        debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
     }
 }
 

@@ -116,7 +116,7 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
 pub fn decode_block_response(
     response_bytes: &[u8],
 ) -> Result<Vec<BlockData>, DecodeBlockResponseError> {
-    let response = schema::BlockResponse::decode(&response_bytes[..])
+    let response = schema::BlockResponse::decode(response_bytes)
         .map_err(ProtobufDecodeError)
         .map_err(DecodeBlockResponseError::ProtobufDecode)?;
 

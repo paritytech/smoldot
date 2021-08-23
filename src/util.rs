@@ -71,7 +71,7 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 /// Decodes a SCALE-compact-encoded usize.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
-/// >           the type of `E`. Use `nom::error::Error`.
+/// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
 pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], usize, E> {
@@ -145,7 +145,10 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
             let mut out_value = 0;
             let mut shift = 0u32;
             for byte_index in 1..=num_bytes {
-                out_value |= match usize::from(bytes[byte_index]).checked_mul(1 << shift) {
+                out_value |= match 1usize
+                    .checked_shl(shift)
+                    .and_then(|shl| usize::from(bytes[byte_index]).checked_mul(shl))
+                {
                     Some(v) => v,
                     None => {
                         // Overflow. The SCALE-encoded value is too large to fit a `usize`.
@@ -169,9 +172,8 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
 
 /// Returns a buffer containing the SCALE-compact encoding of the parameter.
 pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> + Clone {
-    // TODO: use usize::BITS after https://github.com/rust-lang/rust/issues/76904 is stable
-    // TODO: should be `(1 + usize::BITS / 8)` instead of `9`, but this causes compilation errors
-    let mut array = arrayvec::ArrayVec::<u8, 9>::new();
+    const MAX_BITS: usize = 1 + (usize::BITS as usize) / 8;
+    let mut array = arrayvec::ArrayVec::<u8, MAX_BITS>::new();
 
     if value < 64 {
         array.push(u8::try_from(value).unwrap() << 2);

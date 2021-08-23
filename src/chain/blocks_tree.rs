@@ -204,7 +204,7 @@ impl<T> NonFinalizedTree<T> {
                     slot_duration,
                 } => chain_information::ChainInformationConsensusRef::Aura {
                     finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
-                        &authorities_list,
+                        authorities_list,
                     ),
                     slot_duration: *slot_duration,
                 },

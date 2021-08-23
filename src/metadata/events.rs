@@ -19,7 +19,7 @@
 //!
 //! # Overview
 //!
-//! While this behaviour is not part of the specifications and is thus not a strict requirement,
+//! While this behaviour is not part of the specification and is thus not a strict requirement,
 //! Substrate-compatible blockchains built using the Substrate framework provide a storage item
 //! (in other words, an entry in the storage, with a specific key) containing a list of so-called
 //! *events*. This storage item is updated at each block with the events that have happened in
@@ -130,8 +130,8 @@ pub enum EventsStorageKeyError {
 fn twox_128(data: &[u8], dest: &mut [u8; 16]) {
     let mut h0 = twox_hash::XxHash::with_seed(0);
     let mut h1 = twox_hash::XxHash::with_seed(1);
-    h0.write(&data);
-    h1.write(&data);
+    h0.write(data);
+    h1.write(data);
     let r0 = h0.finish();
     let r1 = h1.finish();
 

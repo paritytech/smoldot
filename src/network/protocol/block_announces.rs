@@ -18,6 +18,7 @@
 use crate::header;
 
 use core::{convert::TryFrom, iter};
+use nom::Finish as _;
 
 /// Decoded handshake sent or received when opening a block announces notifications substream.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -72,9 +73,9 @@ pub struct BlockAnnounceRef<'a> {
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
-pub fn encode_block_announce<'a>(
-    announce: BlockAnnounceRef<'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+pub fn encode_block_announce(
+    announce: BlockAnnounceRef<'_>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
     let is_best = if announce.is_best { [1u8] } else { [0u8] };
     announce
         .header
@@ -85,36 +86,42 @@ pub fn encode_block_announce<'a>(
 
 /// Decodes a block announcement.
 pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
-    nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
-            |s| {
-                header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
-                    nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
-                })
-            },
-            nom::branch::alt((
-                nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
-                nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| true),
+    let result: Result<_, nom::error::Error<_>> =
+        nom::combinator::all_consuming(nom::combinator::map(
+            nom::sequence::tuple((
+                |s| {
+                    header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
+                        nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
+                    })
+                },
+                nom::branch::alt((
+                    nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
+                    nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| true),
+                )),
+                crate::util::nom_bytes_decode,
             )),
-            crate::util::nom_bytes_decode,
-        )),
-        |(header, is_best, _)| BlockAnnounceRef { header, is_best },
-    ))(&bytes)
-    .map(|(_, ann)| ann)
-    .map_err(DecodeBlockAnnounceError)
+            |(header, is_best, _)| BlockAnnounceRef { header, is_best },
+        ))(bytes)
+        .finish();
+
+    match result {
+        Ok((_, ann)) => Ok(ann),
+        Err(err) => Err(DecodeBlockAnnounceError(err.code)),
+    }
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
 #[derive(Debug, derive_more::Display)]
-pub struct DecodeBlockAnnounceError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+#[display(fmt = "Failed to decode a block announcement")]
+pub struct DecodeBlockAnnounceError(nom::error::ErrorKind);
 
 /// Turns a block announces handshake into its SCALE-encoding ready to be sent over the wire.
 ///
 /// This function returns an iterator of buffers. The encoded message consists in the
 /// concatenation of the buffers.
-pub fn encode_block_announces_handshake<'a>(
-    handshake: BlockAnnouncesHandshakeRef<'a>,
-) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+pub fn encode_block_announces_handshake(
+    handshake: BlockAnnouncesHandshakeRef<'_>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
     let mut header = [0; 5];
     header[0] = handshake.role.scale_encoding()[0];
 
@@ -131,28 +138,34 @@ pub fn encode_block_announces_handshake<'a>(
 pub fn decode_block_announces_handshake(
     handshake: &[u8],
 ) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
-    nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
-            nom::branch::alt((
-                nom::combinator::map(nom::bytes::complete::tag(&[0b1]), |_| Role::Full),
-                nom::combinator::map(nom::bytes::complete::tag(&[0b10]), |_| Role::Light),
-                nom::combinator::map(nom::bytes::complete::tag(&[0b100]), |_| Role::Authority),
+    let result: Result<_, nom::error::Error<_>> =
+        nom::combinator::all_consuming(nom::combinator::map(
+            nom::sequence::tuple((
+                nom::branch::alt((
+                    nom::combinator::map(nom::bytes::complete::tag(&[0b1]), |_| Role::Full),
+                    nom::combinator::map(nom::bytes::complete::tag(&[0b10]), |_| Role::Light),
+                    nom::combinator::map(nom::bytes::complete::tag(&[0b100]), |_| Role::Authority),
+                )),
+                nom::number::complete::le_u32,
+                nom::bytes::complete::take(32u32),
+                nom::bytes::complete::take(32u32),
             )),
-            nom::number::complete::le_u32,
-            nom::bytes::complete::take(32u32),
-            nom::bytes::complete::take(32u32),
-        )),
-        |(role, best_number, best_hash, genesis_hash)| BlockAnnouncesHandshakeRef {
-            role,
-            best_number: u64::from(best_number),
-            best_hash: TryFrom::try_from(best_hash).unwrap(),
-            genesis_hash: TryFrom::try_from(genesis_hash).unwrap(),
-        },
-    ))(handshake)
-    .map(|(_, hs)| hs)
-    .map_err(BlockAnnouncesHandshakeDecodeError)
+            |(role, best_number, best_hash, genesis_hash)| BlockAnnouncesHandshakeRef {
+                role,
+                best_number: u64::from(best_number),
+                best_hash: TryFrom::try_from(best_hash).unwrap(),
+                genesis_hash: TryFrom::try_from(genesis_hash).unwrap(),
+            },
+        ))(handshake)
+        .finish();
+
+    match result {
+        Ok((_, hs)) => Ok(hs),
+        Err(err) => Err(BlockAnnouncesHandshakeDecodeError(err.code)),
+    }
 }
 
 /// Error potentially returned by [`decode_block_announces_handshake`].
 #[derive(Debug, derive_more::Display)]
-pub struct BlockAnnouncesHandshakeDecodeError<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+#[display(fmt = "Failed to decode a block announces handshake")]
+pub struct BlockAnnouncesHandshakeDecodeError(nom::error::ErrorKind);

@@ -20,7 +20,7 @@
 //! The LEB128 encoding is used throughout the networking code. This module provides utilities for
 //! encoding/decoding this format.
 //!
-//! See [https://en.wikipedia.org/wiki/LEB128].
+//! See <https://en.wikipedia.org/wiki/LEB128>.
 
 use alloc::vec::Vec;
 use core::{cmp, convert::TryFrom as _, mem};
@@ -175,7 +175,7 @@ impl FramedInProgress {
 }
 
 /// Error potentially returned by [`FramedInProgress::update`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum FramedError {
     /// The variable-length prefix is too large and cannot possibly represent a valid size.
     LengthPrefixTooLarge,

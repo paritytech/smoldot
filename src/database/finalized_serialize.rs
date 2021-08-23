@@ -69,8 +69,8 @@ pub fn decode_chain(
     ),
     CorruptedError,
 > {
-    let encoded: defs::SerializedChainInformation = serde_json::from_str(&encoded)
-        .map_err(|e| CorruptedError(CorruptedErrorInner::Serde(e)))?;
+    let encoded: defs::SerializedChainInformation =
+        serde_json::from_str(encoded).map_err(|e| CorruptedError(CorruptedErrorInner::Serde(e)))?;
 
     let (chain_info, storage) = encoded
         .decode()

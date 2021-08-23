@@ -20,7 +20,6 @@ use crate::util;
 
 use alloc::vec::Vec;
 use core::{cmp, convert::TryFrom, fmt, iter, slice};
-use parity_scale_codec::DecodeAll as _;
 
 /// A consensus log item for AURA.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,9 +37,12 @@ impl<'a> AuraConsensusLogRef<'a> {
             Some(1) => {
                 AuraConsensusLogRef::AuthoritiesChange(AuraAuthoritiesIter::decode(&slice[1..])?)
             }
-            Some(2) => AuraConsensusLogRef::OnDisabled(
-                u32::decode_all(&slice[1..]).map_err(Error::DigestItemDecodeError)?,
-            ),
+            Some(2) => {
+                let n = u32::from_le_bytes(
+                    <[u8; 4]>::try_from(&slice[1..]).map_err(|_| Error::DigestItemDecodeError)?,
+                );
+                AuraConsensusLogRef::OnDisabled(n)
+            }
             Some(_) => return Err(Error::BadAuraConsensusRefType),
             None => return Err(Error::TooShort),
         })
@@ -51,18 +53,10 @@ impl<'a> AuraConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             AuraConsensusLogRef::AuthoritiesChange(_) => [1],
             AuraConsensusLogRef::OnDisabled(_) => [2],
-        }));
+        });
 
         let body = match self {
             AuraConsensusLogRef::AuthoritiesChange(list) => {
@@ -82,9 +76,7 @@ impl<'a> AuraConsensusLogRef<'a> {
             ),
         };
 
-        index
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+        index.map(either::Left).chain(body.map(either::Right))
     }
 }
 

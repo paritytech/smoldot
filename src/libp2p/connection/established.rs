@@ -50,14 +50,14 @@
 
 use crate::util::leb128;
 
-use super::{multistream_select, noise, yamux};
+use super::{super::read_write::ReadWrite, multistream_select, noise, yamux};
 
 use alloc::{
     string::String,
     vec::{self, Vec},
 };
 use core::{
-    cmp, fmt, iter, mem,
+    fmt, iter, mem,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -211,72 +211,55 @@ impl<TNow, TRqUd, TNotifUd> Established<TNow, TRqUd, TNotifUd>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    /// Reads data coming from the socket from `incoming_data`, updates the internal state machine,
-    /// and writes data destined to the socket to `outgoing_buffer`.
+    /// Reads data coming from the socket, updates the internal state machine, and writes data
+    /// destined to the socket through the [`ReadWrite`].
     ///
-    /// `incoming_data` should be `None` if the remote has closed their writing side.
-    ///
-    /// The returned structure contains the number of bytes read and written from/to the two
-    /// buffers. In order to avoid unnecessary memory allocations, only one [`Event`] is returned
-    /// at a time. Consequently, this method returns as soon as an event is available, even if the
-    /// buffers haven't finished being read. Call this method in a loop until these two values are
-    /// both 0 and [`ReadWrite::event`] is `None`.
-    ///
-    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
-    ///
-    /// The current time must be passed via the `now` parameter. This is used internally in order
-    /// to keep track of ping times and timeouts. The returned structure optionally contains a
-    /// `TNow` representing the moment after which this method should be called again.
+    /// In order to avoid unnecessary memory allocations, only one [`Event`] is returned at a time.
+    /// Consequently, this method returns as soon as an event is available, even if the buffers
+    /// haven't finished being read. Call this method in a loop until the number of bytes read and
+    /// written are both 0, and the returned [`Event`] is `None`.
     ///
     /// If an error is returned, the socket should be entirely shut down.
-    // TODO: should take the in and out buffers as iterators, to allow for vectored reads/writes; tricky because an impl Iterator<Item = &mut [u8]> + Clone is impossible to build
     // TODO: in case of error, we're supposed to first send a yamux goaway frame
     pub fn read_write<'a>(
         mut self,
-        now: TNow,
-        mut incoming_buffer: Option<&[u8]>,
-        mut outgoing_buffer: (&'a mut [u8], &'a mut [u8]),
-    ) -> Result<ReadWrite<TNow, TRqUd, TNotifUd>, Error> {
-        let mut total_read = 0;
-        let mut total_written = 0;
-
+        read_write: &'_ mut ReadWrite<'_, TNow>,
+    ) -> Result<
+        (
+            Established<TNow, TRqUd, TNotifUd>,
+            Option<Event<TRqUd, TNotifUd>>,
+        ),
+        Error,
+    > {
         // First, check for timeouts.
         // Note that this might trigger timeouts for requests whose response is available in
         // `incoming_buffer`. This is intentional, as from the perspective of `read_write` the
         // response arrived after the timeout. It is the responsibility of the user to call
         // `read_write` in an appropriate way for this to not happen.
-        if let Some(event) = self.update_now(now.clone()) {
-            let wake_up_after = self.inner.next_timeout.clone();
-            return Ok(ReadWrite {
-                connection: self,
-                read_bytes: total_read,
-                written_bytes: total_written,
-                write_close: false,
-                wake_up_after,
-                event: Some(event),
-            });
+        if let Some(event) = self.update_now(read_write.now.clone()) {
+            if let Some(t) = &self.inner.next_timeout {
+                read_write.wake_up_after(t);
+            }
+            return Ok((self, Some(event)));
         }
-        debug_assert!(self.inner.next_timeout.as_ref().map_or(true, |t| *t > now));
+        debug_assert!(self
+            .inner
+            .next_timeout
+            .as_ref()
+            .map_or(true, |t| *t > read_write.now));
 
         // Decoding the incoming data.
         loop {
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
-            if let Some(incoming_data) = incoming_buffer.as_mut() {
+            if let Some(incoming_data) = read_write.incoming_buffer.as_mut() {
                 let num_read = self
                     .encryption
                     .inject_inbound_data(*incoming_data)
                     .map_err(Error::Noise)?;
-                total_read += num_read;
-                *incoming_data = &incoming_data[num_read..];
+                read_write.advance_read(num_read);
             } else {
-                return Ok(ReadWrite {
-                    connection: self,
-                    read_bytes: total_read,
-                    written_bytes: total_written,
-                    write_close: true,
-                    wake_up_after: None,
-                    event: None,
-                });
+                read_write.close_write();
+                return Ok((self, None));
             }
 
             // TODO: handle incoming_data being None
@@ -336,15 +319,10 @@ where
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                     if let Some(event) = self.on_substream_reset(substream_id, substream_ty) {
-                        let wake_up_after = self.inner.next_timeout.clone();
-                        return Ok(ReadWrite {
-                            connection: self,
-                            read_bytes: total_read,
-                            written_bytes: total_written,
-                            write_close: false,
-                            wake_up_after,
-                            event: Some(event),
-                        });
+                        if let Some(t) = &self.inner.next_timeout {
+                            read_write.wake_up_after(t);
+                        }
+                        return Ok((self, Some(event)));
                     }
                 }
 
@@ -387,36 +365,32 @@ where
                         Substream::NegotiationFailed => {}
                         Substream::RequestOutNegotiating { user_data, .. }
                         | Substream::RequestOut { user_data, .. } => {
-                            let wake_up_after = self.inner.next_timeout.clone();
-                            return Ok(ReadWrite {
-                                connection: self,
-                                read_bytes: total_read,
-                                written_bytes: total_written,
-                                write_close: false,
-                                wake_up_after,
-                                event: Some(Event::Response {
+                            if let Some(t) = &self.inner.next_timeout {
+                                read_write.wake_up_after(t);
+                            }
+                            return Ok((
+                                self,
+                                Some(Event::Response {
                                     id: SubstreamId(substream_id),
                                     user_data,
                                     response: Err(RequestError::SubstreamClosed),
                                 }),
-                            });
+                            ));
                         }
                         Substream::RequestInRecv { .. } => {}
                         Substream::RequestInSend { .. } => {}
                         Substream::NotificationsInHandshake { .. } => {}
                         Substream::NotificationsInWait { protocol_index, .. } => {
-                            let wake_up_after = self.inner.next_timeout.clone();
-                            return Ok(ReadWrite {
-                                connection: self,
-                                read_bytes: total_read,
-                                written_bytes: total_written,
-                                write_close: false,
-                                wake_up_after,
-                                event: Some(Event::NotificationsInOpenCancel {
+                            if let Some(t) = &self.inner.next_timeout {
+                                read_write.wake_up_after(t);
+                            }
+                            return Ok((
+                                self,
+                                Some(Event::NotificationsInOpenCancel {
                                     id: SubstreamId(substream_id),
                                     protocol_index,
                                 }),
-                            });
+                            ));
                         }
                         Substream::NotificationsIn { .. } => {
                             // TODO: report to user
@@ -428,18 +402,16 @@ where
                         Substream::NotificationsOut { user_data, .. }
                         | Substream::NotificationsOutHandshakeRecv { user_data, .. }
                         | Substream::NotificationsOutNegotiating { user_data, .. } => {
-                            let wake_up_after = self.inner.next_timeout.clone();
-                            return Ok(ReadWrite {
-                                connection: self,
-                                read_bytes: total_read,
-                                written_bytes: total_written,
-                                write_close: false,
-                                wake_up_after,
-                                event: Some(Event::NotificationsOutReject {
+                            if let Some(t) = &self.inner.next_timeout {
+                                read_write.wake_up_after(t);
+                            }
+                            return Ok((
+                                self,
+                                Some(Event::NotificationsOutReject {
                                     id: SubstreamId(substream_id),
                                     user_data,
                                 }),
-                            });
+                            ));
                         }
                     }
                 }
@@ -462,15 +434,10 @@ where
                         .consume_inbound_data(yamux_decode.bytes_read);
 
                     if let Some(event) = event {
-                        let wake_up_after = self.inner.next_timeout.clone();
-                        return Ok(ReadWrite {
-                            connection: self,
-                            read_bytes: total_read,
-                            written_bytes: total_written,
-                            write_close: false,
-                            wake_up_after,
-                            event: Some(event),
-                        });
+                        if let Some(t) = &self.inner.next_timeout {
+                            read_write.wake_up_after(t);
+                        }
+                        return Ok((self, Some(event)));
                     }
 
                     if yamux_decode.bytes_read == 0 {
@@ -485,7 +452,7 @@ where
         loop {
             let bytes_out = self
                 .encryption
-                .encrypt_size_conv(outgoing_buffer.0.len() + outgoing_buffer.1.len());
+                .encrypt_size_conv(read_write.outgoing_buffer_available());
             if bytes_out == 0 {
                 break;
             }
@@ -496,31 +463,22 @@ where
                 break;
             }
 
-            let (_read, written) = self
-                .encryption
-                .encrypt(buffers, (&mut outgoing_buffer.0, &mut outgoing_buffer.1));
-            debug_assert!(_read <= bytes_out);
-            total_written += written;
-            let out_buf_0_len = outgoing_buffer.0.len();
-            outgoing_buffer = (
-                &mut outgoing_buffer.0[cmp::min(written, out_buf_0_len)..],
-                &mut outgoing_buffer.1[written.saturating_sub(out_buf_0_len)..],
+            let (_read, written) = self.encryption.encrypt(
+                buffers,
+                match read_write.outgoing_buffer.as_mut() {
+                    Some((a, b)) => (a, b),
+                    None => (&mut [], &mut []),
+                },
             );
-            if outgoing_buffer.0.is_empty() {
-                outgoing_buffer = (outgoing_buffer.1, outgoing_buffer.0);
-            }
+            debug_assert!(_read <= bytes_out);
+            read_write.advance_write(written);
         }
 
         // Nothing more can be done.
-        let wake_up_after = self.inner.next_timeout.clone();
-        Ok(ReadWrite {
-            connection: self,
-            read_bytes: total_read,
-            written_bytes: total_written,
-            write_close: false,
-            wake_up_after,
-            event: None,
-        })
+        if let Some(t) = &self.inner.next_timeout {
+            read_write.wake_up_after(t);
+        }
+        Ok((self, None))
     }
 
     fn on_substream_reset(
@@ -826,7 +784,7 @@ where
                     user_data,
                 }
             }
-            _ => panic!(),
+            _ => return, // TODO: too defensive, should be panic!()
         }
     }
 
@@ -894,7 +852,10 @@ where
         substream.queued_bytes()
     }
 
-    /// Closes a notifications substream.
+    /// Closes a notifications substream opened with [`Established::open_notifications_substream`].
+    ///
+    /// This can be done even when in the negotiation phase, in other words before the remote has
+    /// accepted/refused the substream.
     ///
     /// # Panic
     ///
@@ -903,7 +864,12 @@ where
     ///
     pub fn close_notifications_substream(&mut self, id: SubstreamId) {
         let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
+        if !matches!(
+            substream.user_data(),
+            Substream::NotificationsOutNegotiating { .. }
+                | Substream::NotificationsOutHandshakeRecv { .. }
+                | Substream::NotificationsOut { .. }
+        ) {
             panic!()
         }
         *substream.user_data() = Substream::NotificationsOutClosed;
@@ -1071,7 +1037,14 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 user_data,
                             };
                         }
-                        _err => todo!("{:?}", _err), // TODO:
+                        _ => {
+                            // TODO: differentiate between actual error and protocol unavailable?
+                            substream.reset();
+                            return Some(Event::NotificationsOutReject {
+                                id: substream_id,
+                                user_data,
+                            });
+                        }
                     }
                 }
                 Substream::NotificationsOutHandshakeRecv {
@@ -1091,6 +1064,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                             });
                         }
                         Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                            debug_assert_ne!(num_read, 0);
                             data = &data[num_read..];
                             *substream.user_data() = Substream::NotificationsOutHandshakeRecv {
                                 handshake,
@@ -1242,6 +1216,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                         });
                     }
                     Ok((num_read, leb128::Framed::InProgress(handshake))) => {
+                        debug_assert_ne!(num_read, 0);
                         data = &data[num_read..];
                         *substream.user_data() = Substream::NotificationsInHandshake {
                             handshake,
@@ -1254,7 +1229,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                 },
                 Substream::NotificationsInWait { protocol_index } => {
                     // TODO: what to do with data?
-                    data = &data[data.len()..];
+                    data = &[];
                     *substream.user_data() = Substream::NotificationsInWait { protocol_index };
                 }
                 Substream::NotificationsIn {
@@ -1262,8 +1237,7 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                     protocol_index,
                     user_data,
                 } => {
-                    // TODO: rewrite this block to support sending one notification at a
-                    // time
+                    // TODO: rewrite this block to support sending one notification at a time
 
                     let mut notification = None;
                     let max_notification_size =
@@ -1284,10 +1258,9 @@ impl<TNow, TRqUd, TNotifUd> Inner<TNow, TRqUd, TNotifUd> {
                                 break;
                             }
                             Err(_) => {
-                                // TODO: report to user and all ; this is just a dummy
-                                next_notification =
-                                    leb128::FramedInProgress::new(max_notification_size);
-                                break;
+                                substream.reset();
+                                // TODO: report to user; there's no corresponding event yet
+                                return None;
                             }
                         }
                     }
@@ -1378,37 +1351,7 @@ where
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubstreamId(yamux::SubstreamId);
 
-/// Outcome of [`Established::read_write`].
-#[must_use]
-pub struct ReadWrite<TNow, TRqUd, TNotifUd> {
-    /// Connection object yielded back.
-    pub connection: Established<TNow, TRqUd, TNotifUd>,
-
-    /// Number of bytes at the start of the incoming buffer that have been processed. These bytes
-    /// should no longer be present the next time [`Established::read_write`] is called.
-    pub read_bytes: usize,
-
-    /// Number of bytes written to the outgoing buffer. These bytes should be sent out to the
-    /// remote. The rest of the outgoing buffer is left untouched.
-    pub written_bytes: usize,
-
-    /// If `true`, the writing side the connection must be closed. Will always remain to `true`
-    /// after it has been set.
-    ///
-    /// If, after calling [`Established::read_write`], the returned [`ReadWrite`] contains `true`
-    /// here, and the inbound buffer is `None`, then the connection as a whole is useless and can
-    /// be closed.
-    pub write_close: bool,
-
-    /// If `Some`, [`Established::read_write`] should be called again when the point in time
-    /// reaches the value in the `Option`.
-    pub wake_up_after: Option<TNow>,
-
-    /// Event that happened on the connection.
-    pub event: Option<Event<TRqUd, TNotifUd>>,
-}
-
-/// Event that happened on the connection. See [`ReadWrite::event`].
+/// Event that happened on the connection. See [`Established::read_write`].
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
@@ -1525,7 +1468,7 @@ pub enum Error {
 }
 
 /// Error that can happen during a request in a request-response scheme.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum RequestError {
     /// Remote hasn't answered in time.
     Timeout,

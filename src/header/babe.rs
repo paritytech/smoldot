@@ -20,7 +20,6 @@ use crate::util;
 
 use alloc::vec::Vec;
 use core::{cmp, convert::TryFrom, fmt, iter, slice};
-use parity_scale_codec::{Decode as _, DecodeAll as _};
 
 /// A consensus log item for BABE.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,20 +42,19 @@ impl<'a> BabeConsensusLogRef<'a> {
             Some(1) => {
                 BabeConsensusLogRef::NextEpochData(BabeNextEpochRef::from_slice(&slice[1..])?)
             }
-            Some(2) => BabeConsensusLogRef::OnDisabled(
-                u32::decode_all(&slice[1..]).map_err(Error::DigestItemDecodeError)?,
-            ),
+            Some(2) => {
+                let n = u32::from_le_bytes(
+                    <[u8; 4]>::try_from(&slice[1..]).map_err(|_| Error::DigestItemDecodeError)?,
+                );
+                BabeConsensusLogRef::OnDisabled(n)
+            }
             Some(3) => {
                 // The Babe configuration info starts with a version number that is always `1`
                 // at the moment.
                 if slice.len() < 2 || slice[1] != 1 {
                     return Err(Error::BadBabeNextConfigVersion);
                 }
-
-                BabeConsensusLogRef::NextConfigData(
-                    BabeNextConfig::decode_all(&slice[2..])
-                        .map_err(Error::DigestItemDecodeError)?,
-                )
+                BabeConsensusLogRef::NextConfigData(BabeNextConfig::from_slice(&slice[2..])?)
             }
             Some(_) => return Err(Error::BadBabeConsensusRefType),
             None => return Err(Error::TooShort),
@@ -68,37 +66,30 @@ impl<'a> BabeConsensusLogRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             BabeConsensusLogRef::NextEpochData(_) => [1],
             BabeConsensusLogRef::OnDisabled(_) => [2],
             BabeConsensusLogRef::NextConfigData(_) => [3],
-        }));
+        });
 
         let body = match self {
-            BabeConsensusLogRef::NextEpochData(digest) => {
-                either::Either::Left(digest.scale_encoding().map(either::Either::Left))
-            }
-            BabeConsensusLogRef::OnDisabled(digest) => either::Either::Right(iter::once(
-                either::Either::Right(parity_scale_codec::Encode::encode(digest)),
+            BabeConsensusLogRef::NextEpochData(digest) => either::Left(either::Left(
+                digest.scale_encoding().map(either::Left).map(either::Left),
             )),
-            BabeConsensusLogRef::NextConfigData(digest) => {
-                let mut encoded = parity_scale_codec::Encode::encode(digest);
-                encoded.insert(0, 1);
-                either::Either::Right(iter::once(either::Either::Right(encoded)))
-            }
+            BabeConsensusLogRef::OnDisabled(digest) => either::Left(either::Right(iter::once(
+                either::Left(either::Right(digest.to_le_bytes())),
+            ))),
+            BabeConsensusLogRef::NextConfigData(digest) => either::Right(
+                iter::once(either::Right(either::Left([1]))).chain(
+                    digest
+                        .scale_encoding()
+                        .map(either::Right)
+                        .map(either::Right),
+                ),
+            ),
         };
 
-        index
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+        index.map(either::Left).chain(body.map(either::Right))
     }
 }
 
@@ -149,14 +140,12 @@ pub struct BabeNextEpochRef<'a> {
 
 impl<'a> BabeNextEpochRef<'a> {
     /// Decodes a [`BabePreDigestRef`] from a slice of bytes.
-    pub fn from_slice(mut slice: &'a [u8]) -> Result<Self, Error> {
-        // TODO: don't unwrap on decode fail
-        let authorities_len = usize::try_from(
-            parity_scale_codec::Compact::<u64>::decode(&mut slice)
-                .unwrap()
-                .0,
-        )
-        .unwrap();
+    pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
+        let (slice, authorities_len) =
+            match crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(slice) {
+                Ok(s) => s,
+                Err(_) => return Err(Error::TooShort),
+            };
 
         if slice.len() != authorities_len * 40 + 32 {
             return Err(Error::TooShort);
@@ -301,7 +290,7 @@ impl<'a> BabeAuthorityRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        iter::once(either::Either::Right(self.public_key)).chain(iter::once(either::Either::Left(
+        iter::once(either::Right(self.public_key)).chain(iter::once(either::Left(
             parity_scale_codec::Encode::encode(&self.weight),
         )))
     }
@@ -338,6 +327,7 @@ impl<'a> From<BabeAuthorityRef<'a>> for BabeAuthority {
 
 /// Information about the next epoch config, if changed. This is broadcast in the first
 /// block of the epoch, and applies using the same rules as `NextEpochDescriptor`.
+// TODO: remove the Encode & Decode trait derivation ; unfortunately used elsewhere
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
 )]
@@ -348,7 +338,34 @@ pub struct BabeNextConfig {
     pub allowed_slots: BabeAllowedSlots,
 }
 
+impl BabeNextConfig {
+    /// Decodes a [`BabeNextConfig`] from a slice of bytes.
+    pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
+        if slice.len() < 16 {
+            return Err(Error::TooShort);
+        }
+
+        let c0 = u64::from_le_bytes(<[u8; 8]>::try_from(&slice[..8]).unwrap());
+        let c1 = u64::from_le_bytes(<[u8; 8]>::try_from(&slice[8..16]).unwrap());
+        let allowed_slots = BabeAllowedSlots::from_slice(&slice[16..])?;
+
+        Ok(BabeNextConfig {
+            c: (c0, c1),
+            allowed_slots,
+        })
+    }
+
+    /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
+    /// encoding of that object.
+    pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
+        iter::once(either::Left(self.c.0.to_le_bytes()))
+            .chain(iter::once(either::Left(self.c.1.to_le_bytes())))
+            .chain(self.allowed_slots.scale_encoding().map(either::Right))
+    }
+}
+
 /// Types of allowed slots.
+// TODO: remove the Encode & Decode trait derivation ; unfortunately used elsewhere
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode,
 )]
@@ -359,6 +376,28 @@ pub enum BabeAllowedSlots {
     PrimaryAndSecondaryPlainSlots,
     /// Allow primary and secondary VRF slot claims.
     PrimaryAndSecondaryVrfSlots,
+}
+
+impl BabeAllowedSlots {
+    /// Decodes a [`BabeAllowedSlots`] from a slice of bytes.
+    pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
+        Ok(match slice.get(0) {
+            Some(0) => BabeAllowedSlots::PrimarySlots,
+            Some(1) => BabeAllowedSlots::PrimaryAndSecondaryPlainSlots,
+            Some(2) => BabeAllowedSlots::PrimaryAndSecondaryVrfSlots,
+            _ => return Err(Error::BadBabePreDigestRefType),
+        })
+    }
+
+    /// Returns an iterator to list of buffers which, when concatenated, produces the SCALE
+    /// encoding of that object.
+    pub fn scale_encoding(&self) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
+        iter::once(match self {
+            BabeAllowedSlots::PrimarySlots => [0],
+            BabeAllowedSlots::PrimaryAndSecondaryPlainSlots => [1],
+            BabeAllowedSlots::PrimaryAndSecondaryVrfSlots => [2],
+        })
+    }
 }
 
 /// A BABE pre-runtime digest. This contains all data required to validate a
@@ -409,41 +448,29 @@ impl<'a> BabePreDigestRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        #[derive(Clone)]
-        struct One([u8; 1]);
-        impl AsRef<[u8]> for One {
-            fn as_ref(&self) -> &[u8] {
-                &self.0[..]
-            }
-        }
-
-        let index = iter::once(One(match self {
+        let index = iter::once(match self {
             BabePreDigestRef::Primary(_) => [1],
             BabePreDigestRef::SecondaryPlain(_) => [2],
             BabePreDigestRef::SecondaryVRF(_) => [3],
-        }));
+        });
 
         let body = match self {
-            BabePreDigestRef::Primary(digest) => either::Either::Left(either::Either::Left(
+            BabePreDigestRef::Primary(digest) => either::Left(either::Left(
                 digest
                     .scale_encoding()
-                    .map(|buf| either::Either::Left(either::Either::Left(buf))),
+                    .map(|buf| either::Left(either::Left(buf))),
             )),
-            BabePreDigestRef::SecondaryPlain(digest) => {
-                either::Either::Left(either::Either::Right(
-                    digest
-                        .scale_encoding()
-                        .map(|buf| either::Either::Left(either::Either::Right(buf))),
-                ))
-            }
+            BabePreDigestRef::SecondaryPlain(digest) => either::Left(either::Right(
+                digest
+                    .scale_encoding()
+                    .map(|buf| either::Left(either::Right(buf))),
+            )),
             BabePreDigestRef::SecondaryVRF(digest) => {
-                either::Either::Right(digest.scale_encoding().map(either::Either::Right))
+                either::Right(digest.scale_encoding().map(either::Right))
             }
         };
 
-        index
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+        index.map(either::Left).chain(body.map(either::Right))
     }
 }
 
@@ -518,8 +545,8 @@ impl<'a> BabePrimaryPreDigestRef<'a> {
             .map(either::Left);
 
         header
-            .chain(iter::once(either::Either::Right(&self.vrf_output[..])))
-            .chain(iter::once(either::Either::Right(&self.vrf_proof[..])))
+            .chain(iter::once(either::Right(&self.vrf_output[..])))
+            .chain(iter::once(either::Right(&self.vrf_proof[..])))
     }
 }
 
@@ -587,8 +614,13 @@ pub struct BabeSecondaryPlainPreDigest {
 impl BabeSecondaryPlainPreDigest {
     /// Decodes a [`BabeSecondaryPlainPreDigest`] from a slice of bytes.
     pub fn from_slice(slice: &[u8]) -> Result<Self, Error> {
-        let (authority_index, slot_number) =
-            <(u32, u64)>::decode_all(slice).map_err(Error::DigestItemDecodeError)?;
+        if slice.len() != 12 {
+            return Err(Error::DigestItemDecodeError);
+        }
+
+        let authority_index = u32::from_le_bytes(<[u8; 4]>::try_from(&slice[..4]).unwrap());
+        let slot_number = u64::from_le_bytes(<[u8; 8]>::try_from(&slice[4..]).unwrap());
+
         Ok(BabeSecondaryPlainPreDigest {
             authority_index,
             slot_number,
@@ -641,8 +673,8 @@ impl<'a> BabeSecondaryVRFPreDigestRef<'a> {
             .map(either::Left);
 
         header
-            .chain(iter::once(either::Either::Right(&self.vrf_output[..])))
-            .chain(iter::once(either::Either::Right(&self.vrf_proof[..])))
+            .chain(iter::once(either::Right(&self.vrf_output[..])))
+            .chain(iter::once(either::Right(&self.vrf_proof[..])))
     }
 }
 

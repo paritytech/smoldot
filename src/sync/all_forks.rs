@@ -445,7 +445,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// > **Note**: It is in no way mandatory to actually call this function and cancel the
     /// >           requests that are returned.
-    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = RequestId> + '_ {
+    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> + '_ {
         self.inner.blocks.obsolete_requests()
     }
 
@@ -535,7 +535,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 HeaderFromSourceOutcome::HeaderVerify => {
                     return AncestrySearchResponseOutcome::Verify;
                 }
-                HeaderFromSourceOutcome::TooOld => {
+                HeaderFromSourceOutcome::TooOld { .. } => {
                     // Block is below the finalized block number.
                     // Ancestry searches never request any block earlier than the finalized block
                     // number. `TooOld` can happen if the source is misbehaving, but also if the
@@ -618,7 +618,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             is_best,
         ) {
             HeaderFromSourceOutcome::HeaderVerify => BlockAnnounceOutcome::HeaderVerify,
-            HeaderFromSourceOutcome::TooOld => BlockAnnounceOutcome::TooOld,
+            HeaderFromSourceOutcome::TooOld {
+                announce_block_height,
+                finalized_block_height,
+            } => BlockAnnounceOutcome::TooOld {
+                announce_block_height,
+                finalized_block_height,
+            },
             HeaderFromSourceOutcome::AlreadyInChain => BlockAnnounceOutcome::AlreadyInChain,
             HeaderFromSourceOutcome::NotFinalizedChain => BlockAnnounceOutcome::NotFinalizedChain,
             HeaderFromSourceOutcome::Disjoint => BlockAnnounceOutcome::Disjoint,
@@ -633,11 +639,25 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &mut self,
         scale_encoded_message: &[u8],
     ) -> Result<(), blocks_tree::CommitVerifyError> {
-        // TODO: must handle the `NotEnoughBlocks` error separately
-        self.chain
-            .verify_grandpa_commit_message(scale_encoded_message)?
-            .apply();
-        Ok(())
+        // TODO: must also handle the `NotEnoughBlocks` error separately
+        match self
+            .chain
+            .verify_grandpa_commit_message(scale_encoded_message)
+        {
+            Ok(apply) => {
+                apply.apply();
+                Ok(())
+            }
+            // In case where the commit message concerns a block older or equal to the finalized
+            // block, the operation is silently considered successful.
+            Err(blocks_tree::CommitVerifyError::FinalityVerify(
+                blocks_tree::FinalityVerifyError::EqualToFinalized,
+            ))
+            | Err(blocks_tree::CommitVerifyError::FinalityVerify(
+                blocks_tree::FinalityVerifyError::BelowFinalized,
+            )) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Process the next block in the queue of verification.
@@ -645,17 +665,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
     pub fn process_one(self) -> ProcessOne<TBl, TRq, TSrc> {
-        let block = self
-            .inner
-            .blocks
-            .unverified_leaves()
-            .filter(|block| {
-                block.parent_block_hash == self.chain.finalized_block_hash()
-                    || self
-                        .chain
-                        .contains_non_finalized_block(&block.parent_block_hash)
-            })
-            .next();
+        let block = self.inner.blocks.unverified_leaves().find(|block| {
+            block.parent_block_hash == self.chain.finalized_block_hash()
+                || self
+                    .chain
+                    .contains_non_finalized_block(&block.parent_block_hash)
+        });
 
         if let Some(block) = block {
             ProcessOne::HeaderVerify(HeaderVerify {
@@ -690,7 +705,10 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         // Code below does `header.number - 1`. Make sure that `header.number` isn't 0.
         if header.number == 0 {
-            return HeaderFromSourceOutcome::TooOld;
+            return HeaderFromSourceOutcome::TooOld {
+                announce_block_height: 0,
+                finalized_block_height: self.chain.finalized_block_header().number,
+            };
         }
 
         // No matter what is done below, start by updating the view the state machine maintains
@@ -716,11 +734,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
         if header.number <= self.chain.finalized_block_header().number {
-            return HeaderFromSourceOutcome::TooOld;
+            return HeaderFromSourceOutcome::TooOld {
+                announce_block_height: header.number,
+                finalized_block_height: self.chain.finalized_block_header().number,
+            };
         }
 
         // If the block is already part of the local tree of blocks, nothing more to do.
-        if self.chain.contains_non_finalized_block(&header_hash) {
+        if self.chain.contains_non_finalized_block(header_hash) {
             return HeaderFromSourceOutcome::AlreadyInChain;
         }
 
@@ -879,7 +900,12 @@ enum HeaderFromSourceOutcome {
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
-    TooOld,
+    TooOld {
+        /// Height of the announced block.
+        announce_block_height: u64,
+        /// Height of the currently finalized block.
+        finalized_block_height: u64,
+    },
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
     AlreadyInChain,
@@ -900,7 +926,12 @@ pub enum BlockAnnounceOutcome {
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
-    TooOld,
+    TooOld {
+        /// Height of the announced block.
+        announce_block_height: u64,
+        /// Height of the currently finalized block.
+        finalized_block_height: u64,
+    },
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
     AlreadyInChain,

@@ -359,7 +359,7 @@ impl BlockBuild {
 
                     shared.stage = new_stage;
 
-                    match parse_apply_extrinsic_output(&success.virtual_machine.value().as_ref()) {
+                    match parse_apply_extrinsic_output(success.virtual_machine.value().as_ref()) {
                         Ok(Ok(Ok(()))) => {}
                         Ok(Ok(Err(error))) => {
                             return BlockBuild::Finished(Err(
@@ -377,6 +377,7 @@ impl BlockBuild {
                         Err(err) => return BlockBuild::Finished(Err(err)),
                     }
 
+                    // TODO: probably wrong because of double-SCALE-encoding issue
                     shared.block_body.push(extrinsic);
 
                     inner = Inner::Transition(success);
@@ -387,13 +388,14 @@ impl BlockBuild {
                     Stage::ApplyExtrinsic(_),
                 ) => {
                     let result = match parse_apply_extrinsic_output(
-                        &success.virtual_machine.value().as_ref(),
+                        success.virtual_machine.value().as_ref(),
                     ) {
                         Ok(r) => r,
                         Err(err) => return BlockBuild::Finished(Err(err)),
                     };
 
                     if result.is_ok() {
+                        // TODO: probably wrong because of double-SCALE-encoding issue
                         shared.block_body.push(match &mut shared.stage {
                             Stage::ApplyExtrinsic(ext) => mem::replace(ext, Vec::new()),
                             _ => unreachable!(),
@@ -689,9 +691,9 @@ impl PrefixKeys {
         self.0.prefix()
     }
 
-    /// Injects the list of keys.
-    pub fn inject_keys(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BlockBuild {
-        BlockBuild::from_inner(self.0.inject_keys(keys), self.1)
+    /// Injects the list of keys ordered lexicographically.
+    pub fn inject_keys_ordered(self, keys: impl Iterator<Item = impl AsRef<[u8]>>) -> BlockBuild {
+        BlockBuild::from_inner(self.0.inject_keys_ordered(keys), self.1)
     }
 }
 

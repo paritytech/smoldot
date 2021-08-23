@@ -44,7 +44,7 @@ pub struct Config<'a> {
 pub enum ConfigConsensus<'a> {
     /// Any node on the chain is allowed to produce blocks.
     ///
-    /// No seal must be present in the header.  // TODO: is this true?
+    /// No seal must be present in the header.
     ///
     /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
     /// >           be produced. If this variant is used, the user is encouraged to limit, through
@@ -118,7 +118,7 @@ pub enum Success {
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Number of the block to verify isn't equal to the parent block's number plus one.
-    BadBlockNumber,
+    NonSequentialBlockNumber,
     /// Hash of the parent block doesn't match the hash in the header to verify.
     BadParentHash,
     /// Block header contains items relevant to multiple consensus engines at the same time.
@@ -151,7 +151,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         .checked_add(1)
         .map_or(true, |v| v != config.block_header.number)
     {
-        return Err(Error::BadBlockNumber);
+        return Err(Error::NonSequentialBlockNumber);
     }
 
     // TODO: need to verify the changes trie stuff maybe?
@@ -160,6 +160,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
 
     match config.consensus {
         ConfigConsensus::AllAuthorized => {
+            // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
             if config.block_header.digest.has_any_aura()
                 || config.block_header.digest.has_any_babe()
             {

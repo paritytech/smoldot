@@ -36,14 +36,23 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain, header,
+    chain,
+    executor::{host, read_only_runtime_host},
+    header,
     informant::HashDisplay,
     libp2p::{self, PeerId},
     network::{self, protocol, service},
     sync::{all, para},
     trie::{self, prefix_proof, proof_verify},
 };
-use std::{collections::HashMap, convert::TryFrom as _, fmt, num::NonZeroU32, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    convert::TryFrom as _,
+    fmt, iter,
+    num::{NonZeroU32, NonZeroU64},
+    pin::Pin,
+    sync::Arc,
+};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
@@ -72,10 +81,6 @@ pub struct Config {
 pub struct ConfigParachain {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService>,
-
-    /// Index in the network service of [`Config::network_service`] of the relay chain of this
-    /// parachain.
-    pub relay_network_chain_index: usize,
 
     /// Id of the parachain within the relay chain.
     ///
@@ -145,6 +150,9 @@ impl SyncService {
     ///
     /// If you have subscribed to new blocks, the finalized blocks reported in this channel are
     /// guaranteed to have earlier been reported as new blocks.
+    ///
+    /// If you have subscribed to best blocks, the finalized blocks reported in this channel are
+    /// guaranteed to be ancestors of the latest reported best block.
     // TODO: is this last paragraph true for parachains?
     pub async fn subscribe_finalized(&self) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
         let (send_back, rx) = oneshot::channel();
@@ -482,6 +490,7 @@ impl SyncService {
     }
 
     // TODO: documentation
+    // TODO: there's no proof that the call proof is actually correct
     pub async fn call_proof_query<'a>(
         self: Arc<Self>,
         block_number: u64,
@@ -507,7 +516,13 @@ impl SyncService {
                 .await;
 
             match result {
-                Ok(value) => return Ok(value),
+                Ok(value) if !value.is_empty() => return Ok(value),
+                // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
+                Ok(_) => outcome_errors.push(service::CallProofRequestError::Request(
+                    smoldot::libp2p::peers::RequestError::Connection(
+                        smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
+                    ),
+                )),
                 Err(err) => {
                     outcome_errors.push(err);
                 }
@@ -570,11 +585,19 @@ pub enum StorageQueryErrorDetail {
 }
 
 /// Error that can happen when calling [`SyncService::call_proof_query`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CallProofQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
     pub errors: Vec<service::CallProofRequestError>,
+}
+
+impl CallProofQueryError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        self.errors.iter().all(|err| err.is_network_problem())
+    }
 }
 
 impl fmt::Display for CallProofQueryError {
@@ -640,12 +663,12 @@ async fn start_relay_chain(
     let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
-        source_selection_randomness_seed: rand::random(),
-        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
         blocks_capacity: {
             // This is the maximum number of blocks between two consecutive justifications.
             1024
         },
+        max_disjoint_headers: 1024,
+        max_requests_per_block: NonZeroU32::new(3).unwrap(),
         download_ahead_blocks: {
             // Verifying a block mostly consists in:
             //
@@ -683,10 +706,6 @@ async fn start_relay_chain(
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut all_notifications = Vec::<mpsc::Sender<BlockNotification>>::new();
 
-        // Queue of requests that the sync state machine wants to start and that haven't been
-        // sent out yet.
-        let mut requests_to_start = Vec::<all::Action>::with_capacity(16);
-
         let mut has_new_best = false;
         let mut has_new_finalized = false;
 
@@ -699,34 +718,38 @@ async fn start_relay_chain(
             // still exist. This is only guaranteed to be case because we process
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
-            for request in requests_to_start.drain(..) {
+            loop {
+                let (source_id, request) = match sync.desired_requests().next() {
+                    Some(v) => v,
+                    None => break,
+                };
+
+                let request_id = sync.add_request(source_id, request.clone(), ());
+
                 match request {
-                    all::Action::Start {
-                        source_id,
-                        request_id,
-                        detail:
-                            all::RequestDetail::BlocksRequest {
-                                first_block,
-                                ascending,
-                                num_blocks,
-                                request_headers,
-                                request_bodies,
-                                request_justification,
-                            },
+                    all::RequestDetail::BlocksRequest {
+                        first_block_hash,
+                        first_block_height,
+                        ascending,
+                        num_blocks,
+                        request_headers,
+                        request_bodies,
+                        request_justification,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let block_request = network_service.clone().blocks_request(
-                            peer_id.clone(),
+                            peer_id,
                             network_chain_index,
                             network::protocol::BlocksRequestConfig {
-                                start: match first_block {
-                                    all::BlocksRequestFirstBlock::Hash(h) => {
-                                        network::protocol::BlocksRequestConfigStart::Hash(h)
-                                    }
-                                    all::BlocksRequestFirstBlock::Number(n) => {
-                                        network::protocol::BlocksRequestConfigStart::Number(n)
-                                    }
+                                start: if let Some(first_block_hash) = first_block_hash {
+                                    network::protocol::BlocksRequestConfigStart::Hash(
+                                        first_block_hash,
+                                    )
+                                } else {
+                                    network::protocol::BlocksRequestConfigStart::Number(
+                                        NonZeroU64::new(first_block_height).unwrap(), // TODO: unwrap?
+                                    )
                                 },
                                 desired_count: NonZeroU32::new(
                                     u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
@@ -751,18 +774,13 @@ async fn start_relay_chain(
                         pending_block_requests
                             .push(async move { (request_id, block_request.await) });
                     }
-                    all::Action::Start {
-                        source_id,
-                        request_id,
-                        detail:
-                            all::RequestDetail::GrandpaWarpSync {
-                                sync_start_block_hash,
-                            },
+                    all::RequestDetail::GrandpaWarpSync {
+                        sync_start_block_hash,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let grandpa_request = network_service.clone().grandpa_warp_sync_request(
-                            peer_id.clone(),
+                            peer_id,
                             network_chain_index,
                             sync_start_block_hash,
                         );
@@ -773,21 +791,16 @@ async fn start_relay_chain(
                         pending_grandpa_requests
                             .push(async move { (request_id, grandpa_request.await) });
                     }
-                    all::Action::Start {
-                        source_id,
-                        request_id,
-                        detail:
-                            all::RequestDetail::StorageGet {
-                                block_hash,
-                                state_trie_root,
-                                keys,
-                            },
+                    all::RequestDetail::StorageGet {
+                        block_hash,
+                        state_trie_root,
+                        keys,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let storage_request = network_service.clone().storage_proof_request(
                             network_chain_index,
-                            peer_id.clone(),
+                            peer_id,
                             network::protocol::StorageProofRequestConfig {
                                 block_hash,
                                 keys: keys.clone().into_iter(),
@@ -822,11 +835,10 @@ async fn start_relay_chain(
                         pending_storage_requests
                             .push(async move { (request_id, storage_request.await) });
                     }
-                    all::Action::Cancel(request_id) => {
-                        pending_requests.remove(&request_id).unwrap().abort();
-                    }
                 }
             }
+
+            // TODO: handle obsolete requests
 
             // The sync state machine can be in a few various states. At the time of writing:
             // idle, verifying header, verifying block, verifying grandpa warp sync proof,
@@ -840,26 +852,32 @@ async fn start_relay_chain(
                         break;
                     }
                     all::ProcessOne::VerifyWarpSyncFragment(verify) => {
-                        let (sync_out, next_actions, result) = verify.perform();
+                        let sender_peer_id = verify.proof_sender().1.clone(); // TODO: unnecessary cloning most of the time
+
+                        let (sync_out, result) = verify.perform();
                         sync = sync_out;
-                        requests_to_start.extend(next_actions);
 
                         if let Err(err) = result {
-                            // TODO: indicate peer who sent it?
                             log::warn!(
                                 target: "sync-verify",
-                                "Failed to verify warp sync fragment: {}", err
+                                "Failed to verify warp sync fragment from {}: {}", sender_peer_id, err
                             );
                         }
+
+                        // Verifying a fragment is rather expensive. We yield in order to not
+                        // block the entire node.
+                        super::yield_once().await;
                     }
-                    all::ProcessOne::VerifyHeaderBody(_) => unreachable!(),
                     all::ProcessOne::VerifyHeader(verify) => {
                         let verified_hash = verify.hash();
+
+                        // Verifying a block is rather expensive. We yield in order to not
+                        // block the entire node.
+                        super::yield_once().await;
 
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
                                 sync: sync_out,
-                                next_actions,
                                 is_new_best,
                                 is_new_finalized,
                                 ..
@@ -870,8 +888,6 @@ async fn start_relay_chain(
                                     HashDisplay(&verified_hash),
                                     if is_new_best { "yes" } else { "no" }
                                 );
-
-                                requests_to_start.extend(next_actions);
 
                                 if is_new_best {
                                     has_new_best = true;
@@ -909,7 +925,6 @@ async fn start_relay_chain(
                             }
                             all::HeaderVerifyOutcome::Error {
                                 sync: sync_out,
-                                next_actions,
                                 error,
                                 ..
                             } => {
@@ -920,12 +935,14 @@ async fn start_relay_chain(
                                     error
                                 );
 
-                                requests_to_start.extend(next_actions);
                                 sync = sync_out;
                                 continue;
                             }
                         }
                     }
+
+                    // Can't verify header and body in non-full mode.
+                    all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
                 }
             }
 
@@ -934,9 +951,11 @@ async fn start_relay_chain(
                 has_new_best = false;
 
                 let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                // TODO: remove expired senders
-                for notif in &mut best_notifications {
-                    let _ = notif.send(scale_encoded_header.clone());
+                for index in (0..best_notifications.len()).rev() {
+                    let mut notif = best_notifications.swap_remove(index);
+                    if notif.send(scale_encoded_header.clone()).is_ok() {
+                        best_notifications.push(notif);
+                    }
                 }
 
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
@@ -982,9 +1001,11 @@ async fn start_relay_chain(
                 }
 
                 let scale_encoded_header = sync.finalized_block_header().scale_encoding_vec();
-                // TODO: remove expired senders
-                for notif in &mut finalized_notifications {
-                    let _ = notif.send(scale_encoded_header.clone());
+                for index in (0..finalized_notifications.len()).rev() {
+                    let mut notif = finalized_notifications.swap_remove(index);
+                    if notif.send(scale_encoded_header.clone()).is_ok() {
+                        finalized_notifications.push(notif);
+                    }
                 }
 
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
@@ -1016,16 +1037,17 @@ async fn start_relay_chain(
                         network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
-                            let (id, requests) = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let id = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
-                            requests_to_start.extend(requests);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
                             if chain_index == network_chain_index =>
                         {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (requests, _) = sync.remove_source(id);
-                            requests_to_start.extend(requests);
+                            let (_, requests) = sync.remove_source(id);
+                            for (request_id, _, _) in requests {
+                                pending_requests.remove(&request_id).unwrap().abort();
+                            }
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
                             if chain_index == network_chain_index =>
@@ -1033,15 +1055,40 @@ async fn start_relay_chain(
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: stupid to re-encode header
-                            // TODO: log the outcome
                             match sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify => {},
-                                all::BlockAnnounceOutcome::TooOld => {},
-                                all::BlockAnnounceOutcome::AlreadyInChain => {},
-                                all::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
-                                all::BlockAnnounceOutcome::Disjoint { next_actions } => {
-                                    requests_to_start.extend(next_actions);
+                                all::BlockAnnounceOutcome::HeaderVerify |
+                                all::BlockAnnounceOutcome::AlreadyInChain => {
+                                    log::debug!(
+                                        target: "sync-verify",
+                                        "Processed block announce from {}", peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::Disjoint {} => {
+                                    log::debug!(
+                                        target: "sync-verify",
+                                        "Processed block announce from {} (disjoint)", peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::TooOld { announce_block_height, .. } => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Block announce header height (#{}) from {} is below finalized block",
+                                        announce_block_height, peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::NotFinalizedChain => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Block announce from {} isn't part of finalized chain",
+                                        peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::InvalidHeader(err) => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Failed to decode block announce header from {}: {}",
+                                        peer_id, err
+                                    );
                                 },
                             }
                         },
@@ -1223,12 +1270,10 @@ async fn start_relay_chain(
             // `response_outcome` represents the way the state machine has changed as a
             // consequence of the response to a request.
             match response_outcome {
-                all::ResponseOutcome::Queued { next_actions }
-                | all::ResponseOutcome::NotFinalizedChain { next_actions, .. }
-                | all::ResponseOutcome::AllAlreadyInChain { next_actions, .. } => {
-                    requests_to_start.extend(next_actions);
-                }
-                all::ResponseOutcome::WarpSyncFinished { next_actions } => {
+                all::ResponseOutcome::Queued
+                | all::ResponseOutcome::NotFinalizedChain { .. }
+                | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
+                all::ResponseOutcome::WarpSyncFinished => {
                     let finalized_num = sync.finalized_block_header().number;
                     log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
                     has_new_finalized = true;
@@ -1236,7 +1281,6 @@ async fn start_relay_chain(
                     // Since there is a gap in the blocks, all active notifications to all blocks
                     // must be cleared.
                     all_notifications.clear();
-                    requests_to_start.extend(next_actions);
                 }
             }
         }
@@ -1306,6 +1350,8 @@ async fn start_parachain(
                         });
 
                         // TODO: `_tx` is immediately discarded; the feature isn't actually fully implemented
+                        // TODO: a `mem::forget` is used in order to avoid issues in other parts of the code, but is a complete hack
+                        core::mem::forget(_tx);
                     }
                     ToBackground::PeersAssumedKnowBlock { send_back, .. } => {
                         let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
@@ -1323,26 +1369,17 @@ async fn start_parachain(
                 // accidentally call this block multiple times.
                 while let Some(_) = relay_best_blocks.next().now_or_never() {}
 
-                // Determine if the call to `recent_best_block_runtime_call` below applies to a
-                // block that is near the head of the chain.
+                // Determine if the call to `recent_best_block_runtime_call` in the `parahead`
+                // function applies to a block that is near the head of the chain.
                 let relay_sync_near_head_of_chain =
                     parachain_config.relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
-                // For each relay chain block, call `ParachainHost_persisted_validation_data` in
-                // order to know where the parachains are.
-                let pvd_result = parachain_config.relay_chain_sync.recent_best_block_runtime_call(
-                    para::PERSISTED_VALIDATION_FUNCTION_NAME,
-                    para::persisted_validation_data_parameters(
-                        parachain_config.parachain_id,
-                        para::OccupiedCoreAssumption::TimedOut
-                    )
-                ).await;
-
+                // Do the actual runtime call to obtain the parahead.
                 // Even if there isn't any bug, the runtime call can likely fail because the relay
                 // chain block has already been pruned from the network. This isn't a severe
                 // error.
-                let encoded_pvd = match pvd_result {
-                    Ok(encoded_pvd) => encoded_pvd,
+                let encoded_head_data = match parahead(&parachain_config.relay_chain_sync, parachain_config.parachain_id).await {
+                    Ok(v) => v,
                     Err(err) => {
                         previous_best_head_data_hash = None;
                         if err.is_network_problem() {
@@ -1358,7 +1395,7 @@ async fn start_parachain(
                 // If this fails, it indicates an incompatibility between smoldot and the relay
                 // chain.
                 let head_data =
-                    match para::decode_persisted_validation_data_return_value(&encoded_pvd) {
+                    match para::decode_persisted_validation_data_return_value(&encoded_head_data) {
                         Ok(Some(pvd)) => pvd.parent_head,
                         Ok(None) => {
                             // `Ok(None)` indicates that the parachain doesn't occupy any core
@@ -1419,6 +1456,92 @@ async fn start_parachain(
                     }
                 }
             }
+        }
+    }
+}
+
+async fn parahead(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+    parachain_id: u32,
+) -> Result<Vec<u8>, ParaheadError> {
+    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
+    // order to know where the parachains are.
+    let (runtime_call_lock, virtual_machine) = relay_chain_sync
+        .recent_best_block_runtime_call(
+            para::PERSISTED_VALIDATION_FUNCTION_NAME,
+            para::persisted_validation_data_parameters(
+                parachain_id,
+                para::OccupiedCoreAssumption::TimedOut,
+            ),
+        )
+        .await
+        .map_err(ParaheadError::Call)?;
+
+    // TODO: move the logic below in the `para` module
+
+    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+        virtual_machine,
+        function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
+        parameter: para::persisted_validation_data_parameters(
+            parachain_id,
+            para::OccupiedCoreAssumption::TimedOut,
+        ),
+    }) {
+        Ok(vm) => vm,
+        Err((err, prototype)) => {
+            runtime_call_lock.unlock(prototype);
+            return Err(ParaheadError::StartError(err));
+        }
+    };
+
+    loop {
+        match runtime_call {
+            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                let output = success.virtual_machine.value().as_ref().to_owned();
+                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
+                break Ok(output);
+            }
+            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                runtime_call_lock.unlock(error.prototype);
+                break Err(ParaheadError::ReadOnlyRuntime(error.detail));
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        runtime_call_lock.unlock(
+                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
+                        );
+                        return Err(ParaheadError::Call(err));
+                    }
+                };
+                runtime_call = get.inject_value(storage_value.map(iter::once));
+            }
+            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                todo!() // TODO:
+            }
+            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+            }
+        }
+    }
+}
+
+#[derive(derive_more::Display)]
+enum ParaheadError {
+    Call(runtime_service::RuntimeCallError),
+    StartError(host::StartErr),
+    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+}
+
+impl ParaheadError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    fn is_network_problem(&self) -> bool {
+        match self {
+            ParaheadError::Call(err) => err.is_network_problem(),
+            ParaheadError::StartError(_) => false,
+            ParaheadError::ReadOnlyRuntime(_) => false,
         }
     }
 }

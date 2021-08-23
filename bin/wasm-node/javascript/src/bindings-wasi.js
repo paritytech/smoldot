@@ -40,6 +40,9 @@ export default (config) => {
         // Need to fill the buffer described by `ptr` and `len` with random data.
         // This data will be used in order to generate secrets. Do not use a dummy implementation!
         random_get: (ptr, len) => {
+            ptr >>>= 0;
+            len >>>= 0;
+
             const bytes = randombytes(len);
             bytes.copy(Buffer.from(config.instance.exports.memory.buffer), ptr);
             return 0;
@@ -47,6 +50,8 @@ export default (config) => {
 
         // Writing to a file descriptor is used in order to write to stdout/stderr.
         fd_write: (fd, addr, num, out_ptr) => {
+            out_ptr >>>= 0;
+
             // Only stdout and stderr are open for writing.
             if (fd != 1 && fd != 2) {
                 return 8;
@@ -113,6 +118,9 @@ export default (config) => {
         // Return the number of environment variables and the total size of all environment
         // variables. This is called in order to initialize buffers before `environ_get`.
         environ_sizes_get: (argcOut, argvBufSizeOut) => {
+            argcOut >>>= 0;
+            argvBufSizeOut >>>= 0;
+
             let totalLen = 0;
             envVars.forEach(e => totalLen += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
 
@@ -128,6 +136,9 @@ export default (config) => {
         // the environment variables.
         // The sizes of the buffers were determined by calling `environ_sizes_get`.
         environ_get: (argv, argv_buf) => {
+            argv >>>= 0;
+            argv_buf >>>= 0;
+
             const mem = Buffer.from(config.instance.exports.memory.buffer);
 
             let argvPos = 0;

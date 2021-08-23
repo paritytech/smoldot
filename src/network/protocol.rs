@@ -51,6 +51,6 @@ mod schema {
 }
 
 /// Error while decoding the protobuf encoding.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 #[display(fmt = "{}", _0)]
 pub struct ProtobufDecodeError(prost::DecodeError);

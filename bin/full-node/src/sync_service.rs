@@ -33,7 +33,7 @@ use smoldot::{
     executor, header, libp2p, network,
     sync::{all, optimistic},
 };
-use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
+use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::SystemTime};
 use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
@@ -171,8 +171,8 @@ fn start_sync(
             // This is the maximum number of blocks between two consecutive justifications.
             1024
         },
-        source_selection_randomness_seed: rand::random(),
-        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
+        max_disjoint_headers: 1024,
+        max_requests_per_block: NonZeroU32::new(3).unwrap(),
         download_ahead_blocks: {
             // Assuming a verification speed of 1k blocks/sec and a 95% latency of one second,
             // the number of blocks to download ahead of time in order to not block is 1000.
@@ -207,10 +207,6 @@ fn start_sync(
         // TODO: remove; should store the aborthandle in the TRq user data instead
         let mut pending_requests = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::default();
 
-        // Queue of requests that the sync state machine wants to start and that haven't been
-        // sent out yet.
-        let mut requests_to_start = Vec::<all::Action>::with_capacity(16);
-
         loop {
             // Drain the content of `requests_to_start` to actually start the requests that have
             // been queued by the previous iteration of the main loop.
@@ -219,20 +215,23 @@ fn start_sync(
             // still exist. This is only guaranteed to be case because we process
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
-            for request in requests_to_start.drain(..) {
+            loop {
+                let (source_id, request) = match sync.desired_requests().next() {
+                    Some(v) => v,
+                    None => break,
+                };
+
+                let request_id = sync.add_request(source_id, request.clone(), ());
+
                 match request {
-                    all::Action::Start {
-                        source_id,
-                        request_id,
-                        detail:
-                            all::RequestDetail::BlocksRequest {
-                                first_block,
-                                ascending,
-                                num_blocks,
-                                request_headers,
-                                request_bodies,
-                                request_justification,
-                            },
+                    all::RequestDetail::BlocksRequest {
+                        first_block_hash,
+                        first_block_height,
+                        ascending,
+                        num_blocks,
+                        request_headers,
+                        request_bodies,
+                        request_justification,
                     } => {
                         let peer_id = sync.source_user_data_mut(source_id).clone();
 
@@ -240,13 +239,14 @@ fn start_sync(
                             peer_id,
                             network_chain_index,
                             network::protocol::BlocksRequestConfig {
-                                start: match first_block {
-                                    all::BlocksRequestFirstBlock::Hash(h) => {
-                                        network::protocol::BlocksRequestConfigStart::Hash(h)
-                                    }
-                                    all::BlocksRequestFirstBlock::Number(n) => {
-                                        network::protocol::BlocksRequestConfigStart::Number(n)
-                                    }
+                                start: if let Some(first_block_hash) = first_block_hash {
+                                    network::protocol::BlocksRequestConfigStart::Hash(
+                                        first_block_hash,
+                                    )
+                                } else {
+                                    network::protocol::BlocksRequestConfigStart::Number(
+                                        NonZeroU64::new(first_block_height).unwrap(), // TODO: unwrap?
+                                    )
                                 },
                                 desired_count: NonZeroU32::new(
                                     u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
@@ -270,22 +270,15 @@ fn start_sync(
 
                         block_requests_finished.push(request.map(move |r| (request_id, r)));
                     }
-                    all::Action::Start {
-                        detail: all::RequestDetail::GrandpaWarpSync { .. },
-                        ..
-                    }
-                    | all::Action::Start {
-                        detail: all::RequestDetail::StorageGet { .. },
-                        ..
-                    } => {
+                    all::RequestDetail::GrandpaWarpSync { .. }
+                    | all::RequestDetail::StorageGet { .. } => {
                         // Not used in "full" mode.
                         unreachable!()
                     }
-                    all::Action::Cancel(request_id) => {
-                        pending_requests.remove(&request_id).unwrap().abort();
-                    }
                 }
             }
+
+            // TODO: handle obsolete requests
 
             // The sync state machine can be in a few various states. At the time of writing:
             // idle, verifying header, verifying block, verifying grandpa warp sync proof,
@@ -303,24 +296,21 @@ fn start_sync(
                         break;
                     }
                     all::ProcessOne::VerifyWarpSyncFragment(_) => unreachable!(),
-                    all::ProcessOne::VerifyHeaderBody(verify) => {
+                    all::ProcessOne::VerifyBodyHeader(verify) => {
                         let mut verify = verify.start(unix_time, ());
                         loop {
                             match verify {
                                 all::BlockVerification::Error {
                                     sync: sync_out,
                                     error,
-                                    next_actions,
                                     ..
                                 } => {
                                     tracing::warn!(%error, "failed-block-verification");
-                                    requests_to_start.extend(next_actions);
                                     sync = sync_out;
                                     break;
                                 }
                                 all::BlockVerification::Finalized {
                                     sync: sync_out,
-                                    next_actions,
                                     finalized_blocks,
                                 } => {
                                     // TODO: restore this code
@@ -358,15 +348,10 @@ fn start_sync(
                                         .await
                                         .unwrap();
 
-                                    requests_to_start.extend(next_actions);
                                     sync = sync_out;
                                     break;
                                 }
-                                all::BlockVerification::Success {
-                                    sync: sync_out,
-                                    next_actions,
-                                    ..
-                                } => {
+                                all::BlockVerification::Success { sync: sync_out, .. } => {
                                     // TODO: restore this code
                                     /*
                                     // Processing has made a step forward.
@@ -378,7 +363,6 @@ fn start_sync(
                                     drop(lock);
                                      */
 
-                                    requests_to_start.extend(next_actions);
                                     sync = sync_out;
                                     break;
                                 }
@@ -407,32 +391,25 @@ fn start_sync(
                                         .range(req.prefix().as_ref().to_vec()..)
                                         .take_while(|(k, _)| k.starts_with(&prefix))
                                         .map(|(k, _)| k);
-                                    verify = req.inject_keys(keys);
+                                    verify = req.inject_keys_ordered(keys);
                                 }
                             }
                         }
                     }
                     all::ProcessOne::VerifyHeader(verify) => {
                         match verify.perform(unix_time, ()) {
-                            all::HeaderVerifyOutcome::Success {
-                                sync: sync_out,
-                                next_actions,
-                                ..
-                            } => {
-                                requests_to_start.extend(next_actions);
+                            all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
                                 sync = sync_out;
                                 continue;
                             }
                             all::HeaderVerifyOutcome::Error {
                                 sync: sync_out,
-                                next_actions,
                                 error,
                                 ..
                             } => {
                                 // TODO: print block info
                                 tracing::warn!(%error, "failed-block-verification");
 
-                                requests_to_start.extend(next_actions);
                                 sync = sync_out;
                                 continue;
                             }
@@ -459,16 +436,17 @@ fn start_sync(
                         network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
-                            let (id, requests) = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let id = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
-                            requests_to_start.extend(requests);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
                             if chain_index == network_chain_index =>
                         {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (requests, _) = sync.remove_source(id);
-                            requests_to_start.extend(requests);
+                            let (_, requests) = sync.remove_source(id);
+                            for (request_id, _, _) in requests {
+                                pending_requests.remove(&request_id).unwrap().abort();
+                            }
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
                             if chain_index == network_chain_index =>
@@ -479,12 +457,11 @@ fn start_sync(
                             // TODO: log the outcome
                             match sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
-                                all::BlockAnnounceOutcome::TooOld => {},
+                                all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
                                 all::BlockAnnounceOutcome::InvalidHeader(_) => {},
-                                all::BlockAnnounceOutcome::Disjoint { next_actions } => {
-                                    requests_to_start.extend(next_actions);
+                                all::BlockAnnounceOutcome::Disjoint {} => {
                                 },
                             }
                         },
@@ -508,10 +485,9 @@ fn start_sync(
                         })));
 
                         match response_outcome {
-                            all::ResponseOutcome::Queued { next_actions }
-                            | all::ResponseOutcome::NotFinalizedChain { next_actions, .. }
-                            | all::ResponseOutcome::AllAlreadyInChain { next_actions, .. } => {
-                                requests_to_start.extend(next_actions);
+                            all::ResponseOutcome::Queued
+                            | all::ResponseOutcome::NotFinalizedChain { .. }
+                            | all::ResponseOutcome::AllAlreadyInChain { .. } => {
                             }
                             all::ResponseOutcome::WarpSyncFinished { .. } => {
                                 unreachable!()
@@ -537,11 +513,7 @@ async fn start_database_write(
                 let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
                 let _enter = span.enter();
 
-                let new_finalized_hash = if let Some(last_finalized) = finalized_blocks.last() {
-                    Some(last_finalized.header.hash())
-                } else {
-                    None
-                };
+                let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
 
                 for block in finalized_blocks {
                     // TODO: overhead for building the SCALE encoding of the header

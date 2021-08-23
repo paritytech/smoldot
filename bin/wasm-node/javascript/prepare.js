@@ -18,15 +18,25 @@
 import * as child_process from 'child_process';
 import * as fs from 'fs';
 
-// Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`.
-// At the moment this defaults to `debug` because correctness is more important than speed.
-const build_profile = 'debug';
+// Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`, based
+// on the CLI options passed by the user.
+let build_profile;
+if (process.argv.slice(2).indexOf("--debug") !== -1) {
+    build_profile = 'debug';
+}
+if (process.argv.slice(2).indexOf("--release") !== -1) {
+    if (build_profile)
+        throw new Error("Can't pass both --debug and --release");
+    build_profile = 'release';
+}
+if (build_profile != 'debug' && build_profile != 'release')
+    throw new Error("Either --debug or --release must be passed");
 
 // The Rust version to use.
 // The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
 // possible for the wasm-js bindings to change between two Rust versions. Feel free to update
 // this version pin whenever you like, provided it continues to build.
-const rust_version = '1.51.0';
+const rust_version = '1.54.0';
 
 // Assume that the user has `rustup` installed and make sure that `rust_version` is available.
 // Because `rustup install` requires an Internet connection, check whether the toolchain is
@@ -51,7 +61,7 @@ child_process.execSync(
 // The important step in this script is running `cargo build --target wasm32-wasi` on the Rust
 // code. This generates a `wasm` file in `target/wasm32-wasi`.
 child_process.execSync(
-    "cargo +" + rust_version + " build --package smoldot-js --target wasm32-wasi --no-default-features"
+    "cargo +" + rust_version + " build --package smoldot-light --target wasm32-wasi --no-default-features"
     + (build_profile == 'debug' ? '' : ' --' + build_profile),
     { 'stdio': 'inherit' }
 );
@@ -64,7 +74,7 @@ try {
     if (build_profile == 'release') {
         child_process.execSync(
             "wasm-opt -o src/autogen/tmp.wasm -Os --strip-debug --vacuum --dce "
-            + "../../../target/wasm32-wasi/" + build_profile + "/smoldot_js.wasm",
+            + "../../../target/wasm32-wasi/" + build_profile + "/smoldot_light.wasm",
             { 'stdio': 'inherit' }
         );
     } else {
@@ -76,7 +86,7 @@ try {
     fallback_copy = true;
 }
 if (fallback_copy) {
-    fs.copyFileSync("../../../target/wasm32-wasi/" + build_profile + "/smoldot_js.wasm", "./src/autogen/tmp.wasm");
+    fs.copyFileSync("../../../target/wasm32-wasi/" + build_profile + "/smoldot_light.wasm", "./src/autogen/tmp.wasm");
 }
 
 // We then base64-encode the `.wasm` file, and put this base64 string as a constant in

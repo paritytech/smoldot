@@ -42,7 +42,7 @@ pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseError> 
         None => return Err(ParseError::UnknownNotification(call_def.method)),
     };
 
-    let call = match MethodCall::from_defs(&call_def.method, call_def.params_json) {
+    let call = match MethodCall::from_defs(call_def.method, call_def.params_json) {
         Ok(c) => c,
         Err(error) => return Err(ParseError::Method { request_id, error }),
     };
@@ -144,11 +144,17 @@ pub struct InvalidParameterError(serde_json::Error);
 
 /// Generates the [`MethodCall`] and [`Response`] enums based on the list of supported requests.
 macro_rules! define_methods {
-    ($($name:ident($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty $([$($alias:ident),*])*,)*) => {
+    ($(
+        $(#[$attrs:meta])*
+        $name:ident ($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty
+            $([$($alias:ident),*])*
+        ,
+    )*) => {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone)]
         pub enum MethodCall<'a> {
             $(
+                $(#[$attrs])*
                 $name {
                     $($p_name: $p_ty),*
                 },
@@ -297,6 +303,7 @@ define_methods! {
     offchain_localStorageGet() -> (), // TODO:
     offchain_localStorageSet() -> (), // TODO:
     payment_queryInfo(extrinsic: HexString, hash: Option<HashHexString>) -> RuntimeDispatchInfo,
+    /// Returns a list of all JSON-RPC methods that are available.
     rpc_methods() -> RpcMethods,
     state_call() -> () [state_callAt], // TODO:
     state_getKeys() -> (), // TODO:
@@ -312,7 +319,7 @@ define_methods! {
     state_queryStorageAt(keys: Vec<HexString>, at: Option<HashHexString>) -> Vec<StorageChangeSet>, // TODO:
     state_subscribeRuntimeVersion() -> &'a str [chain_subscribeRuntimeVersion],
     state_subscribeStorage(list: Vec<HexString>) -> &'a str,
-    state_unsubscribeRuntimeVersion() -> bool [chain_unsubscribeRuntimeVersion],
+    state_unsubscribeRuntimeVersion(subscription: &'a str) -> bool [chain_unsubscribeRuntimeVersion],
     state_unsubscribeStorage(subscription: &'a str) -> bool,
     system_accountNextIndex(account: AccountId) -> u64,
     system_addReservedPeer() -> (), // TODO:
@@ -321,13 +328,16 @@ define_methods! {
     system_dryRun() -> () [system_dryRunAt], // TODO:
     system_health() -> SystemHealth,
     system_localListenAddresses() -> Vec<String>,
+    /// Returns the base58 encoding of the network identity of the node on the peer-to-peer network.
     system_localPeerId() -> &'a str,
+    /// Returns, as an opaque string, the name of the client serving these JSON-RPC requests.
     system_name() -> &'a str,
     system_networkState() -> (), // TODO:
     system_nodeRoles() -> (), // TODO:
     system_peers() -> Vec<SystemPeer>,
     system_properties() -> Box<serde_json::value::RawValue>,
     system_removeReservedPeer() -> (), // TODO:
+    /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> &'a str,
 }
 
@@ -490,7 +500,7 @@ pub struct RuntimeVersion {
 pub struct RuntimeDispatchInfo {
     pub weight: u64,
     pub class: DispatchClass,
-    pub partial_fee: u64,
+    pub partial_fee: u128,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -652,7 +662,7 @@ impl serde::Serialize for RuntimeVersion {
             apis: self
                 .apis
                 .iter()
-                .map(|(name, version)| (HexString(name.to_vec()), *version))
+                .map(|(name_hash, version)| (HexString(name_hash.to_vec()), *version))
                 .collect(),
         }
         .serialize(serializer)

@@ -57,10 +57,11 @@
 
 // TODO: write usage
 
+use super::super::read_write::ReadWrite;
 use crate::util::leb128;
 
 use alloc::{vec, vec::Vec};
-use core::{cmp, fmt, iter, mem, slice, str};
+use core::{cmp, fmt, iter, mem, str};
 
 /// Configuration of a multistream-select protocol.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -178,7 +179,7 @@ where
             config: Some(config),
             // Note that the listener theoretically doesn't necessarily have to immediately send
             // a handshake, and could instead wait for a command from the dialer. In practice,
-            // however, the specifications don't mention anything about this, and some libraries
+            // however, the specification doesn't mention anything about this, and some libraries
             // such as js-libp2p wait for the listener to send a handshake before emitting a
             // command.
             state: InProgressState::SendHandshake {
@@ -189,34 +190,26 @@ where
         }
     }
 
-    /// Feeds data coming from a socket through `incoming_data`, updates the internal state
-    /// machine, and writes data destined to the socket to `outgoing_buffer`.
+    /// Feeds data coming from a socket, updates the internal state machine, and writes data
+    /// destined to the socket.
     ///
-    /// On success, returns the new state of the negotiation, plus the number of bytes that have
-    /// been read from `incoming_data` and the number of bytes that have been written to
-    /// `outgoing_buffer`.
+    /// On success, returns the new state of the negotiation.
     ///
     /// An error is returned if the protocol is being violated by the remote. When that happens,
     /// the connection should be closed altogether.
-    ///
-    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
-    pub fn read_write(
+    pub fn read_write<TNow>(
         mut self,
-        mut incoming_data: &[u8],
-        mut outgoing_buffer: &mut [u8],
-    ) -> Result<(Negotiation<I, P>, usize, usize), Error> {
-        let mut total_read = 0;
-        let mut total_written = 0;
-
+        read_write: &mut ReadWrite<TNow>,
+    ) -> Result<Negotiation<I, P>, Error> {
         loop {
             // `self.recv_buffer` serves as a helper to delimit `data` into frames. The first step
             // is to inject the received data into `recv_buffer`.
             if let leb128::Framed::InProgress(recv_buffer) = self.recv_buffer {
-                let (num_read, framed_result) =
-                    recv_buffer.update(incoming_data).map_err(Error::Frame)?;
+                let (num_read, framed_result) = recv_buffer
+                    .update(read_write.incoming_buffer.as_ref().unwrap_or(&&[][..]))
+                    .map_err(Error::Frame)?;
                 self.recv_buffer = framed_result;
-                total_read += num_read;
-                incoming_data = &incoming_data[num_read..];
+                read_write.advance_read(num_read);
             }
 
             match (self.state, &mut self.config) {
@@ -227,10 +220,10 @@ where
                     Some(config),
                 ) => {
                     let message = MessageOut::Handshake::<iter::Empty<_>, &'static str>;
-                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
-                    outgoing_buffer = &mut outgoing_buffer[written..];
-                    total_written += written;
-                    num_bytes_written += written;
+
+                    let written_before = read_write.written_bytes;
+                    let done = message.write_out(num_bytes_written, read_write);
+                    num_bytes_written += read_write.written_bytes - written_before;
 
                     match (done, config) {
                         (false, _) => {
@@ -257,10 +250,10 @@ where
                     let message = MessageOut::ProtocolRequest::<iter::Empty<_>, _>(
                         requested_protocol.as_ref(),
                     );
-                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
-                    outgoing_buffer = &mut outgoing_buffer[written..];
-                    total_written += written;
-                    num_bytes_written += written;
+
+                    let written_before = read_write.written_bytes;
+                    let done = message.write_out(num_bytes_written, read_write);
+                    num_bytes_written += read_write.written_bytes - written_before;
 
                     if done {
                         self.state = InProgressState::HandshakeExpected;
@@ -277,10 +270,10 @@ where
                     _,
                 ) => {
                     let message = MessageOut::ProtocolNa::<iter::Empty<_>, &'static str>;
-                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
-                    outgoing_buffer = &mut outgoing_buffer[written..];
-                    total_written += written;
-                    num_bytes_written += written;
+
+                    let written_before = read_write.written_bytes;
+                    let done = message.write_out(num_bytes_written, read_write);
+                    num_bytes_written += read_write.written_bytes - written_before;
 
                     if done {
                         self.state = InProgressState::CommandExpected;
@@ -298,12 +291,13 @@ where
                     _,
                 ) => {
                     let message = MessageOut::ProtocolOk::<iter::Empty<_>, _>(protocol.as_ref());
-                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
-                    total_written += written;
-                    num_bytes_written += written;
+
+                    let written_before = read_write.written_bytes;
+                    let done = message.write_out(num_bytes_written, read_write);
+                    num_bytes_written += read_write.written_bytes - written_before;
 
                     if done {
-                        return Ok((Negotiation::Success(protocol), total_read, total_written));
+                        return Ok(Negotiation::Success(protocol));
                     } else {
                         self.state = InProgressState::SendProtocolOk {
                             num_bytes_written,
@@ -326,9 +320,10 @@ where
                     let message = MessageOut::LsResponse(
                         list.iter().map(|p| AsRef::<str>::as_ref(p).as_bytes()),
                     );
-                    let (written, done) = message.write_out(num_bytes_written, outgoing_buffer);
-                    total_written += written;
-                    num_bytes_written += written;
+
+                    let written_before = read_write.written_bytes;
+                    let done = message.write_out(num_bytes_written, read_write);
+                    num_bytes_written += read_write.written_bytes - written_before;
 
                     if done {
                         self.state = InProgressState::CommandExpected;
@@ -348,7 +343,7 @@ where
                         }
                         leb128::Framed::InProgress(f) => {
                             // No frame is available.
-                            debug_assert!(incoming_data.is_empty());
+                            debug_assert_eq!(read_write.incoming_buffer_available(), 0);
                             self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::HandshakeExpected;
                             break;
@@ -375,7 +370,7 @@ where
                         }
                         leb128::Framed::InProgress(f) => {
                             // No frame is available.
-                            debug_assert!(incoming_data.is_empty());
+                            debug_assert_eq!(read_write.incoming_buffer_available(), 0);
                             self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::HandshakeExpected;
                             break;
@@ -406,7 +401,7 @@ where
                         }
                         leb128::Framed::InProgress(f) => {
                             // No frame is available.
-                            debug_assert!(incoming_data.is_empty());
+                            debug_assert_eq!(read_write.incoming_buffer_available(), 0);
                             self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::CommandExpected;
                             break;
@@ -445,7 +440,7 @@ where
                         leb128::Framed::Finished(f) => f,
                         leb128::Framed::InProgress(f) => {
                             // No frame is available.
-                            debug_assert!(incoming_data.is_empty());
+                            debug_assert_eq!(read_write.incoming_buffer_available(), 0);
                             self.recv_buffer = leb128::Framed::InProgress(f);
                             self.state = InProgressState::ProtocolRequestAnswerExpected;
                             break;
@@ -466,16 +461,12 @@ where
                         // Because of the order of checks, a protocol named `na` will never be
                         // successfully negotiated. Debugging is expected to be less confusing if
                         // the negotiation always fails.
-                        return Ok((Negotiation::NotAvailable, total_read, total_written));
+                        return Ok(Negotiation::NotAvailable);
                     }
                     if &frame[..frame.len() - 1] != requested_protocol.as_ref().as_bytes() {
                         return Err(Error::UnexpectedProtocolRequestAnswer);
                     }
-                    return Ok((
-                        Negotiation::Success(requested_protocol),
-                        total_read,
-                        total_written,
-                    ));
+                    return Ok(Negotiation::Success(requested_protocol));
                 }
 
                 // Invalid states.
@@ -494,7 +485,7 @@ where
         }
 
         // This point should be reached only if data is lacking in order to proceed.
-        Ok((Negotiation::InProgress(self), total_read, total_written))
+        Ok(Negotiation::InProgress(self))
     }
 
     /// Similar to [`InProgress::read_write`], but write the outgoing data to a `Vec` rather than
@@ -506,34 +497,44 @@ where
     /// returned alongside with a number or bytes that isn't equal to `incoming_data.len()`.
     pub fn read_write_vec(
         mut self,
-        mut incoming_data: &[u8],
+        incoming_data: &[u8],
     ) -> Result<(Negotiation<I, P>, usize, Vec<u8>), Error> {
         // TODO: how to choose appropriate buffer length?
         let mut out_buffer = vec![0; 512];
 
-        let mut total_read = 0;
-        let mut total_written = 0;
+        let mut read_write = ReadWrite {
+            now: 0,
+            incoming_buffer: Some(incoming_data),
+            outgoing_buffer: Some((&mut out_buffer, &mut [])),
+            read_bytes: 0,
+            written_bytes: 0,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
 
         loop {
-            let (new_state, read, written) = self.read_write(incoming_data, &mut out_buffer)?;
-            total_read += read;
-            incoming_data = &incoming_data[read..];
-            total_written += written;
-            assert!(total_written < out_buffer.len()); // TODO: how to choose appropriate buffer length?
+            let written_before = read_write.written_bytes;
+
+            let new_state = self.read_write(&mut read_write)?;
+            assert_ne!(read_write.outgoing_buffer_available(), 0); // TODO: how to choose appropriate buffer length?
             match new_state {
                 Negotiation::InProgress(n) => self = n,
                 other => {
-                    out_buffer.truncate(total_written);
-                    return Ok((other, total_read, out_buffer));
+                    let read_bytes = read_write.read_bytes;
+                    let written_bytes = read_write.written_bytes;
+                    out_buffer.truncate(written_bytes);
+                    return Ok((other, read_bytes, out_buffer));
                 }
             }
-            if written == 0 {
+            if written_before == read_write.written_bytes {
                 break;
             }
         }
 
-        out_buffer.truncate(total_written);
-        Ok((Negotiation::InProgress(self), total_read, out_buffer))
+        let read_bytes = read_write.read_bytes;
+        let written_bytes = read_write.written_bytes;
+        out_buffer.truncate(written_bytes);
+        Ok((Negotiation::InProgress(self), read_bytes, out_buffer))
     }
 }
 
@@ -544,7 +545,7 @@ impl<I, P> fmt::Debug for InProgress<I, P> {
 }
 
 /// Error that can happen during the negotiation.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Error while decoding a frame length, or frame size limit reached.
     Frame(leb128::FramedError),
@@ -587,35 +588,27 @@ where
             MessageOut::ProtocolNa => 3,
         };
 
-        let length_prefix = leb128::encode_usize(len).map(|n| {
-            struct One(u8);
-            impl AsRef<[u8]> for One {
-                fn as_ref(&self) -> &[u8] {
-                    slice::from_ref(&self.0)
-                }
-            }
-            One(n)
-        });
+        let length_prefix = leb128::encode_usize(len).map(|n| [n]);
 
         let mut n = 0;
         let body = iter::from_fn(move || {
             let ret = match (&mut self, n) {
-                (MessageOut::Handshake, 0) => Some(either::Either::Left(HANDSHAKE)),
+                (MessageOut::Handshake, 0) => Some(either::Left(HANDSHAKE)),
                 (MessageOut::Handshake, _) => None,
-                (MessageOut::Ls, 0) => Some(either::Either::Left(&b"ls\n"[..])),
-                (MessageOut::Ls, 500) => Some(either::Either::Left(&b"\n"[..])), // TODO: hack, see below
+                (MessageOut::Ls, 0) => Some(either::Left(&b"ls\n"[..])),
+                (MessageOut::Ls, 500) => Some(either::Left(&b"\n"[..])), // TODO: hack, see below
                 (MessageOut::Ls, _) => None,
                 (MessageOut::LsResponse(list), n) if n % 3 == 0 => {
                     let protocol_len = list.clone().nth(n / 3)?.as_ref().len() + 1;
                     // TODO: overhead
                     let length = leb128::encode_usize(protocol_len).collect::<Vec<_>>();
-                    Some(either::Either::Right(either::Right(length)))
+                    Some(either::Right(either::Right(length)))
                 }
                 (MessageOut::LsResponse(list), n) if n % 3 == 1 => {
                     let protocol = list.clone().nth(n / 3).unwrap();
-                    Some(either::Either::Right(either::Left(protocol)))
+                    Some(either::Right(either::Left(protocol)))
                 }
-                (MessageOut::LsResponse(_), _) => Some(either::Either::Left(&b"\n"[..])),
+                (MessageOut::LsResponse(_), _) => Some(either::Left(&b"\n"[..])),
                 (MessageOut::ProtocolOk(_), 0) | (MessageOut::ProtocolRequest(_), 0) => {
                     let proto = match mem::replace(&mut self, MessageOut::Ls) {
                         MessageOut::ProtocolOk(p) | MessageOut::ProtocolRequest(p) => p,
@@ -623,12 +616,12 @@ where
                     };
                     // TODO: this is completely a hack; decide whether it's acceptable
                     n = 499;
-                    Some(either::Either::Right(either::Left(proto)))
+                    Some(either::Right(either::Left(proto)))
                 }
                 (MessageOut::ProtocolOk(_), _) | (MessageOut::ProtocolRequest(_), _) => {
                     unreachable!()
                 }
-                (MessageOut::ProtocolNa, 0) => Some(either::Either::Left(&b"na\n"[..])),
+                (MessageOut::ProtocolNa, 0) => Some(either::Left(&b"na\n"[..])),
                 (MessageOut::ProtocolNa, _) => None,
             };
 
@@ -640,21 +633,24 @@ where
         });
 
         length_prefix
-            .map(either::Either::Left)
-            .chain(body.map(either::Either::Right))
+            .map(either::Left)
+            .chain(body.map(either::Right))
     }
 
-    /// Write to the given buffer the bytes of the message, starting at `message_offset`. Returns
-    /// the number of bytes written to `destination`, and a flag indicating whether the
-    /// destination buffer was large enough to hold the entire message.
+    /// Write to the given [`ReadWrite`] as many bytes of the message as possible, starting at
+    /// `message_offset`.
+    ///
+    /// Returns a boolean indicating whether the message has been fully written in the buffer.
     ///
     /// # Panic
     ///
     /// Panics if `message_offset` is larger than the size of the message.
     ///
-    pub fn write_out(self, mut message_offset: usize, mut destination: &mut [u8]) -> (usize, bool) {
-        let mut total_written = 0;
-
+    pub fn write_out<TNow>(
+        self,
+        mut message_offset: usize,
+        read_write: &mut ReadWrite<TNow>,
+    ) -> bool {
         for buf in self.into_bytes() {
             let buf = buf.as_ref();
             if message_offset >= buf.len() {
@@ -663,25 +659,25 @@ where
             }
 
             let buf = &buf[message_offset..];
+            debug_assert!(!buf.is_empty());
 
-            let to_write = cmp::min(buf.len(), destination.len());
-            destination[..to_write].copy_from_slice(&buf[..to_write]);
-            destination = &mut destination[to_write..];
-            total_written += to_write;
+            let to_write = cmp::min(buf.len(), read_write.outgoing_buffer_available());
+
+            read_write.write_out(&buf[..to_write]);
             message_offset = 0;
 
             if to_write < buf.len() {
-                return (total_written, false);
+                return false;
             }
         }
 
-        (total_written, true)
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, MessageOut, Negotiation};
+    use super::{super::super::read_write::ReadWrite, Config, MessageOut, Negotiation};
     use core::iter;
 
     #[test]
@@ -750,18 +746,34 @@ mod tests {
                     Negotiation::InProgress(nego) => {
                         if buf_1_to_2.is_empty() {
                             buf_1_to_2.resize(size1, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
-                            negotiation1 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_2_to_1),
+                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            negotiation1 = nego.read_write(&mut read_write).unwrap();
+                            let (read_bytes, written_bytes) =
+                                (read_write.read_bytes, read_write.written_bytes);
+                            for _ in 0..read_bytes {
                                 buf_2_to_1.remove(0);
                             }
-                            buf_1_to_2.truncate(written);
+                            buf_1_to_2.truncate(written_bytes);
                         } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_2_to_1, &mut []).unwrap();
-                            negotiation1 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_2_to_1),
+                                outgoing_buffer: Some((&mut [], &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            negotiation1 = nego.read_write(&mut read_write).unwrap();
+                            for _ in 0..read_write.read_bytes {
                                 buf_2_to_1.remove(0);
                             }
                         }
@@ -774,18 +786,34 @@ mod tests {
                     Negotiation::InProgress(nego) => {
                         if buf_2_to_1.is_empty() {
                             buf_2_to_1.resize(size2, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
-                            negotiation2 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_1_to_2),
+                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            negotiation2 = nego.read_write(&mut read_write).unwrap();
+                            let (read_bytes, written_bytes) =
+                                (read_write.read_bytes, read_write.written_bytes);
+                            for _ in 0..read_bytes {
                                 buf_1_to_2.remove(0);
                             }
-                            buf_2_to_1.truncate(written);
+                            buf_2_to_1.truncate(written_bytes);
                         } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_1_to_2, &mut []).unwrap();
-                            negotiation2 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_1_to_2),
+                                outgoing_buffer: Some((&mut [], &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            negotiation2 = nego.read_write(&mut read_write).unwrap();
+                            for _ in 0..read_write.read_bytes {
                                 buf_1_to_2.remove(0);
                             }
                         }

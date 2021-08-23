@@ -84,8 +84,8 @@ pub(super) struct SerializedChainInformationV1 {
 }
 
 impl SerializedChainInformationV1 {
-    pub(super) fn new<'a>(
-        from: chain_information::ChainInformationRef<'a>,
+    pub(super) fn new(
+        from: chain_information::ChainInformationRef<'_>,
         finalized_storage: Option<impl Iterator<Item = (impl AsRef<[u8]>, impl AsRef<[u8]>)>>,
     ) -> Self {
         SerializedChainInformationV1 {
@@ -264,16 +264,12 @@ impl SerializedChainInformationV1 {
         };
 
         // TODO: consider checking integrity of the storage against the header
-        let finalized_storage = if let Some(storage) = self.finalized_storage {
-            Some(
-                storage
-                    .into_iter()
-                    .map(|entry| (entry.key, entry.value))
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let finalized_storage = self.finalized_storage.map(|storage| {
+            storage
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect()
+        });
 
         Ok((chain_info, finalized_storage))
     }
@@ -510,7 +506,7 @@ fn deserialize_bytes<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<u8>, D::Error> {
     let string = <&str as serde::Deserialize>::deserialize(deserializer)?;
-    Ok(hex::decode(string).map_err(serde::de::Error::custom)?)
+    hex::decode(string).map_err(serde::de::Error::custom)
 }
 
 fn deserialize_hash32<'de, D: serde::Deserializer<'de>>(

@@ -315,10 +315,10 @@ impl Inner {
                     };
 
                     match super::core_version(vm_prototype) {
-                        Ok((version, _)) => {
+                        (Ok(version), _) => {
                             self.vm = req.resume(Ok(version.as_ref()));
                         }
-                        Err(_) => {
+                        (Err(_), _) => {
                             self.vm = req.resume(Err(()));
                         }
                     }
