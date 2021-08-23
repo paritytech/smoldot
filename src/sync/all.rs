@@ -123,7 +123,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         chain_information: config.chain_information,
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
-                        blocks_request_granularity: NonZeroU32::new(256).unwrap(), // TODO: ask through config
+                        blocks_request_granularity: NonZeroU32::new(128).unwrap(), // TODO: ask through config
                         download_ahead_blocks: config.download_ahead_blocks,
                         full: Some(optimistic::ConfigFull {
                             finalized_runtime: config_full.finalized_runtime,
