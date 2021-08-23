@@ -109,8 +109,8 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
             }
 
             // The code below uses `checked_shl` because using plain `<<` sometimes panics with
-            // "attempt to shift left with overflow", even though it is mathematically for this
-            // to happen. I strongly suspect a miscompilation when using `<<` instead of
+            // "attempt to shift left with overflow", even though it is mathematically impossible
+            // for this to happen. I strongly suspect a miscompilation when using `<<` instead of
             // `checked_sub`, but haven't managed to isolate the problem in a reproducible case.
             let byte0 = u32::from(bytes[0] >> 2);
             let byte1 = u32::from(bytes[1]).checked_shl(6).unwrap();
