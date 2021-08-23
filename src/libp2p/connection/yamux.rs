@@ -249,6 +249,13 @@ impl<T> Yamux<T> {
             .map(|(id, s)| (SubstreamId(*id), &s.user_data))
     }
 
+    /// Returns an iterator to the list of all substream user datas.
+    pub fn user_datas_mut(&mut self) -> impl ExactSizeIterator<Item = (SubstreamId, &mut T)> {
+        self.substreams
+            .iter_mut()
+            .map(|(id, s)| (SubstreamId(*id), &mut s.user_data))
+    }
+
     /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
     /// is open.
     pub fn substream_by_id(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
@@ -968,6 +975,11 @@ impl<'a, T> SubstreamMut<'a, T> {
             .write_buffers
             .iter()
             .fold(0, |n, buf| n + buf.len())
+    }
+
+    /// Returns `true` if [`SubstreamMut::close`] has been called on this substream.
+    pub fn is_closed(&self) -> bool {
+        self.substream.get_mut().local_write_closed
     }
 
     /// Marks the substream as closed. It is no longer possible to write data on it.
