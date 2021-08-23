@@ -18,6 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use alloc::collections::VecDeque;
 use core::{cmp, mem};
 use futures::future::{self, BoxFuture, Future, FutureExt as _};
 
@@ -182,6 +183,28 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         outgoing_buffer.1[..to_copy_buf2].copy_from_slice(&data[to_copy_buf1..][..to_copy_buf2]);
 
         self.advance_write(data.len());
+    }
+
+    /// Copies as much as possible from the content of `data` to [`ReadWrite::outgoing_buffer`]
+    /// and increases [`ReadWrite::written_bytes`]. The bytes that have been written are removed
+    /// from `data`.
+    pub fn write_from_vec_deque(&mut self, data: &mut VecDeque<u8>) {
+        let (slice1, slice2) = data.as_slices();
+
+        let outgoing_available = self.outgoing_buffer_available();
+        let to_copy1 = cmp::min(slice1.len(), outgoing_available);
+        let to_copy2 = if to_copy1 == slice1.len() {
+            cmp::min(slice2.len(), outgoing_available - to_copy1)
+        } else {
+            0
+        };
+
+        self.write_out(&slice1[..to_copy1]);
+        self.write_out(&slice2[..to_copy2]);
+
+        for _ in 0..(to_copy1 + to_copy2) {
+            data.pop_front();
+        }
     }
 
     /// Sets [`ReadWrite::wake_up_after`] to `min(wake_up_after, after)`.
