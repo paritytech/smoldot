@@ -366,6 +366,8 @@ impl Client {
 
                         // TODO: avoid cloning here
                         let chain_name = chain_spec.name().to_owned();
+                        let relay_chain_id =
+                            chain_spec.relay_chain().map(|(r, id)| (r.to_owned(), id));
                         let starting_block_number =
                             chain_information.as_ref().finalized_block_header.number;
                         let starting_block_hash =
@@ -381,17 +383,29 @@ impl Client {
                         )
                         .await;
 
-                        // Note that the chain name is printed through the `Debug` trait (rather than
-                        // `Display`) because it is an untrusted user input.
-                        log::info!(
-                            "Chain initialization complete. Name: {:?}. Genesis hash: {}. \
-                            Network identity: {}. Starting at block #{} ({})",
-                            chain_name,
-                            HashDisplay(&genesis_block_hash),
-                            running_chain.network_identity,
-                            starting_block_number,
-                            HashDisplay(&starting_block_hash)
-                        );
+                        // Note that the chain name is printed through the `Debug` trait (rather
+                        // than `Display`) because it is an untrusted user input.
+                        if let Some((relay_chain_id, para_id)) = relay_chain_id {
+                            log::info!(
+                                "Parachain initialization complete. Name: {:?}. Genesis \
+                                hash: {}. Network identity: {}. Relay chain: {:?} (id: {})",
+                                chain_name,
+                                HashDisplay(&genesis_block_hash),
+                                running_chain.network_identity,
+                                relay_chain_id,
+                                para_id
+                            );
+                        } else {
+                            log::info!(
+                                "Chain initialization complete. Name: {:?}. Genesis hash: {}. \
+                                Network identity: {}. Starting at block #{} ({})",
+                                chain_name,
+                                HashDisplay(&genesis_block_hash),
+                                running_chain.network_identity,
+                                starting_block_number,
+                                HashDisplay(&starting_block_hash)
+                            );
+                        }
 
                         running_chain
                     };
