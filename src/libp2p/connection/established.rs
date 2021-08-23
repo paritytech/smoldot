@@ -90,6 +90,16 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     notifications_protocols: Vec<ConfigNotifications>,
     /// See [`Config::ping_protocol`].
     ping_protocol: String,
+
+    /// Buffer used for intermediary data. When it is necessary, data is first copied here before
+    /// being turned into a `Vec`.
+    ///
+    /// While in theory this intermediary buffer could be shared between multiple different
+    /// connections, since data present in this buffer isn't always zero-ed, it could be possible
+    /// for a bug to cause data destined for connection A to be sent to connection B. Sharing this
+    /// buffer is too dangerous.
+    // TODO: remove; needs a lot of refactoring of noise and yamux
+    intermediary_buffer: Box<[u8]>,
 }
 
 impl<TNow, TRqUd, TNotifUd> Established<TNow, TRqUd, TNotifUd>
@@ -120,11 +130,11 @@ where
         // This doesn't read data from `read_write`, but can potential write out data.
         {
             let read_bytes_before = read_write.read_bytes;
-            if let Some(event) = self.update_all(read_write) {
-                debug_assert_eq!(read_bytes_before, read_write.read_bytes);
+            let out = self.update_all(read_write);
+            debug_assert_eq!(read_bytes_before, read_write.read_bytes);
+            if let Some(event) = out {
                 return Ok((self, Some(event)));
             }
-            debug_assert_eq!(read_bytes_before, read_write.read_bytes);
         }
 
         // Decoding the incoming data.
@@ -197,7 +207,7 @@ where
                 }) => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
-                    if let Some(event) = substream_ty.reset() {
+                    if let Some(event) = substream_ty.unwrap().reset() {
                         return Ok((self, Some(event)));
                     }
                 }
@@ -258,11 +268,8 @@ where
                         wake_up_future: None,
                     };
 
-                    let event = substream.user_data().read_write(&mut substream_read_write);
-
-                    if substream_read_write.outgoing_buffer.is_none() {
-                        substream.close().unwrap();
-                    }
+                    let state_machine = substream.user_data().take().unwrap();
+                    let (updated, event) = state_machine.read_write(&mut substream_read_write);
 
                     if let Some(wake_up_after) = substream_read_write.wake_up_after {
                         read_write.wake_up_after(&wake_up_after);
@@ -275,6 +282,18 @@ where
                     // `self.encryption`.
                     self.encryption
                         .consume_inbound_data(substream_read_write.read_bytes);
+
+                    match updated {
+                        Ok(updated) => {
+                            *substream.user_data() = Some(updated);
+                            if substream_read_write.outgoing_buffer.is_none() {
+                                substream.close().unwrap();
+                            }
+                        }
+                        Err(()) => {
+                            substream.reset();
+                        }
+                    }
 
                     if let Some(event) = event {
                         return Ok((self, Some(event)));
@@ -323,7 +342,7 @@ where
     /// Optionally returns an event that happened as a result of writing out data or of the
     /// passage of time.
     fn update_all(&mut self, read_write: &mut ReadWrite<TNow>) -> Option<Event<TRqUd, TNotifUd>> {
-        for (_, substream) in self.inner.yamux.user_datas_mut() {
+        for (substream_id, substream) in self.inner.yamux.user_datas_mut() {
             let mut substream_read_write = ReadWrite {
                 now: read_write.now,
                 incoming_buffer: Some(&[]), // TODO: what if substream closed?
@@ -338,7 +357,6 @@ where
                 .take()
                 .unwrap()
                 .read_write(&mut substream_read_write);
-            *substream = Some(substream_update);
 
             debug_assert_eq!(substream_read_write.read_bytes, 0);
             if let Some(wake_up_after) = substream_read_write.wake_up_after {
@@ -347,6 +365,17 @@ where
             if let Some(wake_up_future) = substream_read_write.wake_up_future {
                 read_write.wake_up_when_boxed(wake_up_future);
             }
+
+            match substream_update {
+                Ok(s) => *substream = Some(s),
+                Err(()) => {
+                    self.inner
+                        .yamux
+                        .substream_by_id(substream_id)
+                        .unwrap()
+                        .reset();
+                }
+            };
 
             if let Some(event) = event {
                 return Some(event);
@@ -375,11 +404,6 @@ where
         request: Vec<u8>,
         user_data: TRqUd,
     ) -> SubstreamId {
-        let mut negotiation =
-            multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol: self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
-            });
-
         let has_length_prefix = match self.inner.request_protocols[protocol_index].inbound_config {
             ConfigRequestResponseIn::Payload { max_size } => {
                 // TODO: turn this assert into something that can't panic?
@@ -393,39 +417,23 @@ where
             }
         };
 
-        let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
-        match new_state {
-            multistream_select::Negotiation::InProgress(n) => negotiation = n,
-            _ => unreachable!(),
-        }
-
         let timeout = now + self.inner.request_protocols[protocol_index].timeout;
 
-        if self
-            .inner
-            .next_timeout
-            .as_ref()
-            .map_or(true, |t| *t > timeout)
-        {
-            self.inner.next_timeout = Some(timeout.clone());
-        }
+        let mut substream =
+            self.inner
+                .yamux
+                .open_substream(Some(substream::Substream::request_out(
+                    self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                    timeout,
+                    if has_length_prefix {
+                        Some(request)
+                    } else {
+                        None
+                    },
+                    user_data,
+                )));
 
-        let mut substream = self
-            .inner
-            .yamux
-            .open_substream(Substream::RequestOutNegotiating {
-                timeout,
-                negotiation,
-                request: if has_length_prefix {
-                    Some(request)
-                } else {
-                    None
-                },
-                user_data,
-            });
-
-        substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
-        substream.write(out_buffer);
+        // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
         SubstreamId(substream.id())
     }
@@ -441,6 +449,8 @@ where
             .yamux
             .substream_by_id(id.0)?
             .into_user_data()
+            .as_mut()
+            .unwrap()
             .notifications_substream_user_data_mut()
     }
 
@@ -465,47 +475,25 @@ where
         handshake: Vec<u8>,
         user_data: TNotifUd,
     ) -> SubstreamId {
-        let mut negotiation =
-            multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol: self.inner.notifications_protocols[protocol_index]
-                    .name
-                    .clone(), // TODO: clone :-/
-            });
-
         // TODO: turn this assert into something that can't panic?
         assert!(
             handshake.len()
                 <= self.inner.notifications_protocols[protocol_index].max_handshake_size
         );
 
-        let (new_state, _, out_buffer) = negotiation.read_write_vec(&[]).unwrap();
-        match new_state {
-            multistream_select::Negotiation::InProgress(n) => negotiation = n,
-            _ => unreachable!(),
-        }
-
         let timeout = now + Duration::from_secs(20); // TODO:
 
-        if self
-            .inner
-            .next_timeout
-            .as_ref()
-            .map_or(true, |t| *t > timeout)
-        {
-            self.inner.next_timeout = Some(timeout.clone());
-        }
-
-        let mut substream =
+        let substream =
             self.inner
                 .yamux
-                .open_substream(Substream::NotificationsOutNegotiating {
+                .open_substream(Some(substream::Substream::notifications_out(
                     timeout,
-                    negotiation,
+                    self.inner.notifications_protocols[protocol_index]
+                        .name
+                        .clone(), // TODO: clone :-/,
                     handshake,
                     user_data,
-                });
-
-        substream.write(out_buffer);
+                )));
 
         SubstreamId(substream.id())
     }
@@ -527,6 +515,9 @@ where
             .yamux
             .substream_by_id(substream_id.0)
             .unwrap()
+            .into_user_data()
+            .as_mut()
+            .unwrap()
             .accept_in_notifications_substream(handshake, user_data);
     }
 
@@ -541,6 +532,9 @@ where
         self.inner
             .yamux
             .substream_by_id(substream_id.0)
+            .unwrap()
+            .into_user_data()
+            .as_mut()
             .unwrap()
             .reject_in_notifications_substream();
     }
@@ -562,13 +556,19 @@ where
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
     /// notifications substream isn't in the appropriate state.
     ///
-    pub fn write_notification_unbounded(&mut self, id: SubstreamId, notification: Vec<u8>) {
-        let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
-            panic!()
-        }
-        substream.write(leb128::encode_usize(notification.len()).collect());
-        substream.write(notification)
+    pub fn write_notification_unbounded(
+        &mut self,
+        substream_id: SubstreamId,
+        notification: Vec<u8>,
+    ) {
+        self.inner
+            .yamux
+            .substream_by_id(substream_id.0)
+            .unwrap()
+            .into_user_data()
+            .as_mut()
+            .unwrap()
+            .write_notification_unbounded(notification);
     }
 
     /// Returns the number of bytes waiting to be sent out on that substream.
@@ -581,36 +581,37 @@ where
     /// notifications substream isn't in the appropriate state.
     ///
     // TODO: shouldn't require `&mut self`
-    pub fn notification_substream_queued_bytes(&mut self, id: SubstreamId) -> usize {
-        let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(substream.user_data(), Substream::NotificationsOut { .. }) {
-            panic!()
-        }
-        substream.queued_bytes()
+    pub fn notification_substream_queued_bytes(&mut self, substream_id: SubstreamId) -> usize {
+        let substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
+        let already_queued = substream.queued_bytes();
+        let from_substream = substream
+            .into_user_data()
+            .as_mut()
+            .unwrap()
+            .notification_substream_queued_bytes();
+        already_queued + from_substream
     }
 
-    /// Closes a notifications substream opened with [`Established::open_notifications_substream`].
+    /// Closes a notifications substream opened after an [`Event::NotificationsOutAccept`] or that
+    /// was accepted using [`Established::accept_in_notifications_substream`].
     ///
-    /// This can be done even when in the negotiation phase, in other words before the remote has
-    /// accepted/refused the substream.
+    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
+    /// in other words before the remote has accepted/refused the substream.
     ///
     /// # Panic
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
     /// notifications substream isn't in the appropriate state.
     ///
-    pub fn close_notifications_substream(&mut self, id: SubstreamId) {
-        let mut substream = self.inner.yamux.substream_by_id(id.0).unwrap();
-        if !matches!(
-            substream.user_data(),
-            Substream::NotificationsOutNegotiating { .. }
-                | Substream::NotificationsOutHandshakeRecv { .. }
-                | Substream::NotificationsOut { .. }
-        ) {
-            panic!()
-        }
-        *substream.user_data() = Substream::NotificationsOutClosed;
-        substream.close();
+    pub fn close_notifications_substream(&mut self, substream_id: SubstreamId) {
+        self.inner
+            .yamux
+            .substream_by_id(substream_id.0)
+            .unwrap()
+            .into_user_data()
+            .as_mut()
+            .unwrap()
+            .close_notifications_substream();
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
@@ -623,27 +624,14 @@ where
         substream_id: SubstreamId,
         response: Result<Vec<u8>, ()>,
     ) -> Result<(), RespondInRequestError> {
-        let mut substream = self
-            .inner
+        self.inner
             .yamux
             .substream_by_id(substream_id.0)
-            .ok_or(RespondInRequestError::SubstreamClosed)?;
-
-        match substream.user_data() {
-            Substream::RequestInSend => {
-                if let Ok(response) = response {
-                    substream.write(leb128::encode_usize(response.len()).collect());
-                    substream.write(response);
-                }
-
-                // TODO: proper state transition
-                *substream.user_data() = Substream::NegotiationFailed;
-
-                substream.close();
-                Ok(())
-            }
-            _ => panic!(),
-        }
+            .unwrap()
+            .into_user_data()
+            .as_mut()
+            .unwrap()
+            .respond_in_request(response)
     }
 }
 
@@ -806,10 +794,10 @@ impl ConnectionPrototype {
             encryption: self.encryption,
             inner: Inner {
                 yamux,
-                next_timeout: None,
                 request_protocols: config.request_protocols,
                 notifications_protocols: config.notifications_protocols,
                 ping_protocol: config.ping_protocol,
+                intermediary_buffer: vec![0u8; 2048].into_boxed_slice(),
             },
         }
     }

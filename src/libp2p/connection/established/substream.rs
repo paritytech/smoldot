@@ -131,15 +131,21 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
     PingIn(arrayvec::ArrayVec<u8, 32>),
 }
 
-impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
+impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd>
+where
+    TNow: Clone + Ord,
+{
     /// Initializes an outgoing notifications substream.
-    pub fn notifications_out(timeout: TNow, handshake: Vec<u8>, user_data: TNotifUd) -> Self {
-        // TODO: ?!
+    // TODO: detail the events that can happen
+    pub fn notifications_out(
+        timeout: TNow,
+        requested_protocol: String,
+        handshake: Vec<u8>,
+        user_data: TNotifUd,
+    ) -> Self {
         let mut negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol: self.inner.notifications_protocols[protocol_index]
-                    .name
-                    .clone(), // TODO: clone :-/
+                requested_protocol,
             });
 
         Substream::NotificationsOutNegotiating {
@@ -148,6 +154,35 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
             handshake,
             user_data,
         }
+    }
+
+    /// Initializes an outgoing request substream.
+    ///
+    /// After the remote has sent back a response, an [`Event::Response`] event will be generated
+    /// locally. The `user_data` parameter will be passed back.
+    ///
+    /// If the `request` is `None`, then nothing at all will be written out, not even a length
+    /// prefix. If the `request` is `Some`, then a length prefix will be written out. Consequently,
+    /// `Some(&[])` writes a single `0` for the request.
+    pub fn request_out(
+        requested_protocol: String,
+        timeout: TNow,
+        request: Option<Vec<u8>>,
+        user_data: TRqUd,
+    ) -> Self {
+        let mut negotiation =
+            multistream_select::InProgress::new(multistream_select::Config::Dialer {
+                requested_protocol,
+            });
+
+        Substream::RequestOutNegotiating {
+            timeout,
+            negotiation,
+            request,
+            user_data,
+        }
+
+        // TODO: somehow do substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
     }
 
     /// Returns the user dat associated to a notifications substream.
@@ -178,9 +213,7 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                 Ok(multistream_select::Negotiation::InProgress(nego)) => {
                     return (Ok(Substream::InboundNegotiating(nego)), None);
                 }
-                Ok((multistream_select::Negotiation::Success(protocol), num_read, out_buffer)) => {
-                    substream.write(out_buffer);
-                    data = &data[num_read..];
+                Ok(multistream_select::Negotiation::Success(protocol)) => {
                     if protocol == self.ping_protocol {
                         *substream.user_data() = Substream::PingIn(Default::default());
                     } else if let Some(protocol_index) = self
@@ -245,7 +278,7 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                     return (Ok(self), Some(Event::NotificationsOutReject { user_data }));
                 }
 
-                read_write.wake_up_when(timeout);
+                read_write.wake_up_after(&timeout);
 
                 match negotiation.read_write(read_write) {
                     Ok(multistream_select::Negotiation::InProgress(nego)) => {
@@ -326,13 +359,17 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                 // `read_write` the response arrived after the timeout. It is the responsibility
                 // of the user to call `read_write` in an appropriate way for this to not happen.
                 if timeout < read_write.now {
-                    Event::Response {
-                        response: Err(RequestError::Timeout),
-                        user_data,
-                    }
+                    read_write.close_write();
+                    return (
+                        Ok(self), // TODO: transition
+                        Some(Event::Response {
+                            response: Err(RequestError::Timeout),
+                            user_data,
+                        }),
+                    );
                 }
 
-                read_write.wake_up_when(timeout);
+                read_write.wake_up_after(&timeout);
 
                 // TODO: ?!
                 let incoming_buffer = match read_write.incoming_buffer {
@@ -361,9 +398,7 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                             None,
                         ));
                     }
-                    Ok((multistream_select::Negotiation::Success(_), num_read, out_buffer)) => {
-                        substream.write(out_buffer);
-                        data = &data[num_read..];
+                    Ok(multistream_select::Negotiation::Success(_)) => {
                         if let Some(request) = request {
                             substream.write(leb128::encode_usize(request.len()).collect());
                             substream.write(request);
@@ -376,20 +411,20 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                         let _already_closed = substream.close();
                         debug_assert!(_already_closed.is_none());
                     }
-                    Ok((multistream_select::Negotiation::NotAvailable, ..)) => {
-                        substream.reset();
-                        return Some(Event::Response {
+                    Ok(multistream_select::Negotiation::NotAvailable) => (
+                        Err(()),
+                        Some(Event::Response {
                             user_data,
                             response: Err(RequestError::ProtocolNotAvailable),
-                        });
-                    }
-                    Err(err) => {
-                        substream.reset();
-                        return Some(Event::Response {
+                        }),
+                    ),
+                    Err(err) => (
+                        Err(()),
+                        Some(Event::Response {
                             user_data,
                             response: Err(RequestError::NegotiationError(err)),
-                        });
-                    }
+                        }),
+                    ),
                 }
             }
             Substream::RequestOut {
@@ -402,13 +437,17 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                 // `read_write` the response arrived after the timeout. It is the responsibility
                 // of the user to call `read_write` in an appropriate way for this to not happen.
                 if timeout < read_write.now {
-                    Event::Response {
-                        response: Err(RequestError::Timeout),
-                        user_data,
-                    }
+                    read_write.close_write();
+                    return (
+                        Ok(Substream::NegotiationFailed), // TODO: proper transition
+                        Some(Event::Response {
+                            response: Err(RequestError::Timeout),
+                            user_data,
+                        }),
+                    );
                 }
 
-                read_write.wake_up_when(timeout);
+                read_write.wake_up_after(&timeout);
 
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
@@ -417,7 +456,6 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                         return Ok((
                             self,
                             Some(Event::Response {
-                                id: SubstreamId(substream_id),
                                 user_data,
                                 response: Err(RequestError::SubstreamClosed),
                             }),
@@ -425,33 +463,35 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                     }
                 };
 
-                match response.update(&data) {
-                    Ok((_num_read, leb128::Framed::Finished(response))) => {
-                        // TODO: proper state transition
-                        *substream.user_data() = Substream::NegotiationFailed;
-                        return Some(Event::Response {
-                            id: substream_id,
-                            user_data,
-                            response: Ok(response),
-                        });
+                match response.update(incoming_buffer) {
+                    Ok((num_read, leb128::Framed::Finished(response))) => {
+                        read_write.advance_read(num_read);
+                        (
+                            Ok(Substream::NegotiationFailed), // TODO: proper state transition
+                            Some(Event::Response {
+                                user_data,
+                                response: Ok(response),
+                            }),
+                        )
                     }
                     Ok((num_read, leb128::Framed::InProgress(response))) => {
-                        debug_assert_eq!(num_read, data.len());
-                        data = &data[num_read..];
-                        *substream.user_data() = Substream::RequestOut {
-                            timeout,
-                            user_data,
-                            response,
-                        };
+                        read_write.advance_read(num_read);
+                        (
+                            Ok(Substream::RequestOut {
+                                timeout,
+                                user_data,
+                                response,
+                            }),
+                            None,
+                        )
                     }
-                    Err(err) => {
-                        substream.reset();
-                        return Some(Event::Response {
-                            id: substream_id,
+                    Err(err) => (
+                        Err(()),
+                        Some(Event::Response {
                             user_data,
                             response: Err(RequestError::ResponseLebError(err)),
-                        });
-                    }
+                        }),
+                    ),
                 }
             }
             Substream::RequestInRecv {
@@ -472,7 +512,6 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                         return Ok((
                             Substream::RequestInSend,
                             Some(Event::RequestIn {
-                                id: substream_id,
                                 protocol_index,
                                 request,
                             }),
@@ -505,9 +544,7 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                         read_write.close_write();
                         return Ok((
                             self,
-                            Some(Event::NotificationsInOpenCancel {
-                                protocol_index,
-                            }),
+                            Some(Event::NotificationsInOpenCancel { protocol_index }),
                         ));
                     }
                 };
@@ -515,32 +552,31 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                 match handshake.update(incoming_buffer) {
                     Ok((num_read, leb128::Framed::Finished(handshake))) => {
                         read_write.advance_read(num_read);
-                        *substream.user_data() = Substream::NotificationsInWait { protocol_index };
-                        return Some(Event::NotificationsInOpen {
-                            id: substream_id,
-                            protocol_index,
-                            handshake,
-                        });
+                        (
+                            Ok(Substream::NotificationsInWait { protocol_index }),
+                            Some(Event::NotificationsInOpen {
+                                protocol_index,
+                                handshake,
+                            }),
+                        );
                     }
                     Ok((num_read, leb128::Framed::InProgress(handshake))) => {
                         read_write.advance_read(num_read);
-                        return Ok((
-                            Substream::NotificationsInHandshake {
+                        (
+                            Ok(Substream::NotificationsInHandshake {
                                 handshake,
                                 protocol_index,
-                            },
+                            }),
                             None,
-                        ));
+                        )
                     }
-                    Err(_) => {
-                        substream.reset();
-                    }
+                    Err(_) => (Err(()), None),
                 }
             }
             Substream::NotificationsInWait { protocol_index } => {
                 // TODO: what to do with data?
                 read_write.discard_all_incoming();
-                return Ok((Substream::NotificationsInWait { protocol_index }, None));
+                return (Ok(Substream::NotificationsInWait { protocol_index }), None);
             }
             Substream::NotificationsIn {
                 mut next_notification,
@@ -582,10 +618,7 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                 };
 
                 if let Some(notification) = notification {
-                    return Some(Event::NotificationIn {
-                        id: substream_id,
-                        notification,
-                    });
+                    return Some(Event::NotificationIn { notification });
                 }
             }
             Substream::PingIn(mut payload) => {
@@ -618,17 +651,13 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
             Substream::NegotiationFailed => None,
             Substream::RequestOutNegotiating { user_data, .. }
             | Substream::RequestOut { user_data, .. } => Some(Event::Response {
-                id: SubstreamId(substream_id),
                 user_data,
                 response: Err(RequestError::SubstreamReset),
             }),
             Substream::RequestInRecv { .. } => None,
             Substream::NotificationsInHandshake { .. } => None,
             Substream::NotificationsInWait { protocol_index, .. } => {
-                Some(Event::NotificationsInOpenCancel {
-                    id: SubstreamId(substream_id),
-                    protocol_index,
-                })
+                Some(Event::NotificationsInOpenCancel { protocol_index })
             }
             Substream::NotificationsIn { .. } => {
                 // TODO: report to user
@@ -637,16 +666,12 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
             Substream::NotificationsInRefused => None,
             Substream::NotificationsOutNegotiating { user_data, .. }
             | Substream::NotificationsOutHandshakeRecv { user_data, .. } => {
-                Some(Event::NotificationsOutReject {
-                    id: SubstreamId(substream_id),
-                    user_data,
-                })
+                Some(Event::NotificationsOutReject { user_data })
             }
             Substream::PingIn(_) => None,
-            Substream::NotificationsOut { user_data, .. } => Some(Event::NotificationsOutReset {
-                id: SubstreamId(substream_id),
-                user_data,
-            }),
+            Substream::NotificationsOut { user_data, .. } => {
+                Some(Event::NotificationsOutReset { user_data })
+            }
             Substream::NotificationsOutClosed { .. } => None,
             Substream::RequestInSend => None,
         }
@@ -692,6 +717,90 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd> {
                 if substream.close().is_none() {
                     *self = Substream::NotificationsInRefused;
                 }
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// Queues a notification to be written out on the given substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    pub fn write_notification_unbounded(&mut self, notification: Vec<u8>) {
+        if !matches!(self, Substream::NotificationsOut { .. }) {
+            panic!()
+        }
+
+        substream.write(leb128::encode_usize(notification.len()).collect());
+        substream.write(notification)
+    }
+
+    /// Returns the number of bytes waiting to be sent out on that substream.
+    ///
+    /// See the documentation of [`Substream::write_notification_unbounded`] for context.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    pub fn notification_substream_queued_bytes(&self) -> usize {
+        if !matches!(self, Substream::NotificationsOut { .. }) {
+            panic!()
+        }
+
+        substream.queued_bytes()
+    }
+
+    /// Closes a notifications substream opened after an [`Event::NotificationsOutAccept`] or that
+    /// was accepted using [`Substream::accept_in_notifications_substream`].
+    ///
+    /// In the case of an outbound substream, this can be done even when in the negotiation phase,
+    /// in other words before the remote has accepted/refused the substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
+    /// notifications substream isn't in the appropriate state.
+    ///
+    pub fn close_notifications_substream(&mut self) {
+        if !matches!(
+            self,
+            Substream::NotificationsOutNegotiating { .. }
+                | Substream::NotificationsOutHandshakeRecv { .. }
+                | Substream::NotificationsOut { .. }
+        ) {
+            panic!()
+        }
+
+        *self = Substream::NotificationsOutClosed;
+        substream.close();
+    }
+
+    /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
+    ///
+    /// Passing an `Err` corresponds, on the other side, to a [`RequestError::SubstreamClosed`].
+    ///
+    /// Returns an error if the [`SubstreamId`] is invalid.
+    pub fn respond_in_request(
+        &mut self,
+        response: Result<Vec<u8>, ()>,
+    ) -> Result<(), RespondInRequestError> {
+        match self {
+            Substream::RequestInSend => {
+                if let Ok(response) = response {
+                    substream.write(leb128::encode_usize(response.len()).collect());
+                    substream.write(response);
+                }
+
+                // TODO: proper state transition
+                *self = Substream::NegotiationFailed;
+
+                substream.close();
+                Ok(())
             }
             _ => panic!(),
         }
