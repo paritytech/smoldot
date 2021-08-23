@@ -145,7 +145,10 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
             let mut out_value = 0;
             let mut shift = 0u32;
             for byte_index in 1..=num_bytes {
-                out_value |= match usize::from(bytes[byte_index]).checked_mul(1 << shift) {
+                out_value |= match 1usize
+                    .checked_shl(shift)
+                    .and_then(|shl| usize::from(bytes[byte_index]).checked_mul(shl))
+                {
                     Some(v) => v,
                     None => {
                         // Overflow. The SCALE-encoded value is too large to fit a `usize`.
