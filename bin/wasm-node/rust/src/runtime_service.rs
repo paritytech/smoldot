@@ -119,6 +119,7 @@ impl RuntimeService {
             // simply store an `Err` and continue running.
             // However, in practice, it seems more sane to detect problems in the genesis block.
             let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages)
+                .await
                 .expect("invalid runtime at genesis block");
 
             // As documented in the `metadata` field, we must fill it using the genesis storage.
@@ -267,6 +268,7 @@ impl RuntimeService {
         };
 
         SuccessfulRuntime::from_params(&code, &heap_pages)
+            .await
             .map(|r| r.runtime_spec)
             .map_err(RuntimeVersionOfBlockError::InvalidRuntime)
     }
@@ -830,10 +832,14 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    fn from_params(
+    async fn from_params(
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
+        // once after.
+        super::yield_once().await;
+
         let vm = match executor::host::HostVmPrototype::new(
             code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
             executor::storage_heap_pages_to_value(heap_pages.as_deref())
@@ -846,6 +852,10 @@ impl SuccessfulRuntime {
                 return Err(RuntimeError::Build(error));
             }
         };
+
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
+        // once after.
+        super::yield_once().await;
 
         let (runtime_spec, vm) = match executor::core_version(vm) {
             (Ok(spec), vm) => (spec, vm),
@@ -1021,7 +1031,8 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 latest_known_runtime.runtime = SuccessfulRuntime::from_params(
                     &latest_known_runtime.runtime_code,
                     &latest_known_runtime.heap_pages,
-                );
+                )
+                .await;
 
                 // Elements in `runtime_version_subscriptions` are removed one by one and inserted
                 // back if the channel is still open.

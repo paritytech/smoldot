@@ -863,9 +863,17 @@ async fn start_relay_chain(
                                 "Failed to verify warp sync fragment from {}: {}", sender_peer_id, err
                             );
                         }
+
+                        // Verifying a fragment is rather expensive. We yield in order to not
+                        // block the entire node.
+                        super::yield_once().await;
                     }
                     all::ProcessOne::VerifyHeader(verify) => {
                         let verified_hash = verify.hash();
+
+                        // Verifying a block is rather expensive. We yield in order to not
+                        // block the entire node.
+                        super::yield_once().await;
 
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
