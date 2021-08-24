@@ -600,7 +600,6 @@ where
             ),
             Substream::RequestInApiWait => (Ok(Substream::RequestInApiWait), None),
             Substream::RequestInRespond { mut response } => {
-                debug_assert!(read_write.incoming_buffer.is_none());
                 read_write.write_from_vec_deque(&mut response);
                 if response.is_empty() {
                     read_write.close_write();
