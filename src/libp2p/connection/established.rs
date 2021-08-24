@@ -206,10 +206,10 @@ where
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                     if let Some(event) = substream_ty.unwrap().reset() {
-                        if let Some(event) = self.pass_through_substream_event(substream_id, event)
-                        {
-                            return Ok((self, Some(event)));
-                        }
+                        return Ok((
+                            self,
+                            Some(Self::pass_through_substream_event(substream_id, event)),
+                        ));
                     }
                 }
 
@@ -265,51 +265,14 @@ where
                     let data = &self.encryption.decoded_inbound_data()
                         [start_offset..yamux_decode.bytes_read];
 
-                    let mut substream = self.inner.yamux.substream_by_id(substream_id).unwrap();
-
-                    let mut substream_read_write = ReadWrite {
-                        now: read_write.now.clone(),
-                        incoming_buffer: Some(data),
-                        outgoing_buffer: if substream.is_closed() { None } else { todo!() },
-                        read_bytes: 0,
-                        written_bytes: 0,
-                        wake_up_after: None,
-                        wake_up_future: None,
-                    };
-
-                    let state_machine = substream.user_data().take().unwrap();
-                    let (updated, event) = state_machine.read_write(&mut substream_read_write);
-
-                    if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                        read_write.wake_up_after(&wake_up_after);
-                    }
-                    if let Some(future) = substream_read_write.wake_up_future {
-                        read_write.wake_up_when_boxed(future);
-                    }
-                    let outgoing_buffer_closed = substream_read_write.outgoing_buffer.is_none();
-
+                    let (num_read, event) =
+                        Self::process_substream(&mut self.inner, substream_id, read_write, data);
                     // Now that the Yamux parsing has been processed, discard this data in
                     // `self.encryption`.
-                    self.encryption
-                        .consume_inbound_data(substream_read_write.read_bytes);
-
-                    match updated {
-                        Ok(updated) => {
-                            *substream.user_data() = Some(updated);
-                            if outgoing_buffer_closed {
-                                substream.close().unwrap();
-                            }
-                        }
-                        Err(()) => {
-                            substream.reset();
-                        }
-                    }
+                    self.encryption.consume_inbound_data(num_read);
 
                     if let Some(event) = event {
-                        if let Some(event) = self.pass_through_substream_event(substream_id, event)
-                        {
-                            return Ok((self, Some(event)));
-                        }
+                        return Ok((self, Some(event)));
                     }
 
                     // TODO: correct?
@@ -355,11 +318,66 @@ where
     /// Optionally returns an event that happened as a result of writing out data or of the
     /// passage of time.
     fn update_all(&mut self, read_write: &mut ReadWrite<TNow>) -> Option<Event<TRqUd, TNotifUd>> {
-        for (substream_id, substream) in self.inner.yamux.user_datas_mut() {
+        for substream_id in self
+            .inner
+            .yamux
+            .user_datas()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+        {
+            let (_num_read, event) =
+                Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
+            debug_assert_eq!(_num_read, 0);
+            if let Some(event) = event {
+                return Some(event);
+            }
+        }
+
+        None
+    }
+
+    /// Advances a single substream.
+    ///
+    /// Returns the number of bytes that have been read from `in_data`, and optionally returns an
+    /// event to yield to the user.
+    ///
+    /// If the substream wants to wake up at a certain time or after a certain future,
+    /// `outer_read_write` will be updated to also wake up at that moment.
+    ///
+    /// This function does **not** read incoming data from `outer_read_write`. Instead, the data
+    /// destined to the substream is found in `in_data`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream has its read point closed and `in_data` isn't empty.
+    ///
+    fn process_substream(
+        inner: &mut Inner<TNow, TRqUd, TNotifUd>,
+        substream_id: yamux::SubstreamId,
+        outer_read_write: &mut ReadWrite<TNow>,
+        in_data: &[u8],
+    ) -> (usize, Option<Event<TRqUd, TNotifUd>>) {
+        let mut total_read = 0;
+
+        loop {
+            let mut substream = inner.yamux.substream_by_id(substream_id).unwrap();
+
+            let read_is_closed = substream.is_remote_closed();
+            let write_is_closed = substream.is_closed();
+
             let mut substream_read_write = ReadWrite {
-                now: read_write.now.clone(),
-                incoming_buffer: Some(&[]), // TODO: what if substream closed?
-                outgoing_buffer: todo!(),   // TODO:
+                now: outer_read_write.now.clone(),
+                incoming_buffer: if read_is_closed {
+                    assert!(in_data.is_empty());
+                    None
+                } else {
+                    Some(&in_data[total_read..])
+                },
+                outgoing_buffer: if !write_is_closed {
+                    Some((&mut inner.intermediary_buffer, &mut []))
+                } else {
+                    None
+                },
                 read_bytes: 0,
                 written_bytes: 0,
                 wake_up_after: None,
@@ -367,104 +385,148 @@ where
             };
 
             let (substream_update, event) = substream
+                .user_data()
                 .take()
                 .unwrap()
                 .read_write(&mut substream_read_write);
 
-            debug_assert_eq!(substream_read_write.read_bytes, 0);
+            total_read += substream_read_write.read_bytes;
             if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                read_write.wake_up_after(&wake_up_after);
+                outer_read_write.wake_up_after(&wake_up_after);
             }
             if let Some(wake_up_future) = substream_read_write.wake_up_future {
-                read_write.wake_up_when_boxed(wake_up_future);
+                outer_read_write.wake_up_when_boxed(wake_up_future);
             }
 
             match substream_update {
-                Ok(s) => *substream = Some(s),
+                Ok(s) => *substream.user_data() = Some(s),
                 Err(()) => {
-                    self.inner
-                        .yamux
-                        .substream_by_id(substream_id)
-                        .unwrap()
-                        .reset();
+                    inner.yamux.substream_by_id(substream_id).unwrap().reset();
                 }
             };
 
-            if let Some(event) = event {
-                if let Some(event) = self.pass_through_substream_event(substream_id, event) {
-                    return Some(event);
-                }
-            }
-        }
+            let event_to_yield = match event {
+                None => None,
+                Some(substream::Event::InboundNegotiated(protocol)) => {
+                    let substream = inner
+                        .yamux
+                        .substream_by_id(substream_id)
+                        .unwrap()
+                        .into_user_data()
+                        .as_mut()
+                        .unwrap();
 
-        None
+                    if protocol == inner.ping_protocol {
+                        substream.set_inbound_ty(substream::InboundTy::Ping);
+                    } else if let Some(protocol_index) = inner
+                        .request_protocols
+                        .iter()
+                        .position(|p| p.name == protocol)
+                    {
+                        substream.set_inbound_ty(substream::InboundTy::Request {
+                            protocol_index,
+                            request_max_size: if let ConfigRequestResponseIn::Payload { max_size } =
+                                inner.request_protocols[protocol_index].inbound_config
+                            {
+                                Some(max_size)
+                            } else {
+                                None
+                            },
+                        });
+                    } else if let Some(protocol_index) = inner
+                        .notifications_protocols
+                        .iter()
+                        .position(|p| p.name == protocol)
+                    {
+                        substream.set_inbound_ty(substream::InboundTy::Notifications {
+                            protocol_index,
+                            max_handshake_size: inner.notifications_protocols[protocol_index]
+                                .max_handshake_size,
+                        });
+                    } else {
+                        unreachable!()
+                    }
+
+                    continue;
+                }
+                Some(other) => Some(Self::pass_through_substream_event(substream_id, other)),
+            };
+
+            break (total_read, event_to_yield);
+        }
     }
 
+    /// Turns an event from the [`substream`] module into an [`Event`].
+    ///
+    /// # Panics
+    ///
+    /// Intentionally panics on [`substream::Event::InboundNegotiated`]. Please handler this
+    /// variant separately.
+    ///
     fn pass_through_substream_event(
-        &mut self,
         substream_id: yamux::SubstreamId,
         event: substream::Event<TRqUd, TNotifUd>,
-    ) -> Option<Event<TRqUd, TNotifUd>> {
+    ) -> Event<TRqUd, TNotifUd> {
         match event {
-            substream::Event::InboundNegotiated(_) => todo!(),
+            substream::Event::InboundNegotiated(_) => panic!(),
             substream::Event::RequestIn {
                 protocol_index,
                 request,
-            } => Some(Event::RequestIn {
+            } => Event::RequestIn {
                 id: SubstreamId(substream_id),
                 protocol_index,
                 request,
-            }),
+            },
             substream::Event::Response {
                 response,
                 user_data,
-            } => Some(Event::Response {
+            } => Event::Response {
                 id: SubstreamId(substream_id),
                 response,
                 user_data,
-            }),
+            },
             substream::Event::NotificationsInOpen {
                 protocol_index,
                 handshake,
-            } => Some(Event::NotificationsInOpen {
+            } => Event::NotificationsInOpen {
                 id: SubstreamId(substream_id),
                 protocol_index,
                 handshake,
-            }),
+            },
             substream::Event::NotificationsInOpenCancel { protocol_index } => {
-                Some(Event::NotificationsInOpenCancel {
+                Event::NotificationsInOpenCancel {
                     id: SubstreamId(substream_id),
                     protocol_index,
+                }
+            }
+            substream::Event::NotificationIn { notification } => {
+                (Event::NotificationIn {
+                    notification,
+                    id: SubstreamId(substream_id),
                 })
             }
-            substream::Event::NotificationIn { notification } => Some(Event::NotificationIn {
-                notification,
-                id: SubstreamId(substream_id),
-            }),
 
             substream::Event::NotificationsOutAccept { remote_handshake } => {
-                Some(Event::NotificationsOutAccept {
+                Event::NotificationsOutAccept {
                     id: SubstreamId(substream_id),
                     remote_handshake,
-                })
+                }
             }
             substream::Event::NotificationsOutReject { user_data } => {
-                Some(Event::NotificationsOutReject {
+                Event::NotificationsOutReject {
                     id: SubstreamId(substream_id),
                     user_data,
-                })
+                }
             }
             substream::Event::NotificationsOutCloseDemanded => {
-                Some(Event::NotificationsOutCloseDemanded {
+                Event::NotificationsOutCloseDemanded {
                     id: SubstreamId(substream_id),
-                })
+                }
             }
-            substream::Event::NotificationsOutReset { user_data } => {
-                Some(Event::NotificationsOutReset {
-                    id: SubstreamId(substream_id),
-                    user_data,
-                })
-            }
+            substream::Event::NotificationsOutReset { user_data } => Event::NotificationsOutReset {
+                id: SubstreamId(substream_id),
+                user_data,
+            },
         }
     }
 

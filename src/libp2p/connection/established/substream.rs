@@ -251,49 +251,10 @@ where
                 Ok(multistream_select::Negotiation::InProgress(nego)) => {
                     return (Ok(Substream::InboundNegotiating(nego)), None);
                 }
-                Ok(multistream_select::Negotiation::Success(protocol)) => {
-                    (
-                        Ok(Substream::InboundNegotiatingApiWait),
-                        Some(Event::InboundNegotiated(protocol)),
-                    )
-                    /*if protocol == self.ping_protocol {
-                        *substream.user_data() = Substream::PingIn(Default::default());
-                    } else if let Some(protocol_index) = self
-                        .request_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        if let ConfigRequestResponseIn::Payload { max_size } =
-                            self.request_protocols[protocol_index].inbound_config
-                        {
-                            *substream.user_data() = Substream::RequestInRecv {
-                                protocol_index,
-                                request: leb128::FramedInProgress::new(max_size),
-                            };
-                        } else {
-                            // TODO: make sure that data is empty?
-                            *substream.user_data() = Substream::RequestInApiWait;
-                            return Some(Event::RequestIn {
-                                id: substream_id,
-                                protocol_index,
-                                request: Vec::new(),
-                            });
-                        }
-                    } else if let Some(protocol_index) = self
-                        .notifications_protocols
-                        .iter()
-                        .position(|p| p.name == protocol)
-                    {
-                        *substream.user_data() = Substream::NotificationsInHandshake {
-                            protocol_index,
-                            handshake: leb128::FramedInProgress::new(
-                                self.notifications_protocols[protocol_index].max_handshake_size,
-                            ),
-                        };
-                    } else {
-                        unreachable!()
-                    }*/
-                }
+                Ok(multistream_select::Negotiation::Success(protocol)) => (
+                    Ok(Substream::InboundNegotiatingApiWait),
+                    Some(Event::InboundNegotiated(protocol)),
+                ),
                 Ok(multistream_select::Negotiation::NotAvailable) => {
                     read_write.close_write(); // TODO: unclear how multistream-select adjusts the read_write
                     (Ok(Substream::NegotiationFailed), None)
@@ -950,9 +911,45 @@ where
     ///
     /// Panics if the substream is not in the correct state.
     ///
-    pub fn set_inbound_ty(&mut self, ty: ()) {
+    pub fn set_inbound_ty(&mut self, ty: InboundTy) {
         assert!(matches!(*self, Substream::InboundNegotiatingApiWait));
-        todo!()
+
+        match ty {
+            InboundTy::Ping => {
+                *self = Substream::PingIn {
+                    payload_in: Default::default(),
+                    payload_out: VecDeque::with_capacity(32),
+                }
+            }
+            InboundTy::Notifications {
+                protocol_index,
+                max_handshake_size,
+            } => {
+                *self = Substream::NotificationsInHandshake {
+                    protocol_index,
+                    handshake: leb128::FramedInProgress::new(max_handshake_size),
+                }
+            }
+            InboundTy::Request {
+                protocol_index,
+                request_max_size,
+            } => {
+                if let Some(request_max_size) = request_max_size {
+                    *self = Substream::RequestInRecv {
+                        protocol_index,
+                        request: leb128::FramedInProgress::new(request_max_size),
+                    };
+                } else {
+                    *self = Substream::RequestInApiWait;
+                    // TODO: /!\
+                    /*return Some(Event::RequestIn {
+                        id: substream_id,
+                        protocol_index,
+                        request: Vec::new(),
+                    });*/
+                }
+            }
+        }
     }
 }
 
@@ -1085,6 +1082,22 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsOutReset {
         /// Value that was passed to [`Established::open_notifications_substream`].
         user_data: TNotifUd,
+    },
+}
+
+/// Type of inbound protocol.
+pub enum InboundTy {
+    Ping,
+    Request {
+        protocol_index: usize,
+        /// Maximum allowed size of the request.
+        /// If `None`, then no data is expected on the substream, not even the length of the
+        /// request.
+        request_max_size: Option<usize>,
+    },
+    Notifications {
+        protocol_index: usize,
+        max_handshake_size: usize,
     },
 }
 
