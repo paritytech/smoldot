@@ -18,6 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use alloc::collections::VecDeque;
 use core::{cmp, mem};
 use futures::future::{self, BoxFuture, Future, FutureExt as _};
 
@@ -115,6 +116,13 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             .unwrap_or(0)
     }
 
+    /// Shortcut to [`ReadWrite::advance_read`], passing as parameter the value of
+    /// [`ReadWrite::incoming_buffer_available`]. This discards all the incoming data.
+    pub fn discard_all_incoming(&mut self) {
+        let len = self.incoming_buffer_available();
+        self.advance_read(len);
+    }
+
     /// Returns an iterator that pops bytes from [`ReadWrite::incoming_buffer`]. Whenever the
     /// iterator advances, [`ReadWrite::read_bytes`] is increased by 1.
     pub fn incoming_bytes_iter<'b>(&'b mut self) -> IncomingBytes<'a, 'b, TNow> {
@@ -177,6 +185,28 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         self.advance_write(data.len());
     }
 
+    /// Copies as much as possible from the content of `data` to [`ReadWrite::outgoing_buffer`]
+    /// and increases [`ReadWrite::written_bytes`]. The bytes that have been written are removed
+    /// from `data`.
+    pub fn write_from_vec_deque(&mut self, data: &mut VecDeque<u8>) {
+        let (slice1, slice2) = data.as_slices();
+
+        let outgoing_available = self.outgoing_buffer_available();
+        let to_copy1 = cmp::min(slice1.len(), outgoing_available);
+        let to_copy2 = if to_copy1 == slice1.len() {
+            cmp::min(slice2.len(), outgoing_available - to_copy1)
+        } else {
+            0
+        };
+
+        self.write_out(&slice1[..to_copy1]);
+        self.write_out(&slice2[..to_copy2]);
+
+        for _ in 0..(to_copy1 + to_copy2) {
+            data.pop_front();
+        }
+    }
+
     /// Sets [`ReadWrite::wake_up_after`] to `min(wake_up_after, after)`.
     pub fn wake_up_after(&mut self, after: &TNow)
     where
@@ -202,6 +232,25 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         self.wake_up_future = Some(
             async move {
                 futures::pin_mut!(when);
+                future::select(current, when).await;
+            }
+            .boxed(),
+        );
+    }
+
+    /// Same as [`ReadWrite::wake_up_when`], but accepts a boxed future as parameter. This is
+    /// slightly faster if your future is already boxed.
+    pub fn wake_up_when_boxed(&mut self, when: future::BoxFuture<'static, ()>) {
+        let current = match self.wake_up_future.take() {
+            Some(f) => f,
+            None => {
+                self.wake_up_future = Some(when);
+                return;
+            }
+        };
+
+        self.wake_up_future = Some(
+            async move {
                 future::select(current, when).await;
             }
             .boxed(),

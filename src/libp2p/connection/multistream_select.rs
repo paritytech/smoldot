@@ -212,6 +212,8 @@ where
                 read_write.advance_read(num_read);
             }
 
+            // TODO: error if inbound or outbound buffer closed
+
             match (self.state, &mut self.config) {
                 (
                     InProgressState::SendHandshake {
