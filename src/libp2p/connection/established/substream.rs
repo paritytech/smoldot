@@ -52,7 +52,7 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
         negotiation: multistream_select::InProgress<vec::IntoIter<String>, String>,
         /// Bytes of the handshake to send after the substream is open.
         handshake_out: Vec<u8>,
-        /// Data passed by the user to [`Substream::open_notifications_substream`].
+        /// Data passed by the user to [`Substream::notifications_out`].
         user_data: TNotifUd,
     },
     /// A notifications protocol has been negotiated on a substream. Either a successful handshake
@@ -62,7 +62,7 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
         handshake_in: leb128::FramedInProgress,
         /// Handshake payload to write out.
         handshake_out: VecDeque<u8>,
-        /// Data passed by the user to [`Substream::open_notifications_substream`].
+        /// Data passed by the user to [`Substream::notifications_out`].
         user_data: TNotifUd,
     },
     /// A notifications protocol has been negotiated, and the remote accepted it. Can now send
@@ -70,7 +70,7 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
     NotificationsOut {
         /// Notifications to write out.
         notifications: VecDeque<u8>,
-        /// Data passed by the user to [`Substream::open_notifications_substream`].
+        /// Data passed by the user to [`Substream::notifications_out`].
         user_data: TNotifUd,
     },
     /// A notifications protocol has been closed. Waiting for the remote to close it as well.
@@ -121,7 +121,7 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
         /// If `None`, nothing should be sent on the substream at all, not even the length prefix.
         /// This contrasts with `Some(empty_vec)` where a `0` length prefix must be sent.
         request: Option<Vec<u8>>,
-        /// Data passed by the user to [`Substream::add_request`].
+        /// Data passed by the user to [`Substream::request_out`].
         user_data: TRqUd,
     },
     /// Outgoing request has been sent out or is queued for send out, and a response from the
@@ -131,7 +131,7 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
         timeout: TNow,
         /// Request payload to write out.
         request: VecDeque<u8>,
-        /// Data passed by the user to [`Substream::add_request`].
+        /// Data passed by the user to [`Substream::request_out`].
         user_data: TRqUd,
         /// Buffer for the incoming response.
         response: leb128::FramedInProgress,
@@ -146,7 +146,7 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
         protocol_index: usize,
     },
     /// Similar to [`Substream::RequestInRecv`], but doesn't expect any request body. Immediately
-    /// reports an event and switches to [`Substream::RquestInApiWait`].
+    /// reports an event and switches to [`Substream::RequestInApiWait`].
     RequestInRecvEmpty {
         /// Protocol that was negotiated.
         protocol_index: usize,
@@ -833,8 +833,8 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
-    /// notifications substream isn't in the appropriate state.
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
     ///
     pub fn write_notification_unbounded(&mut self, notification: Vec<u8>) {
         match self {
@@ -853,8 +853,8 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
-    /// notifications substream isn't in the appropriate state.
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
     ///
     pub fn notification_substream_queued_bytes(&self) -> usize {
         match self {
@@ -871,8 +871,8 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
-    /// notifications substream isn't in the appropriate state.
+    /// Panics if the substream isn't a notifications substream, or if the notifications substream
+    /// isn't in the appropriate state.
     ///
     pub fn close_notifications_substream(&mut self) {
         if !matches!(
@@ -1017,8 +1017,6 @@ pub enum Event<TRqUd, TNotifUd> {
     /// Received a request in the context of a request-response protocol.
     RequestIn {
         /// Index of the request-response protocol the request was sent on.
-        ///
-        /// The index refers to the position of the protocol in [`Config::request_protocols`].
         protocol_index: usize,
         /// Bytes of the request. Its interpretation is out of scope of this module.
         request: Vec<u8>,
@@ -1028,7 +1026,7 @@ pub enum Event<TRqUd, TNotifUd> {
     Response {
         /// Bytes of the response. Its interpretation is out of scope of this module.
         response: Result<Vec<u8>, RequestError>,
-        /// Value that was passed to [`Substream::add_request`].
+        /// Value that was passed to [`Substream::request_out`].
         user_data: TRqUd,
     },
 
@@ -1039,9 +1037,6 @@ pub enum Event<TRqUd, TNotifUd> {
     /// order to accept or reject this substream.
     NotificationsInOpen {
         /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
         protocol_index: usize,
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
@@ -1054,9 +1049,6 @@ pub enum Event<TRqUd, TNotifUd> {
     /// [`Substream::reject_in_notifications_substream`] should not be called on this substream.
     NotificationsInOpenCancel {
         /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
         protocol_index: usize,
     },
 
@@ -1068,7 +1060,7 @@ pub enum Event<TRqUd, TNotifUd> {
         notification: Vec<u8>,
     },
 
-    /// Remote has accepted a substream opened with [`Substream::open_notifications_substream`].
+    /// Remote has accepted a substream opened with [`Substream::notifications_out`].
     ///
     /// It is now possible to send notifications on this substream.
     NotificationsOutAccept {
@@ -1076,9 +1068,9 @@ pub enum Event<TRqUd, TNotifUd> {
         remote_handshake: Vec<u8>,
     },
 
-    /// Remote has rejected a substream opened with [`Substream::open_notifications_substream`].
+    /// Remote has rejected a substream opened with [`Substream::notifications_out`].
     NotificationsOutReject {
-        /// Value that was passed to [`Substream::open_notifications_substream`].
+        /// Value that was passed to [`Substream::notifications_out`].
         user_data: TNotifUd,
     },
 
@@ -1088,7 +1080,7 @@ pub enum Event<TRqUd, TNotifUd> {
 
     /// Remote has reset an outgoing notifications substream. The substream is instantly closed.
     NotificationsOutReset {
-        /// Value that was passed to [`Substream::open_notifications_substream`].
+        /// Value that was passed to [`Substream::notifications_out`].
         user_data: TNotifUd,
     },
 }

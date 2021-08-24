@@ -517,12 +517,10 @@ where
                     protocol_index,
                 }
             }
-            substream::Event::NotificationIn { notification } => {
-                (Event::NotificationIn {
-                    notification,
-                    id: SubstreamId(substream_id),
-                })
-            }
+            substream::Event::NotificationIn { notification } => Event::NotificationIn {
+                notification,
+                id: SubstreamId(substream_id),
+            },
 
             substream::Event::NotificationsOutAccept { remote_handshake } => {
                 Event::NotificationsOutAccept {
@@ -582,19 +580,19 @@ where
 
         let timeout = now + self.inner.request_protocols[protocol_index].timeout;
 
-        let mut substream =
-            self.inner
-                .yamux
-                .open_substream(Some(substream::Substream::request_out(
-                    self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
-                    timeout,
-                    if has_length_prefix {
-                        Some(request)
-                    } else {
-                        None
-                    },
-                    user_data,
-                )));
+        let substream = self
+            .inner
+            .yamux
+            .open_substream(Some(substream::Substream::request_out(
+                self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                timeout,
+                if has_length_prefix {
+                    Some(request)
+                } else {
+                    None
+                },
+                user_data,
+            )));
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
