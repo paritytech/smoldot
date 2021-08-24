@@ -320,7 +320,10 @@ where
             } => {
                 if timeout < read_write.now {
                     // TODO: report that it's a timeout and not a rejection
-                    return (Ok(self), Some(Event::NotificationsOutReject { user_data }));
+                    return (
+                        Ok(Substream::NegotiationFailed),
+                        Some(Event::NotificationsOutReject { user_data }),
+                    );
                 }
 
                 read_write.wake_up_after(&timeout);
@@ -370,7 +373,10 @@ where
                     None => {
                         read_write.close_write();
                         // TODO: transition
-                        return (Ok(self), Some(Event::NotificationsOutReject { user_data }));
+                        return (
+                            Ok(Substream::NegotiationFailed),
+                            Some(Event::NotificationsOutReject { user_data }),
+                        );
                     }
                 };
 
@@ -448,7 +454,7 @@ where
                 if timeout < read_write.now {
                     read_write.close_write();
                     return (
-                        Ok(self), // TODO: transition
+                        Ok(Substream::NegotiationFailed),
                         Some(Event::Response {
                             response: Err(RequestError::Timeout),
                             user_data,
@@ -459,17 +465,15 @@ where
                 read_write.wake_up_after(&timeout);
 
                 match negotiation.read_write(read_write) {
-                    Ok(multistream_select::Negotiation::InProgress(nego)) => {
-                        return Ok((
-                            Substream::RequestOutNegotiating {
-                                negotiation: nego,
-                                timeout,
-                                request,
-                                user_data,
-                            },
-                            None,
-                        ));
-                    }
+                    Ok(multistream_select::Negotiation::InProgress(nego)) => (
+                        Ok(Substream::RequestOutNegotiating {
+                            negotiation: nego,
+                            timeout,
+                            request,
+                            user_data,
+                        }),
+                        None,
+                    ),
                     Ok(multistream_select::Negotiation::Success(_)) => {
                         let request_payload = if let Some(request) = request {
                             let request_len = request.len();
@@ -538,13 +542,13 @@ where
                     Some(buf) => buf,
                     None => {
                         read_write.close_write();
-                        return Ok((
-                            self,
+                        return (
+                            Ok(Substream::NegotiationFailed),
                             Some(Event::Response {
                                 user_data,
                                 response: Err(RequestError::SubstreamClosed),
                             }),
-                        ));
+                        );
                     }
                 };
 
@@ -636,10 +640,10 @@ where
                     Some(buf) => buf,
                     None => {
                         read_write.close_write();
-                        return Ok((
-                            self,
+                        return (
+                            Ok(Substream::NegotiationFailed), // TODO: proper transition
                             Some(Event::NotificationsInOpenCancel { protocol_index }),
-                        ));
+                        );
                     }
                 };
 
@@ -679,7 +683,7 @@ where
             }
             Substream::NotificationsIn {
                 mut next_notification,
-                handshake,
+                mut handshake,
                 protocol_index,
                 max_notification_size,
                 user_data,
@@ -690,8 +694,10 @@ where
                     Some(buf) => buf,
                     None => {
                         read_write.close_write();
-                        // TODO: transition
-                        return Ok((self, Some(Event::NotificationsOutReject { user_data })));
+                        return (
+                            Ok(Substream::NegotiationFailed), // TODO: proper transitio
+                            Some(Event::NotificationsOutReject { user_data }),
+                        );
                     }
                 };
 
@@ -911,8 +917,6 @@ where
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
     ///
     /// Passing an `Err` corresponds, on the other side, to a [`RequestError::SubstreamClosed`].
-    ///
-    /// Returns an error if the [`SubstreamId`] is invalid.
     pub fn respond_in_request(
         &mut self,
         response: Result<Vec<u8>, ()>,
@@ -934,6 +938,7 @@ where
 
                 Ok(())
             }
+            // TODO: handle substream closed
             _ => panic!(),
         }
     }
@@ -989,6 +994,7 @@ where
             Substream::RequestInRecv { protocol_index, .. } => {
                 f.debug_tuple("request-in").field(protocol_index).finish()
             }
+            Substream::RequestInRespond { .. } => f.debug_tuple("request-in-respond").finish(),
             Substream::RequestInApiWait => f.debug_tuple("request-in").finish(),
             Substream::PingIn { .. } => f.debug_tuple("ping-in").finish(),
         }
@@ -1099,4 +1105,11 @@ pub enum RequestError {
     NegotiationError(multistream_select::Error),
     /// Error while receiving the response.
     ResponseLebError(leb128::FramedError),
+}
+
+/// Error potentially returned by [`Established::respond_in_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum RespondInRequestError {
+    /// The substream has already been closed.
+    SubstreamClosed,
 }

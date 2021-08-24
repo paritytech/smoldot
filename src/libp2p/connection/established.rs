@@ -59,7 +59,7 @@ use core::{
 
 pub mod substream;
 
-pub use substream::RequestError;
+pub use substream::{RequestError, RespondInRequestError};
 
 /// State machine of a fully-established connection.
 pub struct Established<TNow, TRqUd, TNotifUd> {
@@ -206,42 +206,53 @@ where
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                     if let Some(event) = substream_ty.unwrap().reset() {
-                        return Ok((self, Some(event)));
+                        if let Some(event) = self.pass_through_substream_event(substream_id, event)
+                        {
+                            return Ok((self, Some(event)));
+                        }
                     }
                 }
 
                 Some(yamux::IncomingDataDetail::StreamClosed {
                     substream_id,
-                    user_data,
+                    user_data: state_machine,
                 }) => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
 
-                    let user_data = match user_data {
-                        Some(ud) => ud,
+                    let state_machine = match state_machine {
+                        Some(ud) => ud.unwrap(),
                         None => {
-                            match self
-                                .inner
-                                .yamux
-                                .substream_by_id(substream_id)
-                                .unwrap()
-                                .into_user_data()
-                            {
-                                Substream::NotificationsOut { .. } => {
-                                    // TODO: report to user
-                                    todo!()
-                                }
-                                _ => {}
-                            }
-
-                            self.inner
-                                .yamux
-                                .substream_by_id(substream_id)
-                                .unwrap()
-                                .close()
-                                .unwrap()
+                            // None here means that only the read side of the substream has been
+                            // closed by the remote. This substream will be processed at the next
+                            // iteration of the loop.
+                            // TODO: actually do this
+                            continue;
                         }
                     };
+
+                    // If this is reached, then both sides of the substream have been closed.
+                    // Querying the substream again for events.
+                    // TODO: consider refactoring yamux to keep the substream until removed manually?
+
+                    let mut substream_read_write = ReadWrite {
+                        now: read_write.now.clone(),
+                        incoming_buffer: None,
+                        outgoing_buffer: None,
+                        read_bytes: 0,
+                        written_bytes: 0,
+                        wake_up_after: None,
+                        wake_up_future: None,
+                    };
+
+                    let (updated, event) = state_machine.read_write(&mut substream_read_write);
+
+                    if let Some(wake_up_after) = substream_read_write.wake_up_after {
+                        read_write.wake_up_after(&wake_up_after);
+                    }
+                    if let Some(future) = substream_read_write.wake_up_future {
+                        read_write.wake_up_when_boxed(future);
+                    }
 
                     // TODO: finish here
                 }
@@ -254,10 +265,10 @@ where
                     let data = &self.encryption.decoded_inbound_data()
                         [start_offset..yamux_decode.bytes_read];
 
-                    let substream = self.inner.yamux.substream_by_id(substream_id).unwrap();
+                    let mut substream = self.inner.yamux.substream_by_id(substream_id).unwrap();
 
                     let mut substream_read_write = ReadWrite {
-                        now: read_write.now,
+                        now: read_write.now.clone(),
                         incoming_buffer: Some(data),
                         outgoing_buffer: if substream.is_closed() { None } else { todo!() },
                         read_bytes: 0,
@@ -275,6 +286,7 @@ where
                     if let Some(future) = substream_read_write.wake_up_future {
                         read_write.wake_up_when_boxed(future);
                     }
+                    let outgoing_buffer_closed = substream_read_write.outgoing_buffer.is_none();
 
                     // Now that the Yamux parsing has been processed, discard this data in
                     // `self.encryption`.
@@ -284,7 +296,7 @@ where
                     match updated {
                         Ok(updated) => {
                             *substream.user_data() = Some(updated);
-                            if substream_read_write.outgoing_buffer.is_none() {
+                            if outgoing_buffer_closed {
                                 substream.close().unwrap();
                             }
                         }
@@ -294,7 +306,10 @@ where
                     }
 
                     if let Some(event) = event {
-                        return Ok((self, Some(event)));
+                        if let Some(event) = self.pass_through_substream_event(substream_id, event)
+                        {
+                            return Ok((self, Some(event)));
+                        }
                     }
 
                     // TODO: correct?
@@ -342,7 +357,7 @@ where
     fn update_all(&mut self, read_write: &mut ReadWrite<TNow>) -> Option<Event<TRqUd, TNotifUd>> {
         for (substream_id, substream) in self.inner.yamux.user_datas_mut() {
             let mut substream_read_write = ReadWrite {
-                now: read_write.now,
+                now: read_write.now.clone(),
                 incoming_buffer: Some(&[]), // TODO: what if substream closed?
                 outgoing_buffer: todo!(),   // TODO:
                 read_bytes: 0,
@@ -376,11 +391,81 @@ where
             };
 
             if let Some(event) = event {
-                return Some(event);
+                if let Some(event) = self.pass_through_substream_event(substream_id, event) {
+                    return Some(event);
+                }
             }
         }
 
         None
+    }
+
+    fn pass_through_substream_event(
+        &mut self,
+        substream_id: yamux::SubstreamId,
+        event: substream::Event<TRqUd, TNotifUd>,
+    ) -> Option<Event<TRqUd, TNotifUd>> {
+        match event {
+            substream::Event::InboundNegotiated(_) => todo!(),
+            substream::Event::RequestIn {
+                protocol_index,
+                request,
+            } => Some(Event::RequestIn {
+                id: SubstreamId(substream_id),
+                protocol_index,
+                request,
+            }),
+            substream::Event::Response {
+                response,
+                user_data,
+            } => Some(Event::Response {
+                id: SubstreamId(substream_id),
+                response,
+                user_data,
+            }),
+            substream::Event::NotificationsInOpen {
+                protocol_index,
+                handshake,
+            } => Some(Event::NotificationsInOpen {
+                id: SubstreamId(substream_id),
+                protocol_index,
+                handshake,
+            }),
+            substream::Event::NotificationsInOpenCancel { protocol_index } => {
+                Some(Event::NotificationsInOpenCancel {
+                    id: SubstreamId(substream_id),
+                    protocol_index,
+                })
+            }
+            substream::Event::NotificationIn { notification } => Some(Event::NotificationIn {
+                notification,
+                id: SubstreamId(substream_id),
+            }),
+
+            substream::Event::NotificationsOutAccept { remote_handshake } => {
+                Some(Event::NotificationsOutAccept {
+                    id: SubstreamId(substream_id),
+                    remote_handshake,
+                })
+            }
+            substream::Event::NotificationsOutReject { user_data } => {
+                Some(Event::NotificationsOutReject {
+                    id: SubstreamId(substream_id),
+                    user_data,
+                })
+            }
+            substream::Event::NotificationsOutCloseDemanded => {
+                Some(Event::NotificationsOutCloseDemanded {
+                    id: SubstreamId(substream_id),
+                })
+            }
+            substream::Event::NotificationsOutReset { user_data } => {
+                Some(Event::NotificationsOutReset {
+                    id: SubstreamId(substream_id),
+                    user_data,
+                })
+            }
+        }
     }
 
     /// Sends a request to the remote.
@@ -627,7 +712,7 @@ where
         self.inner
             .yamux
             .substream_by_id(substream_id.0)
-            .unwrap()
+            .ok_or(RespondInRequestError::SubstreamClosed)?
             .into_user_data()
             .as_mut()
             .unwrap()
@@ -869,11 +954,4 @@ pub struct ConfigNotifications {
 
     /// Maximum size, in bytes, of a notification that can be received.
     pub max_notification_size: usize,
-}
-
-/// Error potentially returned by [`Established::respond_in_request`].
-#[derive(Debug, derive_more::Display)]
-pub enum RespondInRequestError {
-    /// The substream has already been closed.
-    SubstreamClosed,
 }

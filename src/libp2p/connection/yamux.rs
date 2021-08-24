@@ -979,7 +979,7 @@ impl<'a, T> SubstreamMut<'a, T> {
 
     /// Returns `true` if [`SubstreamMut::close`] has been called on this substream.
     pub fn is_closed(&self) -> bool {
-        self.substream.get_mut().local_write_closed
+        self.substream.get().local_write_closed
     }
 
     /// Marks the substream as closed. It is no longer possible to write data on it.
