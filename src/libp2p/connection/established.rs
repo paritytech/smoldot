@@ -48,11 +48,9 @@
 
 // TODO: expand docs ^
 
-use crate::util::leb128;
+use super::{super::read_write::ReadWrite, noise, yamux};
 
-use super::{super::read_write::ReadWrite, multistream_select, noise, yamux};
-
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{
     fmt, iter,
     ops::{Add, Sub},
@@ -176,27 +174,27 @@ where
                     // Receive a request from the remote for a new incoming substream.
                     // These requests are automatically accepted.
                     // TODO: add a limit to the number of substreams
-                    let nego =
-                        multistream_select::InProgress::new(multistream_select::Config::Listener {
-                            supported_protocols: self
-                                .inner
-                                .request_protocols
+
+                    let supported_protocols = self
+                        .inner
+                        .request_protocols
+                        .iter()
+                        .filter(|p| p.inbound_allowed)
+                        .map(|p| p.name.clone())
+                        .chain(
+                            self.inner
+                                .notifications_protocols
                                 .iter()
-                                .filter(|p| p.inbound_allowed)
-                                .map(|p| p.name.clone())
-                                .chain(
-                                    self.inner
-                                        .notifications_protocols
-                                        .iter()
-                                        .map(|p| p.name.clone()),
-                                )
-                                .chain(iter::once(self.inner.ping_protocol.clone()))
-                                .collect::<Vec<_>>()
-                                .into_iter(),
-                        });
+                                .map(|p| p.name.clone()),
+                        )
+                        .chain(iter::once(self.inner.ping_protocol.clone()))
+                        .collect::<Vec<_>>();
+
                     self.inner
                         .yamux
-                        .accept_pending_substream(Substream::InboundNegotiating(nego));
+                        .accept_pending_substream(Some(substream::Substream::ingoing(
+                            supported_protocols,
+                        )));
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                 }
@@ -511,6 +509,8 @@ where
         handshake: Vec<u8>,
         user_data: TNotifUd,
     ) {
+        let max_notification_size = 16 * 1024 * 1024; // TODO: hack
+                                                      // TODO: self.inner.notifications_protocols[protocol_index].max_notification_size;
         self.inner
             .yamux
             .substream_by_id(substream_id.0)
@@ -518,7 +518,7 @@ where
             .into_user_data()
             .as_mut()
             .unwrap()
-            .accept_in_notifications_substream(handshake, user_data);
+            .accept_in_notifications_substream(handshake, max_notification_size, user_data);
     }
 
     /// Rejects an inbound notifications protocol. Must be called in response to a
