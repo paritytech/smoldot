@@ -269,7 +269,6 @@ where
                 // protocol. The substream is expected to close soon, but the remote might
                 // have been eagerly sending data (assuming that the negotiation would
                 // succeed), which should be silently discarded.
-                debug_assert!(read_write.outgoing_buffer.is_none());
                 read_write.discard_all_incoming();
                 (Ok(Substream::NegotiationFailed), None)
             }
@@ -585,6 +584,7 @@ where
                     }
                 }
             }
+            Substream::RequestInApiWait => (Ok(Substream::RequestInApiWait), None),
             Substream::RequestInRespond { mut response } => {
                 debug_assert!(read_write.incoming_buffer.is_none());
                 read_write.write_from_vec_deque(&mut response);
@@ -727,11 +727,10 @@ where
                     None,
                 )
             }
-            _ => todo!("other substream kind"),
         }
     }
 
-    pub fn reset(mut self) -> Option<Event<TRqUd, TNotifUd>> {
+    pub fn reset(self) -> Option<Event<TRqUd, TNotifUd>> {
         match self {
             Substream::Poisoned => unreachable!(),
             Substream::InboundNegotiating(_) => None,

@@ -258,27 +258,35 @@ where
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
-                    start_offset,
+                    mut start_offset,
                     substream_id,
                 }) => {
-                    // Data belonging to a substream has been decoded.
-                    let data = &self.encryption.decoded_inbound_data()
-                        [start_offset..yamux_decode.bytes_read];
+                    while start_offset != yamux_decode.bytes_read {
+                        // Data belonging to a substream has been decoded.
+                        let data = &self.encryption.decoded_inbound_data()
+                            [start_offset..yamux_decode.bytes_read];
 
-                    let (num_read, event) =
-                        Self::process_substream(&mut self.inner, substream_id, read_write, data);
-                    // Now that the Yamux parsing has been processed, discard this data in
-                    // `self.encryption`.
-                    self.encryption.consume_inbound_data(num_read);
+                        let (num_read, event) = Self::process_substream(
+                            &mut self.inner,
+                            substream_id,
+                            read_write,
+                            data,
+                        );
 
-                    if let Some(event) = event {
-                        return Ok((self, Some(event)));
+                        start_offset += num_read;
+
+                        if let Some(event) = event {
+                            // Discard this data in `self.encryption`.
+                            self.encryption
+                                .consume_inbound_data(yamux_decode.bytes_read);
+                            // TODO: what if even when start_offset != yamux_decode.bytes_read? will be state inconsistency /!\
+                            return Ok((self, Some(event)));
+                        }
                     }
 
-                    // TODO: correct?
-                    if yamux_decode.bytes_read == 0 {
-                        break;
-                    }
+                    // Discard this data in `self.encryption`.
+                    self.encryption
+                        .consume_inbound_data(yamux_decode.bytes_read);
                 }
             };
         }
