@@ -181,10 +181,9 @@ where
         handshake: Vec<u8>,
         user_data: TNotifUd,
     ) -> Self {
-        let mut negotiation =
-            multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol,
-            });
+        let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
+            requested_protocol,
+        });
 
         Substream::NotificationsOutNegotiating {
             timeout,
@@ -208,10 +207,9 @@ where
         request: Option<Vec<u8>>,
         user_data: TRqUd,
     ) -> Self {
-        let mut negotiation =
-            multistream_select::InProgress::new(multistream_select::Config::Dialer {
-                requested_protocol,
-            });
+        let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
+            requested_protocol,
+        });
 
         Substream::RequestOutNegotiating {
             timeout,
@@ -223,7 +221,7 @@ where
         // TODO: somehow do substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
     }
 
-    /// Returns the user dat associated to a notifications substream.
+    /// Returns the user data associated to a notifications substream.
     ///
     /// Returns `None` if the substream isn't a notifications substream.
     pub fn notifications_substream_user_data_mut(&mut self) -> Option<&mut TNotifUd> {
@@ -242,7 +240,7 @@ where
     /// If a protocol error happens, an `Err(())` is returned. In that case, the substream must be
     /// reset.
     pub fn read_write<'a>(
-        mut self,
+        self,
         read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
     ) -> (Result<Self, ()>, Option<Event<TRqUd, TNotifUd>>) {
         match self {
@@ -270,6 +268,7 @@ where
                 // have been eagerly sending data (assuming that the negotiation would
                 // succeed), which should be silently discarded.
                 read_write.discard_all_incoming();
+                read_write.close_write();
                 (Ok(Substream::NegotiationFailed), None)
             }
             Substream::NotificationsOutNegotiating {
