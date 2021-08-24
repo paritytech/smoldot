@@ -26,6 +26,8 @@ use alloc::{
 use core::fmt;
 
 /// State machine containing the state of a single substream of an established connection.
+// TODO: remove `protocol_index` fields?
+// TODO: hide enum variants
 pub enum Substream<TNow, TRqUd, TNotifUd> {
     /// Temporary transition state.
     Poisoned,
@@ -140,6 +142,12 @@ pub enum Substream<TNow, TRqUd, TNotifUd> {
     RequestInRecv {
         /// Buffer for the incoming request.
         request: leb128::FramedInProgress,
+        /// Protocol that was negotiated.
+        protocol_index: usize,
+    },
+    /// Similar to [`Substream::RequestInRecv`], but doesn't expect any request body. Immediately
+    /// reports an event and switches to [`Substream::RquestInApiWait`].
+    RequestInRecvEmpty {
         /// Protocol that was negotiated.
         protocol_index: usize,
     },
@@ -583,6 +591,13 @@ where
                     }
                 }
             }
+            Substream::RequestInRecvEmpty { protocol_index } => (
+                Ok(Substream::RequestInApiWait),
+                Some(Event::RequestIn {
+                    protocol_index,
+                    request: Vec::new(),
+                }),
+            ),
             Substream::RequestInApiWait => (Ok(Substream::RequestInApiWait), None),
             Substream::RequestInRespond { mut response } => {
                 debug_assert!(read_write.incoming_buffer.is_none());
@@ -740,7 +755,6 @@ where
                 user_data,
                 response: Err(RequestError::SubstreamReset),
             }),
-            Substream::RequestInRecv { .. } => None,
             Substream::NotificationsInHandshake { .. } => None,
             Substream::NotificationsInWait { protocol_index, .. } => {
                 Some(Event::NotificationsInOpenCancel { protocol_index })
@@ -759,6 +773,8 @@ where
                 Some(Event::NotificationsOutReset { user_data })
             }
             Substream::NotificationsOutClosed { .. } => None,
+            Substream::RequestInRecv { .. } => None,
+            Substream::RequestInRecvEmpty { .. } => None,
             Substream::RequestInApiWait => None,
             Substream::RequestInRespond { .. } => None,
         }
@@ -938,13 +954,7 @@ where
                         request: leb128::FramedInProgress::new(request_max_size),
                     };
                 } else {
-                    *self = Substream::RequestInApiWait;
-                    // TODO: /!\
-                    /*return Some(Event::RequestIn {
-                        id: substream_id,
-                        protocol_index,
-                        request: Vec::new(),
-                    });*/
+                    *self = Substream::RequestInRecvEmpty { protocol_index };
                 }
             }
         }
@@ -986,7 +996,8 @@ where
             | Substream::RequestOut { user_data, .. } => {
                 f.debug_tuple("request-out").field(&user_data).finish()
             }
-            Substream::RequestInRecv { protocol_index, .. } => {
+            Substream::RequestInRecv { protocol_index, .. }
+            | Substream::RequestInRecvEmpty { protocol_index, .. } => {
                 f.debug_tuple("request-in").field(protocol_index).finish()
             }
             Substream::RequestInRespond { .. } => f.debug_tuple("request-in-respond").finish(),
