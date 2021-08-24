@@ -1214,7 +1214,6 @@ where
                             let _ = waker.send(());
                         }
 
-                        panic!("{:?}", err); // TODO: remove
                         self.connection =
                             ConnectionInner::Errored(ConnectionError::Established(err));
                         self.pending_event = Some(PendingEvent::Disconnect);
