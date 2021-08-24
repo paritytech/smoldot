@@ -76,8 +76,8 @@ pub struct Established<TNow, TRqUd, TNotifUd> {
 /// Extra fields. Segregated in order to solve borrowing questions.
 struct Inner<TNow, TRqUd, TNotifUd> {
     /// State of the various substreams of the connection.
-    /// Consists in a collection of substreams, each of which holding a [`Substream`] object, or
-    /// `None` if the substream has been reset.
+    /// Consists in a collection of substreams, each of which holding a [`substream::Substream`]
+    /// object, or `None` if the substream has been reset.
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
     yamux: yamux::Yamux<Option<substream::Substream<TNow, TRqUd, TNotifUd>>>,
