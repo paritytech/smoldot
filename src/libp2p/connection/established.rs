@@ -149,8 +149,6 @@ where
                 return Ok((self, None));
             }
 
-            // TODO: handle incoming_data being None
-
             // Ask the Yamux state machine to decode the buffer present in `self.encryption`.
             let yamux_decode = self
                 .inner
@@ -280,6 +278,7 @@ where
                             self.encryption
                                 .consume_inbound_data(yamux_decode.bytes_read);
                             // TODO: what if even when start_offset != yamux_decode.bytes_read? will be state inconsistency /!\
+                            debug_assert_eq!(yamux_decode.bytes_read, start_offset);
                             return Ok((self, Some(event)));
                         }
                     }
@@ -404,6 +403,17 @@ where
             }
             if let Some(wake_up_future) = substream_read_write.wake_up_future {
                 outer_read_write.wake_up_when_boxed(wake_up_future);
+            }
+
+            let closed_after = substream_read_write.outgoing_buffer.is_none();
+            let written_bytes = substream_read_write.written_bytes;
+            if written_bytes != 0 {
+                debug_assert!(!write_is_closed);
+                substream.write(inner.intermediary_buffer[..written_bytes].to_vec());
+            }
+            if !write_is_closed && closed_after {
+                // TODO: use return value
+                // TODO: substream.close();
             }
 
             match substream_update {
