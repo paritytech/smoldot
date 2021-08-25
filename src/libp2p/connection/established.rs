@@ -128,6 +128,10 @@ where
         ),
         Error,
     > {
+        if let Some(event) = self.inner.pending_events.pop_front() {
+            return Ok((self, Some(event)));
+        }
+
         // First, update all the internal substreams.
         // This doesn't read data from `read_write`, but can potential write out data.
         {
@@ -286,7 +290,7 @@ where
                         }
 
                         // It might be that the substream has been closed in `process_substream`.
-                        if inner.yamux.substream_by_id(substream_id).is_none() {
+                        if self.inner.yamux.substream_by_id(substream_id).is_none() {
                             break;
                         }
                     }
