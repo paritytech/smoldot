@@ -50,7 +50,7 @@
 
 use super::{super::read_write::ReadWrite, noise, yamux};
 
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
     fmt, iter,
     ops::{Add, Sub},
@@ -75,6 +75,10 @@ pub struct Established<TNow, TRqUd, TNotifUd> {
 
 /// Extra fields. Segregated in order to solve borrowing questions.
 struct Inner<TNow, TRqUd, TNotifUd> {
+    /// Events that should be yielded from [`Established::read_write`] as soon as possible.
+    // TODO: remove this field; it is necessary because of limitations in the yamux implementation
+    pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
+
     /// State of the various substreams of the connection.
     /// Consists in a collection of substreams, each of which holding a [`substream::Substream`]
     /// object, or `None` if the substream has been reset.
@@ -137,6 +141,10 @@ where
 
         // Decoding the incoming data.
         loop {
+            if let Some(event) = self.inner.pending_events.pop_front() {
+                return Ok((self, Some(event)));
+            }
+
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
             if let Some(incoming_data) = read_write.incoming_buffer.as_mut() {
                 let num_read = self
@@ -274,12 +282,12 @@ where
                         start_offset += num_read;
 
                         if let Some(event) = event {
-                            // Discard this data in `self.encryption`.
-                            self.encryption
-                                .consume_inbound_data(yamux_decode.bytes_read);
-                            // TODO: what if even when start_offset != yamux_decode.bytes_read? will be state inconsistency /!\
-                            debug_assert_eq!(yamux_decode.bytes_read, start_offset);
-                            return Ok((self, Some(event)));
+                            self.inner.pending_events.push_back(event);
+                        }
+
+                        // It might be that the substream has been closed in `process_substream`.
+                        if inner.yamux.substream_by_id(substream_id).is_none() {
+                            break;
                         }
                     }
 
@@ -956,6 +964,7 @@ impl ConnectionPrototype {
         Established {
             encryption: self.encryption,
             inner: Inner {
+                pending_events: Default::default(),
                 yamux,
                 request_protocols: config.request_protocols,
                 notifications_protocols: config.notifications_protocols,
