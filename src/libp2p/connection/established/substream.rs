@@ -15,6 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Individual substream within an established connection.
+//!
+//! This module contains the [`Substream`] struct, a state machine containing the state of a
+//! single substream. When the remote sends data on that substream, or when the remote is ready to
+//! accept more data on that substream, the state machine can be updated by calling
+//! [`Substream::read_write`]. This optionally produces an event that indicates what happened on
+//! the substream as a result of the call.
+
 use crate::libp2p::{connection::multistream_select, read_write};
 use crate::util::leb128;
 
@@ -233,6 +241,17 @@ where
         }
 
         // TODO: somehow do substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
+    }
+
+    /// Returns the user data associated to a request substream.
+    ///
+    /// Returns `None` if the substream isn't a request substream.
+    pub fn request_substream_user_data_mut(&mut self) -> Option<&mut TRqUd> {
+        match &mut self.inner {
+            SubstreamInner::RequestOutNegotiating { user_data, .. } => Some(user_data),
+            SubstreamInner::RequestOut { user_data, .. } => Some(user_data),
+            _ => None,
+        }
     }
 
     /// Returns the user data associated to a notifications substream.
