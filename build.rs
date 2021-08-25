@@ -18,10 +18,10 @@
 fn main() {
     prost_build::compile_protos(
         &[
+            "src/network/kademlia/dht.proto",
             "src/network/protocol/api.v1.proto",
             "src/network/protocol/identify.proto",
             "src/network/protocol/light.v1.proto",
-            "src/libp2p/discovery/kademlia/dht.proto",
             "src/libp2p/connection/noise/payload.proto",
             "src/libp2p/peer_id/keys.proto",
         ],
