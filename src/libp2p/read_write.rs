@@ -296,3 +296,159 @@ impl<'a, 'b, TNow> Iterator for IncomingBytes<'a, 'b, TNow> {
 }
 
 impl<'a, 'b, TNow> ExactSizeIterator for IncomingBytes<'a, 'b, TNow> {}
+
+#[cfg(test)]
+mod tests {
+    use super::ReadWrite;
+
+    #[test]
+    fn incoming_bytes_iter() {
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: Some(&[1, 2, 3]),
+            outgoing_buffer: None,
+            read_bytes: 2,
+            written_bytes: 0,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.len(), 2);
+
+        assert_eq!(rw.read_bytes, 3);
+
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some(2));
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next(), Some(3));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+
+        assert_eq!(rw.read_bytes, 5);
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn advance_read() {
+        let buf = [1, 2, 3];
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: Some(&buf),
+            outgoing_buffer: None,
+            read_bytes: 5,
+            written_bytes: 0,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.advance_read(1);
+        assert_eq!(rw.incoming_buffer.as_ref().unwrap(), &[2, 3]);
+        assert_eq!(rw.read_bytes, 6);
+
+        rw.advance_read(2);
+        assert!(rw.incoming_buffer.as_ref().unwrap().is_empty());
+        assert_eq!(rw.read_bytes, 8);
+    }
+
+    #[test]
+    fn advance_write() {
+        let mut buf1 = [1, 2, 3];
+        let mut buf2 = [4, 5];
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.advance_write(1);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[2, 3]);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().1, &[4, 5]);
+        assert_eq!(rw.written_bytes, 6);
+
+        rw.advance_write(2);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[4, 5]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 8);
+
+        rw.advance_write(2);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 10);
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.advance_write(4);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[5]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 9);
+    }
+
+    #[test]
+    fn write_from_vec_deque_smaller() {
+        let mut buf1 = [0, 0, 0];
+        let mut buf2 = [0, 0];
+        let mut input = [1, 2, 3, 4].iter().cloned().collect();
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.write_from_vec_deque(&mut input);
+        assert!(input.is_empty());
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[0]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 9);
+        assert_eq!(&buf1, &[1, 2, 3]);
+        assert_eq!(&buf2, &[4, 0]);
+    }
+
+    #[test]
+    fn write_from_vec_deque_larger() {
+        let mut buf1 = [0, 0, 0];
+        let mut buf2 = [0, 0];
+        let mut input = [1, 2, 3, 4, 5, 6].iter().cloned().collect();
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.write_from_vec_deque(&mut input);
+        assert_eq!(input.into_iter().collect::<Vec<_>>(), &[6]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 10);
+        assert_eq!(&buf1, &[1, 2, 3]);
+        assert_eq!(&buf2, &[4, 5]);
+    }
+}
