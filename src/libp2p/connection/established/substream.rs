@@ -32,9 +32,6 @@ pub struct Substream<TNow, TRqUd, TNotifUd> {
 
 // TODO: remove `protocol_index` fields?
 enum SubstreamInner<TNow, TRqUd, TNotifUd> {
-    /// Temporary transition state.
-    Poisoned,
-
     /// Protocol negotiation in progress in an incoming substream.
     InboundNegotiating(multistream_select::InProgress<vec::IntoIter<String>, String>),
     /// Protocol negotiation in an incoming substream has finished, and an
@@ -273,7 +270,6 @@ where
         Option<Event<TRqUd, TNotifUd>>,
     ) {
         match self.inner {
-            SubstreamInner::Poisoned => unreachable!(),
             SubstreamInner::InboundNegotiating(nego) => match nego.read_write(read_write) {
                 Ok(multistream_select::Negotiation::InProgress(nego)) => {
                     return (Some(SubstreamInner::InboundNegotiating(nego)), None);
@@ -769,7 +765,6 @@ where
 
     pub fn reset(self) -> Option<Event<TRqUd, TNotifUd>> {
         match self.inner {
-            SubstreamInner::Poisoned => unreachable!(),
             SubstreamInner::InboundNegotiating(_) => None,
             SubstreamInner::InboundNegotiatingApiWait => None,
             SubstreamInner::NegotiationFailed => None,
@@ -993,7 +988,6 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
-            SubstreamInner::Poisoned => f.debug_tuple("poisoned").finish(),
             SubstreamInner::NegotiationFailed => {
                 f.debug_tuple("incoming-negotiation-failed").finish()
             }
