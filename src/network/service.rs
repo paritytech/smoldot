@@ -16,8 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::libp2p::{
-    connection,
-    multiaddr, peer_id,
+    connection, multiaddr, peer_id,
     peers::{self, QueueNotificationError},
     PeerId,
 };
