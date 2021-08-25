@@ -1206,31 +1206,46 @@ where
 
         // TODO: implement Kademlia properly
 
-        // Select a random peer to query.
-
-        let request_data = kademlia::build_find_node_request(random_peer_id.as_bytes());
         if let Some(target) = self.inner.peers_list().await.next() {
             // TODO: better peer selection
-            let response = self
-                .inner
-                .request(
-                    now,
-                    &target,
-                    self.protocol_index(chain_index, 2),
-                    request_data,
-                )
+            let outcome = self
+                .kademlia_find_node(&target, now, chain_index, random_peer_id.as_bytes())
                 .await
-                .map_err(DiscoveryError::RequestFailed)?;
-            let decoded = kademlia::decode_find_node_response(&response)
-                .map_err(DiscoveryError::DecodeError)?;
+                .map_err(DiscoveryError::FindNode)?;
             Ok(DiscoveryInsert {
                 service: self,
-                outcome: decoded,
+                outcome,
                 chain_index,
             })
         } else {
             Err(DiscoveryError::NoPeer)
         }
+    }
+
+    /// Sends a Kademlia "find node" request to a single peer, and waits for it to answer.
+    ///
+    /// Returns an error if there is no active connection with that peer.
+    pub async fn kademlia_find_node(
+        &'_ self,
+        target: &PeerId,
+        now: TNow,
+        chain_index: usize,
+        close_to_key: &[u8],
+    ) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError> {
+        let request_data = kademlia::build_find_node_request(close_to_key);
+        let response = self
+            .inner
+            .request(
+                now,
+                target,
+                self.protocol_index(chain_index, 2),
+                request_data,
+            )
+            .await
+            .map_err(KademliaFindNodeError::RequestFailed)?;
+        let decoded = kademlia::decode_find_node_response(&response)
+            .map_err(KademliaFindNodeError::DecodeError)?;
+        Ok(decoded)
     }
 
     /// Allocates a [`PendingId`] and returns a [`StartConnect`] indicating a multiaddress that
@@ -1592,6 +1607,12 @@ impl<'a, TNow> fmt::Debug for IdentifyRequestIn<'a, TNow> {
 #[derive(Debug, derive_more::Display)]
 pub enum DiscoveryError {
     NoPeer,
+    FindNode(KademliaFindNodeError),
+}
+
+/// Error during [`ChainNetwork::kademlia_find_node`].
+#[derive(Debug, derive_more::Display)]
+pub enum KademliaFindNodeError {
     RequestFailed(peers::RequestError),
     DecodeError(kademlia::DecodeFindNodeResponseError),
 }
