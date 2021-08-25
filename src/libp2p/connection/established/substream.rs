@@ -148,8 +148,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// Protocol that was negotiated.
         protocol_index: usize,
     },
-    /// Similar to [`Substream::RequestInRecv`], but doesn't expect any request body. Immediately
-    /// reports an event and switches to [`Substream::RequestInApiWait`].
+    /// Similar to [`SubstreamInner::RequestInRecv`], but doesn't expect any request body.
+    /// Immediately reports an event and switches to [`SubstreamInner::RequestInApiWait`].
     RequestInRecvEmpty {
         /// Protocol that was negotiated.
         protocol_index: usize,
