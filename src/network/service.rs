@@ -16,13 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::libp2p::{
-    connection,
-    discovery::kademlia,
-    multiaddr, peer_id,
+    connection, multiaddr, peer_id,
     peers::{self, QueueNotificationError},
     PeerId,
 };
-use crate::network::protocol;
+use crate::network::{kademlia, protocol};
 use crate::util;
 
 use alloc::{

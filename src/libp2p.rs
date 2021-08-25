@@ -20,7 +20,6 @@
 pub mod async_rw_with_buffers;
 pub mod collection;
 pub mod connection;
-pub mod discovery;
 pub mod peer_id;
 pub mod peers;
 pub mod read_write;
