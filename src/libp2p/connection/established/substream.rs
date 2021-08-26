@@ -129,6 +129,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// If `None`, nothing should be sent on the substream at all, not even the length prefix.
         /// This contrasts with `Some(empty_vec)` where a `0` length prefix must be sent.
         request: Option<Vec<u8>>,
+        /// Maximum allowed size for the response.
+        max_response_size: usize,
         /// Data passed by the user to [`Substream::request_out`].
         user_data: TRqUd,
     },
@@ -225,6 +227,7 @@ where
         requested_protocol: String,
         timeout: TNow,
         request: Option<Vec<u8>>,
+        max_response_size: usize,
         user_data: TRqUd,
     ) -> Self {
         let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
@@ -236,6 +239,7 @@ where
                 timeout,
                 negotiation,
                 request,
+                max_response_size,
                 user_data,
             },
         }
@@ -448,6 +452,7 @@ where
                 negotiation,
                 timeout,
                 request,
+                max_response_size,
                 user_data,
             } => {
                 // Note that this might trigger timeouts for requests whose response is available
@@ -473,6 +478,7 @@ where
                             negotiation: nego,
                             timeout,
                             request,
+                            max_response_size,
                             user_data,
                         }),
                         None,
@@ -492,7 +498,7 @@ where
                                 timeout,
                                 request: request_payload,
                                 user_data,
-                                response: leb128::FramedInProgress::new(128 * 1024 * 1024), // TODO: proper max size
+                                response: leb128::FramedInProgress::new(max_response_size),
                             }),
                             None,
                         )
