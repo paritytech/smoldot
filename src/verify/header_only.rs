@@ -118,7 +118,7 @@ pub enum Success {
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Number of the block to verify isn't equal to the parent block's number plus one.
-    BadBlockNumber,
+    NonSequentialBlockNumber,
     /// Hash of the parent block doesn't match the hash in the header to verify.
     BadParentHash,
     /// Block header contains items relevant to multiple consensus engines at the same time.
@@ -151,7 +151,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         .checked_add(1)
         .map_or(true, |v| v != config.block_header.number)
     {
-        return Err(Error::BadBlockNumber);
+        return Err(Error::NonSequentialBlockNumber);
     }
 
     // TODO: need to verify the changes trie stuff maybe?

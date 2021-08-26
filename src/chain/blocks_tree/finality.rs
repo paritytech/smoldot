@@ -199,7 +199,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     Some(idx) => idx,
                     None => {
                         return Err(FinalityVerifyError::UnknownTargetBlock {
-                            block_number: From::from(target_number),
+                            block_number: target_number,
                             block_hash: *target_hash,
                         });
                     }
@@ -257,7 +257,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 // As explained above, `target_number` must be <= `earliest_trigger`, otherwise the
                 // finalization is unsecure.
                 if let Some(earliest_trigger) = earliest_trigger {
-                    if u64::from(target_number) > earliest_trigger {
+                    if target_number > earliest_trigger {
                         let block_to_finalize_hash = self
                             .blocks
                             .node_to_root_path(block_index)
@@ -283,7 +283,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 // Find which authorities are supposed to finalize the target block.
                 let authorities_list = finalized_scheduled_change
                     .as_ref()
-                    .filter(|(trigger_height, _)| *trigger_height < u64::from(target_number))
+                    .filter(|(trigger_height, _)| *trigger_height < target_number)
                     .map(|(_, list)| list)
                     .unwrap_or(finalized_triggered_authorities);
 
@@ -310,7 +310,7 @@ impl<T> NonFinalizedTreeInner<T> {
             Finality::Outsourced => Err(JustificationVerifyError::AlgorithmHasNoJustification),
             Finality::Grandpa { .. } => {
                 // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa(&scale_encoded_justification)
+                let decoded = justification::decode::decode_grandpa(scale_encoded_justification)
                     .map_err(JustificationVerifyError::InvalidJustification)?;
 
                 // Delegate the first step to the other function.

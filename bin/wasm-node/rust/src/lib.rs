@@ -201,17 +201,30 @@ impl Client {
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
-    ) -> Result<ChainId, AddChainError> {
+    ) -> ChainId {
         // Decode the chain specification.
-        let chain_spec = chain_spec::ChainSpec::from_json_bytes(&config.specification)
-            .map_err(AddChainError::InvalidChainSpec)?;
+        let chain_spec =
+            match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
+                Ok(cs) => cs,
+                Err(err) => {
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                        format!("Failed to decode chain specification: {}", err),
+                    )));
+                }
+            };
 
         // Load the information about the chain from the chain spec. If a light sync state is
         // present in the chain specs, it is possible to start sync at the finalized block it
         // describes.
         let genesis_chain_information =
-            chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec)
-                .map_err(AddChainError::GenesisChainInformationError)?;
+            match chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec) {
+                Ok(ci) => ci,
+                Err(err) => {
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                        format!("Failed to build genesis chain information: {}", err),
+                    )));
+                }
+            };
         let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
             light_sync_state.as_chain_information()
         } else {
@@ -227,17 +240,31 @@ impl Client {
                 .filter(|c| {
                     self.public_api_chains
                         .get(c.0)
-                        .map_or(false, |chain| chain.chain_spec_chain_id == relay_chain_id)
+                        .map_or(false, |chain| match chain {
+                            PublicApiChain::Ok {
+                                chain_spec_chain_id,
+                                ..
+                            } => chain_spec_chain_id == relay_chain_id,
+                            _ => false,
+                        })
                 })
-                .exactly_one()
-                .map_err(|mut iter| {
-                    if iter.next().is_none() {
-                        AddChainError::RelayChainNotFound
+                .exactly_one();
+
+            match chain {
+                Ok(c) => Some(c),
+                Err(mut iter) => {
+                    let msg = if iter.next().is_none() {
+                        "Couldn't find any valid relay chain".to_string()
                     } else {
-                        AddChainError::MultipleValidRelayChains
-                    }
-                })?;
-            Some(chain)
+                        "Multiple valid relay chains found".to_string()
+                    };
+
+                    return ChainId(
+                        self.public_api_chains
+                            .insert(PublicApiChain::Erroneous(msg)),
+                    );
+                }
+            }
         } else {
             None
         };
@@ -257,7 +284,10 @@ impl Client {
                 .hash(),
             relay_chain: relay_chain_id.map(|ck| {
                 (
-                    Box::new(self.public_api_chains.get(ck.0).unwrap().key.clone()),
+                    Box::new(match self.public_api_chains.get(ck.0).unwrap() {
+                        PublicApiChain::Ok { key, .. } => key.clone(),
+                        _ => unreachable!(),
+                    }),
                     chain_spec.relay_chain().unwrap().1,
                 )
             }),
@@ -288,7 +318,10 @@ impl Client {
             .map(|relay_chain| {
                 let relay_chain = &self
                     .chains_by_key
-                    .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
+                    .get(match self.public_api_chains.get(relay_chain.0).unwrap() {
+                        PublicApiChain::Ok { key, .. } => key,
+                        _ => unreachable!(),
+                    })
                     .unwrap()
                     .0;
 
@@ -333,6 +366,8 @@ impl Client {
 
                         // TODO: avoid cloning here
                         let chain_name = chain_spec.name().to_owned();
+                        let relay_chain_id =
+                            chain_spec.relay_chain().map(|(r, id)| (r.to_owned(), id));
                         let starting_block_number =
                             chain_information.as_ref().finalized_block_header.number;
                         let starting_block_hash =
@@ -348,17 +383,29 @@ impl Client {
                         )
                         .await;
 
-                        // Note that the chain name is printed through the `Debug` trait (rather than
-                        // `Display`) because it is an untrusted user input.
-                        log::info!(
-                            "Chain initialization complete. Name: {:?}. Genesis hash: {}. \
-                            Network identity: {}. Starting at block #{} ({})",
-                            chain_name,
-                            HashDisplay(&genesis_block_hash),
-                            running_chain.network_identity,
-                            starting_block_number,
-                            HashDisplay(&starting_block_hash)
-                        );
+                        // Note that the chain name is printed through the `Debug` trait (rather
+                        // than `Display`) because it is an untrusted user input.
+                        if let Some((relay_chain_id, para_id)) = relay_chain_id {
+                            log::info!(
+                                "Parachain initialization complete. Name: {:?}. Genesis \
+                                hash: {}. Network identity: {}. Relay chain: {:?} (id: {})",
+                                chain_name,
+                                HashDisplay(&genesis_block_hash),
+                                running_chain.network_identity,
+                                relay_chain_id,
+                                para_id
+                            );
+                        } else {
+                            log::info!(
+                                "Chain initialization complete. Name: {:?}. Genesis hash: {}. \
+                                Network identity: {}. Starting at block #{} ({})",
+                                chain_name,
+                                HashDisplay(&genesis_block_hash),
+                                running_chain.network_identity,
+                                starting_block_number,
+                                HashDisplay(&starting_block_hash)
+                            );
+                        }
 
                         running_chain
                     };
@@ -409,7 +456,6 @@ impl Client {
                             tasks_executor: Box::new({
                                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                             }),
-                            network_service: (running_chain.network_service.clone(), 0),
                             sync_service: running_chain.sync_service,
                             transactions_service: running_chain.transactions_service,
                             runtime_service: running_chain.runtime_service,
@@ -463,18 +509,31 @@ impl Client {
             None
         };
 
-        public_api_chains_entry.insert(PublicApiChain {
+        // Success!
+        public_api_chains_entry.insert(PublicApiChain::Ok {
             key: new_chain_key,
             chain_spec_chain_id,
             json_rpc_service,
         });
+        new_chain_id
+    }
 
-        Ok(new_chain_id)
+    /// If [`Client::add_chain`] encountered an error when creating this chain, returns the error
+    /// message corresponding to it.
+    pub fn chain_is_erroneous(&self, id: ChainId) -> Option<&str> {
+        if let Some(public_chain) = self.public_api_chains.get(id.0) {
+            if let PublicApiChain::Erroneous(msg) = &public_chain {
+                Some(&msg)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
     /// JSON-RPC requests and subscriptions.
-    // TODO: not the case ^
     ///
     /// Be aware that the [`ChainId`] might be reused if [`Client::add_chain`] is called again
     /// later.
@@ -484,14 +543,31 @@ impl Client {
     /// as the relay chain of a parachain.
     pub fn remove_chain(&mut self, id: ChainId) {
         let removed_chain = self.public_api_chains.remove(id.0);
-        self.public_api_chains.shrink_to_fit();
 
-        let running_chain = self.chains_by_key.get_mut(&removed_chain.key).unwrap();
-        if running_chain.1.get() == 1 {
-            self.chains_by_key.remove(&removed_chain.key);
-        } else {
-            running_chain.1 = NonZeroU32::new(running_chain.1.get() - 1).unwrap();
+        match removed_chain {
+            PublicApiChain::Ok {
+                json_rpc_service,
+                key,
+                ..
+            } => {
+                if let Some((_, abort)) = json_rpc_service {
+                    // Instantly aborts the task that sends back responses.
+                    // This works only because Wasm is single-threaded, otherwise it would be
+                    // possible for another thread to still be polling that task.
+                    abort.abort();
+                }
+
+                let running_chain = self.chains_by_key.get_mut(&key).unwrap();
+                if running_chain.1.get() == 1 {
+                    self.chains_by_key.remove(&key);
+                } else {
+                    running_chain.1 = NonZeroU32::new(running_chain.1.get() - 1).unwrap();
+                }
+            }
+            _ => {}
         }
+
+        self.public_api_chains.shrink_to_fit();
     }
 
     /// Enqueues a JSON-RPC request towards the given chain.
@@ -534,8 +610,11 @@ impl Client {
             }
         };
 
-        if let Some(public_chain) = self.public_api_chains.get(chain_id.0) {
-            if let Some((json_rpc_service, _)) = public_chain.json_rpc_service.as_ref() {
+        if let Some(PublicApiChain::Ok {
+            json_rpc_service, ..
+        }) = self.public_api_chains.get(chain_id.0)
+        {
+            if let Some((ref json_rpc_service, _)) = json_rpc_service {
                 let mut json_rpc_service = match json_rpc_service {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                     future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
@@ -545,7 +624,7 @@ impl Client {
                 let future = async move {
                     (&mut json_rpc_service).await;
                     let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
-                    if let Err(err) = json_rpc_service.handle_rpc(json_rpc_request).await {
+                    if let Err(err) = json_rpc_service.queue_rpc_request(json_rpc_request).await {
                         if let Some(err) = err.into_json_rpc_error() {
                             send_back(&err, chain_id);
                         }
@@ -588,23 +667,18 @@ impl Client {
     }
 }
 
-struct PublicApiChain {
-    key: ChainKey,
-    chain_spec_chain_id: String,
-    json_rpc_service: Option<(
-        future::MaybeDone<
-            future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>>>,
-        >,
-        future::AbortHandle,
-    )>,
-}
-
-impl Drop for PublicApiChain {
-    fn drop(&mut self) {
-        if let Some((_, abort)) = &self.json_rpc_service {
-            abort.abort();
-        }
-    }
+enum PublicApiChain {
+    Ok {
+        key: ChainKey,
+        chain_spec_chain_id: String,
+        json_rpc_service: Option<(
+            future::MaybeDone<
+                future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>>>,
+            >,
+            future::AbortHandle,
+        )>,
+    },
+    Erroneous(String),
 }
 
 /// Sends back a response or a notification to the JSON-RPC client.
@@ -648,16 +722,6 @@ struct RunningChain {
     sync_service: Arc<sync_service::SyncService>,
     runtime_service: Arc<runtime_service::RuntimeService>,
     transactions_service: Arc<transactions_service::TransactionsService>,
-}
-
-/// See [`Client::add_chain`].
-#[derive(Debug, derive_more::Display)]
-pub enum AddChainError {
-    // TODO: doc
-    InvalidChainSpec(chain_spec::ParseError),
-    GenesisChainInformationError(chain::chain_information::FromGenesisStorageError),
-    RelayChainNotFound,
-    MultipleValidRelayChains,
 }
 
 /// Starts all the services of the client.

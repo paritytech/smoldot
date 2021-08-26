@@ -42,7 +42,7 @@ pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseError> 
         None => return Err(ParseError::UnknownNotification(call_def.method)),
     };
 
-    let call = match MethodCall::from_defs(&call_def.method, call_def.params_json) {
+    let call = match MethodCall::from_defs(call_def.method, call_def.params_json) {
         Ok(c) => c,
         Err(error) => return Err(ParseError::Method { request_id, error }),
     };
@@ -319,7 +319,7 @@ define_methods! {
     state_queryStorageAt(keys: Vec<HexString>, at: Option<HashHexString>) -> Vec<StorageChangeSet>, // TODO:
     state_subscribeRuntimeVersion() -> &'a str [chain_subscribeRuntimeVersion],
     state_subscribeStorage(list: Vec<HexString>) -> &'a str,
-    state_unsubscribeRuntimeVersion() -> bool [chain_unsubscribeRuntimeVersion],
+    state_unsubscribeRuntimeVersion(subscription: &'a str) -> bool [chain_unsubscribeRuntimeVersion],
     state_unsubscribeStorage(subscription: &'a str) -> bool,
     system_accountNextIndex(account: AccountId) -> u64,
     system_addReservedPeer() -> (), // TODO:
@@ -500,7 +500,7 @@ pub struct RuntimeVersion {
 pub struct RuntimeDispatchInfo {
     pub weight: u64,
     pub class: DispatchClass,
-    pub partial_fee: u64,
+    pub partial_fee: u128,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -662,7 +662,7 @@ impl serde::Serialize for RuntimeVersion {
             apis: self
                 .apis
                 .iter()
-                .map(|(name, version)| (HexString(name.to_vec()), *version))
+                .map(|(name_hash, version)| (HexString(name_hash.to_vec()), *version))
                 .collect(),
         }
         .serialize(serializer)

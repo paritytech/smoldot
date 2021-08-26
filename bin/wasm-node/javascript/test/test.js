@@ -15,50 +15,41 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import test from 'ava';
 import * as fs from 'fs';
 import * as client from "../src/index.js";
-import { default as process } from 'process';
-
-// The test will fail by default unless `process.exit(0)` is explicitly used later.
-process.exitCode = 1;
-
-// Note that the flow control below is a bit complicated and would need to be refactored if we
-// add more tests.
 
 const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
 
-(async () => {
-  // Test that invalid chain specs errors are properly caught.
+test('invalid chain spec throws error', async t => {
   await client
-    .start()
+    .start({ logCallback: () => { } })
     .then(client => client.addChain({
       chainSpec: "invalid chain spec",
     }))
-    .then((chain) => {
-      console.error("Chain loaded successfully despite invalid chain spec");
-      process.exit(1);
-    })
-    .catch(() => { });
+    .then((chain) => t.fail())
+    .catch(() => t.pass());
+});
 
-  // Basic `system_name` test.
-  client
-    .start()
+test('system_name works', async t => {
+  await client
+    .start({ logCallback: () => { } })
     .then(client => {
+      let promiseResolve;
+      const promise = new Promise((resolve, reject) => promiseResolve = resolve);
+
       return client.addChain({
         chainSpec: westendSpec,
         jsonRpcCallback: (resp) => {
-          if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-js"}') {
-            // Test successful
-            process.exit(0)
-          } else {
-            console.warn(resp);
-            process.exit(1);
+          if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-light"}') {
+            promiseResolve();
           }
         }
-      });
-    })
-    .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
-    })
-    .catch((err) => process.exit(1));
-})();
+      })
+        .then((chain) => {
+          chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
+        })
+        .then(() => promise)
+        .then(() => t.pass());
+    });
+});

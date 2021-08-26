@@ -60,7 +60,7 @@ pub fn build_storage_proof_request(
 pub fn decode_storage_proof_response(
     response_bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, DecodeStorageProofResponseError> {
-    let response = schema::Response::decode(&response_bytes[..])
+    let response = schema::Response::decode(response_bytes)
         .map_err(ProtobufDecodeError)
         .map_err(DecodeStorageProofResponseError::ProtobufDecode)?;
 

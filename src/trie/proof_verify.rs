@@ -45,10 +45,9 @@
 //! >           corresponding to the storage entries necessary for a certain runtime call.
 //!
 
-use super::nibble;
+use super::{nibble, proof_node_decode};
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, iter};
 
 /// Configuration to pass to [`verify_proof`].
 pub struct VerifyProofConfig<'a, I> {
@@ -86,7 +85,7 @@ pub fn verify_proof<'a, 'b>(
         trie_root_hash: config.trie_root_hash,
         proof: config.proof,
     })?
-    .node_value)
+    .storage_value)
 }
 
 /// Configuration to pass to [`trie_node_info`].
@@ -154,201 +153,76 @@ pub fn trie_node_info<'a, 'b>(
 
     // Number of nibbles that have been found during the iteration below.
     // Used only for debugging purposes.
-    let mut iter_nibbles = 0usize;
+    let mut iter_nibbles = 0usize; // TODO: remove?
 
     // The verification consists in iterating using `expected_nibbles_iter` and `node_value`.
     let mut expected_nibbles_iter = config.requested_key;
     loop {
-        if node_value.is_empty() {
-            return Err(Error::InvalidNodeValue {
-                invalid_node_nibbles: iter_nibbles,
-            });
-        }
-
-        let has_children = (node_value[0] & 0x80) != 0;
-        let has_storage_value = (node_value[0] & 0x40) != 0;
-
-        // Iterator to the partial key found in the node value of `proof_iter`.
-        let mut partial_key = {
-            // Length of the partial key, in nibbles.
-            let pk_len = {
-                let mut accumulator = usize::from(node_value[0] & 0x3f);
-                node_value = &node_value[1..];
-                let mut continue_iter = accumulator == 63;
-                while continue_iter {
-                    if node_value.is_empty() {
-                        return Err(Error::InvalidNodeValue {
-                            invalid_node_nibbles: iter_nibbles,
-                        });
-                    }
-                    continue_iter = node_value[0] == 255;
-                    accumulator = accumulator.checked_add(usize::from(node_value[0])).ok_or(
-                        Error::InvalidNodeValue {
-                            invalid_node_nibbles: iter_nibbles,
-                        },
-                    )?;
-                    node_value = &node_value[1..];
-                }
-                accumulator
-            };
-
-            // Length of the partial key, in bytes.
-            let pk_len_bytes = if pk_len == 0 {
-                0
-            } else {
-                1 + ((pk_len - 1) / 2)
-            };
-            if node_value.len() < pk_len_bytes {
-                return Err(Error::InvalidNodeValue {
-                    invalid_node_nibbles: iter_nibbles,
-                });
-            }
-
-            let pk_nibbles_iter = node_value
-                .iter()
-                .take(pk_len_bytes)
-                .flat_map(|byte| nibble::bytes_to_nibbles(iter::once(*byte)))
-                .skip(pk_len % 2);
-            node_value = &node_value[pk_len_bytes..];
-            pk_nibbles_iter
-        };
+        // Decodes `node_value` into its components.
+        let decoded_node_value =
+            proof_node_decode::decode(node_value).map_err(Error::InvalidNodeValue)?;
 
         // Iterating over this partial key, checking if it matches `expected_nibbles_iter`.
-        while let Some(nibble) = partial_key.next() {
+        for nibble in decoded_node_value.partial_key.clone() {
             match expected_nibbles_iter.next() {
                 None => {
                     return Ok(TrieNodeInfo {
-                        node_value: None,
+                        storage_value: None,
                         children: Children::One(nibble),
                     });
                 }
                 Some(n) if n != nibble => {
                     return Ok(TrieNodeInfo {
-                        node_value: None,
+                        storage_value: None,
                         children: Children::None,
                     });
                 }
                 Some(_) => {
+                    // Normal path.
                     iter_nibbles += 1;
                 }
             }
         }
 
-        // After the partial key, the node value optionally contains a bitfield of child nodes.
-        let children_bitmap = if has_children {
-            if node_value.len() < 2 {
-                return Err(Error::InvalidNodeValue {
-                    invalid_node_nibbles: iter_nibbles,
-                });
-            }
-            let val = u16::from_le_bytes(<[u8; 2]>::try_from(&node_value[..2]).unwrap());
-            node_value = &node_value[2..];
-            val
-        } else {
-            0
-        };
-
         if let Some(expected_nibble) = expected_nibbles_iter.next() {
             // The iteration needs to continue with another node.
-            // Update `proof_iter` to the point to the child whose index matches next nibble that
-            // was just pulled from `expected_nibbles_iter`.
-
-            // No child with the requested index exists.
-            if children_bitmap & (1 << u8::from(expected_nibble)) == 0 {
-                return Ok(TrieNodeInfo {
-                    node_value: None,
-                    children: Children::None,
-                });
-            }
-
-            for n in 0.. {
-                if children_bitmap & (1 << n) == 0 {
-                    continue;
-                }
-
-                // Find the Merkle value of that child in `node_value`.
-                let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                    .map_err(
-                        |_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue {
-                            invalid_node_nibbles: iter_nibbles,
-                        },
-                    )?;
-                node_value = node_value_update;
-                if node_value.len() < len {
-                    return Err(Error::InvalidNodeValue {
-                        invalid_node_nibbles: iter_nibbles,
+            // Update `node_value` to point to the child whose index matches next nibble that was
+            // just pulled from `expected_nibbles_iter`.
+            let child = match decoded_node_value.children[usize::from(u8::from(expected_nibble))] {
+                Some(child) => child,
+                None => {
+                    // No child with the requested index exists.
+                    return Ok(TrieNodeInfo {
+                        storage_value: None,
+                        children: Children::None,
                     });
                 }
+            };
 
-                // The Merkle value that was just found is the one that interests us.
-                if n == u8::from(expected_nibble) {
-                    if len < 32 {
-                        // If the node value is less than 32 bytes, it means it's unhashed. In that
-                        // case, the child isn't part of `proof`.
-                        node_value = &node_value[..len];
-                    } else {
-                        // Find the entry in `proof` matching this Merkle value and update
-                        // `proof_iter`.
-                        let proof_iter = merkle_values
-                            .iter()
-                            .position(|v| v[..] == node_value[..len])
-                            .ok_or(Error::MissingProofEntry {
-                                closest_ancestor_nibbles: iter_nibbles,
-                            })?;
-                        node_value = config.proof.clone().nth(proof_iter).unwrap();
-                    }
-
-                    // Break out of the children iteration, to jump to the next node.
-                    iter_nibbles += 1;
-                    break;
-                }
-
-                node_value = &node_value[len..];
-            }
-        } else if has_storage_value {
-            // The current node (as per `proof_iter`) exactly matches the requested key, and
-            // a storage value exists.
-
-            // Skip over the Merkle values of the children.
-            for _ in 0..children_bitmap.count_ones() {
-                let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                    .map_err(
-                        |_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue {
-                            invalid_node_nibbles: iter_nibbles,
-                        },
-                    )?;
-                node_value = node_value_update;
-                if node_value.len() < len {
-                    return Err(Error::InvalidNodeValue {
-                        invalid_node_nibbles: iter_nibbles,
-                    });
-                }
-                node_value = &node_value[len..];
-            }
-
-            // Now at the value that interests us.
-            let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-                .map_err(
-                    |_: nom::Err<nom::error::Error<&[u8]>>| Error::InvalidNodeValue {
-                        invalid_node_nibbles: iter_nibbles,
+            if child.len() < 32 {
+                // If the node value is less than 32 bytes, it means it's unhashed. In that
+                // case, the child isn't part of `proof` but directly in the node.
+                node_value = child;
+            } else {
+                // Find the entry in `proof` matching this Merkle value and update
+                // `proof_iter`.
+                let proof_iter = merkle_values.iter().position(|v| v[..] == *child).ok_or(
+                    Error::MissingProofEntry {
+                        closest_ancestor_nibbles: iter_nibbles,
                     },
                 )?;
-            node_value = node_value_update;
-            if node_value.len() != len {
-                return Err(Error::InvalidNodeValue {
-                    invalid_node_nibbles: iter_nibbles,
-                });
+                node_value = config.proof.clone().nth(proof_iter).unwrap();
             }
-            return Ok(TrieNodeInfo {
-                node_value: Some(node_value),
-                children: Children::Multiple { children_bitmap },
-            });
+
+            // Jump to the next node.
+            iter_nibbles += 1;
         } else {
-            // The current node (as per `proof_iter`) exactly matches the requested key, but no
-            // storage value exists.
+            // The current node (as per `proof_iter`) exactly matches the requested key.
             return Ok(TrieNodeInfo {
-                node_value: None,
-                children: Children::Multiple { children_bitmap },
+                storage_value: decoded_node_value.storage_value,
+                children: Children::Multiple {
+                    children_bitmap: decoded_node_value.children_bitmap(),
+                },
             });
         }
     }
@@ -357,7 +231,7 @@ pub fn trie_node_info<'a, 'b>(
 /// Information about a node of the trie.
 pub struct TrieNodeInfo<'a> {
     /// Storage value of the node, if any.
-    pub node_value: Option<&'a [u8]>,
+    pub storage_value: Option<&'a [u8]>,
     /// Which children the node has.
     pub children: Children,
 }
@@ -394,19 +268,14 @@ impl Children {
 }
 
 /// Possible error returned by [`verify_proof`]
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
     /// Trie root wasn't found in the proof.
     TrieRootNotFound,
     /// One of the node values in the proof has an invalid format.
-    #[display(
-        fmt = "A node of the proof has an invalid format (nibbles: {})",
-        invalid_node_nibbles
-    )]
-    InvalidNodeValue {
-        /// Number of nibbles in the key of the node whose value is invalid.
-        invalid_node_nibbles: usize,
-    },
+    // TODO: indicate which one? complicated because of inline nodes
+    #[display(fmt = "A node of the proof has an invalid format: {}", _0)]
+    InvalidNodeValue(proof_node_decode::Error),
     /// Missing an entry in the proof.
     #[display(
         fmt = "An entry is missing from the proof (closest ancestor nibbles: {})",

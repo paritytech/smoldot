@@ -504,7 +504,7 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
                     slot_duration,
                 } => ChainInformationConsensusRef::Aura {
                     finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
-                        &finalized_authorities_list,
+                        finalized_authorities_list,
                     ),
                     slot_duration: *slot_duration,
                 },

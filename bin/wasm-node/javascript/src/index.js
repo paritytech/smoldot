@@ -61,21 +61,37 @@ export async function start(config) {
   // Entries are instantly removed when the user desires to remove a chain even before the worker
   // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
   // JSON-RPC response even though we've already sent a `removeChain` message to it.
-  let chainsJsonRpcCallbacks = {};
+  let chainsJsonRpcCallbacks = new Map();
+
+  // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
+  // still alive.
+  // If this liveness ping isn't received for a long time, an error is reported in the logs.
+  // The first check is delayed in order to account for the fact that the worker has to perform
+  // an expensive initialization step when initializing the Wasm VM.
+  let livenessTimeout = null;
+  const resetLivenessTimeout = () => {
+    if (livenessTimeout !== null)
+      clearTimeout(livenessTimeout);
+    livenessTimeout = setTimeout(() => {
+      livenessTimeout = null;
+      logCallback(1, 'smoldot', 'Smoldot worker appears unresponsive');
+    }, 7000);
+  };
+  setTimeout(() => resetLivenessTimeout(), 10000);
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
     if (message.kind == 'jsonrpc') {
-      const cb = chainsJsonRpcCallbacks[message.chainId];
+      const cb = chainsJsonRpcCallbacks.get(message.chainId);
       if (cb) cb(message.data);
 
     } else if (message.kind == 'chainAddedOk') {
-      const expected = pendingConfirmations.pop();
-      const chainId = message.chainId;
+      const expected = pendingConfirmations.shift();
+      let chainId = message.chainId; // Later set to null when the chain is removed.
 
-      if (!!chainsJsonRpcCallbacks[chainId]) // Sanity check.
+      if (chainsJsonRpcCallbacks.has(chainId)) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
-      chainsJsonRpcCallbacks[chainId] = expected.jsonRpcCallback;
+      chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
 
       // `expected` was pushed by the `addChain` method.
       // Resolve the promise that `addChain` returned to the user.
@@ -83,19 +99,24 @@ export async function start(config) {
         sendJsonRpc: (request) => {
           if (workerError)
             throw workerError;
-          if (!chainsJsonRpcCallbacks[message.chainId])
+          if (chainId === null)
+            throw new SmoldotError('Chain has already been removed');
+          if (!chainsJsonRpcCallbacks.has(chainId))
             throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
           worker.postMessage({ ty: 'request', request, chainId });
         },
         remove: () => {
           if (workerError)
             throw workerError;
+          if (chainId === null)
+            throw new SmoldotError('Chain has already been removed');
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
           // response concerning that `chainId` to arrive after the `remove` function has
           // returned. We solve that by removing the callback immediately.
-          delete chainsJsonRpcCallbacks[message.chainId];
+          chainsJsonRpcCallbacks.delete(chainId);
+          chainId = null;
         },
         // Hacky internal method that later lets us access the `chainId` of this chain for
         // implementation reasons.
@@ -103,16 +124,19 @@ export async function start(config) {
       });
 
     } else if (message.kind == 'chainAddedErr') {
-      const expected = pendingConfirmations.pop();
+      const expected = pendingConfirmations.shift();
       // `expected` was pushed by the `addChain` method.
       // Reject the promise that `addChain` returned to the user.
       expected.reject(message.error);
 
     } else if (message.kind == 'chainRemoved') {
-      pendingConfirmations.pop();
+      pendingConfirmations.shift();
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
+
+    } else if (message.kind == 'livenessPing') {
+      resetLivenessTimeout();
 
     } else {
       console.error('Unknown message type', message);
@@ -150,11 +174,13 @@ export async function start(config) {
 
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {
-        for (var chain of options.potentialRelayChains) {
+        for (const chain of options.potentialRelayChains) {
           // The content of `options.potentialRelayChains` are supposed to be chains earlier
           // returned by `addChain`. The hacky `__internal_smoldot_id` method lets us obtain the
           // internal ID of these chains.
           const id = chain.__internal_smoldot_id();
+          if (id === null) // It is possible for `id` to be null if it has earlier been removed.
+            continue;
           potentialRelayChainsIds.push(id);
         }
       }

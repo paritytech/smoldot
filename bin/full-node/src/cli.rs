@@ -37,7 +37,13 @@ use std::path::PathBuf;
 // started with `--help`.
 
 #[derive(Debug, structopt::StructOpt)]
-pub struct CliOptions {
+pub enum CliOptions {
+    /// Connect to the chain and synchronize the local database with the network.
+    Run(CliOptionsRun),
+}
+
+#[derive(Debug, structopt::StructOpt)]
+pub struct CliOptionsRun {
     /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
     pub chain: CliChain,

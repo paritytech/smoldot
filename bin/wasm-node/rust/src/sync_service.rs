@@ -46,7 +46,12 @@ use smoldot::{
     trie::{self, prefix_proof, proof_verify},
 };
 use std::{
-    collections::HashMap, convert::TryFrom as _, fmt, iter, num::NonZeroU32, pin::Pin, sync::Arc,
+    collections::HashMap,
+    convert::TryFrom as _,
+    fmt, iter,
+    num::{NonZeroU32, NonZeroU64},
+    pin::Pin,
+    sync::Arc,
 };
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
@@ -485,6 +490,7 @@ impl SyncService {
     }
 
     // TODO: documentation
+    // TODO: there's no proof that the call proof is actually correct
     pub async fn call_proof_query<'a>(
         self: Arc<Self>,
         block_number: u64,
@@ -510,7 +516,13 @@ impl SyncService {
                 .await;
 
             match result {
-                Ok(value) => return Ok(value),
+                Ok(value) if !value.is_empty() => return Ok(value),
+                // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
+                Ok(_) => outcome_errors.push(service::CallProofRequestError::Request(
+                    smoldot::libp2p::peers::RequestError::Connection(
+                        smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
+                    ),
+                )),
                 Err(err) => {
                     outcome_errors.push(err);
                 }
@@ -573,11 +585,19 @@ pub enum StorageQueryErrorDetail {
 }
 
 /// Error that can happen when calling [`SyncService::call_proof_query`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CallProofQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
     pub errors: Vec<service::CallProofRequestError>,
+}
+
+impl CallProofQueryError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        self.errors.iter().all(|err| err.is_network_problem())
+    }
 }
 
 impl fmt::Display for CallProofQueryError {
@@ -643,12 +663,12 @@ async fn start_relay_chain(
     let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
-        source_selection_randomness_seed: rand::random(),
-        blocks_request_granularity: NonZeroU32::new(128).unwrap(),
         blocks_capacity: {
             // This is the maximum number of blocks between two consecutive justifications.
             1024
         },
+        max_disjoint_headers: 1024,
+        max_requests_per_block: NonZeroU32::new(3).unwrap(),
         download_ahead_blocks: {
             // Verifying a block mostly consists in:
             //
@@ -709,22 +729,28 @@ async fn start_relay_chain(
                 match request {
                     all::RequestDetail::BlocksRequest {
                         first_block_hash,
-                        first_block_height: _,
+                        first_block_height,
                         ascending,
                         num_blocks,
                         request_headers,
                         request_bodies,
                         request_justification,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let block_request = network_service.clone().blocks_request(
-                            peer_id.clone(),
+                            peer_id,
                             network_chain_index,
                             network::protocol::BlocksRequestConfig {
-                                start: network::protocol::BlocksRequestConfigStart::Hash(
-                                    first_block_hash,
-                                ),
+                                start: if let Some(first_block_hash) = first_block_hash {
+                                    network::protocol::BlocksRequestConfigStart::Hash(
+                                        first_block_hash,
+                                    )
+                                } else {
+                                    network::protocol::BlocksRequestConfigStart::Number(
+                                        NonZeroU64::new(first_block_height).unwrap(), // TODO: unwrap?
+                                    )
+                                },
                                 desired_count: NonZeroU32::new(
                                     u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
                                 )
@@ -751,10 +777,10 @@ async fn start_relay_chain(
                     all::RequestDetail::GrandpaWarpSync {
                         sync_start_block_hash,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let grandpa_request = network_service.clone().grandpa_warp_sync_request(
-                            peer_id.clone(),
+                            peer_id,
                             network_chain_index,
                             sync_start_block_hash,
                         );
@@ -770,11 +796,11 @@ async fn start_relay_chain(
                         state_trie_root,
                         keys,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone();
+                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let storage_request = network_service.clone().storage_proof_request(
                             network_chain_index,
-                            peer_id.clone(),
+                            peer_id,
                             network::protocol::StorageProofRequestConfig {
                                 block_hash,
                                 keys: keys.clone().into_iter(),
@@ -837,9 +863,17 @@ async fn start_relay_chain(
                                 "Failed to verify warp sync fragment from {}: {}", sender_peer_id, err
                             );
                         }
+
+                        // Verifying a fragment is rather expensive. We yield in order to not
+                        // block the entire node.
+                        super::yield_once().await;
                     }
                     all::ProcessOne::VerifyHeader(verify) => {
                         let verified_hash = verify.hash();
+
+                        // Verifying a block is rather expensive. We yield in order to not
+                        // block the entire node.
+                        super::yield_once().await;
 
                         match verify.perform(ffi::unix_time(), ()) {
                             all::HeaderVerifyOutcome::Success {
@@ -906,6 +940,9 @@ async fn start_relay_chain(
                             }
                         }
                     }
+
+                    // Can't verify header and body in non-full mode.
+                    all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
                 }
             }
 
@@ -914,9 +951,11 @@ async fn start_relay_chain(
                 has_new_best = false;
 
                 let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                // TODO: remove expired senders
-                for notif in &mut best_notifications {
-                    let _ = notif.send(scale_encoded_header.clone());
+                for index in (0..best_notifications.len()).rev() {
+                    let mut notif = best_notifications.swap_remove(index);
+                    if notif.send(scale_encoded_header.clone()).is_ok() {
+                        best_notifications.push(notif);
+                    }
                 }
 
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
@@ -962,9 +1001,11 @@ async fn start_relay_chain(
                 }
 
                 let scale_encoded_header = sync.finalized_block_header().scale_encoding_vec();
-                // TODO: remove expired senders
-                for notif in &mut finalized_notifications {
-                    let _ = notif.send(scale_encoded_header.clone());
+                for index in (0..finalized_notifications.len()).rev() {
+                    let mut notif = finalized_notifications.swap_remove(index);
+                    if notif.send(scale_encoded_header.clone()).is_ok() {
+                        finalized_notifications.push(notif);
+                    }
                 }
 
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
@@ -1004,7 +1045,7 @@ async fn start_relay_chain(
                         {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, requests) = sync.remove_source(id);
-                            for (request_id, _, _) in requests {
+                            for (request_id, _) in requests {
                                 pending_requests.remove(&request_id).unwrap().abort();
                             }
                         },
@@ -1014,14 +1055,41 @@ async fn start_relay_chain(
                             let id = *peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: stupid to re-encode header
-                            // TODO: log the outcome
                             match sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify => {},
-                                all::BlockAnnounceOutcome::TooOld => {},
-                                all::BlockAnnounceOutcome::AlreadyInChain => {},
-                                all::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
-                                all::BlockAnnounceOutcome::Disjoint {} => {},
+                                all::BlockAnnounceOutcome::HeaderVerify |
+                                all::BlockAnnounceOutcome::AlreadyInChain => {
+                                    log::debug!(
+                                        target: "sync-verify",
+                                        "Processed block announce from {}", peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::Disjoint {} => {
+                                    log::debug!(
+                                        target: "sync-verify",
+                                        "Processed block announce from {} (disjoint)", peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::TooOld { announce_block_height, .. } => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Block announce header height (#{}) from {} is below finalized block",
+                                        announce_block_height, peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::NotFinalizedChain => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Block announce from {} isn't part of finalized chain",
+                                        peer_id
+                                    );
+                                },
+                                all::BlockAnnounceOutcome::InvalidHeader(err) => {
+                                    log::warn!(
+                                        target: "sync-verify",
+                                        "Failed to decode block announce header from {}: {}",
+                                        peer_id, err
+                                    );
+                                },
                             }
                         },
                         network_service::Event::GrandpaCommitMessage { chain_index, message }
@@ -1282,6 +1350,8 @@ async fn start_parachain(
                         });
 
                         // TODO: `_tx` is immediately discarded; the feature isn't actually fully implemented
+                        // TODO: a `mem::forget` is used in order to avoid issues in other parts of the code, but is a complete hack
+                        core::mem::forget(_tx);
                     }
                     ToBackground::PeersAssumedKnowBlock { send_back, .. } => {
                         let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\

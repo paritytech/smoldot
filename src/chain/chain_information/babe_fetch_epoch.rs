@@ -99,7 +99,7 @@ impl Query {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 let decoded = DecodableBabeEpochInformation::decode_all(
-                    &mut success.virtual_machine.value().as_ref(),
+                    &success.virtual_machine.value().as_ref(),
                 );
 
                 let virtual_machine = success.virtual_machine.into_prototype();

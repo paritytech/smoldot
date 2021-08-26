@@ -293,13 +293,13 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if one of the [`NodeIndex`]s is invalid.
     ///
-    pub fn ascend_and_descend<'a>(
-        &'a self,
+    pub fn ascend_and_descend(
+        &'_ self,
         node1: NodeIndex,
         node2: NodeIndex,
     ) -> (
-        impl Iterator<Item = NodeIndex> + Clone + 'a,
-        impl Iterator<Item = NodeIndex> + Clone + 'a,
+        impl Iterator<Item = NodeIndex> + Clone + '_,
+        impl Iterator<Item = NodeIndex> + Clone + '_,
     ) {
         let common_ancestor = self.common_ancestor(node1, node2);
 
@@ -321,10 +321,10 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn node_to_root_path<'a>(
-        &'a self,
+    pub fn node_to_root_path(
+        &'_ self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + Clone + 'a {
+    ) -> impl Iterator<Item = NodeIndex> + Clone + '_ {
         iter::successors(Some(node_index), move |n| {
             self.nodes[n.0].parent.map(NodeIndex)
         })
@@ -336,10 +336,10 @@ impl<T> ForkTree<T> {
     ///
     /// Panics if the [`NodeIndex`] is invalid.
     ///
-    pub fn root_to_node_path<'a>(
-        &'a self,
+    pub fn root_to_node_path(
+        &'_ self,
         node_index: NodeIndex,
-    ) -> impl Iterator<Item = NodeIndex> + Clone + 'a {
+    ) -> impl Iterator<Item = NodeIndex> + Clone + '_ {
         debug_assert!(self.nodes.get(usize::max_value()).is_none());
 
         // First element is an invalid key, each successor is the last element of
@@ -543,8 +543,10 @@ impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
         // Make sure that all elements are removed.
         while let Some(_) = self.next() {}
 
-        debug_assert!(self.tree.first_root.is_some());
-        debug_assert!(self.tree.nodes.get(self.tree.first_root.unwrap()).is_some());
+        if self.uncles_only {
+            debug_assert!(self.tree.first_root.is_some());
+            debug_assert!(self.tree.nodes.get(self.tree.first_root.unwrap()).is_some());
+        }
         debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
     }
 }

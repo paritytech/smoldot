@@ -216,7 +216,7 @@ impl SqliteFullDatabase {
             return Err(FinalizedAccessError::Obsolete);
         }
 
-        let finalized_block_header = block_header(&connection, &finalized_block_hash)?
+        let finalized_block_header = block_header(&connection, finalized_block_hash)?
             .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
 
         let finality = match (
@@ -286,11 +286,9 @@ impl SqliteFullDatabase {
             },
         ) {
             Ok(ci) => Ok(ci),
-            Err(err) => {
-                return Err(FinalizedAccessError::Access(AccessError::Corrupted(
-                    CorruptedError::InvalidChainInformation(err),
-                )))
-            }
+            Err(err) => Err(FinalizedAccessError::Access(AccessError::Corrupted(
+                CorruptedError::InvalidChainInformation(err),
+            ))),
         }
     }
 
@@ -313,7 +311,7 @@ impl SqliteFullDatabase {
         let block_hash = header::hash_from_scale_encoded_header(scale_encoded_header);
 
         // Decode the header, as we will need various information from it.
-        let header = header::decode(&scale_encoded_header).map_err(InsertError::BadHeader)?;
+        let header = header::decode(scale_encoded_header).map_err(InsertError::BadHeader)?;
 
         // Locking is performed as late as possible.
         let connection = self.database.lock();
@@ -344,7 +342,7 @@ impl SqliteFullDatabase {
             .bind(1, i64::try_from(header.number).unwrap())
             .unwrap();
         statement.bind(2, &block_hash[..]).unwrap();
-        statement.bind(3, &scale_encoded_header[..]).unwrap();
+        statement.bind(3, scale_encoded_header).unwrap();
         statement.next().unwrap();
 
         let mut statement = connection
@@ -401,7 +399,7 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         // Fetch the header of the block to finalize.
-        let new_finalized_header = block_header(&connection, &new_finalized_block_hash)?
+        let new_finalized_header = block_header(&connection, new_finalized_block_hash)?
             .ok_or(SetFinalizedError::UnknownBlock)?;
 
         // Fetch the current finalized block.
@@ -1004,7 +1002,7 @@ fn finalized_hash(database: &sqlite::Connection) -> Result<[u8; 32], AccessError
         .map_err(AccessError::Corrupted)?;
 
     if !matches!(statement.next().unwrap(), sqlite::State::Row) {
-        return Err(AccessError::Corrupted(CorruptedError::InvalidFinalizedNum).into());
+        return Err(AccessError::Corrupted(CorruptedError::InvalidFinalizedNum));
     }
 
     let value = statement
@@ -1018,7 +1016,7 @@ fn finalized_hash(database: &sqlite::Connection) -> Result<[u8; 32], AccessError
         out.copy_from_slice(&value);
         Ok(out)
     } else {
-        Err(AccessError::Corrupted(CorruptedError::InvalidBlockHashLen).into())
+        Err(AccessError::Corrupted(CorruptedError::InvalidBlockHashLen))
     }
 }
 
@@ -1078,7 +1076,9 @@ fn block_header(
 
     match header::decode(&encoded) {
         Ok(h) => Ok(Some(h.into())),
-        Err(err) => Err(AccessError::Corrupted(CorruptedError::BlockHeaderCorrupted(err)).into()),
+        Err(err) => Err(AccessError::Corrupted(
+            CorruptedError::BlockHeaderCorrupted(err),
+        )),
     }
 }
 
@@ -1289,7 +1289,7 @@ fn decode_babe_epoch_information(
                 allowed_slots,
             }
         },
-    ))(&value)
+    ))(value)
     .map(|(_, v)| v)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
 

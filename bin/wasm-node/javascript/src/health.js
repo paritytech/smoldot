@@ -15,16 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import randombytes from 'randombytes';
-
 // Creates a new health checker.
 //
 // The role of the health checker is to report to the user the health of a smoldot chain.
 //
-// In order to use it, start by creating a health checker. The health checker is disabled by
-// default. Use `start()` in order to start the health checks. The `start()` function must be
-// passed a function that the health checker can use to send JSON-RPC requests to the chain, and
-// a callback called when an update to the health of the node is available.
+// In order to use it, start by creating a health checker, and call `setSendJsonRpc` to set the
+// way to send a JSON-RPC request to a chain. The health checker is disabled by default. Use
+// `start()` in order to start the health checks. The `start()` function must be passed a callback called
+// when an update to the health of the node is available.
+//
+// In order to send a JSON-RPC request to the chain, you **must** use the `sendJsonRpc` function
+// of the health checker. The health checker rewrites the `id` of the requests it receives.
 //
 // When the chain send a JSON-RPC response, it must be passed to `responsePassThrough()`. This
 // function intercepts the responses destined to the requests that have been emitted by the health
@@ -47,11 +48,18 @@ import randombytes from 'randombytes';
 export function healthChecker() {
     // `null` if health checker is not started.
     let checker = null;
+    let sendJsonRpc = null;
 
     return {
-        start: (sendJsonRpc, healthCallback) => {
+        setSendJsonRpc: (cb) => {
+            sendJsonRpc = cb;
+        },
+
+        start: (healthCallback) => {
             if (checker !== null)
                 throw new Error("Can't start the health checker multiple times in parallel");
+            if (!sendJsonRpc)
+                throw new Error("setSendJsonRpc must be called before starting the health checks");
 
             checker = {
                 healthCallback,
@@ -60,6 +68,24 @@ export function healthChecker() {
                 currentSubunsubRequestId: null,
                 currentSubscriptionId: null,
                 isSyncing: false,
+                nextRequestId: 0,
+
+                sendJsonRpc: function (request) {
+                    // Replace the `id` in the request to prefix the request ID with `extern:`.
+                    let parsedRequest;
+                    try {
+                        parsedRequest = JSON.parse(request);
+                    } catch (err) {
+                        return;
+                    };
+
+                    if (parsedRequest.id) {
+                        const newId = 'extern:' + JSON.stringify(parsedRequest.id);
+                        parsedRequest.id = newId;
+                    }
+
+                    sendJsonRpc(JSON.stringify(parsedRequest));
+                },
 
                 responsePassThrough: function (jsonRpcResponse) {
                     let parsedResponse;
@@ -124,7 +150,15 @@ export function healthChecker() {
                     }
 
                     // Response doesn't concern us.
-                    return jsonRpcResponse;
+                    if (parsedResponse.id) {
+                        // Need to remove the `extern:` prefix.
+                        if (!parsedResponse.id.startsWith('extern:'))
+                            throw new Error('State inconsistency in health checker');
+                        const newId = JSON.parse(parsedResponse.id.slice('extern:'.length));
+                        parsedResponse.id = newId;
+                    }
+
+                    return JSON.stringify(parsedResponse);
                 },
 
                 update: function () {
@@ -148,7 +182,8 @@ export function healthChecker() {
                         clearTimeout(this.currentHealthTimeout);
                         this.currentHealthTimeout = null;
                     }
-                    this.currentHealthCheckId = randombytes(32).toString('base64');
+                    this.currentHealthCheckId = "health-checker:" + this.nextRequestId;
+                    this.nextRequestId += 1;
                     sendJsonRpc(JSON.stringify({
                         jsonrpc: "2.0",
                         id: this.currentHealthCheckId,
@@ -160,7 +195,8 @@ export function healthChecker() {
                 startSubscription: function () {
                     if (this.currentSubunsubRequestId || this.currentSubscriptionId)
                         throw new Error('Internal error in health checker');
-                    this.currentSubunsubRequestId = randombytes(32).toString('base64');
+                    this.currentSubunsubRequestId = "health-checker:" + this.nextRequestId;
+                    this.nextRequestId += 1;
                     sendJsonRpc(JSON.stringify({
                         jsonrpc: "2.0",
                         id: this.currentSubunsubRequestId,
@@ -172,7 +208,8 @@ export function healthChecker() {
                 endSubscription: function () {
                     if (this.currentSubunsubRequestId || !this.currentSubscriptionId)
                         throw new Error('Internal error in health checker');
-                    this.currentSubunsubRequestId = randombytes(32).toString('base64');
+                    this.currentSubunsubRequestId = "health-checker:" + this.nextRequestId;
+                    this.nextRequestId += 1;
                     sendJsonRpc(JSON.stringify({
                         jsonrpc: "2.0",
                         id: this.currentSubunsubRequestId,
@@ -196,6 +233,14 @@ export function healthChecker() {
                 return; // Already stopped.
             checker.destroy();
             checker = null;
+        },
+        sendJsonRpc: (request) => {
+            if (!sendJsonRpc)
+                throw new Error("setSendJsonRpc must be called before sending requests");
+            if (checker === null)
+                sendJsonRpc(request);
+            else
+                checker.sendJsonRpc(request);
         },
         responsePassThrough: (jsonRpcResponse) => {
             if (checker === null)

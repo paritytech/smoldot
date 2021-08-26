@@ -61,7 +61,10 @@
 //! [`Noise::inject_inbound_data`] when data is received.
 // TODO: review this last sentence, as this API might change after some experience with it
 
-use crate::libp2p::peer_id::{PeerId, PublicKey};
+use crate::libp2p::{
+    peer_id::{PeerId, PublicKey},
+    read_write::ReadWrite,
+};
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 use core::{cmp, convert::TryFrom as _, fmt, iter};
@@ -172,9 +175,11 @@ impl UnsignedNoiseKey {
             PublicKey::Ed25519(libp2p_public_ed25519_key).to_protobuf_encoding();
 
         let handshake_message = {
-            let mut protobuf = payload_proto::NoiseHandshakePayload::default();
-            protobuf.identity_key = libp2p_pubkey_protobuf;
-            protobuf.identity_sig = signature.to_vec();
+            let protobuf = payload_proto::NoiseHandshakePayload {
+                identity_key: libp2p_pubkey_protobuf,
+                identity_sig: signature.to_vec(),
+                ..Default::default()
+            };
 
             let mut msg = Vec::with_capacity(protobuf.encoded_len());
             protobuf.encode(&mut msg).unwrap();
@@ -615,27 +620,18 @@ impl HandshakeInProgress {
         }
     }
 
-    /// Feeds data coming from a socket through `incoming_data`, updates the internal state
-    /// machine, and writes data destined to the socket to `outgoing_buffer`.
+    /// Feeds data coming from a socket and outputs data to write to the socket.
     ///
-    /// On success, returns the new state of the negotiation, plus the number of bytes that have
-    /// been read from `incoming_data` and the number of bytes that have been written to
-    /// `outgoing_buffer`.
+    /// On success, returns the new state of the negotiation.
     ///
     /// An error is returned if the protocol is being violated by the remote. When that happens,
     /// the connection should be closed altogether.
-    ///
-    /// If the remote isn't ready to accept new data, pass an empty slice as `outgoing_buffer`.
-    pub fn read_write(
+    pub fn read_write<TNow>(
         mut self,
-        mut incoming_data: &[u8],
-        mut outgoing_buffer: &mut [u8],
-    ) -> Result<(NoiseHandshake, usize, usize), HandshakeError> {
-        let mut total_read = 0;
-        let mut total_written = 0;
-
+        read_write: &mut ReadWrite<'_, TNow>,
+    ) -> Result<NoiseHandshake, HandshakeError> {
         'outer_loop: loop {
-            // Copy data from `self.tx_buffer_encrypted` to `destination`.
+            // Copy data from `self.tx_buffer_encrypted` to `read_write`.
             loop {
                 debug_assert!(
                     !self.tx_buffer_encrypted.as_slices().0.is_empty()
@@ -643,16 +639,18 @@ impl HandshakeInProgress {
                 );
 
                 let to_write = self.tx_buffer_encrypted.as_slices().0;
-                let to_write_len = cmp::min(to_write.len(), outgoing_buffer.len());
-                outgoing_buffer[..to_write_len].copy_from_slice(&to_write[..to_write_len]);
-                for _ in 0..to_write_len {
-                    self.tx_buffer_encrypted.pop_front().unwrap();
+                if !to_write.is_empty() && read_write.outgoing_buffer.is_none() {
+                    return Err(HandshakeError::WriteClosed);
                 }
-                total_written += to_write_len;
-                outgoing_buffer = &mut outgoing_buffer[to_write_len..];
 
+                let to_write_len = cmp::min(to_write.len(), read_write.outgoing_buffer_available());
                 if to_write_len == 0 {
                     break;
+                }
+
+                read_write.write_out(&to_write[..to_write_len]);
+                for _ in 0..to_write_len {
+                    self.tx_buffer_encrypted.pop_front().unwrap();
                 }
             }
 
@@ -662,16 +660,21 @@ impl HandshakeInProgress {
                 break;
             }
 
+            // The remaining of the body requires reading from `read_write`. As such, error if
+            // the reading side is closed.
+            if read_write.incoming_buffer.is_none() {
+                return Err(HandshakeError::ReadClosed);
+            }
+
             // Handshake message must start with two bytes of length.
             // Copy bytes one by one from payload until we reach a length of two.
             while self.rx_buffer_encrypted.len() < 2 {
-                if incoming_data.is_empty() {
+                if read_write.incoming_buffer_available() == 0 {
                     break 'outer_loop;
                 }
 
-                self.rx_buffer_encrypted.push(incoming_data[0]);
-                incoming_data = &incoming_data[1..];
-                total_read += 1;
+                self.rx_buffer_encrypted
+                    .push(read_write.read_bytes::<1>()[0]);
             }
 
             // Decoding the first two bytes, which are the length of the handshake message.
@@ -683,13 +686,11 @@ impl HandshakeInProgress {
             // copying more than the handshake message.
             let to_copy = cmp::min(
                 usize::from(expected_len) + 2 - self.rx_buffer_encrypted.len(),
-                incoming_data.len(),
+                read_write.incoming_buffer_available(),
             );
             self.rx_buffer_encrypted
-                .extend_from_slice(&incoming_data[..to_copy]);
+                .extend(read_write.incoming_bytes_iter().take(to_copy));
             debug_assert!(self.rx_buffer_encrypted.len() <= usize::from(expected_len) + 2);
-            incoming_data = &incoming_data[to_copy..];
-            total_read += to_copy;
 
             // Return early if the entire handshake message has not been received yet.
             if self.rx_buffer_encrypted.len() < usize::from(expected_len) + 2 {
@@ -771,7 +772,7 @@ impl HandshakeInProgress {
         }
 
         // Call `try_finish` to check whether the handshake has finished.
-        Ok((self.try_finish(), total_read, total_written))
+        Ok(self.try_finish())
     }
 }
 
@@ -792,6 +793,10 @@ fn noise_params() -> snow::params::NoiseParams {
 /// Potential error during the noise handshake.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
+    /// Reading side of the connection is closed. The handshake can't proceeed further.
+    ReadClosed,
+    /// Writing side of the connection is closed. The handshake can't proceeed further.
+    WriteClosed,
     /// Error in the decryption state machine.
     Cipher(CipherError),
     /// Failed to decode the payload as the libp2p-extension-to-noise payload.
@@ -815,7 +820,7 @@ pub struct PayloadDecodeError(prost::DecodeError);
 
 #[cfg(test)]
 mod tests {
-    use super::{NoiseHandshake, NoiseKey};
+    use super::{NoiseHandshake, NoiseKey, ReadWrite};
 
     #[test]
     fn handshake_basic_works() {
@@ -841,18 +846,36 @@ mod tests {
                     NoiseHandshake::InProgress(nego) => {
                         if buf_1_to_2.is_empty() {
                             buf_1_to_2.resize(size1, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_2_to_1, &mut buf_1_to_2).unwrap();
-                            handshake1 = updated;
-                            for _ in 0..num_read {
+
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_2_to_1),
+                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+
+                            handshake1 = nego.read_write(&mut read_write).unwrap();
+                            let (read_bytes, written_bytes) =
+                                (read_write.read_bytes, read_write.written_bytes);
+                            for _ in 0..read_bytes {
                                 buf_2_to_1.remove(0);
                             }
-                            buf_1_to_2.truncate(written);
+                            buf_1_to_2.truncate(written_bytes);
                         } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_2_to_1, &mut []).unwrap();
-                            handshake1 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_2_to_1),
+                                outgoing_buffer: Some((&mut buf_1_to_2, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            handshake1 = nego.read_write(&mut read_write).unwrap();
+                            for _ in 0..read_write.read_bytes {
                                 buf_2_to_1.remove(0);
                             }
                         }
@@ -864,18 +887,36 @@ mod tests {
                     NoiseHandshake::InProgress(nego) => {
                         if buf_2_to_1.is_empty() {
                             buf_2_to_1.resize(size2, 0);
-                            let (updated, num_read, written) =
-                                nego.read_write(&buf_1_to_2, &mut buf_2_to_1).unwrap();
-                            handshake2 = updated;
-                            for _ in 0..num_read {
+
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_1_to_2),
+                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+
+                            handshake2 = nego.read_write(&mut read_write).unwrap();
+                            let (read_bytes, written_bytes) =
+                                (read_write.read_bytes, read_write.written_bytes);
+                            for _ in 0..read_bytes {
                                 buf_1_to_2.remove(0);
                             }
-                            buf_2_to_1.truncate(written);
+                            buf_2_to_1.truncate(written_bytes);
                         } else {
-                            let (updated, num_read, _) =
-                                nego.read_write(&buf_1_to_2, &mut []).unwrap();
-                            handshake2 = updated;
-                            for _ in 0..num_read {
+                            let mut read_write = ReadWrite {
+                                now: 0,
+                                incoming_buffer: Some(&buf_1_to_2),
+                                outgoing_buffer: Some((&mut buf_2_to_1, &mut [])),
+                                read_bytes: 0,
+                                written_bytes: 0,
+                                wake_up_after: None,
+                                wake_up_future: None,
+                            };
+                            handshake2 = nego.read_write(&mut read_write).unwrap();
+                            for _ in 0..read_write.read_bytes {
                                 buf_1_to_2.remove(0);
                             }
                         }

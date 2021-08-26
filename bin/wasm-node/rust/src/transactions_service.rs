@@ -609,7 +609,7 @@ async fn background_task(
 
                             log::debug!(
                                 target: "tx-service-validation",
-                                "Success for {} at {}: {:?}",
+                                "Successfully validated transaction {} at {}: {:?}",
                                 HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
                                 HashDisplay(&block_hash),
                                 result
@@ -873,12 +873,17 @@ async fn validate_transaction(
     ),
     ValidateTransactionError,
 > {
-    let (runtime_call_lock, runtime) = relay_chain_sync
-        .recent_best_block_runtime_call(
+    let runtime_lock = relay_chain_sync.recent_best_block_runtime_lock().await;
+
+    let block_hash = *runtime_lock.block_hash();
+    let (runtime_call_lock, runtime) = runtime_lock
+        .start(
             validate::VALIDATION_FUNCTION_NAME,
-            validate::validate_transaction_runtime_parameters(
+            // TODO: don't hardcode v3 but determine parameters dynamically from the runtime
+            validate::validate_transaction_runtime_parameters_v3(
                 iter::once(scale_encoded_transaction.as_ref()),
                 source,
+                &block_hash,
             ),
         )
         .await

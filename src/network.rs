@@ -20,6 +20,7 @@
 **   Not ready yet                                      **
 *********************************************************/
 
+pub mod kademlia;
 pub mod protocol;
 pub mod service;
 
