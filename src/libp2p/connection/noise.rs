@@ -631,7 +631,7 @@ impl HandshakeInProgress {
         read_write: &mut ReadWrite<'_, TNow>,
     ) -> Result<NoiseHandshake, HandshakeError> {
         'outer_loop: loop {
-            // Copy data from `self.tx_buffer_encrypted` to `destination`.
+            // Copy data from `self.tx_buffer_encrypted` to `read_write`.
             loop {
                 debug_assert!(
                     !self.tx_buffer_encrypted.as_slices().0.is_empty()
@@ -639,6 +639,10 @@ impl HandshakeInProgress {
                 );
 
                 let to_write = self.tx_buffer_encrypted.as_slices().0;
+                if !to_write.is_empty() && read_write.outgoing_buffer.is_none() {
+                    return Err(HandshakeError::WriteClosed);
+                }
+
                 let to_write_len = cmp::min(to_write.len(), read_write.outgoing_buffer_available());
                 if to_write_len == 0 {
                     break;
@@ -654,6 +658,12 @@ impl HandshakeInProgress {
             // If not, return now without reading anything more.
             if self.rx_messages_remain == 0 {
                 break;
+            }
+
+            // The remaining of the body requires reading from `read_write`. As such, error if
+            // the reading side is closed.
+            if read_write.incoming_buffer.is_none() {
+                return Err(HandshakeError::ReadClosed);
             }
 
             // Handshake message must start with two bytes of length.
@@ -783,6 +793,10 @@ fn noise_params() -> snow::params::NoiseParams {
 /// Potential error during the noise handshake.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
+    /// Reading side of the connection is closed. The handshake can't proceeed further.
+    ReadClosed,
+    /// Writing side of the connection is closed. The handshake can't proceeed further.
+    WriteClosed,
     /// Error in the decryption state machine.
     Cipher(CipherError),
     /// Failed to decode the payload as the libp2p-extension-to-noise payload.

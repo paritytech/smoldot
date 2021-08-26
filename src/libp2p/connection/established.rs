@@ -605,6 +605,7 @@ where
                 } else {
                     None
                 },
+                self.inner.request_protocols[protocol_index].max_response_size,
                 user_data,
             )));
 
