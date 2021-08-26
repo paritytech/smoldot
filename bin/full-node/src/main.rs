@@ -366,6 +366,8 @@ async fn run(cli_options: cli::CliOptionsRun) {
                             None
                         },
                         max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(80),
+                        num_peers: u64::try_from(network_service.num_established_connections().await)
+                            .unwrap_or(u64::max_value()), // TODO: wrong value, not implemented properly
                         num_network_connections: u64::try_from(network_service.num_established_connections().await)
                             .unwrap_or(u64::max_value()),
                         best_number: sync_state.best_block_number,

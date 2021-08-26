@@ -35,6 +35,7 @@
 //!     chain_name: "My chain",
 //!     relay_chain: None,
 //!     max_line_width: 80,
+//!     num_peers: 8,
 //!     num_network_connections: 12,
 //!     best_number: 220,
 //!     finalized_number: 217,
@@ -62,6 +63,8 @@ pub struct InformantLine<'a> {
     pub relay_chain: Option<RelayChain<'a>>,
     /// Maximum number of characters of the informant line.
     pub max_line_width: u32,
+    /// Number of gossiping substreams open with nodes of the same chain.
+    pub num_peers: u64,
     /// Number of network connections we are having with the rest of the peer-to-peer network.
     pub num_network_connections: u64,
     /// Best block currently being propagated on the peer-to-peer. `None` if unknown.
@@ -127,23 +130,25 @@ impl<'a> fmt::Display for InformantLine<'a> {
 
         // TODO: it's a bit of a clusterfuck to properly align because the emoji eats a whitespace
         let trailer = format!(
-            "] {white_bold}{network_best}{reset} (🌐{white_bold}{connec:>4}{reset})   ",
+            "] {white_bold}{network_best}{reset} (🔗{white_bold}{peers:>3}{reset}) (🌐{white_bold}{connec:>4}{reset})   ",
             network_best = self
                 .network_known_best
                 .map(BlockNumberDisplay)
                 .map(either::Left)
                 .unwrap_or(either::Right("?")),
+            peers = self.num_network_connections,
             connec = self.num_network_connections,
             white_bold = white_bold,
             reset = reset,
         );
         let trailer_len = format!(
-            "] {network_best} (  {connec:>4})   ",
+            "] {network_best} (  {peers:>3}) (  {connec:>4})   ",
             network_best = self
                 .network_known_best
                 .map(BlockNumberDisplay)
                 .map(either::Left)
                 .unwrap_or(either::Right("?")),
+            peers = self.num_network_connections,
             connec = self.num_network_connections,
         )
         .len();
