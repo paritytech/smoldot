@@ -159,9 +159,10 @@ impl HealthyHandshake {
 
                 NegotiationState::Encryption { handshake } => {
                     // Delegating read/write to the Noise handshake state machine.
-                    let updated = handshake
-                        .read_write(read_write)
-                        .map_err(HandshakeError::NoiseHandshake)?;
+                    let updated = handshake.read_write(read_write).map_err(|err| {
+                        debug_assert!(!matches!(err, noise::HandshakeError::WriteClosed));
+                        HandshakeError::NoiseHandshake(err)
+                    })?;
 
                     match updated {
                         noise::NoiseHandshake::Success {
