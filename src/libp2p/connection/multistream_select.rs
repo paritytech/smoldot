@@ -195,8 +195,8 @@ where
     ///
     /// On success, returns the new state of the negotiation.
     ///
-    /// An error is returned if the protocol is being violated by the remote. When that happens,
-    /// the connection should be closed altogether.
+    /// An error is returned if the reading or writing are closed, or if the protocol is being
+    /// violated by the remote. When that happens, the connection should be closed altogether.
     pub fn read_write<TNow>(
         mut self,
         read_write: &mut ReadWrite<TNow>,
@@ -212,8 +212,6 @@ where
                 read_write.advance_read(num_read);
             }
 
-            // TODO: error if inbound or outbound buffer closed
-
             match (self.state, &mut self.config) {
                 (
                     InProgressState::SendHandshake {
@@ -221,6 +219,10 @@ where
                     },
                     Some(config),
                 ) => {
+                    if read_write.outgoing_buffer.is_none() {
+                        return Err(Error::WriteClosed);
+                    }
+
                     let message = MessageOut::Handshake::<iter::Empty<_>, &'static str>;
 
                     let written_before = read_write.written_bytes;
@@ -249,6 +251,10 @@ where
                     },
                     Some(Config::Dialer { requested_protocol }),
                 ) => {
+                    if read_write.outgoing_buffer.is_none() {
+                        return Err(Error::WriteClosed);
+                    }
+
                     let message = MessageOut::ProtocolRequest::<iter::Empty<_>, _>(
                         requested_protocol.as_ref(),
                     );
@@ -271,6 +277,10 @@ where
                     },
                     _,
                 ) => {
+                    if read_write.outgoing_buffer.is_none() {
+                        return Err(Error::WriteClosed);
+                    }
+
                     let message = MessageOut::ProtocolNa::<iter::Empty<_>, &'static str>;
 
                     let written_before = read_write.written_bytes;
@@ -292,6 +302,10 @@ where
                     },
                     _,
                 ) => {
+                    if read_write.outgoing_buffer.is_none() {
+                        return Err(Error::WriteClosed);
+                    }
+
                     let message = MessageOut::ProtocolOk::<iter::Empty<_>, _>(protocol.as_ref());
 
                     let written_before = read_write.written_bytes;
@@ -317,6 +331,10 @@ where
                         supported_protocols,
                     }),
                 ) => {
+                    if read_write.outgoing_buffer.is_none() {
+                        return Err(Error::WriteClosed);
+                    }
+
                     // TODO: overhead stupidity
                     let list = supported_protocols.clone().collect::<Vec<_>>();
                     let message = MessageOut::LsResponse(
@@ -336,6 +354,10 @@ where
                 }
 
                 (InProgressState::HandshakeExpected, Some(Config::Dialer { .. })) => {
+                    if read_write.incoming_buffer.is_none() {
+                        return Err(Error::ReadClosed);
+                    }
+
                     let frame = match self.recv_buffer {
                         leb128::Framed::Finished(frame) => {
                             self.recv_buffer = leb128::Framed::InProgress(
@@ -363,6 +385,10 @@ where
                 }
 
                 (InProgressState::HandshakeExpected, Some(Config::Listener { .. })) => {
+                    if read_write.incoming_buffer.is_none() {
+                        return Err(Error::ReadClosed);
+                    }
+
                     let frame = match self.recv_buffer {
                         leb128::Framed::Finished(frame) => {
                             self.recv_buffer = leb128::Framed::InProgress(
@@ -394,6 +420,10 @@ where
                         supported_protocols,
                     }),
                 ) => {
+                    if read_write.incoming_buffer.is_none() {
+                        return Err(Error::ReadClosed);
+                    }
+
                     let frame = match self.recv_buffer {
                         leb128::Framed::Finished(frame) => {
                             self.recv_buffer = leb128::Framed::InProgress(
@@ -438,6 +468,10 @@ where
                     InProgressState::ProtocolRequestAnswerExpected,
                     cfg @ Some(Config::Dialer { .. }),
                 ) => {
+                    if read_write.incoming_buffer.is_none() {
+                        return Err(Error::ReadClosed);
+                    }
+
                     let frame = match self.recv_buffer {
                         leb128::Framed::Finished(f) => f,
                         leb128::Framed::InProgress(f) => {
@@ -500,6 +534,10 @@ impl<I, P> fmt::Debug for InProgress<I, P> {
 /// Error that can happen during the negotiation.
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
+    /// Reading side of the connection is closed. The handshake can't proceeed further.
+    ReadClosed,
+    /// Writing side of the connection is closed. The handshake can't proceeed further.
+    WriteClosed,
     /// Error while decoding a frame length, or frame size limit reached.
     Frame(leb128::FramedError),
     /// Unknown handshake or unknown multistream-select protocol version.
