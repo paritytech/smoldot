@@ -43,8 +43,12 @@ fn main() {
 }
 
 async fn async_main() {
-    let cli_options = cli::CliOptions::from_args();
+    match cli::CliOptions::from_args() {
+        cli::CliOptions::Run(r) => run(r).await,
+    }
+}
 
+async fn run(cli_options: cli::CliOptionsRun) {
     // Setup the logging system of the binary.
     if matches!(
         cli_options.output,
