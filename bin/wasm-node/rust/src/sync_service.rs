@@ -1045,7 +1045,7 @@ async fn start_relay_chain(
                         {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, requests) = sync.remove_source(id);
-                            for (request_id, _, _) in requests {
+                            for (request_id, _) in requests {
                                 pending_requests.remove(&request_id).unwrap().abort();
                             }
                         },
