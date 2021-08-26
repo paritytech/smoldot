@@ -364,14 +364,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn remove_source(
         &mut self,
         source_id: SourceId,
-    ) -> (TSrc, impl Iterator<Item = (RequestId, RequestDetail, TRq)>) {
+    ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)>) {
         debug_assert!(self.shared.sources.contains(source_id.0));
         match (&mut self.inner, self.shared.sources.remove(source_id.0)) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
                 let (user_data, requests) = sync.remove_source(source_id);
                 let requests = requests
                     .map(
-                        |(_inner_request_id, request_params, request_inner_user_data)| {
+                        |(_inner_request_id, _request_params, request_inner_user_data)| {
                             debug_assert!(self
                                 .shared
                                 .requests
@@ -387,7 +387,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                             (
                                 request_inner_user_data.outer_request_id,
-                                all_forks_request_convert(request_params),
                                 request_inner_user_data.user_data.unwrap(),
                             )
                         },
@@ -402,28 +401,23 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(source_id)) => {
                 let (user_data, requests) = inner.remove_source(source_id);
                 // TODO: do properly
-                let requests = core::iter::empty() /*requests
-                    .map(
-                        |(_inner_request_id, request_params, request_inner_user_data)| {
-                            debug_assert!(self
-                                .shared
-                                .requests
-                                .contains(request_inner_user_data.outer_request_id.0));
-                            let _removed = self
-                                .shared
-                                .requests
-                                .remove(request_inner_user_data.outer_request_id.0);
-                            debug_assert!(matches!(
-                                _removed,
-                                RequestMapping::AllForks(_inner_request_id)
-                            ));
-                            (
-                                request_inner_user_data.outer_request_id,
-                                all_forks_request_convert(request_params),
-                                request_inner_user_data.user_data.unwrap(),
-                            )
-                        },
-                    )*/
+                let self_requests = &mut self.shared.requests;
+                let requests = requests
+                    .map(move |(_inner_request_id, request_inner_user_data)| {
+                        debug_assert!(
+                            self_requests.contains(request_inner_user_data.outer_request_id.0)
+                        );
+                        let _removed =
+                            self_requests.remove(request_inner_user_data.outer_request_id.0);
+                        debug_assert!(matches!(
+                            _removed,
+                            RequestMapping::Optimistic(_inner_request_id)
+                        ));
+                        (
+                            request_inner_user_data.outer_request_id,
+                            request_inner_user_data.user_data,
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .into_iter();
 
