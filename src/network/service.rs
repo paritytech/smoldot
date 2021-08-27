@@ -434,6 +434,13 @@ where
         self.peers_list().await.count()
     }
 
+    /// Returns the number of peers we have a substream with.
+    pub async fn num_peers(&self, chain_index: usize) -> usize {
+        self.inner
+            .num_outgoing_substreams(self.protocol_index(chain_index, 0))
+            .await
+    }
+
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
     pub fn num_chains(&self) -> usize {
         self.chain_configs.len()

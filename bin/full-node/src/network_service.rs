@@ -436,6 +436,11 @@ impl NetworkService {
         self.network.num_established_connections().await
     }
 
+    /// Returns the number of peers we have a substream with.
+    pub async fn num_peers(&self, chain_index: usize) -> usize {
+        self.network.num_peers(chain_index).await
+    }
+
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     // TODO: proper error type
