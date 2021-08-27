@@ -906,6 +906,11 @@ where
         events_rx.next().await.unwrap()
     }
 
+    /// Reads data coming from the connection, updates the internal state machine, and writes data
+    /// destined to the connection through the [`ReadWrite`].
+    ///
+    /// If an error is returned, the connection should be destroyed altogether and the
+    /// [`ConnectionId`] is no longer valid.
     ///
     /// # Panic
     ///
@@ -938,7 +943,18 @@ where
             debug_assert!(connection_lock.pending_event.is_none());
         }
 
-        connection_lock.read_write(self, read_write)?;
+        match connection_lock.read_write(self, read_write) {
+            Ok(()) => {}
+            Err(err) => {
+                debug_assert!(connection_lock.pending_event.is_none());
+
+                let mut guarded = self.guarded.lock().await;
+                let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap(); // TODO: don't unwrap?
+                guarded.connections.remove(connection_index);
+
+                return Err(err);
+            }
+        };
 
         if connection_lock.pending_event.is_some() {
             let mut guarded = self.guarded.lock().await;
