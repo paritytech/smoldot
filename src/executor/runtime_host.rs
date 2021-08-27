@@ -744,6 +744,9 @@ impl Inner {
                                 let _ = self.top_trie_changes.remove(&key);
                             }
                         }
+
+                        // TODO: very slow; do this properly
+                        self.top_trie_root_calculation_cache = Some(Default::default());
                     }
 
                     self.top_trie_transaction_revert = None;
