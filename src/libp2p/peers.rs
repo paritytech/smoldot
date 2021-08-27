@@ -1156,6 +1156,20 @@ where
             .into_iter()
     }
 
+    /// Returns the number of connections we have a substream with.
+    pub async fn num_outgoing_substreams(&self, notifications_protocol_index: usize) -> usize {
+        let guarded = self.guarded.lock().await;
+        // TODO: O(n)
+        guarded
+            .peers_notifications_out
+            .iter()
+            .filter(|((_, idx), state)| {
+                *idx == notifications_protocol_index
+                    && matches!(state.open, NotificationsOutOpenState::Open(_))
+            })
+            .count()
+    }
+
     /// Picks the connection to use to send requests or notifications to the given peer.
     fn connection_id_for_peer(
         &self,
