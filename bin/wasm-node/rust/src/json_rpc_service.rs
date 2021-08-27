@@ -1013,7 +1013,26 @@ impl Background {
                     .unwrap();
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                self.subscribe_storage(request_id, list).await;
+                if list.is_empty() {
+                    // When the list of keys is empty, that means we want to subscribe to *all*
+                    // storage changes. It is not possible to reasonably implement this in a
+                    // light client.
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Subscribing to all storage changes isn't supported",
+                            ),
+                            None,
+                        ))
+                        .await;
+                } else {
+                    self.subscribe_storage(request_id, list).await;
+                }
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
