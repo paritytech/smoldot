@@ -1114,6 +1114,11 @@ where
         guarded.requests_in.remove(id.0);
     }
 
+    /// Reads data coming from the connection, updates the internal state machine, and writes data
+    /// destined to the connection through the [`ReadWrite`].
+    ///
+    /// If an error is returned, the connection should be destroyed altogether and the
+    /// [`ConnectionId`] is no longer valid.
     ///
     /// # Panic
     ///
