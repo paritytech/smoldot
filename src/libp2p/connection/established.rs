@@ -651,11 +651,11 @@ where
         handshake: Vec<u8>,
         user_data: TNotifUd,
     ) -> SubstreamId {
+        let max_handshake_size =
+            self.inner.notifications_protocols[protocol_index].max_handshake_size;
+
         // TODO: turn this assert into something that can't panic?
-        assert!(
-            handshake.len()
-                <= self.inner.notifications_protocols[protocol_index].max_handshake_size
-        );
+        assert!(handshake.len() <= max_handshake_size);
 
         let timeout = now + Duration::from_secs(20); // TODO:
 
@@ -668,6 +668,7 @@ where
                         .name
                         .clone(), // TODO: clone :-/,
                     handshake,
+                    max_handshake_size,
                     user_data,
                 )));
 
