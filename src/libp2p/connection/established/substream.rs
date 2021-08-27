@@ -58,6 +58,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         timeout: TNow,
         /// State of the protocol negotiation.
         negotiation: multistream_select::InProgress<vec::IntoIter<String>, String>,
+        /// Maximum allowed size for the remote's handshake.
+        max_handshake_size: usize,
         /// Bytes of the handshake to send after the substream is open.
         handshake_out: Vec<u8>,
         /// Data passed by the user to [`Substream::notifications_out`].
@@ -199,8 +201,11 @@ where
         timeout: TNow,
         requested_protocol: String,
         handshake: Vec<u8>,
+        max_handshake_size: usize,
         user_data: TNotifUd,
     ) -> Self {
+        // TODO: check `handshake < max_handshake_size`?
+
         let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
             requested_protocol,
         });
@@ -209,6 +214,7 @@ where
             inner: SubstreamInner::NotificationsOutNegotiating {
                 timeout,
                 negotiation,
+                max_handshake_size,
                 handshake_out: handshake,
                 user_data,
             },
@@ -322,6 +328,7 @@ where
             SubstreamInner::NotificationsOutNegotiating {
                 negotiation,
                 timeout,
+                max_handshake_size,
                 handshake_out,
                 user_data,
             } => {
@@ -340,6 +347,7 @@ where
                         Some(SubstreamInner::NotificationsOutNegotiating {
                             negotiation: nego,
                             timeout,
+                            max_handshake_size,
                             handshake_out,
                             user_data,
                         }),
@@ -355,7 +363,7 @@ where
 
                         (
                             Some(SubstreamInner::NotificationsOutHandshakeRecv {
-                                handshake_in: leb128::FramedInProgress::new(10 * 1024), // TODO: proper max size
+                                handshake_in: leb128::FramedInProgress::new(max_handshake_size),
                                 handshake_out,
                                 user_data,
                             }),
