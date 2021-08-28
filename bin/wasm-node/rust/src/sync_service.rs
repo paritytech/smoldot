@@ -35,6 +35,7 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
+use rand::seq::IteratorRandom as _;
 use smoldot::{
     chain,
     executor::{host, read_only_runtime_host},
@@ -719,10 +720,11 @@ async fn start_relay_chain(
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
             loop {
-                let (source_id, request) = match sync.desired_requests().next() {
-                    Some(v) => v,
-                    None => break,
-                };
+                let (source_id, request) =
+                    match sync.desired_requests().choose(&mut rand::thread_rng()) {
+                        Some(v) => v,
+                        None => break,
+                    };
 
                 let request_id = sync.add_request(source_id, request.clone(), ());
 
