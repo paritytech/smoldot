@@ -232,6 +232,9 @@ struct Source<TSrc> {
     /// Note that the ban is lifted if the source is removed. This ban isn't meant to be a line of
     /// defense against malicious peers but rather an optimisation.
     banned: bool,
+
+    /// Number of requests that use this source.
+    num_ongoing_requests: u32,
 }
 
 struct VerificationQueueEntry<TRq, TBl> {
@@ -412,6 +415,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 user_data: source,
                 best_block_number,
                 banned: false,
+                num_ongoing_requests: 0,
             },
         );
 
@@ -530,6 +534,9 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             .chain(iter2)
             .flat_map(move |e| sources.iter().map(move |s| (e, s)))
             .filter_map(|((block_height, num_blocks), (source_id, source))| {
+                if source.num_ongoing_requests != 0 {
+                    return None;
+                }
                 let source_avail_blocks =
                     source.best_block_number.checked_sub(block_height.get())?;
                 Some(RequestDetail {
@@ -547,7 +554,18 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Returns the identifier for the request that must later be passed back to
     /// [`OptimisticSync::finish_request`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
     pub fn insert_request(&mut self, detail: RequestDetail, user_data: TRq) -> RequestId {
+        self.inner
+            .sources
+            .get_mut(&detail.source_id)
+            .unwrap()
+            .num_ongoing_requests += 1;
+
         let request_id = self.inner.next_request_id;
         self.inner.next_request_id.0 += 1;
 
@@ -609,8 +627,13 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         request_id: RequestId,
         outcome: Result<impl Iterator<Item = RequestSuccessBlock<TBl>>, RequestFail>,
     ) -> (TRq, FinishRequestOutcome<TSrc>) {
-        if let Some((_, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
+        if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
             self.inner.obsolete_requests.shrink_to_fit();
+            self.inner
+                .sources
+                .get_mut(&source_id)
+                .unwrap()
+                .num_ongoing_requests -= 1;
             return (user_data, FinishRequestOutcome::Obsolete);
         }
 
@@ -627,6 +650,12 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             })
             .next()
             .expect("invalid RequestId");
+
+        self.inner
+            .sources
+            .get_mut(&source_id)
+            .unwrap()
+            .num_ongoing_requests -= 1;
 
         let blocks = match outcome {
             Ok(blocks) => blocks.collect(),
