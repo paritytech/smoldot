@@ -315,20 +315,19 @@ fn start_sync(
                                     sync: sync_out,
                                     finalized_blocks,
                                 } => {
-                                    // TODO: restore this code
                                     // Processing has made a step forward.
-                                    // There is nothing to do, but this is used to update to best block
-                                    // shown on the informant.
-                                    /*let mut lock = sync_state.lock().await;
-                                    lock.best_block_hash = new_best_hash;
-                                    lock.best_block_number = new_best_number;
+                                    // There is nothing to do, but this is used to update the
+                                    // best block shown on the informant.
+                                    let mut lock = sync_state.lock().await;
+                                    lock.best_block_hash = sync_out.best_block_hash();
+                                    lock.best_block_number = sync_out.best_block_number();
                                     drop(lock);
 
                                     if let Some(last_finalized) = finalized_blocks.last() {
                                         let mut lock = sync_state.lock().await;
                                         lock.finalized_block_hash = last_finalized.header.hash();
                                         lock.finalized_block_number = last_finalized.header.number;
-                                    }*/
+                                    }
 
                                     // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
                                     for block in &finalized_blocks {
@@ -353,18 +352,23 @@ fn start_sync(
                                     sync = sync_out;
                                     break;
                                 }
-                                all::BlockVerification::Success { sync: sync_out, .. } => {
-                                    // TODO: restore this code
-                                    /*
+                                all::BlockVerification::Success {
+                                    is_new_best: true,
+                                    sync: sync_out,
+                                    ..
+                                } => {
                                     // Processing has made a step forward.
                                     // There is nothing to do, but this is used to update to best block
                                     // shown on the informant.
                                     let mut lock = sync_state.lock().await;
-                                    lock.best_block_hash = new_best_hash;
-                                    lock.best_block_number = new_best_number;
+                                    lock.best_block_hash = sync_out.best_block_hash();
+                                    lock.best_block_number = sync_out.best_block_number();
                                     drop(lock);
-                                     */
 
+                                    sync = sync_out;
+                                    break;
+                                }
+                                all::BlockVerification::Success { sync: sync_out, .. } => {
                                     sync = sync_out;
                                     break;
                                 }
