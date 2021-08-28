@@ -346,8 +346,10 @@ struct SerdeSubscriptionEventParams<'a> {
 mod tests {
     #[test]
     fn parse_basic_works() {
-        let call =
-            super::parse_call(r#"{"jsonrpc":"2.0","id":5,"method":"foo","params":[5,true, "hello"]}"#).unwrap();
+        let call = super::parse_call(
+            r#"{"jsonrpc":"2.0","id":5,"method":"foo","params":[5,true, "hello"]}"#,
+        )
+        .unwrap();
         assert_eq!(call.id_json.unwrap(), "5");
         assert_eq!(call.method, "foo");
         assert_eq!(call.params_json, "[5,true, \"hello\"]");
