@@ -28,6 +28,7 @@ use crate::network_service;
 
 use core::{convert::TryFrom as _, num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use rand::seq::IteratorRandom as _;
 use smoldot::{
     database::full_sqlite,
     executor, header, libp2p, network,
@@ -216,10 +217,11 @@ fn start_sync(
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
             loop {
-                let (source_id, request) = match sync.desired_requests().next() {
-                    Some(v) => v,
-                    None => break,
-                };
+                let (source_id, request) =
+                    match sync.desired_requests().choose(&mut rand::thread_rng()) {
+                        Some(v) => v,
+                        None => break,
+                    };
 
                 let request_id = sync.add_request(source_id, request.clone(), ());
 
