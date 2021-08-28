@@ -341,3 +341,47 @@ struct SerdeSubscriptionEventParams<'a> {
     subscription: &'a str,
     result: &'a serde_json::value::RawValue,
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parse_basic_works() {
+        let call =
+            super::parse_call(r#"{"jsonrpc":"2.0","id":5,"method":"foo","params":[5,true, "hello"]}"#).unwrap();
+        assert_eq!(call.id_json.unwrap(), "5");
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[5,true, \"hello\"]");
+    }
+
+    #[test]
+    fn parse_missing_id() {
+        let call = super::parse_call(r#"{"jsonrpc":"2.0","method":"foo","params":[]}"#).unwrap();
+        assert!(call.id_json.is_none());
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_id_string() {
+        let call =
+            super::parse_call(r#"{"jsonrpc":"2.0","id":"hello","method":"foo","params":[]}"#)
+                .unwrap();
+        assert_eq!(call.id_json.unwrap(), "\"hello\"");
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_wrong_jsonrpc() {
+        assert!(
+            super::parse_call(r#"{"jsonrpc":"2.1","id":5,"method":"foo","params":[]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_bad_id() {
+        assert!(
+            super::parse_call(r#"{"jsonrpc":"2.0","id":{},"method":"foo","params":[]}"#).is_err()
+        );
+    }
+}
