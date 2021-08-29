@@ -1476,7 +1476,7 @@ pub struct RequestDetail {
     /// Height of the block to request.
     pub block_height: NonZeroU64,
     /// Number of blocks to request. This might be equal to `u32::max_value()` in case no upper
-    /// bound is needed. The API user is responsible for clamping this value to a reasonable
+    /// bound is required. The API user is responsible for clamping this value to a reasonable
     /// limit.
     pub num_blocks: NonZeroU32,
 }
