@@ -82,12 +82,6 @@ pub struct Config {
     /// Should be set to the maximum number of block between two consecutive justifications.
     pub blocks_capacity: usize,
 
-    /// Maximum number of blocks returned by a response.
-    ///
-    /// > **Note**: If blocks are requested from the network, this should match the network
-    /// >           protocol enforced limit.
-    pub blocks_request_granularity: NonZeroU32,
-
     /// Number of blocks to download ahead of the best block.
     ///
     /// Whenever the latest best block is updated, the state machine will start block
@@ -152,9 +146,6 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Cache of calculation for the storage trie of the best block.
     /// Providing this value when verifying a block considerably speeds up the verification.
     top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
-
-    /// See [`Config::blocks_request_granularity`].
-    blocks_request_granularity: NonZeroU32,
 
     /// See [`Config::download_ahead_blocks`].
     download_ahead_blocks: u32,
@@ -283,8 +274,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     pub fn new(config: Config) -> Self {
         let blocks_tree_config = blocks_tree::Config {
             chain_information: config.chain_information,
-            blocks_capacity: usize::try_from(config.blocks_request_granularity.get())
-                .unwrap_or(usize::max_value()),
+            blocks_capacity: config.blocks_capacity,
         };
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree_config.clone());
@@ -304,20 +294,13 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 ),
                 next_source_id: SourceId(0),
                 verification_queue: {
-                    let mut list = VecDeque::with_capacity(
-                        usize::try_from(
-                            config.download_ahead_blocks / config.blocks_request_granularity.get(),
-                        )
-                        .unwrap()
-                        .saturating_add(1),
-                    );
+                    let mut list = VecDeque::new();
                     list.push_back(VerificationQueueEntry {
                         block_height: NonZeroU64::new(best_block_header_num + 1).unwrap(),
                         ty: VerificationQueueEntryTy::Missing,
                     });
                     list
                 },
-                blocks_request_granularity: config.blocks_request_granularity,
                 download_ahead_blocks: config.download_ahead_blocks,
                 next_request_id: RequestId(0),
                 obsolete_requests: HashMap::with_capacity_and_hasher(0, Default::default()),
@@ -524,7 +507,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         {
             either::Left(iter::once((
                 verif_queue_last.block_height,
-                self.inner.blocks_request_granularity,
+                NonZeroU32::new(u32::max_value()).unwrap(),
             )))
         } else {
             either::Right(iter::empty())
@@ -1492,8 +1475,9 @@ pub struct RequestDetail {
     pub source_id: SourceId,
     /// Height of the block to request.
     pub block_height: NonZeroU64,
-    /// Number of blocks to request. Always smaller than the value passed through
-    /// [`Config::blocks_request_granularity`].
+    /// Number of blocks to request. This might be equal to `u32::max_value()` in case no upper
+    /// bound is needed. The API user is responsible for clamping this value to a reasonable
+    /// limit.
     pub num_blocks: NonZeroU32,
 }
 
