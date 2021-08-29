@@ -41,6 +41,7 @@ use crate::{
 use alloc::{vec, vec::Vec};
 
 use core::{
+    cmp,
     convert::TryFrom as _,
     iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -123,7 +124,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         chain_information: config.chain_information,
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
-                        blocks_request_granularity: NonZeroU32::new(128).unwrap(), // TODO: ask through config
                         download_ahead_blocks: config.download_ahead_blocks,
                         full: Some(optimistic::ConfigFull {
                             finalized_runtime: config_full.finalized_runtime,
@@ -1255,6 +1255,9 @@ pub enum RequestDetail {
         ///
         /// Note that this is only an indication, and the source is free to give fewer blocks
         /// than requested.
+        ///
+        /// This might be equal to `u64::max_value()` in case no upper bound is required. The API
+        /// user is responsible for clamping this value to a reasonable limit.
         num_blocks: NonZeroU64,
         /// `True` if headers should be included in the response.
         request_headers: bool,
@@ -1279,6 +1282,21 @@ pub enum RequestDetail {
         /// Keys whose values is requested.
         keys: Vec<Vec<u8>>,
     },
+}
+
+impl RequestDetail {
+    /// Caps the number of blocks to request to `max`.
+    pub fn num_blocks_clamp(&mut self, max: NonZeroU64) {
+        if let RequestDetail::BlocksRequest { num_blocks, .. } = self {
+            *num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), max.get())).unwrap();
+        }
+    }
+
+    /// Caps the number of blocks to request to `max`.
+    pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
+        self.num_blocks_clamp(max);
+        self
+    }
 }
 
 pub struct BlockRequestSuccessBlock<TBl> {

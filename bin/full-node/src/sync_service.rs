@@ -217,11 +217,15 @@ fn start_sync(
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
             loop {
-                let (source_id, request) =
+                let (source_id, mut request) =
                     match sync.desired_requests().choose(&mut rand::thread_rng()) {
                         Some(v) => v,
                         None => break,
                     };
+
+                // Before notifying the syncing of the request, clamp the number of blocks to the
+                // number of blocks we expect to receive.
+                request.num_blocks_clamp(NonZeroU64::new(128).unwrap());
 
                 let request_id = sync.add_request(source_id, request.clone(), ());
 
