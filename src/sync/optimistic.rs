@@ -52,11 +52,7 @@ use crate::{
     trie::calculate_root,
 };
 
-use alloc::{
-    borrow::ToOwned as _,
-    collections::{BTreeMap, VecDeque},
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{
     cmp,
     convert::TryFrom as _,
@@ -65,7 +61,8 @@ use core::{
     time::Duration,
 };
 use hashbrown::{HashMap, HashSet};
-use itertools::Itertools as _;
+
+mod verification_queue;
 
 /// Configuration for the [`OptimisticSync`].
 #[derive(Debug)]
@@ -159,9 +156,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     next_source_id: SourceId,
 
     /// Queue of block requests, either waiting to be started, in progress, or completed.
-    ///
-    /// Must contain at least one entry of type [`VerificationQueueEntryTy::Missing`] at the end.
-    verification_queue: VecDeque<VerificationQueueEntry<TRq, TBl>>,
+    verification_queue: verification_queue::VerificationQueue<TRq, TBl>,
 
     /// Identifier to assign to the next request.
     next_request_id: RequestId,
@@ -172,35 +167,17 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
     fn make_requests_obsolete(&mut self, chain: &blocks_tree::NonFinalizedTree<Block<TBl>>) {
-        let entries = self
-            .verification_queue
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, e)| matches!(e.ty, VerificationQueueEntryTy::Requested { .. }))
-            .map(|(n, _)| n)
-            .collect::<Vec<_>>();
+        let former_queue = mem::replace(
+            &mut self.verification_queue,
+            verification_queue::VerificationQueue::new(chain.best_block_header().number + 1),
+        );
 
-        for entry_n in entries {
-            let entry = self.verification_queue.remove(entry_n).unwrap();
-            match entry.ty {
-                VerificationQueueEntryTy::Requested {
-                    id,
-                    user_data,
-                    source,
-                } => {
-                    let _was_in = self.obsolete_requests.insert(id, (source, user_data));
-                    debug_assert!(_was_in.is_none());
-                }
-                _ => unreachable!(),
-            }
+        for (user_data, request_id, source) in former_queue.into_requests() {
+            let _was_in = self
+                .obsolete_requests
+                .insert(request_id, (source, user_data));
+            debug_assert!(_was_in.is_none());
         }
-
-        self.verification_queue.clear();
-        self.verification_queue.push_back(VerificationQueueEntry {
-            block_height: NonZeroU64::new(chain.best_block_header().number + 1).unwrap(),
-            ty: VerificationQueueEntryTy::Missing,
-        });
     }
 
     fn with_requests_obsoleted(
@@ -226,26 +203,6 @@ struct Source<TSrc> {
 
     /// Number of requests that use this source.
     num_ongoing_requests: u32,
-}
-
-struct VerificationQueueEntry<TRq, TBl> {
-    block_height: NonZeroU64,
-    ty: VerificationQueueEntryTy<TRq, TBl>,
-}
-
-enum VerificationQueueEntryTy<TRq, TBl> {
-    Missing,
-    Requested {
-        id: RequestId,
-        /// User-chosen data for this request.
-        user_data: TRq,
-        // Index of this source within [`OptimisticSyncInner::sources`].
-        source: SourceId,
-    },
-    Queued {
-        source: SourceId,
-        blocks: VecDeque<RequestSuccessBlock<TBl>>,
-    },
 }
 
 // TODO: doc
@@ -293,14 +250,9 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                     Default::default(),
                 ),
                 next_source_id: SourceId(0),
-                verification_queue: {
-                    let mut list = VecDeque::new();
-                    list.push_back(VerificationQueueEntry {
-                        block_height: NonZeroU64::new(best_block_header_num + 1).unwrap(),
-                        ty: VerificationQueueEntryTy::Missing,
-                    });
-                    list
-                },
+                verification_queue: verification_queue::VerificationQueue::new(
+                    best_block_header_num + 1,
+                ),
                 download_ahead_blocks: config.download_ahead_blocks,
                 next_request_id: RequestId(0),
                 obsolete_requests: HashMap::with_capacity_and_hasher(0, Default::default()),
@@ -371,15 +323,8 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             requests: self
                 .inner
                 .verification_queue
-                .into_iter()
-                .filter_map(|queue_elem| {
-                    if let VerificationQueueEntryTy::Requested { id, user_data, .. } = queue_elem.ty
-                    {
-                        Some((id, user_data))
-                    } else {
-                        None
-                    }
-                })
+                .into_requests()
+                .map(|(user_data, request_id, _)| (request_id, user_data))
                 .collect(),
         }
     }
@@ -452,8 +397,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
         let src_user_data = self.inner.sources.remove(&source_id).unwrap().user_data;
         let drain = RequestsDrain {
-            iter: self.inner.verification_queue.iter_mut().fuse(),
-            source_id,
+            iter: self.inner.verification_queue.drain_source(source_id),
         };
         (src_user_data, drain)
     }
@@ -481,40 +425,10 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
 
     /// Returns an iterator that yields all requests that could be started.
     pub fn desired_requests(&'_ self) -> impl Iterator<Item = RequestDetail> + '_ {
-        let best_block_header_num = self.chain.best_block_header().number;
-
         let sources = &self.inner.sources;
-        let iter1 = self
-            .inner
+        self.inner
             .verification_queue
-            .iter()
-            .tuple_windows::<(_, _)>()
-            .filter(|(e, _)| matches!(e.ty, VerificationQueueEntryTy::Missing))
-            .map(|(entry, next_entry)| {
-                (
-                    entry.block_height,
-                    NonZeroU32::new(
-                        u32::try_from(next_entry.block_height.get() - entry.block_height.get())
-                            .unwrap(),
-                    )
-                    .unwrap(),
-                )
-            });
-
-        let verif_queue_last = self.inner.verification_queue.back().unwrap();
-        let iter2 = if verif_queue_last.block_height.get()
-            < best_block_header_num + u64::from(self.inner.download_ahead_blocks)
-        {
-            either::Left(iter::once((
-                verif_queue_last.block_height,
-                NonZeroU32::new(u32::max_value()).unwrap(),
-            )))
-        } else {
-            either::Right(iter::empty())
-        };
-
-        iter1
-            .chain(iter2)
+            .desired_requests()
             .flat_map(move |e| sources.iter().map(move |s| (e, s)))
             .filter_map(|((block_height, num_blocks), (source_id, source))| {
                 if source.num_ongoing_requests != 0 {
@@ -552,39 +466,19 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         let request_id = self.inner.next_request_id;
         self.inner.next_request_id.0 += 1;
 
-        let missing_pos = self.inner.verification_queue.iter().position(|entry| {
-            entry.block_height == detail.block_height
-                && matches!(entry.ty, VerificationQueueEntryTy::Missing)
-        });
-
-        if let Some(missing_pos) = missing_pos {
-            self.inner.verification_queue[missing_pos].ty = VerificationQueueEntryTy::Requested {
-                id: request_id,
-                source: detail.source_id,
-                user_data,
-            };
-
-            // TODO: adjust if num_blocks < the diff with the next entry
-
-            if missing_pos == self.inner.verification_queue.len() - 1 {
+        match self.inner.verification_queue.insert_request(
+            detail.block_height,
+            detail.num_blocks,
+            request_id,
+            detail.source_id,
+            user_data,
+        ) {
+            Ok(()) => {}
+            Err(user_data) => {
                 self.inner
-                    .verification_queue
-                    .push_back(VerificationQueueEntry {
-                        block_height: NonZeroU64::new(
-                            detail
-                                .block_height
-                                .get()
-                                .checked_add(u64::from(detail.num_blocks.get()))
-                                .unwrap(),
-                        )
-                        .unwrap(),
-                        ty: VerificationQueueEntryTy::Missing,
-                    })
+                    .obsolete_requests
+                    .insert(request_id, (detail.source_id, user_data));
             }
-        } else {
-            self.inner
-                .obsolete_requests
-                .insert(request_id, (detail.source_id, user_data));
         }
 
         request_id
@@ -620,19 +514,12 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             return (user_data, FinishRequestOutcome::Obsolete);
         }
 
-        let (verification_queue_entry, source_id) = self
+        let outcome_is_err = outcome.is_err();
+
+        let (user_data, source_id) = self
             .inner
             .verification_queue
-            .iter()
-            .enumerate()
-            .filter_map(|(pos, entry)| match entry.ty {
-                VerificationQueueEntryTy::Requested { id, source, .. } if id == request_id => {
-                    Some((pos, source))
-                }
-                _ => None,
-            })
-            .next()
-            .expect("invalid RequestId");
+            .finish_request(request_id, outcome.map_err(|_| ()));
 
         self.inner
             .sources
@@ -640,86 +527,45 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             .unwrap()
             .num_ongoing_requests -= 1;
 
-        let blocks = match outcome {
-            Ok(blocks) => blocks.collect(),
-            Err(_) => {
-                let user_data = match mem::replace(
-                    &mut self.inner.verification_queue[verification_queue_entry].ty,
-                    VerificationQueueEntryTy::Missing,
-                ) {
-                    VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
-                    _ => unreachable!(),
-                };
+        if outcome_is_err {
+            self.inner.sources.get_mut(&source_id).unwrap().banned = true;
 
-                self.inner.sources.get_mut(&source_id).unwrap().banned = true;
-
-                // If all sources are banned, unban them.
-                if self.inner.sources.iter().all(|(_, s)| s.banned) {
-                    for src in self.inner.sources.values_mut() {
-                        src.banned = false;
-                    }
+            // If all sources are banned, unban them.
+            if self.inner.sources.iter().all(|(_, s)| s.banned) {
+                for src in self.inner.sources.values_mut() {
+                    src.banned = false;
                 }
-
-                return (
-                    user_data,
-                    FinishRequestOutcome::SourcePunished(
-                        &mut self.inner.sources.get_mut(&source_id).unwrap().user_data,
-                    ),
-                );
             }
-        };
+        }
 
-        // TODO: handle if blocks.len() < expected_number_of_blocks
-
-        let user_data = match mem::replace(
-            &mut self.inner.verification_queue[verification_queue_entry].ty,
-            VerificationQueueEntryTy::Queued {
-                source: source_id,
-                blocks,
+        (
+            user_data,
+            if !outcome_is_err {
+                FinishRequestOutcome::Queued
+            } else {
+                FinishRequestOutcome::SourcePunished(
+                    &mut self.inner.sources.get_mut(&source_id).unwrap().user_data,
+                )
             },
-        ) {
-            VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
-            _ => unreachable!(),
-        };
-
-        (user_data, FinishRequestOutcome::Queued)
+        )
     }
 
     /// Process the next block in the queue of verification.
     ///
     /// This method takes ownership of the [`OptimisticSync`]. The [`OptimisticSync`] is yielded
     /// back in the returned value.
-    pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
-        // Find out if there is a block ready to be processed.
+    pub fn process_one(self) -> ProcessOne<TRq, TSrc, TBl> {
         // The block isn't immediately extracted. A `Verify` struct is built, whose existence
         // confirms that a block is ready. If the `Verify` is dropped without `start` being called,
         // the block stays in the list.
-        loop {
-            match &mut self.inner.verification_queue.get_mut(0).map(|b| &mut b.ty) {
-                Some(VerificationQueueEntryTy::Queued { blocks, .. }) => match blocks.front() {
-                    Some(_) => break,
-                    None => {
-                        self.inner.verification_queue.pop_front().unwrap();
-                        if self.inner.verification_queue.is_empty() {
-                            let best_block_header_num = self.chain.best_block_header().number;
-                            self.inner
-                                .verification_queue
-                                .push_back(VerificationQueueEntry {
-                                    block_height: NonZeroU64::new(best_block_header_num + 1)
-                                        .unwrap(),
-                                    ty: VerificationQueueEntryTy::Missing,
-                                })
-                        }
-                    }
-                },
-                _ => return ProcessOne::Idle { sync: self },
-            }
+        if self.inner.verification_queue.blocks_ready() {
+            ProcessOne::Verify(Verify {
+                inner: self.inner,
+                chain: self.chain,
+            })
+        } else {
+            ProcessOne::Idle { sync: self }
         }
-
-        ProcessOne::Verify(Verify {
-            inner: self.inner,
-            chain: self.chain,
-        })
     }
 }
 
@@ -773,11 +619,7 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
         &self
             .inner
             .verification_queue
-            .get(0)
-            .map(|b| match &b.ty {
-                VerificationQueueEntryTy::Queued { blocks, .. } => blocks.front().unwrap(),
-                _ => unreachable!(),
-            })
+            .first_block()
             .unwrap()
             .scale_encoded_header
     }
@@ -787,17 +629,10 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
     pub fn start(mut self, now_from_unix_epoch: Duration) -> BlockVerification<TRq, TSrc, TBl> {
-        // Extract the block to process.
+        // Extract the block to process. We are guaranteed that a block is available because a
+        // `Verify` is built only when that is the case.
         // Be aware that `source_id` might refer to an obsolete source.
-        let verif_queue_front = self.inner.verification_queue.get_mut(0).unwrap();
-        let (block, source_id) = match &mut verif_queue_front.ty {
-            VerificationQueueEntryTy::Queued { blocks, source } => {
-                (blocks.pop_front().unwrap(), *source)
-            }
-            _ => unreachable!(),
-        };
-        verif_queue_front.block_height =
-            NonZeroU64::new(verif_queue_front.block_height.get() + 1).unwrap();
+        let (block, source_id) = self.inner.verification_queue.pop_first_block().unwrap();
 
         if self.inner.finalized_runtime.is_some() {
             BlockVerification::from(
@@ -1495,32 +1330,18 @@ pub enum RequestFail {
 
 /// Iterator that drains requests after a source has been removed.
 pub struct RequestsDrain<'a, TRq, TBl> {
-    iter: iter::Fuse<alloc::collections::vec_deque::IterMut<'a, VerificationQueueEntry<TRq, TBl>>>,
-    source_id: SourceId,
+    iter: verification_queue::SourceDrain<'a, TRq, TBl>,
 }
 
 impl<'a, TRq, TBl> Iterator for RequestsDrain<'a, TRq, TBl> {
     type Item = (RequestId, TRq);
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let entry = self.iter.next()?;
-            match entry.ty {
-                VerificationQueueEntryTy::Requested { source, .. } if source == self.source_id => {
-                    match mem::replace(&mut entry.ty, VerificationQueueEntryTy::Missing) {
-                        VerificationQueueEntryTy::Requested { id, user_data, .. } => {
-                            return Some((id, user_data));
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-                _ => {}
-            }
-        }
+        self.iter.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.iter.size_hint().1)
+        self.iter.size_hint()
     }
 }
 
@@ -1533,7 +1354,7 @@ impl<'a, TRq, TBl> fmt::Debug for RequestsDrain<'a, TRq, TBl> {
 impl<'a, TRq, TBl> Drop for RequestsDrain<'a, TRq, TBl> {
     fn drop(&mut self) {
         // Drain all remaining elements even if the iterator is dropped eagerly.
-        // This is the reason why a custom iterator type is needed, rather than using combinators.
+        // This is the reason why a custom iterator type is needed.
         for _ in self {}
     }
 }
