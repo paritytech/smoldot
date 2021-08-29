@@ -112,7 +112,7 @@ impl SyncService {
                 .finalized_block_storage_top_trie(&config.database.finalized_block_hash().unwrap())
                 .unwrap();
 
-            let sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
+            let sync = all::AllSync::new(all::Config {
                 chain_information: config
                     .database
                     .to_chain_information(&config.database.finalized_block_hash().unwrap())
@@ -161,7 +161,6 @@ impl SyncService {
                 to_database,
                 peers_source_id_map: Default::default(),
                 block_requests_finished: stream::FuturesUnordered::new(),
-                pending_requests: Default::default(),
             }
         };
 
@@ -191,7 +190,7 @@ enum ToDatabase {
 }
 
 struct SyncBackground {
-    sync: all::AllSync<(), libp2p::PeerId, ()>,
+    sync: all::AllSync<future::AbortHandle, libp2p::PeerId, ()>,
 
     /// Holds, in parallel of the database, the storage of the latest finalized block.
     /// At the time of writing, this state is stable around ~3MiB for Polkadot, meaning that it is
@@ -217,9 +216,6 @@ struct SyncBackground {
             ),
         >,
     >,
-
-    // TODO: remove; should store the aborthandle in the TRq user data instead
-    pending_requests: hashbrown::HashMap<all::RequestId, future::AbortHandle, fnv::FnvBuildHasher>,
 }
 
 impl SyncBackground {
@@ -233,7 +229,7 @@ impl SyncBackground {
         // `requests_to_start` as soon as an entry is added and before disconnect events can
         // remove sources from the state machine.
         loop {
-            let (source_id, mut request) =
+            let (source_id, mut request_info) =
                 match self.sync.desired_requests().choose(&mut rand::thread_rng()) {
                     Some(v) => v,
                     None => break,
@@ -241,11 +237,9 @@ impl SyncBackground {
 
             // Before notifying the syncing of the request, clamp the number of blocks to the
             // number of blocks we expect to receive.
-            request.num_blocks_clamp(NonZeroU64::new(128).unwrap());
+            request_info.num_blocks_clamp(NonZeroU64::new(128).unwrap());
 
-            let request_id = self.sync.add_request(source_id, request.clone(), ());
-
-            match request {
+            match request_info {
                 all::RequestDetail::BlocksRequest {
                     first_block_hash,
                     first_block_height,
@@ -286,7 +280,9 @@ impl SyncBackground {
                     );
 
                     let (request, abort) = future::abortable(request);
-                    self.pending_requests.insert(request_id, abort);
+                    let request_id = self
+                        .sync
+                        .add_request(source_id, request_info.clone(), abort);
 
                     self.block_requests_finished
                         .push(request.map(move |r| (request_id, r)).boxed());
@@ -481,8 +477,8 @@ impl SyncBackground {
                         {
                             let id = self.peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, requests) = self.sync.remove_source(id);
-                            for (request_id, _) in requests {
-                                self.pending_requests.remove(&request_id).unwrap().abort();
+                            for (_, abort) in requests {
+                                abort.abort();
                             }
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
