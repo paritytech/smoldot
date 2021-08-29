@@ -293,6 +293,11 @@ async fn run(cli_options: cli::CliOptionsRun) {
 
     // Start the JSON-RPC service.
     // It only needs to be kept alive in order to function.
+    //
+    // Note that initialization can panic if, for example, the port is already occupied. It is
+    // preferable to fail to start the node altogether rather than make the user believe that they
+    // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
+    // something else.
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
         Some(
             json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
