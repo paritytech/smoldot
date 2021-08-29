@@ -151,8 +151,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     sources: HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
 
     /// Next [`SourceId`] to allocate.
-    /// SourceIds are unique so that the source in [`VerificationQueueEntryTy`] doesn't
-    /// accidentally collide with a new source.
+    /// SourceIds are unique so that the source in the [`verification_queue::VerificationQueue`]
+    /// doesn't accidentally collide with a new source.
     next_source_id: SourceId,
 
     /// Queue of block requests, either waiting to be started, in progress, or completed.
