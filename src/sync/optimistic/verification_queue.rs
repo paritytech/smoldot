@@ -97,6 +97,10 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         if blocks_now_empty {
             self.verification_queue.pop_front().unwrap();
             debug_assert!(!self.verification_queue.is_empty());
+            debug_assert!(matches!(
+                self.verification_queue.back().unwrap().ty,
+                VerificationQueueEntryTy::Missing
+            ));
         }
 
         Some((block, source_id))
@@ -148,6 +152,8 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         source: SourceId,
         user_data: TRq,
     ) -> Result<(), TRq> {
+        // Find the entry where the request can be inserted.
+        // TODO: the equality check on block_height is too strict; instead adjust the queue if there isn't a strict match
         let missing_pos = self.verification_queue.iter().position(|entry| {
             entry.block_height == block_height
                 && matches!(entry.ty, VerificationQueueEntryTy::Missing)
@@ -164,8 +170,8 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             user_data,
         };
 
-        // TODO: adjust if num_blocks < the diff with the next entry
-
+        // `verification_queue` must always end with an entry of type `Missing`. Add it, if
+        // necessary.
         if missing_pos == self.verification_queue.len() - 1 {
             self.verification_queue.push_back(VerificationQueueEntry {
                 block_height: NonZeroU64::new(
@@ -178,6 +184,43 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
                 ty: VerificationQueueEntryTy::Missing,
             })
         }
+        debug_assert!(matches!(
+            self.verification_queue.back().unwrap().ty,
+            VerificationQueueEntryTy::Missing
+        ));
+
+        // If `num_blocks` is < gap between `missing_pos` and `missing_pos + 1`, we have to either
+        // adjust `missing_pos + 1` or insert an entry in between.
+        //
+        // Note that the case where `num_blocks` is strictly superior to the distance to the next
+        // entry isn't handled. The worst that can happen is the same blocks being requested
+        // multiple times.
+        debug_assert!(self.verification_queue.get(missing_pos + 1).is_some());
+        match (self.verification_queue[missing_pos + 1].block_height.get() - block_height.get())
+            .checked_sub(u64::from(num_blocks.get()))
+        {
+            Some(0) => {}
+            Some(n) => {
+                if matches!(
+                    self.verification_queue[missing_pos + 1].ty,
+                    VerificationQueueEntryTy::Missing
+                ) {
+                    self.verification_queue[missing_pos + 1].block_height = NonZeroU64::new(
+                        self.verification_queue[missing_pos + 1].block_height.get() - n,
+                    )
+                    .unwrap();
+                } else {
+                    self.verification_queue.insert(
+                        missing_pos + 1,
+                        VerificationQueueEntry {
+                            block_height: NonZeroU64::new(block_height.get() + n).unwrap(),
+                            ty: VerificationQueueEntryTy::Missing,
+                        },
+                    );
+                }
+            }
+            None => unreachable!(),
+        }
 
         Ok(())
     }
@@ -187,6 +230,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         request_id: RequestId,
         replacement: Result<impl Iterator<Item = RequestSuccessBlock<TBl>>, ()>,
     ) -> (TRq, SourceId) {
+        // Find the position of that request in the queue.
         let (index, source_id) = self
             .verification_queue
             .iter()
@@ -200,24 +244,100 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             .next()
             .unwrap();
 
-        let new_entry = match replacement {
-            Ok(blocks) => VerificationQueueEntryTy::Queued {
-                source: source_id,
-                blocks: blocks.collect(),
+        let prev_value;
+        if let Ok(blocks) = replacement {
+            let gap_with_next = self.verification_queue[index + 1].block_height.get()
+                - self.verification_queue[index].block_height.get();
+
+            let blocks: VecDeque<_> = blocks
+                .take(usize::try_from(gap_with_next).unwrap_or(usize::max_value()))
+                .collect();
+            let num_blocks = blocks.len();
+
+            prev_value = mem::replace(
+                &mut self.verification_queue[index].ty,
+                VerificationQueueEntryTy::Queued {
+                    source: source_id,
+                    blocks,
+                },
+            );
+
+            // If `num_blocks` is < gap between `index` and `index + 1`, we have to either adjust
+            // `index + 1` or insert an entry in between.
+            match gap_with_next.checked_sub(u64::try_from(num_blocks).unwrap()) {
+                Some(0) => {}
+                Some(n) => {
+                    if matches!(
+                        self.verification_queue[index + 1].ty,
+                        VerificationQueueEntryTy::Missing
+                    ) {
+                        self.verification_queue[index + 1].block_height = NonZeroU64::new(
+                            self.verification_queue[index + 1].block_height.get() - n,
+                        )
+                        .unwrap();
+                    } else {
+                        self.verification_queue.insert(
+                            index + 1,
+                            VerificationQueueEntry {
+                                block_height: NonZeroU64::new(
+                                    self.verification_queue[index].block_height.get() + n,
+                                )
+                                .unwrap(),
+                                ty: VerificationQueueEntryTy::Missing,
+                            },
+                        );
+                    }
+                }
+                None => unreachable!(),
+            }
+
+            // We just put a `Queued` at `index`. If `index` is the last element in the list, add a
+            // `Missing` at the end.
+            if index == self.verification_queue.len() - 1 {
+                let back = self.verification_queue.back().unwrap();
+                let next_block_height = NonZeroU64::new(
+                    back.block_height.get()
+                        + u64::try_from(match &back.ty {
+                            VerificationQueueEntryTy::Queued { blocks, .. } => blocks.len(),
+                            _ => unreachable!(),
+                        })
+                        .unwrap(),
+                )
+                .unwrap();
+                self.verification_queue.push_back(VerificationQueueEntry {
+                    block_height: next_block_height,
+                    ty: VerificationQueueEntryTy::Missing,
+                });
+            }
+        } else {
+            prev_value = mem::replace(
+                &mut self.verification_queue[index].ty,
+                VerificationQueueEntryTy::Missing,
+            );
+
+            // We just put a `Missing` at `index`. If there is a `Missing` immediately following
+            // (i.e. at `index + 1`), then merge the two.
+            if matches!(
+                self.verification_queue[index + 1].ty,
+                VerificationQueueEntryTy::Missing
+            ) {
+                // Check that `index + 2` isn't also `Missing`.
+                debug_assert!(self
+                    .verification_queue
+                    .get(index + 2)
+                    .map_or(true, |e| !matches!(e.ty, VerificationQueueEntryTy::Missing)));
+
+                self.verification_queue.remove(index + 1);
+            }
+        };
+
+        (
+            match prev_value {
+                VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
+                _ => unreachable!(),
             },
-            Err(()) => VerificationQueueEntryTy::Missing,
-        };
-
-        let prev_value = mem::replace(&mut self.verification_queue[index].ty, new_entry);
-
-        let user_data = match prev_value {
-            VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
-            _ => unreachable!(),
-        };
-
-        // TODO: insert a `Missing` at the end if necessary
-
-        (user_data, source_id)
+            source_id,
+        )
     }
 
     /// Consumes the queue and returns an iterator to all the requests that were inside of it.
@@ -282,6 +402,26 @@ impl<'a, TRq, TBl> Iterator for SourceDrain<'a, TRq, TBl> {
 impl<'a, TRq, TBl> fmt::Debug for SourceDrain<'a, TRq, TBl> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("SourceDrain").finish()
+    }
+}
+
+impl<'a, TRq, TBl> Drop for SourceDrain<'a, TRq, TBl> {
+    fn drop(&mut self) {
+        // At a conclusion to the iteration, we merge consecutive `Missing` entries of the queue.
+        // Note: it is possible for this destructor to not run if the user `mem::forget`s the
+        // iterator, which could leave the collection in an inconsistent state. Since no unsafety
+        // is involved anymore, we don't care about this problem.
+        for index in (1..self.queue.verification_queue.len()).rev() {
+            if matches!(
+                self.queue.verification_queue[index].ty,
+                VerificationQueueEntryTy::Missing
+            ) && matches!(
+                self.queue.verification_queue[index - 1].ty,
+                VerificationQueueEntryTy::Missing
+            ) {
+                self.queue.verification_queue.remove(index);
+            }
+        }
     }
 }
 
