@@ -156,7 +156,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     next_source_id: SourceId,
 
     /// Queue of block requests, either waiting to be started, in progress, or completed.
-    verification_queue: verification_queue::VerificationQueue<TRq, TBl>,
+    verification_queue: verification_queue::VerificationQueue<TRq, RequestSuccessBlock<TBl>>,
 
     /// Identifier to assign to the next request.
     next_request_id: RequestId,
