@@ -26,7 +26,7 @@ use core::{
 };
 use itertools::Itertools as _;
 
-use super::{RequestId, RequestSuccessBlock, SourceId}; // TODO: ?
+use super::{RequestId, SourceId}; // TODO: ?
 
 /// Queue of block requests, either waiting to be started, in progress, or completed.
 pub(super) struct VerificationQueue<TRq, TBl> {
@@ -64,7 +64,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     /// If the queue starts with ready blocks, returns the first block that is ready.
     ///
     /// Returns `Some` if and only if [`VerificationQueue::blocks_ready`] returns `true`.
-    pub fn first_block(&self) -> Option<&RequestSuccessBlock<TBl>> {
+    pub fn first_block(&self) -> Option<&TBl> {
         match &self.verification_queue.front().unwrap().ty {
             VerificationQueueEntryTy::Queued { blocks, .. } => Some(blocks.front().unwrap()),
             _ => None,
@@ -75,7 +75,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     /// it.
     ///
     /// Returns `Some` if and only if [`VerificationQueue::blocks_ready`] returns `true`.
-    pub fn pop_first_block(&mut self) -> Option<(RequestSuccessBlock<TBl>, SourceId)> {
+    pub fn pop_first_block(&mut self) -> Option<(TBl, SourceId)> {
         let verif_queue_front = self.verification_queue.get_mut(0).unwrap();
 
         let block;
@@ -228,7 +228,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     pub fn finish_request(
         &mut self,
         request_id: RequestId,
-        replacement: Result<impl Iterator<Item = RequestSuccessBlock<TBl>>, ()>,
+        replacement: Result<impl Iterator<Item = TBl>, ()>,
     ) -> (TRq, SourceId) {
         // Find the position of that request in the queue.
         let (index, source_id) = self
@@ -442,7 +442,7 @@ enum VerificationQueueEntryTy<TRq, TBl> {
     Queued {
         source: SourceId,
         /// Must never be empty.
-        blocks: VecDeque<RequestSuccessBlock<TBl>>, // TODO: replace entirely with ̀`TBl`?
+        blocks: VecDeque<TBl>,
     },
 }
 
