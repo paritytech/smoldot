@@ -36,8 +36,6 @@ pub(super) struct VerificationQueue<TRq, TBl> {
     verification_queue: VecDeque<VerificationQueueEntry<TRq, TBl>>,
 }
 
-// TODO: the implementation has lots of bugs; fix
-
 impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     /// Creates a new queue.
     pub fn new(base_block_number: u64) -> Self {
