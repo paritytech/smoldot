@@ -862,6 +862,7 @@ where
                     num_peer_connections,
                     peer_id,
                     peer_is_desired,
+                    ..
                 } if num_peer_connections == 0 => {
                     if peer_is_desired {
                         self.next_start_connect_waker.wake();
