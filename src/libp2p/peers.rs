@@ -299,7 +299,7 @@ where
                 })
                 .await
             };
-            let mut guarded = &mut *guarded; // Avoid borrow checker issues.
+            let guarded = &mut *guarded; // Avoid borrow checker issues.
 
             // If `maybe_inner_event` is `None`, that means some ahead-of-events processing needs
             // to be performed. No event has been grabbed from `self.inner`.
@@ -486,6 +486,7 @@ where
                                 },
                                 peer_id,
                                 peer_is_desired,
+                                user_data,
                             };
                         }
                     }
@@ -1219,9 +1220,7 @@ pub enum Event<TConn> {
         num_peer_connections: NonZeroU32,
     },
 
-    /// Handshake of the given connection has completed.
-    ///
-    /// This event can only happen once per connection.
+    /// A connection has stopped.
     Disconnected {
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
@@ -1240,6 +1239,9 @@ pub enum Event<TConn> {
         /// Number of other established connections with the same peer remaining after the
         /// disconnection.
         num_peer_connections: u32,
+
+        /// User data that was associated to this connection.
+        user_data: TConn,
     },
 
     /// Received a request from a request-response protocol.
