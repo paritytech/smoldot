@@ -1246,16 +1246,6 @@ where
                 // TODO: check timeout
 
                 loop {
-                    let incoming_buffer = match read_write.incoming_buffer {
-                        Some(b) => b,
-                        None => {
-                            read_write.close_write();
-                            debug_assert!(self.pending_event.is_none());
-                            self.pending_event = Some(PendingEvent::Disconnect);
-                            return Ok(());
-                        }
-                    };
-
                     let (read_before, written_before) =
                         (read_write.read_bytes, read_write.written_bytes);
 

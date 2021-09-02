@@ -208,11 +208,20 @@ impl HealthyHandshake {
                     // During the multiplexing protocol negotiation, all exchanges have to go
                     // through the Noise cipher.
 
+                    if read_write.incoming_buffer.is_none() {
+                        return Err(HandshakeError::MultistreamSelect(
+                            multistream_select::Error::ReadClosed,
+                        ));
+                    }
+                    if read_write.outgoing_buffer.is_none() {
+                        return Err(HandshakeError::MultistreamSelect(
+                            multistream_select::Error::WriteClosed,
+                        ));
+                    }
+
                     // TODO: explain
                     let num_read = encryption
-                        .inject_inbound_data(
-                            read_write.incoming_buffer.as_ref().unwrap_or(&&[][..]),
-                        )
+                        .inject_inbound_data(read_write.incoming_buffer.unwrap())
                         .map_err(HandshakeError::Noise)?;
                     assert_eq!(num_read, read_write.incoming_buffer_available()); // TODO: not necessarily true; situation is a bit complicated; see noise module
                     read_write.advance_read(num_read);
