@@ -242,14 +242,17 @@ async fn background_task(
     max_pending_transactions: usize,
     max_concurrent_validations: usize,
 ) {
+    let transactions_capacity = cmp::min(8, max_pending_transactions);
+    let blocks_capacity = 32;
+
     let mut worker = Worker {
         sync_service,
         runtime_service,
         network_service,
         network_chain_index,
         pending_transactions: light_pool::LightPool::new(light_pool::Config {
-            transactions_capacity: cmp::min(8, max_pending_transactions),
-            blocks_capacity: 32,
+            transactions_capacity,
+            blocks_capacity,
             finalized_block_hash: [0; 32], // Dummy value. Pool is re-initialized below.
         }),
         block_downloads: FuturesUnordered::new(),
@@ -287,9 +290,11 @@ async fn background_task(
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             pending.update_status(TransactionStatus::Dropped);
         }
-        worker
-            .pending_transactions
-            .clear_and_reset(current_finalized_block_hash);
+        worker.pending_transactions = light_pool::LightPool::new(light_pool::Config {
+            transactions_capacity,
+            blocks_capacity,
+            finalized_block_hash: current_finalized_block_hash,
+        });
 
         // Reset the other fields.
         worker.block_downloads.clear();

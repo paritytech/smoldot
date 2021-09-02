@@ -149,17 +149,6 @@ impl<TTx> Pool<TTx> {
         }
     }
 
-    /// Removes all transactions from the pool, and sets the current best block height to the
-    /// value passed as parameter.
-    pub fn clear_and_reset(&mut self, new_best_block_height: u64) {
-        self.transactions.clear();
-        self.not_validated.clear();
-        self.by_hash.clear();
-        self.by_height.clear();
-
-        self.best_block_height = new_best_block_height;
-    }
-
     /// Returns true if the pool is empty.
     pub fn is_empty(&self) -> bool {
         self.transactions.is_empty()
