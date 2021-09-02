@@ -127,7 +127,7 @@ impl SyncService {
                 download_ahead_blocks: {
                     // Assuming a verification speed of 1k blocks/sec and a 95% latency of one second,
                     // the number of blocks to download ahead of time in order to not block is 1000.
-                    1024
+                    NonZeroU32::new(1024).unwrap()
                 },
                 full: Some(all::ConfigFull {
                     finalized_runtime: {

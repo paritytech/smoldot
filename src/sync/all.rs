@@ -83,7 +83,7 @@ pub struct Config {
     ///
     /// The ideal value here depends on the speed of blocks verification speed and latency of
     /// block requests.
-    pub download_ahead_blocks: u32,
+    pub download_ahead_blocks: NonZeroU32,
 
     /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
     /// configuration.

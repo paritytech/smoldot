@@ -20,6 +20,7 @@
 
 use alloc::collections::VecDeque;
 use core::{
+    cmp,
     convert::TryFrom as _,
     fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -104,29 +105,39 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         Some((block, source_id))
     }
 
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (NonZeroU64, NonZeroU32)> + '_ {
-        let base_block_number = self.verification_queue.front().unwrap().block_height;
+    /// Returns the list of ranges of blocks in the queue that need to be requested, as tuples of
+    /// `(block height, number of blocks)`.
+    ///
+    /// Use [`VerificationQueue::insert_request`] to update the queue with a request, so that this
+    /// function no longer returns it.
+    ///
+    /// Must be passed the highest number of blocks between the first block queued in this queue
+    /// and the highest block in the requests.
+    pub fn desired_requests(
+        &'_ self,
+        download_ahead_blocks: NonZeroU32,
+    ) -> impl Iterator<Item = (NonZeroU64, NonZeroU32)> + '_ {
+        // Highest block number to request.
+        let max_block_number = self.verification_queue.front().unwrap().block_height.get()
+            + u64::from(download_ahead_blocks.get());
 
         let iter1 = self
             .verification_queue
             .iter()
             .tuple_windows::<(_, _)>()
             .filter(|(e, _)| matches!(e.ty, VerificationQueueEntryTy::Missing))
-            .map(|(entry, next_entry)| {
+            .filter(move |(entry, _)| entry.block_height.get() <= max_block_number)
+            .map(move |(entry, next_entry)| {
+                let max = cmp::min(max_block_number, next_entry.block_height.get());
                 (
                     entry.block_height,
-                    NonZeroU32::new(
-                        u32::try_from(next_entry.block_height.get() - entry.block_height.get())
-                            .unwrap(),
-                    )
-                    .unwrap(),
+                    NonZeroU32::new(u32::try_from(max - entry.block_height.get()).unwrap())
+                        .unwrap(),
                 )
             });
 
         let verif_queue_last = self.verification_queue.back().unwrap();
-        let iter2 = if verif_queue_last.block_height.get() < base_block_number.get() + 1024
-        // TODO: u64::from(self.download_ahead_blocks) instead of 1024
-        {
+        let iter2 = if verif_queue_last.block_height.get() < max_block_number {
             either::Left(iter::once((
                 verif_queue_last.block_height,
                 NonZeroU32::new(u32::max_value()).unwrap(),

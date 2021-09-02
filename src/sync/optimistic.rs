@@ -88,7 +88,7 @@ pub struct Config {
     ///
     /// The ideal value here depends on the speed of blocks verification speed and latency of
     /// block requests.
-    pub download_ahead_blocks: u32,
+    pub download_ahead_blocks: NonZeroU32,
 
     /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
     /// configuration.
@@ -145,7 +145,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
     /// See [`Config::download_ahead_blocks`].
-    download_ahead_blocks: u32,
+    download_ahead_blocks: NonZeroU32,
 
     /// List of sources of blocks.
     sources: HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
@@ -428,7 +428,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         let sources = &self.inner.sources;
         self.inner
             .verification_queue
-            .desired_requests()
+            .desired_requests(self.inner.download_ahead_blocks)
             .flat_map(move |e| sources.iter().map(move |s| (e, s)))
             .filter_map(|((block_height, num_blocks), (source_id, source))| {
                 if source.num_ongoing_requests != 0 {

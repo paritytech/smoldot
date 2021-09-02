@@ -684,7 +684,7 @@ async fn start_relay_chain(
             // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
             // second, the number of blocks to download ahead of time in order to not block
             // is 5k.
-            5000
+            NonZeroU32::new(5000).unwrap()
         },
         full: None,
     });
