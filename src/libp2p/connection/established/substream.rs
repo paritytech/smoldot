@@ -223,8 +223,8 @@ where
 
     /// Initializes an outgoing request substream.
     ///
-    /// After the remote has sent back a response, an [`Event::Response`] event will be generated
-    /// locally. The `user_data` parameter will be passed back.
+    /// After the remote has sent back a response or after an error occured, an [`Event::Response`]
+    /// event will be generated locally. The `user_data` parameter will be passed back.
     ///
     /// If the `request` is `None`, then nothing at all will be written out, not even a length
     /// prefix. If the `request` is `Some`, then a length prefix will be written out. Consequently,
@@ -540,7 +540,7 @@ where
                 if timeout < read_write.now {
                     read_write.close_write();
                     return (
-                        Some(SubstreamInner::NegotiationFailed), // TODO: proper transition
+                        None,
                         Some(Event::Response {
                             response: Err(RequestError::Timeout),
                             user_data,
@@ -560,7 +560,7 @@ where
                     None => {
                         read_write.close_write();
                         return (
-                            Some(SubstreamInner::NegotiationFailed),
+                            None,
                             Some(Event::Response {
                                 user_data,
                                 response: Err(RequestError::SubstreamClosed),
@@ -572,8 +572,9 @@ where
                 match response.update(incoming_buffer) {
                     Ok((num_read, leb128::Framed::Finished(response))) => {
                         read_write.advance_read(num_read);
+                        read_write.close_write();
                         (
-                            Some(SubstreamInner::NegotiationFailed), // TODO: proper state transition
+                            None,
                             Some(Event::Response {
                                 user_data,
                                 response: Ok(response),
