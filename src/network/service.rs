@@ -165,7 +165,7 @@ pub struct ChainNetwork<TNow> {
     next_start_connect_waker: AtomicWaker,
 }
 
-/// See [`ChainNetwork::guarded`].
+/// See [`ChainNetwork::next_event_guarded`].
 struct NextEventGuarded {
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
     /// [`peers::Peers`]. This event might lead to some asynchronous post-processing being
