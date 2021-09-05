@@ -187,7 +187,7 @@ struct EphemeralGuarded {
     /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
     /// [`PendingId`].
     /// The entries here correspond to the entries in
-    /// [`PendingConnections::num_pending_per_peer`].
+    /// [`EphemeralGuarded::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
 
     /// Combination of addresses that we assume could be dialed to reach a certain peer. When
