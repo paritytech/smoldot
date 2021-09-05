@@ -146,18 +146,13 @@ pub struct ChainNetwork<TNow> {
     /// Underlying data structure.
     inner: peers::Peers<multiaddr::Multiaddr, TNow>,
 
-    /// Extra fields protected by a `Mutex`. Must only be locked around
-    /// [`ChainNetwork::next_event`].
-    guarded: Mutex<Guarded>,
+    /// Extra fields protected by a `Mutex` and that relate to the logic in
+    /// [`ChainNetwork::next_event`]. Must only be locked within that method and is kept locked
+    /// throughout that method.
+    next_event_guarded: Mutex<NextEventGuarded>,
 
-    /// Extra fields protected by a `Mutex` and that relate to pending outgoing connections.
-    pending: Mutex<PendingConnections>,
-
-    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
-    ///
-    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
-    /// is `None` if the chain doesn't use the Grandpa protocol.
-    chain_grandpa_config: Mutex<Vec<Option<GrandpaState>>>,
+    /// Extra fields protected by a `Mutex` and that are briefly accessed.
+    ephemeral_guarded: Mutex<EphemeralGuarded>,
 
     /// See [`Config::chains`].
     chain_configs: Vec<ChainConfig>,
@@ -170,8 +165,8 @@ pub struct ChainNetwork<TNow> {
     next_start_connect_waker: AtomicWaker,
 }
 
-/// See [`ChainNetwork::guarded`].
-struct Guarded {
+/// See [`ChainNetwork::next_event_guarded`].
+struct NextEventGuarded {
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
     /// [`peers::Peers`]. This event might lead to some asynchronous post-processing being
     /// needed. Because the user can interrupt the future returned by [`ChainNetwork::next_event`]
@@ -184,15 +179,15 @@ struct Guarded {
     open_chains: hashbrown::HashSet<(PeerId, usize), ahash::RandomState>,
 }
 
-/// See [`ChainNetwork::pending`].
-struct PendingConnections {
+/// See [`ChainNetwork::ephemeral_guarded`].
+struct EphemeralGuarded {
     /// For each peer, the number of pending attempts.
     num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
 
     /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
     /// [`PendingId`].
     /// The entries here correspond to the entries in
-    /// [`PendingConnections::num_pending_per_peer`].
+    /// [`EphemeralGuarded::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
 
     /// Combination of addresses that we assume could be dialed to reach a certain peer. When
@@ -204,9 +199,15 @@ struct PendingConnections {
     // TODO: never cleaned up until addresses are actually tried; the idea is to eventually use Kademlia k-buckets only
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
+
+    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
+    ///
+    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
+    /// is `None` if the chain doesn't use the Grandpa protocol.
+    chain_grandpa_config: Vec<Option<GrandpaState>>,
 }
 
-/// See [`Guarded::to_process_pre_event`]
+/// See [`NextEventGuarded::to_process_pre_event`].
 enum ToProcessPreEvent {
     AcceptNotificationsIn {
         peer_id: PeerId,
@@ -407,16 +408,16 @@ where
                 initial_desired_peers: Default::default(), // Empty
                 initial_desired_substreams,
             }),
-            guarded: Mutex::new(Guarded {
+            next_event_guarded: Mutex::new(NextEventGuarded {
                 to_process_pre_event: None,
                 open_chains,
             }),
-            pending: Mutex::new(PendingConnections {
+            ephemeral_guarded: Mutex::new(EphemeralGuarded {
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses,
+                chain_grandpa_config,
             }),
-            chain_grandpa_config: Mutex::new(chain_grandpa_config),
             chain_configs: config.chains,
             randomness: Mutex::new(randomness),
             next_start_connect_waker: AtomicWaker::new(),
@@ -480,7 +481,7 @@ where
     /// Panics if `chain_index` is out of range, or if the chain has GrandPa disabled.
     ///
     pub async fn set_local_grandpa_state(&self, chain_index: usize, grandpa_state: GrandpaState) {
-        let mut chain_grandpa_configs = self.chain_grandpa_config.lock().await;
+        let mut guarded = self.ephemeral_guarded.lock().await;
 
         // Bytes of the neighbor packet to send out.
         let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
@@ -503,7 +504,7 @@ where
         // Update the locally-stored state, but only after the notification has been broadcasted.
         // This way, if the user cancels the future while `broadcast_notification` is executing,
         // the whole operation is cancelled.
-        *chain_grandpa_configs[chain_index].as_mut().unwrap() = grandpa_state;
+        *guarded.chain_grandpa_config[chain_index].as_mut().unwrap() = grandpa_state;
     }
 
     /// Sends a blocks request to the given peer.
@@ -659,7 +660,7 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
-        let mut lock = self.pending.lock().await;
+        let mut lock = self.ephemeral_guarded.lock().await;
         let lock = &mut *lock; // Prevents borrow checker issues.
 
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
@@ -703,7 +704,7 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
-        let mut lock = self.pending.lock().await;
+        let mut lock = self.ephemeral_guarded.lock().await;
         let (expected_peer_id, _) = lock.pending_ids.remove(id.0);
 
         // Update `lock.peers`.
@@ -735,7 +736,7 @@ where
     /// produced, and calling this function multiple times is therefore discouraged.
     // TODO: this `now` parameter, it's a hack
     pub async fn next_event(&'_ self, now: TNow) -> Event<'_, TNow> {
-        let mut guarded = self.guarded.lock().await;
+        let mut guarded = self.next_event_guarded.lock().await;
         let guarded = &mut *guarded;
 
         loop {
@@ -822,7 +823,9 @@ where
                     // Grandpa notification has been opened. Send neighbor packet.
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                    let grandpa_config = self.chain_grandpa_config.lock().await[chain_index]
+                    // TODO: futures cancellation issues
+                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let grandpa_config = ephemeral_guarded.chain_grandpa_config[chain_index]
                         .as_ref()
                         .unwrap()
                         .clone();
@@ -1267,7 +1270,7 @@ where
     // TODO: give more control, with number of slots and node choice
     pub async fn next_start_connect<'a>(&self) -> StartConnect {
         loop {
-            let mut pending_lock = self.pending.lock().await;
+            let mut pending_lock = self.ephemeral_guarded.lock().await;
             let pending = &mut *pending_lock; // Prevents borrow checker issues.
 
             // Ask the underlying state machine which nodes are desired but don't have any
@@ -1530,7 +1533,7 @@ where
 
     /// Insert the results in the [`ChainNetwork`].
     pub async fn insert(self) {
-        let mut lock = self.service.pending.lock().await;
+        let mut lock = self.service.ephemeral_guarded.lock().await;
         let lock = &mut *lock; // Avoids borrow checker issues.
 
         let chain_index = self.chain_index;
