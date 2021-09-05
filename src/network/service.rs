@@ -791,104 +791,110 @@ where
                     peer_id,
                     notifications_protocol_index,
                     remote_handshake,
-                } => {
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                    if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-                        let remote_handshake =
-                            match protocol::decode_block_announces_handshake(&remote_handshake) {
-                                Ok(hs) => hs,
-                                Err(err) => {
-                                    // TODO: close the substream?
-                                    let peer_id = peer_id.clone(); // TODO: cloning :-/
-                                    guarded.to_process_pre_event = None;
 
-                                    return Event::ProtocolError {
-                                        peer_id,
-                                        error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                                    };
-                                }
-                            };
+                    let remote_handshake =
+                        match protocol::decode_block_announces_handshake(&remote_handshake) {
+                            Ok(hs) => hs,
+                            Err(err) => {
+                                // TODO: close the substream?
+                                let peer_id = peer_id.clone(); // TODO: cloning :-/
+                                guarded.to_process_pre_event = None;
 
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                peer_id,
-                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                                true,
-                            )
-                            .await;
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                peer_id,
-                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                                true,
-                            )
-                            .await;
-
-                        // TODO: compare genesis hash with ours
-
-                        let _was_inserted =
-                            guarded.open_chains.insert((peer_id.clone(), chain_index));
-                        debug_assert!(_was_inserted);
-
-                        let peer_id = peer_id.clone(); // TODO: cloning :-/
-                        let best_hash = *remote_handshake.best_hash;
-                        let best_number = remote_handshake.best_number;
-                        let role = remote_handshake.role;
-                        guarded.to_process_pre_event = None;
-
-                        return Event::ChainConnected {
-                            peer_id,
-                            chain_index,
-                            best_hash,
-                            best_number,
-                            role,
+                                return Event::ProtocolError {
+                                    peer_id,
+                                    error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                                };
+                            }
                         };
-                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
-                    {
-                        // Nothing to do.
-                        guarded.to_process_pre_event = None;
-                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
-                    {
-                        // Grandpa notification has been opened. Send neighbor packet.
-                        let chain_index =
-                            *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                        // TODO: futures cancellation issues
-                        let ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let grandpa_config = ephemeral_guarded.chain_grandpa_config[chain_index]
-                            .as_ref()
-                            .unwrap()
-                            .clone();
-                        let notification =
-                            protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
-                                round_number: grandpa_config.round_number,
-                                set_id: grandpa_config.set_id,
-                                commit_finalized_height: grandpa_config.commit_finalized_height,
-                            })
-                            .scale_encoding()
-                            .fold(Vec::new(), |mut a, b| {
-                                a.extend_from_slice(b.as_ref());
-                                a
-                            });
 
-                        let _ = self
-                            .inner
-                            .queue_notification(
-                                peer_id,
-                                *notifications_protocol_index,
-                                notification.clone(),
-                            )
-                            .await;
+                    self.inner
+                        .set_peer_notifications_out_desired(
+                            peer_id,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                            true,
+                        )
+                        .await;
+                    self.inner
+                        .set_peer_notifications_out_desired(
+                            peer_id,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                            true,
+                        )
+                        .await;
 
-                        guarded.to_process_pre_event = None;
+                    // TODO: compare genesis hash with ours
 
-                        // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
-                    } else {
-                        unreachable!()
-                    }
+                    let _was_inserted = guarded.open_chains.insert((peer_id.clone(), chain_index));
+                    debug_assert!(_was_inserted);
 
-                    // TODO:
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    let best_hash = *remote_handshake.best_hash;
+                    let best_number = remote_handshake.best_number;
+                    let role = remote_handshake.role;
+                    guarded.to_process_pre_event = None;
+
+                    return Event::ChainConnected {
+                        peer_id,
+                        chain_index,
+                        best_hash,
+                        best_number,
+                        role,
+                    };
                 }
+
+                peers::Event::NotificationsOutAccept {
+                    notifications_protocol_index,
+                    ..
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
+                    // Nothing to do.
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::NotificationsOutAccept {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
+                    // Grandpa notification has been opened. Send neighbor packet.
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    // TODO: futures cancellation issues
+                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let grandpa_config = ephemeral_guarded.chain_grandpa_config[chain_index]
+                        .as_ref()
+                        .unwrap()
+                        .clone();
+                    let notification =
+                        protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
+                            round_number: grandpa_config.round_number,
+                            set_id: grandpa_config.set_id,
+                            commit_finalized_height: grandpa_config.commit_finalized_height,
+                        })
+                        .scale_encoding()
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
+
+                    let _ = self
+                        .inner
+                        .queue_notification(
+                            peer_id,
+                            *notifications_protocol_index,
+                            notification.clone(),
+                        )
+                        .await;
+
+                    guarded.to_process_pre_event = None;
+
+                    // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
+                }
+
+                peers::Event::NotificationsOutAccept { .. } => unreachable!(),
+
                 peers::Event::DesiredOutNotification {
                     id,
                     notifications_protocol_index,
@@ -929,6 +935,7 @@ where
 
                     guarded.to_process_pre_event = None;
                 }
+
                 peers::Event::NotificationsOutClose {
                     notifications_protocol_index,
                     peer_id,
@@ -963,18 +970,21 @@ where
                         chain_index,
                     };
                 }
+
                 peers::Event::NotificationsOutClose { .. } => {
                     guarded.to_process_pre_event = None;
                 }
+
                 peers::Event::NotificationsInClose { .. } => {
                     // TODO: do something?
                     guarded.to_process_pre_event = None;
                 }
+
                 peers::Event::NotificationsIn {
                     notifications_protocol_index,
                     peer_id,
                     notification,
-                } => {
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
@@ -993,143 +1003,175 @@ where
                         continue;
                     }
 
-                    if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-                        if let Err(err) = protocol::decode_block_announce(&notification) {
+                    if let Err(err) = protocol::decode_block_announce(&notification) {
+                        let peer_id = peer_id.clone(); // TODO: cloning :-/
+                        guarded.to_process_pre_event = None;
+                        return Event::ProtocolError {
+                            peer_id,
+                            error: ProtocolError::BadBlockAnnounce(err),
+                        };
+                    }
+
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    let notification = mem::take(notification);
+                    guarded.to_process_pre_event = None;
+
+                    return Event::BlockAnnounce {
+                        chain_index,
+                        peer_id,
+                        announce: EncodedBlockAnnounce(notification),
+                    };
+                }
+
+                peers::Event::NotificationsIn {
+                    notifications_protocol_index,
+                    ..
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
+                    // TODO: transaction announce
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::NotificationsIn {
+                    notifications_protocol_index,
+                    peer_id,
+                    notification,
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // Don't report events about nodes we don't have an outbound substream with.
+                    // TODO: cloning of peer_id :(
+                    if !guarded
+                        .open_chains
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        guarded.to_process_pre_event = None;
+                        continue;
+                    }
+
+                    let decoded_notif = match protocol::decode_grandpa_notification(&notification) {
+                        Ok(n) => n,
+                        Err(err) => {
                             let peer_id = peer_id.clone(); // TODO: cloning :-/
                             guarded.to_process_pre_event = None;
                             return Event::ProtocolError {
                                 peer_id,
-                                error: ProtocolError::BadBlockAnnounce(err),
+                                error: ProtocolError::BadGrandpaNotification(err),
                             };
                         }
+                    };
 
-                        let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    // Commit messages are the only type of message that is important for
+                    // light clients. Anything else is presently ignored.
+                    if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
                         let notification = mem::take(notification);
                         guarded.to_process_pre_event = None;
-
-                        return Event::BlockAnnounce {
+                        return Event::GrandpaCommitMessage {
                             chain_index,
-                            peer_id,
-                            announce: EncodedBlockAnnounce(notification),
+                            message: EncodedGrandpaCommitMessage(notification),
                         };
-                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
-                    {
-                        // TODO: transaction announce
-                        guarded.to_process_pre_event = None;
-                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
-                    {
-                        let decoded_notif =
-                            match protocol::decode_grandpa_notification(&notification) {
-                                Ok(n) => n,
-                                Err(err) => {
-                                    let peer_id = peer_id.clone(); // TODO: cloning :-/
-                                    guarded.to_process_pre_event = None;
-                                    return Event::ProtocolError {
-                                        peer_id,
-                                        error: ProtocolError::BadGrandpaNotification(err),
-                                    };
-                                }
-                            };
-
-                        // Commit messages are the only type of message that is important for
-                        // light clients. Anything else is presently ignored.
-                        if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
-                            let notification = mem::take(notification);
-                            guarded.to_process_pre_event = None;
-                            return Event::GrandpaCommitMessage {
-                                chain_index,
-                                message: EncodedGrandpaCommitMessage(notification),
-                            };
-                        }
-
-                        guarded.to_process_pre_event = None;
-                    } else {
-                        unreachable!()
                     }
+
+                    guarded.to_process_pre_event = None;
                 }
+
+                peers::Event::NotificationsIn { .. } => unreachable!(),
+
                 peers::Event::DesiredInNotification {
                     peer_id,
                     handshake,
                     id: desired_in_notification_id,
                     notifications_protocol_index,
-                } => {
+                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
                     // Remote requests to open a notifications substream.
 
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
-                        if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
-                            self.inner
-                                .in_notification_refuse(*desired_in_notification_id)
-                                .await;
-
-                            let peer_id = peer_id.clone(); // TODO: cloning :-/
-                            guarded.to_process_pre_event = None;
-                            return Event::ProtocolError {
-                                peer_id,
-                                error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                            };
-                        }
-
-                        let chain_config = &self.chain_configs[chain_index];
-                        let handshake = protocol::encode_block_announces_handshake(
-                            protocol::BlockAnnouncesHandshakeRef {
-                                best_hash: &chain_config.best_hash,
-                                best_number: chain_config.best_number,
-                                genesis_hash: &chain_config.genesis_hash,
-                                role: chain_config.role,
-                            },
-                        )
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        });
-
-                        if self
-                            .inner
-                            .in_notification_accept(*desired_in_notification_id, handshake)
-                            .await
-                            .is_ok()
-                        {
-                            // TODO: future cancellation issue
-                            self.inner
-                                .set_peer_notifications_out_desired(
-                                    peer_id,
-                                    *notifications_protocol_index,
-                                    true,
-                                )
-                                .await;
-                        }
-
-                        guarded.to_process_pre_event = None;
-                    } else if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                        == 1
-                    {
-                        let _ = self
-                            .inner
-                            .in_notification_accept(*desired_in_notification_id, Vec::new())
-                            .await;
-                        guarded.to_process_pre_event = None;
-                    } else if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                        == 2
-                    {
-                        // Grandpa substream.
-                        let handshake = self.chain_configs[chain_index]
-                            .role
-                            .scale_encoding()
-                            .to_vec();
-
-                        let _ = self
-                            .inner
-                            .in_notification_accept(*desired_in_notification_id, handshake)
+                    if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
+                        self.inner
+                            .in_notification_refuse(*desired_in_notification_id)
                             .await;
 
+                        let peer_id = peer_id.clone(); // TODO: cloning :-/
                         guarded.to_process_pre_event = None;
-                    } else {
-                        unreachable!()
+                        return Event::ProtocolError {
+                            peer_id,
+                            error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                        };
                     }
+
+                    let chain_config = &self.chain_configs[chain_index];
+                    let handshake = protocol::encode_block_announces_handshake(
+                        protocol::BlockAnnouncesHandshakeRef {
+                            best_hash: &chain_config.best_hash,
+                            best_number: chain_config.best_number,
+                            genesis_hash: &chain_config.genesis_hash,
+                            role: chain_config.role,
+                        },
+                    )
+                    .fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    });
+
+                    if self
+                        .inner
+                        .in_notification_accept(*desired_in_notification_id, handshake)
+                        .await
+                        .is_ok()
+                    {
+                        // TODO: future cancellation issue
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                peer_id,
+                                *notifications_protocol_index,
+                                true,
+                            )
+                            .await;
+                    }
+
+                    guarded.to_process_pre_event = None;
                 }
+
+                peers::Event::DesiredInNotification {
+                    id: desired_in_notification_id,
+                    notifications_protocol_index,
+                    ..
+                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
+                    let _ = self
+                        .inner
+                        .in_notification_accept(*desired_in_notification_id, Vec::new())
+                        .await;
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::DesiredInNotification {
+                    id: desired_in_notification_id,
+                    notifications_protocol_index,
+                    ..
+                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // Grandpa substream.
+                    let handshake = self.chain_configs[chain_index]
+                        .role
+                        .scale_encoding()
+                        .to_vec();
+
+                    let _ = self
+                        .inner
+                        .in_notification_accept(*desired_in_notification_id, handshake)
+                        .await;
+
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::DesiredInNotification { .. } => {
+                    unreachable!()
+                }
+
                 peers::Event::DesiredInNotificationCancel { .. } => {
                     guarded.to_process_pre_event = None;
                 }
