@@ -823,6 +823,7 @@ where
                     // Grandpa notification has been opened. Send neighbor packet.
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    // TODO: futures cancellation issues
                     let ephemeral_guarded = self.ephemeral_guarded.lock().await;
                     let grandpa_config = ephemeral_guarded.chain_grandpa_config[chain_index]
                         .as_ref()
