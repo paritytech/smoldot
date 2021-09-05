@@ -237,7 +237,7 @@ impl SyncBackground {
 
             // Before notifying the syncing of the request, clamp the number of blocks to the
             // number of blocks we expect to receive.
-            request_info.num_blocks_clamp(NonZeroU64::new(128).unwrap());
+            request_info.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
             match request_info {
                 all::RequestDetail::BlocksRequest {
