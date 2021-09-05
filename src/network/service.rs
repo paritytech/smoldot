@@ -207,7 +207,7 @@ struct EphemeralGuarded {
     chain_grandpa_config: Vec<Option<GrandpaState>>,
 }
 
-/// See [`Guarded::to_process_pre_event`]
+/// See [`NextEventGuarded::to_process_pre_event`].
 enum ToProcessPreEvent {
     AcceptNotificationsIn {
         peer_id: PeerId,
