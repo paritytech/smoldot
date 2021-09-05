@@ -199,6 +199,7 @@ where
                 peer_indices,
                 peers,
                 peers_notifications_out,
+                peers_notifications_in: BTreeSet::new(),
                 requests_in: slab::Slab::new(), // TODO: capacity?
                 desired_in_notifications: slab::Slab::new(), // TODO: capacity?
                 desired_out_notifications: slab::Slab::new(), // TODO: capacity?
@@ -583,16 +584,24 @@ where
                     remote_handshake: handshake,
                     user_data: local_connection_index,
                 } => {
+                    let peer_index = guarded.connections[local_connection_index].0.unwrap();
+
+                    // If this peer has already opened an inbound notifications substream in the
+                    // past, forbid any additional one.
+                    if !guarded
+                        .peers_notifications_in
+                        .insert((peer_index, notifications_protocol_index))
+                    {
+                        todo!() // TODO:
+                    }
+
                     let desired_notif_id = DesiredInNotificationId(
                         guarded
                             .desired_in_notifications
                             .insert(Some((connection_id, notifications_protocol_index))),
                     );
 
-                    let peer_id = {
-                        let peer_index = guarded.connections[local_connection_index].0.unwrap();
-                        guarded.peers[peer_index].peer_id.clone()
-                    };
+                    let peer_id = guarded.peers[peer_index].peer_id.clone();
 
                     return Event::DesiredInNotification {
                         id: desired_notif_id,
@@ -626,12 +635,14 @@ where
                     ..
                 } => {
                     // TODO: does this event also mean a NotificationsInOpen is no longer valid?
-                    let peer_id = {
-                        let peer_index = guarded.connections[local_connection_index].0.unwrap();
-                        guarded.peers[peer_index].peer_id.clone()
-                    };
 
-                    // TODO: don't report back if there's still an in substream with the same proto
+                    let peer_index = guarded.connections[local_connection_index].0.unwrap();
+                    let peer_id = guarded.peers[peer_index].peer_id.clone();
+
+                    let _was_in = guarded
+                        .peers_notifications_in
+                        .remove(&(peer_index, notifications_protocol_index));
+                    assert!(_was_in);
 
                     return Event::NotificationsInClose {
                         peer_id,
@@ -923,6 +934,8 @@ where
         let mut guarded = self.guarded.lock().await;
         assert!(guarded.desired_in_notifications.contains(id.0));
         guarded.desired_in_notifications.remove(id.0);
+
+        // TODO: guarded.peers_notifications_in.remove();
 
         todo!()
     }
@@ -1271,6 +1284,9 @@ pub enum Event<TConn> {
 
     /// A peer would like to open a notifications substream with the local node, in order to
     /// send notifications.
+    ///
+    /// Only one inbound notifications substream can exist per peer and per protocol. Any
+    /// additional one will be automatically refused.
     DesiredInNotification {
         /// Identifier for this request. Must be passed back when calling
         /// [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`].
@@ -1405,6 +1421,11 @@ struct Guarded<TConn> {
     /// `peer_index` is the index in [`Guarded::peers`]. Values are `bool` indicating whether the
     /// connection is fully established: `true` if fully established, `false` if handshaking.
     connections_by_peer: BTreeMap<(usize, collection::ConnectionId), bool>,
+
+    /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Contains all the
+    /// inbound notification substreams that are either pending or accepted. Used in order to
+    /// prevent a peer from opening multiple inbound substreams.
+    peers_notifications_in: BTreeSet<(usize, usize)>,
 
     /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Values are the
     /// state of the corresponding outbound notifications substream.
