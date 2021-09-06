@@ -1054,6 +1054,18 @@ impl AsRef<[u8]> for VecWithOffset {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, derive_more::From)]
 pub struct SubstreamId(NonZeroU32);
 
+impl SubstreamId {
+    /// Returns the value that compares inferior or equal to all possible values.
+    pub fn min_value() -> Self {
+        Self(NonZeroU32::new(1).unwrap())
+    }
+
+    /// Returns the value that compares superior or equal to all possible values.
+    pub fn max_value() -> Self {
+        Self(NonZeroU32::new(u32::max_value()).unwrap())
+    }
+}
+
 #[must_use]
 #[derive(Debug)]
 pub struct IncomingDataOutcome<T> {
