@@ -728,7 +728,7 @@ async fn start_relay_chain(
 
                 // Before notifying the syncing of the request, clamp the number of blocks to the
                 // number of blocks we expect to receive.
-                request.num_blocks_clamp(NonZeroU64::new(128).unwrap());
+                request.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
                 let request_id = sync.add_request(source_id, request.clone(), ());
 
