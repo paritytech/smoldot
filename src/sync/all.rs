@@ -1171,12 +1171,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         let request = self.shared.requests.remove(request_id.0);
         assert!(matches!(request, RequestMapping::Inline(..)));
 
-        let mut response = response.unwrap(); // TODO: handle this properly; requires changes in the grandpa warp sync machine
-
-        match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
-            AllSyncInner::GrandpaWarpSync {
-                inner: grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(sync),
-            } => {
+        match (
+            mem::replace(&mut self.inner, AllSyncInner::Poisoned),
+            response,
+        ) {
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner:
+                        grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(sync),
+                },
+                Ok(mut response),
+            ) => {
                 // In this state, we expect the response to be one value for `:code` and one for
                 // `:heappages`. As documented, we panic if the number of items isn't 2.
                 let code = response.next().unwrap();
@@ -1193,9 +1198,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 self.inject_grandpa(grandpa_warp_sync)
             }
-            AllSyncInner::GrandpaWarpSync {
-                inner: grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(sync),
-            } => {
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(sync),
+                },
+                Ok(mut response),
+            ) => {
                 // In this state, we expect the response to be one value. As documented, we panic
                 // if the number of items isn't 1.
                 let value = response.next().unwrap();
@@ -1209,8 +1217,29 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 self.inject_grandpa(grandpa_warp_sync)
             }
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner:
+                        grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(sync),
+                },
+                Err(_),
+            ) => {
+                let grandpa_warp_sync = sync.inject_error();
+                // TODO: notify user of the problem
+                self.inject_grandpa(grandpa_warp_sync)
+            }
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(sync),
+                },
+                Err(_),
+            ) => {
+                let grandpa_warp_sync = sync.inject_error();
+                // TODO: notify user of the problem
+                self.inject_grandpa(grandpa_warp_sync)
+            }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            other => {
+            (other, _) => {
                 self.inner = other;
                 ResponseOutcome::Queued // TODO: no
             }

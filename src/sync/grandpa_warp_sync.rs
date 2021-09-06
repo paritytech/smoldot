@@ -498,6 +498,19 @@ impl<TSrc> StorageGet<TSrc> {
             self.state,
         )
     }
+
+    /// Injects a failure to retrieve the storage value.
+    pub fn inject_error(self) -> GrandpaWarpSync<TSrc> {
+        GrandpaWarpSync::InProgress(
+            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.state.sources,
+                PreVerificationState {
+                    start_chain_information: self.state.start_chain_information,
+                },
+                None,
+            ),
+        )
+    }
 }
 
 /// Fetching the key that follows a given one is required in order to continue.
@@ -839,6 +852,19 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             user_data,
             already_tried: false,
         }))
+    }
+
+    /// Injects a failure to retrieve the parameters.
+    pub fn inject_error(self) -> GrandpaWarpSync<TSrc> {
+        GrandpaWarpSync::InProgress(
+            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.state.sources,
+                PreVerificationState {
+                    start_chain_information: self.state.start_chain_information,
+                },
+                None,
+            ),
+        )
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
