@@ -299,8 +299,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             debug_assert!(self.requests.contains(pending_request_id.0));
             let request = self.requests.remove(pending_request_id.0);
 
-            self.source_occupations
+            let _was_in = self
+                .source_occupations
                 .remove(&(source_id, pending_request_id));
+            debug_assert!(_was_in);
 
             let _was_in = self.blocks_requests.remove(&(
                 request.detail.first_block_height,
