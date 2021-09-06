@@ -299,6 +299,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             debug_assert!(self.requests.contains(pending_request_id.0));
             let request = self.requests.remove(pending_request_id.0);
 
+            let _was_in = self
+                .source_occupations
+                .remove(&(source_id, pending_request_id));
+            debug_assert!(_was_in);
+
             let _was_in = self.blocks_requests.remove(&(
                 request.detail.first_block_height,
                 request.detail.first_block_hash,
@@ -315,6 +320,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
             pending_requests.push((pending_request_id, request.detail, request.user_data));
         }
+
+        debug_assert_eq!(self.source_occupations.len(), self.requests.len());
 
         (user_data.user_data, pending_requests.into_iter())
     }
@@ -654,7 +661,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             user_data,
         }));
 
-        self.source_occupations.insert((source_id, request_id));
+        let _was_inserted = self.source_occupations.insert((source_id, request_id));
+        debug_assert!(_was_inserted);
 
         debug_assert_eq!(self.source_occupations.len(), self.requests.len());
 
