@@ -985,11 +985,11 @@ where
 
                     {
                         let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let _was_removed =
+                        let _was_in =
                             ephemeral_guarded.chain_out_peers[chain_index].remove(peer_id);
-                        debug_assert_ne!(
-                            _was_removed,
-                            ephemeral_guarded.chain_in_peers[chain_index].contains(peer_id)
+                        debug_assert!(
+                            !_was_in
+                                || !ephemeral_guarded.chain_in_peers[chain_index].contains(peer_id)
                         );
                     }
 
@@ -1022,9 +1022,9 @@ where
 
                     let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
                     let _was_in = ephemeral_guarded.chain_in_peers[chain_index].remove(peer_id);
-                    debug_assert_ne!(
-                        _was_in,
-                        ephemeral_guarded.chain_out_peers[chain_index].contains(peer_id)
+                    debug_assert!(
+                        !_was_in
+                            || !ephemeral_guarded.chain_out_peers[chain_index].contains(peer_id)
                     );
 
                     guarded.to_process_pre_event = None;
