@@ -264,7 +264,7 @@ where
             iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/2", chain.protocol_id),
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
-                max_response_size: 10 * 1024 * 1024,
+                max_response_size: 16 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
                 timeout: Duration::from_secs(6),
