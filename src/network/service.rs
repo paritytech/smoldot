@@ -30,6 +30,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    convert::TryFrom as _,
     fmt, iter, mem,
     num::NonZeroUsize,
     ops::{Add, Sub},
@@ -204,6 +205,16 @@ struct EphemeralGuarded {
     /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
     /// is `None` if the chain doesn't use the Grandpa protocol.
     chain_grandpa_config: Vec<Option<GrandpaState>>,
+
+    /// For each item in [`ChainNetwork::chain_configs`], the list of peers with an inbound
+    /// slot attributed to them. Only includes peers the local node is connected to and who have
+    /// opened a block announces substream with the local node.
+    chain_in_peers: Vec<hashbrown::HashSet<PeerId, ahash::RandomState>>,
+
+    /// For each item in [`ChainNetwork::chain_configs`], the list of peers with an outbound
+    /// slot attributed to them. Can include peers not connected to the local node yet. The peers
+    /// in this list are always marked as desired in the underlying state machine.
+    chain_out_peers: Vec<hashbrown::HashSet<PeerId, ahash::RandomState>>,
 }
 
 // Update this when a new request response protocol is added.
@@ -385,6 +396,12 @@ where
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses,
                 chain_grandpa_config,
+                chain_in_peers: (0..config.chains.len())
+                    .map(|_| Default::default())
+                    .collect(), // TODO: proper randomness
+                chain_out_peers: (0..config.chains.len())
+                    .map(|_| Default::default())
+                    .collect(), // TODO: proper randomness
             }),
             chain_configs: config.chains,
             randomness: Mutex::new(randomness),
@@ -676,16 +693,24 @@ where
         let (expected_peer_id, _) = lock.pending_ids.remove(id.0);
 
         // Update `lock.peers`.
-        {
+        let has_any_attempt_left = {
             let value = lock
                 .num_pending_per_peer
                 .get_mut(&expected_peer_id)
                 .unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
+                true
             } else {
                 lock.num_pending_per_peer.remove(&expected_peer_id).unwrap();
+                false
             }
+        };
+
+        // If the peer is completely unreachable, unassign all of its outbound slots and remove
+        // its desired state.
+        if !has_any_attempt_left {
+            // TODO: actually do it; tricky because we should only do this if we're not connected
         }
 
         self.next_start_connect_waker.wake();
@@ -958,8 +983,20 @@ where
                         )
                         .await;
 
+                    {
+                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                        let _was_removed =
+                            ephemeral_guarded.chain_out_peers[chain_index].remove(peer_id);
+                        debug_assert_ne!(
+                            _was_removed,
+                            ephemeral_guarded.chain_in_peers[chain_index].contains(peer_id)
+                        );
+                    }
+
                     let _was_removed = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
                     debug_assert!(_was_removed);
+
+                    // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
 
                     self.next_start_connect_waker.wake();
 
@@ -975,8 +1012,25 @@ where
                     guarded.to_process_pre_event = None;
                 }
 
+                peers::Event::NotificationsInClose {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let _was_in = ephemeral_guarded.chain_in_peers[chain_index].remove(peer_id);
+                    debug_assert_ne!(
+                        _was_in,
+                        ephemeral_guarded.chain_out_peers[chain_index].contains(peer_id)
+                    );
+
+                    guarded.to_process_pre_event = None;
+                }
+
                 peers::Event::NotificationsInClose { .. } => {
-                    // TODO: do something?
                     guarded.to_process_pre_event = None;
                 }
 
@@ -1101,6 +1155,25 @@ where
                         };
                     }
 
+                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let has_out_slot =
+                        ephemeral_guarded.chain_out_peers[chain_index].contains(peer_id);
+                    if !has_out_slot
+                        && ephemeral_guarded.chain_in_peers[chain_index].len()
+                            >= usize::try_from(self.chain_configs[chain_index].in_slots)
+                                .unwrap_or(usize::max_value())
+                    {
+                        // All in slots are occupied.
+                        drop(ephemeral_guarded);
+
+                        self.inner
+                            .in_notification_refuse(*desired_in_notification_id)
+                            .await;
+
+                        guarded.to_process_pre_event = None;
+                        continue;
+                    }
+
                     let chain_config = &self.chain_configs[chain_index];
                     let handshake = protocol::encode_block_announces_handshake(
                         protocol::BlockAnnouncesHandshakeRef {
@@ -1121,6 +1194,12 @@ where
                         .await
                         .is_ok()
                     {
+                        if !has_out_slot {
+                            let _was_inserted = ephemeral_guarded.chain_in_peers[chain_index]
+                                .insert(peer_id.clone());
+                            debug_assert!(_was_inserted);
+                        }
+
                         // TODO: future cancellation issue
                         self.inner
                             .set_peer_notifications_out_desired(
@@ -1520,6 +1599,35 @@ where
         let chain_index = self.chain_index;
 
         for (peer_id, addrs) in self.outcome {
+            // Only proceed if we have out slots available.
+            if lock.chain_out_peers[self.chain_index].len()
+                >= usize::try_from(self.service.chain_configs[self.chain_index].out_slots)
+                    .unwrap_or(usize::max_value())
+            {
+                break;
+            }
+
+            // Don't assign slots to peers that already have a slot.
+            if lock.chain_out_peers[self.chain_index].contains(&peer_id) {
+                continue;
+            }
+
+            // It is now guaranteed that this peer will be assigned an outbound slot.
+            // Add its addresses to the local directory.
+            let existing_addrs = lock.potential_addresses.entry(peer_id.clone()).or_default();
+            for addr in addrs {
+                if !existing_addrs.iter().any(|a| *a == addr) {
+                    existing_addrs.push(addr);
+                }
+            }
+
+            // It is possible that this peer already has an inbound slot, in which case we turn the
+            // inbound slot into an outbound slot.
+            if lock.chain_in_peers[self.chain_index].remove(&peer_id) {
+                lock.chain_out_peers[self.chain_index].insert(peer_id);
+                continue;
+            }
+
             // TODO: hack
             // TODO: futures cancellation issue
             self.service
@@ -1531,12 +1639,7 @@ where
                 )
                 .await;
 
-            let existing_addrs = lock.potential_addresses.entry(peer_id).or_default();
-            for addr in addrs {
-                if !existing_addrs.iter().any(|a| *a == addr) {
-                    existing_addrs.push(addr);
-                }
-            }
+            lock.chain_out_peers[self.chain_index].insert(peer_id);
         }
 
         self.service.next_start_connect_waker.wake();
