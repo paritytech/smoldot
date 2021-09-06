@@ -829,6 +829,18 @@ where
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubstreamId(yamux::SubstreamId);
 
+impl SubstreamId {
+    /// Returns the value that compares inferior or equal to all possible values.
+    pub fn min_value() -> Self {
+        Self(yamux::SubstreamId::min_value())
+    }
+
+    /// Returns the value that compares superior or equal to all possible values.
+    pub fn max_value() -> Self {
+        Self(yamux::SubstreamId::max_value())
+    }
+}
+
 /// Event that happened on the connection. See [`Established::read_write`].
 #[must_use]
 #[derive(Debug)]
