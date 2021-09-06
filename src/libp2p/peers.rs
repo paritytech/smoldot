@@ -596,7 +596,11 @@ where
                         .peers_notifications_in
                         .insert((peer_index, notifications_protocol_index))
                     {
-                        todo!() // TODO:
+                        // TODO: future cancellation issue
+                        let _ = self
+                            .inner
+                            .reject_notifications_in(connection_id, substream_id)
+                            .await;
                     }
 
                     let desired_notif_id =
