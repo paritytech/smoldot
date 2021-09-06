@@ -27,11 +27,10 @@ use alloc::{
     collections::BTreeSet,
     format,
     string::{String, ToString as _},
-    vec,
     vec::Vec,
 };
 use core::{
-    fmt, iter,
+    fmt, iter, mem,
     num::NonZeroUsize,
     ops::{Add, Sub},
     task::Poll,
@@ -146,18 +145,13 @@ pub struct ChainNetwork<TNow> {
     /// Underlying data structure.
     inner: peers::Peers<multiaddr::Multiaddr, TNow>,
 
-    /// Extra fields protected by a `Mutex`. Must only be locked around
-    /// [`ChainNetwork::next_event`].
-    guarded: Mutex<Guarded>,
+    /// Extra fields protected by a `Mutex` and that relate to the logic in
+    /// [`ChainNetwork::next_event`]. Must only be locked within that method and is kept locked
+    /// throughout that method.
+    next_event_guarded: Mutex<NextEventGuarded>,
 
-    /// Extra fields protected by a `Mutex` and that relate to pending outgoing connections.
-    pending: Mutex<PendingConnections>,
-
-    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
-    ///
-    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
-    /// is `None` if the chain doesn't use the Grandpa protocol.
-    chain_grandpa_config: Mutex<Vec<Option<GrandpaState>>>,
+    /// Extra fields protected by a `Mutex` and that are briefly accessed.
+    ephemeral_guarded: Mutex<EphemeralGuarded>,
 
     /// See [`Config::chains`].
     chain_configs: Vec<ChainConfig>,
@@ -170,29 +164,29 @@ pub struct ChainNetwork<TNow> {
     next_start_connect_waker: AtomicWaker,
 }
 
-/// See [`ChainNetwork::guarded`].
-struct Guarded {
+/// See [`ChainNetwork::next_event_guarded`].
+struct NextEventGuarded {
     /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
     /// [`peers::Peers`]. This event might lead to some asynchronous post-processing being
     /// needed. Because the user can interrupt the future returned by [`ChainNetwork::next_event`]
     /// at any point in time, this post-processing cannot be immediately performed, as the user
-    /// could interrupt the future and lose the event. Instead, the necessary post-processing is
-    /// stored in this field. This field is then processed before the next event is pulled.
-    to_process_pre_event: Option<ToProcessPreEvent>,
+    /// could interrupt the future and lose the event. Instead, the event is temporarily stored
+    /// in this field while this post-processing happens and is only cleared afterwards.
+    to_process_pre_event: Option<peers::Event<multiaddr::Multiaddr>>,
 
     /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
     open_chains: hashbrown::HashSet<(PeerId, usize), ahash::RandomState>,
 }
 
-/// See [`ChainNetwork::pending`].
-struct PendingConnections {
+/// See [`ChainNetwork::ephemeral_guarded`].
+struct EphemeralGuarded {
     /// For each peer, the number of pending attempts.
     num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
 
     /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
     /// [`PendingId`].
     /// The entries here correspond to the entries in
-    /// [`PendingConnections::num_pending_per_peer`].
+    /// [`EphemeralGuarded::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
 
     /// Combination of addresses that we assume could be dialed to reach a certain peer. When
@@ -204,37 +198,12 @@ struct PendingConnections {
     // TODO: never cleaned up until addresses are actually tried; the idea is to eventually use Kademlia k-buckets only
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
-}
 
-/// See [`Guarded::to_process_pre_event`]
-enum ToProcessPreEvent {
-    AcceptNotificationsIn {
-        peer_id: PeerId,
-        notifications_protocol_index: usize,
-        id: peers::DesiredInNotificationId,
-        handshake_back: Vec<u8>,
-    },
-    RefuseNotificationsIn {
-        id: peers::DesiredInNotificationId,
-    },
-    SetDesired {
-        peer_id: PeerId,
-        notifications_protocol_indices: Vec<usize>,
-        desired: bool,
-    },
-    NotificationsOut {
-        id: peers::DesiredOutNotificationId,
-        handshake: Vec<u8>,
-    },
-    QueueNotification {
-        peer_id: PeerId,
-        notifications_protocol_index: usize,
-        notification: Vec<u8>,
-    },
-    SendGrandpaNeighborPacket {
-        peer_id: PeerId,
-        notifications_protocol_index: usize,
-    },
+    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
+    ///
+    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
+    /// is `None` if the chain doesn't use the Grandpa protocol.
+    chain_grandpa_config: Vec<Option<GrandpaState>>,
 }
 
 // Update this when a new request response protocol is added.
@@ -407,16 +376,16 @@ where
                 initial_desired_peers: Default::default(), // Empty
                 initial_desired_substreams,
             }),
-            guarded: Mutex::new(Guarded {
+            next_event_guarded: Mutex::new(NextEventGuarded {
                 to_process_pre_event: None,
                 open_chains,
             }),
-            pending: Mutex::new(PendingConnections {
+            ephemeral_guarded: Mutex::new(EphemeralGuarded {
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses,
+                chain_grandpa_config,
             }),
-            chain_grandpa_config: Mutex::new(chain_grandpa_config),
             chain_configs: config.chains,
             randomness: Mutex::new(randomness),
             next_start_connect_waker: AtomicWaker::new(),
@@ -480,7 +449,7 @@ where
     /// Panics if `chain_index` is out of range, or if the chain has GrandPa disabled.
     ///
     pub async fn set_local_grandpa_state(&self, chain_index: usize, grandpa_state: GrandpaState) {
-        let mut chain_grandpa_configs = self.chain_grandpa_config.lock().await;
+        let mut guarded = self.ephemeral_guarded.lock().await;
 
         // Bytes of the neighbor packet to send out.
         let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
@@ -503,7 +472,7 @@ where
         // Update the locally-stored state, but only after the notification has been broadcasted.
         // This way, if the user cancels the future while `broadcast_notification` is executing,
         // the whole operation is cancelled.
-        *chain_grandpa_configs[chain_index].as_mut().unwrap() = grandpa_state;
+        *guarded.chain_grandpa_config[chain_index].as_mut().unwrap() = grandpa_state;
     }
 
     /// Sends a blocks request to the given peer.
@@ -659,7 +628,7 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
-        let mut lock = self.pending.lock().await;
+        let mut lock = self.ephemeral_guarded.lock().await;
         let lock = &mut *lock; // Prevents borrow checker issues.
 
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
@@ -703,7 +672,7 @@ where
     /// Panics if the [`PendingId`] is invalid.
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
-        let mut lock = self.pending.lock().await;
+        let mut lock = self.ephemeral_guarded.lock().await;
         let (expected_peer_id, _) = lock.pending_ids.remove(id.0);
 
         // Update `lock.peers`.
@@ -735,94 +704,166 @@ where
     /// produced, and calling this function multiple times is therefore discouraged.
     // TODO: this `now` parameter, it's a hack
     pub async fn next_event(&'_ self, now: TNow) -> Event<'_, TNow> {
-        let mut guarded = self.guarded.lock().await;
+        let mut guarded = self.next_event_guarded.lock().await;
         let guarded = &mut *guarded;
 
         loop {
-            // First, process `to_process_pre_event`.
-            // We don't do `to_process_pre_event.take()` in order to handle the possibility where
-            // the user cancels the future during an `await` point.
-            match guarded.to_process_pre_event.as_mut() {
-                None => {}
-                Some(ToProcessPreEvent::AcceptNotificationsIn {
+            // It might be that a previous call to `next_event` has been interrupted. If that is
+            // the case, an event will have been left in `to_process_pre_event`. Only pull a new
+            // event if there isn't any not-fully-processed-yet event.
+            let inner_event = match &mut guarded.to_process_pre_event {
+                Some(ev) => ev,
+                ev @ None => {
+                    let new_event = self.inner.next_event().await;
+                    ev.insert(new_event)
+                }
+            };
+
+            // `inner_event` is a mutable reference to `guarded.to_process_pre_event`. All the
+            // branches below must clear `to_process_pre_event` after all potentially-cancellable
+            // asynchronous operations are finished.
+            match inner_event {
+                peers::Event::Connected {
+                    peer_id,
+                    num_peer_connections,
+                    ..
+                } if num_peer_connections.get() == 1 => {
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    guarded.to_process_pre_event = None;
+                    return Event::Connected(peer_id);
+                }
+                peers::Event::Connected { .. } => {
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::Disconnected {
+                    num_peer_connections,
+                    peer_id,
+                    peer_is_desired,
+                    ..
+                } if *num_peer_connections == 0 => {
+                    if *peer_is_desired {
+                        self.next_start_connect_waker.wake();
+                    }
+
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    guarded.to_process_pre_event = None;
+
+                    return Event::Disconnected {
+                        peer_id,
+                        chain_indices: Vec::new(), // TODO: ?
+                    };
+                }
+                peers::Event::Disconnected { .. } => {
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::RequestIn {
+                    request_id,
+                    peer_id,
+                    connection_user_data: observed_addr,
+                    protocol_index: 0,
+                    request_payload,
+                    ..
+                } => {
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    let observed_addr = observed_addr.clone(); // TODO: cloning :-/
+                    let request_id = *request_id;
+                    guarded.to_process_pre_event = None;
+
+                    // TODO: check that request_payload is empty
+                    return Event::IdentifyRequestIn {
+                        peer_id,
+                        request: IdentifyRequestIn {
+                            service: self,
+                            request_id,
+                            observed_addr,
+                        },
+                    };
+                }
+                // Only protocol 0 (identify) can receive requests at the moment.
+                peers::Event::RequestIn { .. } => unreachable!(),
+                peers::Event::RequestInCancel { .. } => {
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::NotificationsOutAccept {
                     peer_id,
                     notifications_protocol_index,
-                    id,
-                    handshake_back,
-                }) => {
-                    if self
-                        .inner
-                        .in_notification_accept(*id, handshake_back.clone())
-                        .await
-                        .is_ok()
-                    {
-                        guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
-                            peer_id: peer_id.clone(), // TODO: clone :(
-                            notifications_protocol_indices: vec![*notifications_protocol_index],
-                            desired: true,
-                        });
-                        continue;
-                    } else {
-                        guarded.to_process_pre_event = None;
-                    }
-                }
-                Some(ToProcessPreEvent::RefuseNotificationsIn { id }) => {
-                    self.inner.in_notification_refuse(*id).await;
-                    guarded.to_process_pre_event = None;
-                }
-                Some(ToProcessPreEvent::SetDesired {
-                    notifications_protocol_indices,
-                    ..
-                }) if notifications_protocol_indices.is_empty() => {
-                    guarded.to_process_pre_event = None;
-                }
-                Some(ToProcessPreEvent::SetDesired {
-                    peer_id,
-                    notifications_protocol_indices,
-                    desired,
-                }) => {
-                    debug_assert!(!notifications_protocol_indices.is_empty());
-                    let notifications_protocol_index =
-                        *notifications_protocol_indices.last().unwrap();
+                    remote_handshake,
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    let remote_handshake =
+                        match protocol::decode_block_announces_handshake(&remote_handshake) {
+                            Ok(hs) => hs,
+                            Err(err) => {
+                                // TODO: close the substream?
+                                let peer_id = peer_id.clone(); // TODO: cloning :-/
+                                guarded.to_process_pre_event = None;
+
+                                return Event::ProtocolError {
+                                    peer_id,
+                                    error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                                };
+                            }
+                        };
+
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
-                            notifications_protocol_index,
-                            *desired,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                            true,
                         )
                         .await;
-                    notifications_protocol_indices.pop();
-                    continue;
-                }
-                Some(ToProcessPreEvent::NotificationsOut { id, handshake }) => {
                     self.inner
-                        .open_out_notification(*id, now.clone(), handshake.clone())
-                        .await;
-                    guarded.to_process_pre_event = None;
-                }
-                Some(ToProcessPreEvent::QueueNotification {
-                    peer_id,
-                    notifications_protocol_index,
-                    notification,
-                }) => {
-                    let _ = self
-                        .inner
-                        .queue_notification(
+                        .set_peer_notifications_out_desired(
                             peer_id,
-                            *notifications_protocol_index,
-                            notification.clone(),
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                            true,
                         )
                         .await;
+
+                    // TODO: compare genesis hash with ours
+
+                    let _was_inserted = guarded.open_chains.insert((peer_id.clone(), chain_index));
+                    debug_assert!(_was_inserted);
+
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    let best_hash = *remote_handshake.best_hash;
+                    let best_number = remote_handshake.best_number;
+                    let role = remote_handshake.role;
+                    guarded.to_process_pre_event = None;
+
+                    return Event::ChainConnected {
+                        peer_id,
+                        chain_index,
+                        best_hash,
+                        best_number,
+                        role,
+                    };
+                }
+
+                peers::Event::NotificationsOutAccept {
+                    notifications_protocol_index,
+                    ..
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
+                    // Nothing to do.
                     guarded.to_process_pre_event = None;
                 }
-                Some(ToProcessPreEvent::SendGrandpaNeighborPacket {
+
+                peers::Event::NotificationsOutAccept {
                     peer_id,
                     notifications_protocol_index,
-                }) => {
+                    ..
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
                     // Grandpa notification has been opened. Send neighbor packet.
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                    let grandpa_config = self.chain_grandpa_config.lock().await[chain_index]
+                    // TODO: futures cancellation issues
+                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let grandpa_config = ephemeral_guarded.chain_grandpa_config[chain_index]
                         .as_ref()
                         .unwrap()
                         .clone();
@@ -838,138 +879,31 @@ where
                             a
                         });
 
-                    // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
-                    guarded.to_process_pre_event = Some(ToProcessPreEvent::QueueNotification {
-                        peer_id: peer_id.clone(),
-                        notifications_protocol_index: *notifications_protocol_index,
-                        notification,
-                    });
-                    continue;
-                }
-            }
-
-            match self.inner.next_event().await {
-                peers::Event::Connected {
-                    peer_id,
-                    num_peer_connections,
-                    ..
-                } if num_peer_connections.get() == 1 => {
-                    return Event::Connected(peer_id);
-                }
-                peers::Event::Connected { .. } => {}
-
-                peers::Event::Disconnected {
-                    num_peer_connections,
-                    peer_id,
-                    peer_is_desired,
-                    ..
-                } if num_peer_connections == 0 => {
-                    if peer_is_desired {
-                        self.next_start_connect_waker.wake();
-                    }
-
-                    return Event::Disconnected {
-                        peer_id,
-                        chain_indices: Vec::new(), // TODO: ?
-                    };
-                }
-                peers::Event::Disconnected { .. } => {}
-
-                peers::Event::RequestIn {
-                    request_id,
-                    peer_id,
-                    connection_user_data: observed_addr,
-                    protocol_index: 0,
-                    request_payload,
-                    ..
-                } => {
-                    // TODO: check that request_payload is empty
-                    return Event::IdentifyRequestIn {
-                        peer_id,
-                        request: IdentifyRequestIn {
-                            service: self,
-                            request_id,
-                            observed_addr,
-                        },
-                    };
-                }
-                // Only protocol 0 (identify) can receive requests at the moment.
-                peers::Event::RequestIn { .. } => unreachable!(),
-                peers::Event::RequestInCancel { .. } => {}
-
-                peers::Event::NotificationsOutAccept {
-                    peer_id,
-                    notifications_protocol_index,
-                    remote_handshake,
-                } => {
-                    let chain_index =
-                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                    if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-                        let remote_handshake =
-                            match protocol::decode_block_announces_handshake(&remote_handshake) {
-                                Ok(hs) => hs,
-                                Err(err) => {
-                                    // TODO: close the substream?
-                                    return Event::ProtocolError {
-                                        peer_id,
-                                        error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                                    };
-                                }
-                            };
-
-                        // TODO: compare genesis hash with ours
-
-                        let _was_inserted =
-                            guarded.open_chains.insert((peer_id.clone(), chain_index));
-                        debug_assert!(_was_inserted);
-
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
-                            peer_id: peer_id.clone(),
-                            notifications_protocol_indices: vec![
-                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                            ],
-                            desired: true,
-                        });
-
-                        return Event::ChainConnected {
+                    let _ = self
+                        .inner
+                        .queue_notification(
                             peer_id,
-                            chain_index,
-                            best_hash: *remote_handshake.best_hash,
-                            best_number: remote_handshake.best_number,
-                            role: remote_handshake.role,
-                        };
-                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
-                    {
-                        // Nothing to do.
-                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
-                    {
-                        // Grandpa notification has been opened. Send neighbor packet.
-                        // This isn't done immediately because of futures-cancellation-related
-                        // concerns.
-                        // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::SendGrandpaNeighborPacket {
-                                peer_id,
-                                notifications_protocol_index,
-                            });
-                    } else {
-                        unreachable!()
-                    }
+                            *notifications_protocol_index,
+                            notification.clone(),
+                        )
+                        .await;
 
-                    // TODO:
+                    guarded.to_process_pre_event = None;
+
+                    // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
                 }
+
+                peers::Event::NotificationsOutAccept { .. } => unreachable!(),
+
                 peers::Event::DesiredOutNotification {
                     id,
                     notifications_protocol_index,
                     ..
                 } => {
                     let chain_config = &self.chain_configs
-                        [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
+                        [*notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
 
-                    let handshake = if notifications_protocol_index
+                    let handshake = if *notifications_protocol_index
                         % NOTIFICATIONS_PROTOCOLS_PER_CHAIN
                         == 0
                     {
@@ -985,70 +919,74 @@ where
                             a.extend_from_slice(b.as_ref());
                             a
                         })
-                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
+                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
                     {
                         Vec::new()
-                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
+                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
                     {
                         chain_config.role.scale_encoding().to_vec()
                     } else {
                         unreachable!()
                     };
 
-                    // Indicating the handshake isn't done immediately because of
-                    // futures-cancellation-related concerns.
-                    debug_assert!(guarded.to_process_pre_event.is_none());
-                    guarded.to_process_pre_event =
-                        Some(ToProcessPreEvent::NotificationsOut { id, handshake });
+                    self.inner
+                        .open_out_notification(*id, now.clone(), handshake)
+                        .await;
+
+                    guarded.to_process_pre_event = None;
                 }
+
                 peers::Event::NotificationsOutClose {
                     notifications_protocol_index,
                     peer_id,
-                } => {
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
-                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-                        let _was_removed =
-                            guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
-                        debug_assert!(_was_removed);
-
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
-                            peer_id: peer_id.clone(),
-                            notifications_protocol_indices: vec![
-                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                            ],
-                            desired: false,
-                        });
-
-                        return Event::ChainDisconnected {
+                    self.inner
+                        .set_peer_notifications_out_desired(
                             peer_id,
-                            chain_index,
-                        };
-                    }
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                            false,
+                        )
+                        .await;
+                    self.inner
+                        .set_peer_notifications_out_desired(
+                            peer_id,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                            false,
+                        )
+                        .await;
+
+                    let _was_removed = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
+                    debug_assert!(_was_removed);
 
                     self.next_start_connect_waker.wake();
-                }
-                peers::Event::NotificationsInClose {
-                    peer_id,
-                    notifications_protocol_index,
-                } => {
-                    debug_assert!(guarded.to_process_pre_event.is_none());
-                    guarded.to_process_pre_event = Some(ToProcessPreEvent::SetDesired {
+
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    guarded.to_process_pre_event = None;
+                    return Event::ChainDisconnected {
                         peer_id,
-                        notifications_protocol_indices: vec![notifications_protocol_index],
-                        desired: false,
-                    });
+                        chain_index,
+                    };
                 }
+
+                peers::Event::NotificationsOutClose { .. } => {
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::NotificationsInClose { .. } => {
+                    // TODO: do something?
+                    guarded.to_process_pre_event = None;
+                }
+
                 peers::Event::NotificationsIn {
                     notifications_protocol_index,
                     peer_id,
                     notification,
-                } => {
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
-                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: think about possible race conditions regarding missing block
@@ -1061,139 +999,185 @@ where
                         .open_chains
                         .contains(&(peer_id.clone(), chain_index))
                     {
+                        guarded.to_process_pre_event = None;
                         continue;
                     }
 
-                    if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 {
-                        if let Err(err) = protocol::decode_block_announce(&notification) {
+                    if let Err(err) = protocol::decode_block_announce(&notification) {
+                        let peer_id = peer_id.clone(); // TODO: cloning :-/
+                        guarded.to_process_pre_event = None;
+                        return Event::ProtocolError {
+                            peer_id,
+                            error: ProtocolError::BadBlockAnnounce(err),
+                        };
+                    }
+
+                    let peer_id = peer_id.clone(); // TODO: cloning :-/
+                    let notification = mem::take(notification);
+                    guarded.to_process_pre_event = None;
+
+                    return Event::BlockAnnounce {
+                        chain_index,
+                        peer_id,
+                        announce: EncodedBlockAnnounce(notification),
+                    };
+                }
+
+                peers::Event::NotificationsIn {
+                    notifications_protocol_index,
+                    ..
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
+                    // TODO: transaction announce
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::NotificationsIn {
+                    notifications_protocol_index,
+                    peer_id,
+                    notification,
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // Don't report events about nodes we don't have an outbound substream with.
+                    // TODO: cloning of peer_id :(
+                    if !guarded
+                        .open_chains
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        guarded.to_process_pre_event = None;
+                        continue;
+                    }
+
+                    let decoded_notif = match protocol::decode_grandpa_notification(&notification) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            let peer_id = peer_id.clone(); // TODO: cloning :-/
+                            guarded.to_process_pre_event = None;
                             return Event::ProtocolError {
                                 peer_id,
-                                error: ProtocolError::BadBlockAnnounce(err),
+                                error: ProtocolError::BadGrandpaNotification(err),
                             };
                         }
+                    };
 
-                        return Event::BlockAnnounce {
+                    // Commit messages are the only type of message that is important for
+                    // light clients. Anything else is presently ignored.
+                    if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
+                        let notification = mem::take(notification);
+                        guarded.to_process_pre_event = None;
+                        return Event::GrandpaCommitMessage {
                             chain_index,
-                            peer_id,
-                            announce: EncodedBlockAnnounce(notification),
+                            message: EncodedGrandpaCommitMessage(notification),
                         };
-                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
-                    {
-                        // TODO: transaction announce
-                    } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
-                    {
-                        let decoded_notif =
-                            match protocol::decode_grandpa_notification(&notification) {
-                                Ok(n) => n,
-                                Err(err) => {
-                                    return Event::ProtocolError {
-                                        peer_id,
-                                        error: ProtocolError::BadGrandpaNotification(err),
-                                    };
-                                }
-                            };
-
-                        // Commit messages are the only type of message that is important for
-                        // light clients. Anything else is presently ignored.
-                        if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
-                            return Event::GrandpaCommitMessage {
-                                chain_index,
-                                message: EncodedGrandpaCommitMessage(notification),
-                            };
-                        }
-                    } else {
-                        unreachable!()
                     }
+
+                    guarded.to_process_pre_event = None;
                 }
+
+                peers::Event::NotificationsIn { .. } => unreachable!(),
+
                 peers::Event::DesiredInNotification {
                     peer_id,
                     handshake,
                     id: desired_in_notification_id,
                     notifications_protocol_index,
-                } => {
+                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
                     // Remote requests to open a notifications substream.
 
                     let chain_index =
-                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 {
-                        if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
-                            // Refusing the substream isn't done immediately because of
-                            // futures-cancellation-related concerns.
-                            debug_assert!(guarded.to_process_pre_event.is_none());
-                            guarded.to_process_pre_event =
-                                Some(ToProcessPreEvent::RefuseNotificationsIn {
-                                    id: desired_in_notification_id,
-                                });
+                    if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
+                        self.inner
+                            .in_notification_refuse(*desired_in_notification_id)
+                            .await;
 
-                            return Event::ProtocolError {
-                                peer_id,
-                                error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                            };
-                        }
-
-                        let chain_config = &self.chain_configs[chain_index];
-                        let handshake = protocol::encode_block_announces_handshake(
-                            protocol::BlockAnnouncesHandshakeRef {
-                                best_hash: &chain_config.best_hash,
-                                best_number: chain_config.best_number,
-                                genesis_hash: &chain_config.genesis_hash,
-                                role: chain_config.role,
-                            },
-                        )
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        });
-
-                        // Accepting the substream isn't done immediately because of
-                        // futures-cancellation-related concerns.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::AcceptNotificationsIn {
-                                peer_id,
-                                notifications_protocol_index,
-                                id: desired_in_notification_id,
-                                handshake_back: handshake,
-                            });
-                    } else if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                        == 1
-                    {
-                        // Accepting the substream isn't done immediately because of
-                        // futures-cancellation-related concerns.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::AcceptNotificationsIn {
-                                peer_id,
-                                notifications_protocol_index,
-                                id: desired_in_notification_id,
-                                handshake_back: Vec::new(),
-                            });
-                    } else if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                        == 2
-                    {
-                        // Grandpa substream.
-                        let handshake = self.chain_configs[chain_index]
-                            .role
-                            .scale_encoding()
-                            .to_vec();
-
-                        // Accepting the substream isn't done immediately because of
-                        // futures-cancellation-related concerns.
-                        debug_assert!(guarded.to_process_pre_event.is_none());
-                        guarded.to_process_pre_event =
-                            Some(ToProcessPreEvent::AcceptNotificationsIn {
-                                peer_id,
-                                notifications_protocol_index,
-                                id: desired_in_notification_id,
-                                handshake_back: handshake,
-                            });
-                    } else {
-                        unreachable!()
+                        let peer_id = peer_id.clone(); // TODO: cloning :-/
+                        guarded.to_process_pre_event = None;
+                        return Event::ProtocolError {
+                            peer_id,
+                            error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                        };
                     }
+
+                    let chain_config = &self.chain_configs[chain_index];
+                    let handshake = protocol::encode_block_announces_handshake(
+                        protocol::BlockAnnouncesHandshakeRef {
+                            best_hash: &chain_config.best_hash,
+                            best_number: chain_config.best_number,
+                            genesis_hash: &chain_config.genesis_hash,
+                            role: chain_config.role,
+                        },
+                    )
+                    .fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    });
+
+                    if self
+                        .inner
+                        .in_notification_accept(*desired_in_notification_id, handshake)
+                        .await
+                        .is_ok()
+                    {
+                        // TODO: future cancellation issue
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                peer_id,
+                                *notifications_protocol_index,
+                                true,
+                            )
+                            .await;
+                    }
+
+                    guarded.to_process_pre_event = None;
                 }
-                peers::Event::DesiredInNotificationCancel { .. } => {}
+
+                peers::Event::DesiredInNotification {
+                    id: desired_in_notification_id,
+                    notifications_protocol_index,
+                    ..
+                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
+                    let _ = self
+                        .inner
+                        .in_notification_accept(*desired_in_notification_id, Vec::new())
+                        .await;
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::DesiredInNotification {
+                    id: desired_in_notification_id,
+                    notifications_protocol_index,
+                    ..
+                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // Grandpa substream.
+                    let handshake = self.chain_configs[chain_index]
+                        .role
+                        .scale_encoding()
+                        .to_vec();
+
+                    let _ = self
+                        .inner
+                        .in_notification_accept(*desired_in_notification_id, handshake)
+                        .await;
+
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::DesiredInNotification { .. } => {
+                    unreachable!()
+                }
+
+                peers::Event::DesiredInNotificationCancel { .. } => {
+                    guarded.to_process_pre_event = None;
+                }
             }
+
+            debug_assert!(guarded.to_process_pre_event.is_none());
         }
     }
 
@@ -1267,7 +1251,7 @@ where
     // TODO: give more control, with number of slots and node choice
     pub async fn next_start_connect<'a>(&self) -> StartConnect {
         loop {
-            let mut pending_lock = self.pending.lock().await;
+            let mut pending_lock = self.ephemeral_guarded.lock().await;
             let pending = &mut *pending_lock; // Prevents borrow checker issues.
 
             // Ask the underlying state machine which nodes are desired but don't have any
@@ -1530,7 +1514,7 @@ where
 
     /// Insert the results in the [`ChainNetwork`].
     pub async fn insert(self) {
-        let mut lock = self.service.pending.lock().await;
+        let mut lock = self.service.ephemeral_guarded.lock().await;
         let lock = &mut *lock; // Avoids borrow checker issues.
 
         let chain_index = self.chain_index;
