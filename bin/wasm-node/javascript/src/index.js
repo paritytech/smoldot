@@ -75,11 +75,11 @@ export async function start(config) {
     livenessTimeout = setTimeout(() => {
       livenessTimeout = null;
       console.warn(
-        "Smoldot appears unresponsive. Please open an issue at \
-        https://github.com/paritytech/smoldot/issues. If you have a debugger available, please \
-        pause execution, generate a stack trace of the thread that isn't the main execution \
-        thread, and paste it in the issue. Please also include any other log found in the \
-        console or elsewhere."
+        "Smoldot appears unresponsive. Please open an issue at " +
+        "https://github.com/paritytech/smoldot/issues. If you have a debugger available, " +
+        "please pause execution, generate a stack trace of the thread that isn't the main " +
+        "execution thread, and paste it in the issue. Please also include any other log found " +
+        "in the console or elsewhere."
       );
     }, 10000);
   };
@@ -153,8 +153,8 @@ export async function start(config) {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     console.error(
-      "Smoldot has panicked. This is a bug in smoldot. Please open an issue at \
-      https://github.com/paritytech/smoldot/issues with the following message:"
+      "Smoldot has panicked. This is a bug in smoldot. Please open an issue at " +
+      "https://github.com/paritytech/smoldot/issues with the following message:"
     );
     console.error(error);
     workerError = error;
