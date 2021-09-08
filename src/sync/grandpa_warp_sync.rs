@@ -365,10 +365,19 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
     }
 
     fn warp_sync_request_from_next_source(
-        sources: slab::Slab<Source<TSrc>>,
+        mut sources: slab::Slab<Source<TSrc>>,
         state: PreVerificationState,
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
     ) -> Self {
+        // It is possible for a source to be banned because of, say, networking errors.
+        // If all sources are "banned", unban them in order to try make progress again with the
+        // hopes that this time it will work.
+        if sources.iter().all(|(_, s)| s.already_tried) {
+            for (_, s) in &mut sources {
+                s.already_tried = false;
+            }
+        }
+
         let next_id = sources
             .iter()
             .find(|(_, s)| !s.already_tried)
@@ -382,6 +391,7 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
                 previous_verifier_values,
             })
         } else {
+            debug_assert!(sources.is_empty());
             Self::WaitingForSources(WaitingForSources {
                 sources,
                 state,
