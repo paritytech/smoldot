@@ -43,7 +43,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{self, PeerId},
     network::{self, protocol, service},
-    sync::{all, para},
+    sync::{all, all_forks::sources, para},
     trie::{self, prefix_proof, proof_verify},
 };
 use std::{
@@ -117,6 +117,8 @@ impl SyncService {
                 Box::pin(start_parachain(
                     config.chain_information,
                     from_foreground,
+                    config.network_service.1,
+                    config.network_events_receiver,
                     config_parachain,
                 )),
             );
@@ -1296,6 +1298,8 @@ async fn start_relay_chain(
 async fn start_parachain(
     chain_information: chain::chain_information::ValidChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
+    network_chain_index: usize,
+    mut from_network_service: mpsc::Receiver<network_service::Event>,
     parachain_config: ConfigParachain,
 ) {
     // TODO: handle finality as well; this is semi-complicated because the runtime service needs to provide a way to call a function on the finalized block's runtime
@@ -1317,6 +1321,13 @@ async fn start_parachain(
     // Hash of the head data of the best block of the parachain. `None` if no head data obtained
     // yet. Used to avoid sending out notifications if the head data hasn't changed.
     let mut previous_best_head_data_hash = None::<[u8; 32]>;
+
+    // State machine that tracks the list of sources and their blocks.
+    // TODO: need to call sync_sources.set_finalized_block_height once finalization is implemented
+    let mut sync_sources =
+        sources::AllForksSources::<PeerId>::new(40, current_finalized_block.number);
+    // Maps `PeerId`s to their indices within `sync_sources`.
+    let mut sync_sources_map = HashMap::new();
 
     loop {
         futures::select! {
@@ -1359,14 +1370,66 @@ async fn start_parachain(
                         // TODO: a `mem::forget` is used in order to avoid issues in other parts of the code, but is a complete hack
                         core::mem::forget(_tx);
                     }
-                    ToBackground::PeersAssumedKnowBlock { send_back, .. } => {
-                        let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
+                    ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
+                        let list = sync_sources.knows_non_finalized_block(block_number, &block_hash)
+                            .map(|local_id| sync_sources.user_data(local_id).clone())
+                            .collect();
+                        let _ = send_back.send(list);
                     }
                     ToBackground::SyncingPeers { send_back } => {
-                        let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
+                        let _ = send_back.send(sync_sources.keys().map(|local_id| {
+                            let (height, hash) = sync_sources.best_block(local_id);
+                            let peer_id = sync_sources.user_data(local_id).clone();
+                            (peer_id, height, *hash)
+                        }).collect());
                     }
                 }
             },
+
+            network_event = from_network_service.next() => {
+                // Something happened on the network.
+
+                let network_event = match network_event {
+                    Some(m) => m,
+                    None => {
+                        // The channel from the network service has been closed. Closing the
+                        // sync background task as well.
+                        return
+                    },
+                };
+
+                match network_event {
+                    network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
+                        if chain_index == network_chain_index =>
+                    {
+                        let local_id = sync_sources.add_source(best_block_number, best_block_hash, peer_id.clone());
+                        sync_sources_map.insert(peer_id, local_id);
+                    },
+                    network_service::Event::Disconnected { peer_id, chain_index }
+                        if chain_index == network_chain_index =>
+                    {
+                        let local_id = sync_sources_map.remove(&peer_id).unwrap();
+                        let _peer_id = sync_sources.remove(local_id);
+                        debug_assert_eq!(peer_id, _peer_id);
+                    },
+                    network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
+                        if chain_index == network_chain_index =>
+                    {
+                        let local_id = *sync_sources_map.get(&peer_id).unwrap();
+                        let decoded = announce.decode();
+                        let decoded_header_hash = decoded.header.hash();
+                        sync_sources.add_known_block(local_id, decoded.header.number, decoded_header_hash);
+                        if decoded.is_best {
+                            sync_sources.set_best_block(local_id, decoded.header.number, decoded_header_hash);
+                        }
+                    },
+                    _ => {
+                        // Uninteresting message or irrelevant chain index.
+                    }
+                }
+
+                continue;
+            }
 
             _relay_best_block = relay_best_blocks.next().fuse() => {
                 // This block is triggered on a new best block, but it is only used to detect when
