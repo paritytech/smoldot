@@ -24,11 +24,11 @@ import * as process from 'process';
 import * as fs from 'fs';
 
 // Adjust these chain specs for the chain you want to connect to.
-const westend = fs.readFileSync('../../westend.json', 'utf8');
-const westmint = fs.readFileSync('../../westend-westmint.json', 'utf8');
-const polkadot = fs.readFileSync('../../polkadot.json', 'utf8');
-const kusama = fs.readFileSync('../../kusama.json', 'utf8');
-const statemine = fs.readFileSync('../../kusama-statemine.json', 'utf8');
+const westend = fs.readFileSync('../../../westend.json', 'utf8');
+const westmint = fs.readFileSync('../../../westend-westmint.json', 'utf8');
+const polkadot = fs.readFileSync('../../../polkadot.json', 'utf8');
+const kusama = fs.readFileSync('../../../kusama.json', 'utf8');
+const statemine = fs.readFileSync('../../../kusama-statemine.json', 'utf8');
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
