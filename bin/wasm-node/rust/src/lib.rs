@@ -754,6 +754,9 @@ async fn start_services(
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
+                // Because the chain spec is untrusted input, we format the `id` with
+                // `fmt::Debug` rather than `fmt::Display`.
+                log_name: format!("{:?}", chain_spec.id()),
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
                     for node in chain_spec.boot_nodes() {
