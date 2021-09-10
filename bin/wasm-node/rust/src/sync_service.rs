@@ -1374,9 +1374,24 @@ async fn start_parachain(
                         core::mem::forget(_tx);
                     }
                     ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
-                        let list = sync_sources.knows_non_finalized_block(block_number, &block_hash)
-                            .map(|local_id| sync_sources.user_data(local_id).clone())
-                            .collect();
+                        // If `block_number` is over the finalized block, then which source
+                        // knows which block is precisely tracked. Otherwise, it is assumed that
+                        // all sources are on the finalized chain and thus that all sources whose
+                        // best block is superior to `block_number` have it.
+                        let list = if block_number > current_finalized_block.number {
+                            sync_sources.knows_non_finalized_block(block_number, &block_hash)
+                                .map(|local_id| sync_sources.user_data(local_id).clone())
+                                .collect()
+                        } else {
+                            sync_sources
+                                .keys()
+                                .filter(|local_id| {
+                                    sync_sources.best_block(*local_id).0 >= block_number
+                                })
+                                .map(|local_id| sync_sources.user_data(local_id).clone())
+                                .collect()
+                        };
+
                         let _ = send_back.send(list);
                     }
                     ToBackground::SyncingPeers { send_back } => {
