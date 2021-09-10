@@ -92,7 +92,8 @@ use core::{num::NonZeroU32, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
-mod sources;
+
+pub mod sources;
 
 pub use pending_blocks::{RequestId, RequestParams, SourceId};
 
