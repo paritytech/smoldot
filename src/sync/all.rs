@@ -1637,11 +1637,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
             OptimisticSourceExtra<TSrc>,
             TBl,
         >,
-        mut shared: Shared<TRq>,
+        shared: Shared<TRq>,
         user_data: TBl,
     ) -> Self {
         match inner {
-            optimistic::BlockVerification::NewBest { mut sync, .. } => {
+            optimistic::BlockVerification::NewBest { sync, .. } => {
                 // TODO: transition to all_forks
                 BlockVerification::Success {
                     is_new_best: true,
@@ -1652,7 +1652,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 }
             }
             optimistic::BlockVerification::Finalized {
-                mut sync,
+                sync,
                 finalized_blocks,
                 ..
             } => {
