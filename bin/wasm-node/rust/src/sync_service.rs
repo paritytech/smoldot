@@ -1082,6 +1082,12 @@ async fn start_relay_chain(
                                         "Processed block announce from {}", peer_id
                                     );
                                 },
+                                all::BlockAnnounceOutcome::Discarded => {
+                                    log::debug!(
+                                        target: "sync-verify",
+                                        "Processed block announce from {} (discarded)", peer_id
+                                    );
+                                },
                                 all::BlockAnnounceOutcome::Disjoint {} => {
                                     log::debug!(
                                         target: "sync-verify",
