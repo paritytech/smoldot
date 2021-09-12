@@ -1236,7 +1236,7 @@ async fn start_relay_chain(
                                     })
                                 })
                             })
-                        )
+                        ).1
 
                     } else {
                         // The sync state machine has emitted a `Action::Cancel` earlier, and is
@@ -1289,7 +1289,8 @@ async fn start_relay_chain(
             // `response_outcome` represents the way the state machine has changed as a
             // consequence of the response to a request.
             match response_outcome {
-                all::ResponseOutcome::Queued
+                all::ResponseOutcome::Outdated
+                | all::ResponseOutcome::Queued
                 | all::ResponseOutcome::NotFinalizedChain { .. }
                 | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
                 all::ResponseOutcome::WarpSyncFinished => {
