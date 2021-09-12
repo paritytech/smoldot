@@ -494,8 +494,8 @@ impl SyncBackground {
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
                                 all::BlockAnnounceOutcome::InvalidHeader(_) => {},
-                                all::BlockAnnounceOutcome::Disjoint {} => {
-                                },
+                                all::BlockAnnounceOutcome::Discarded => {},
+                                all::BlockAnnounceOutcome::Disjoint {} => {},
                             }
                         },
                         _ => {
