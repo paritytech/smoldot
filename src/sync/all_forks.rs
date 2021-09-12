@@ -488,7 +488,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // TODO: shouldn't that be done in the networking? ^
 
         // Set to true below if any block is inserted in `disjoint_headers`.
-        let mut any_progress = false;
+        //let mut any_progress = false; // TODO: restore
 
         // The next block in the list of headers should have a hash and height equal to this one.
         let mut expected_next_hash = requested_block_hash;
@@ -564,7 +564,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 }
                 HeaderFromSourceOutcome::Disjoint => {
                     // Block of unknown ancestry. Continue looping.
-                    any_progress = true;
+                    //any_progress = true; // TODO: restore
                     expected_next_hash = *decoded_header.parent_hash;
                     debug_assert_ne!(expected_next_height, 0);
                     expected_next_height -= 1;

@@ -60,7 +60,7 @@
 use super::super::read_write::ReadWrite;
 use crate::util::leb128;
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{cmp, fmt, iter, mem, str};
 
 /// Configuration of a multistream-select protocol.

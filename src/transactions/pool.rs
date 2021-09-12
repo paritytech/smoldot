@@ -293,6 +293,7 @@ impl<TTx> Pool<TTx> {
     pub fn inclusion_order(&'_ self) -> impl Iterator<Item = TransactionId> + '_ {
         // FIXME: /!\
         // TODO: /!\
+        #![allow(unreachable_code)]
         let _i: core::iter::Empty<_> = todo!();
         _i
     }
