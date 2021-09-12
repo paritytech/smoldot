@@ -297,16 +297,6 @@ enum SubstreamState {
     Open,
 }
 
-impl SubstreamState {
-    fn min_value() -> Self {
-        SubstreamState::Pending(usize::min_value())
-    }
-
-    fn max_value() -> Self {
-        SubstreamState::Open
-    }
-}
-
 impl<TConn, TNow> Network<TConn, TNow>
 where
     TConn: Clone,

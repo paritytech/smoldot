@@ -923,7 +923,8 @@ where
             };
 
         // TODO: use Result
-        self.inner
+        let _ = self
+            .inner
             .accept_notifications_in(connection_id, substream_id, handshake_back)
             .await;
 

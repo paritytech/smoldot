@@ -790,7 +790,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         }
 
         // Return value of the function.
-        let mut return_value = Vec::with_capacity(num_blocks_to_remove);
+        let return_value = Vec::with_capacity(num_blocks_to_remove);
 
         // Do the actual pruning.
         for pruned in self.blocks_tree.prune_ancestors(upmost_to_remove) {
@@ -811,7 +811,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 .map(|(_, tx_id)| *tx_id)
                 .collect::<Vec<_>>();
 
-            for tx_id in included_transactions {
+            for _tx_id in included_transactions {
                 // TODO: finish here
                 //self.remove_transaction();
             }
