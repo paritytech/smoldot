@@ -14,7 +14,7 @@ name = "full-node"
 path = "src/main.rs"
 
 [dependencies]
-async-std = "1.9.0"
+async-std = "1.10.0"
 atty = "0.2.14"
 ctrlc = "3.2.0"
 derive_more = "0.99.16"
