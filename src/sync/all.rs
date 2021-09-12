@@ -1056,27 +1056,29 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
-    // TODO: return the TRq?
     pub fn blocks_request_response(
         &mut self,
         request_id: RequestId,
         blocks: Result<impl Iterator<Item = BlockRequestSuccessBlock<TBl>>, ()>,
-    ) -> ResponseOutcome {
+    ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
 
         match (&mut self.inner, request) {
+            (_, RequestMapping::Inline(_, _, user_data)) => (user_data, ResponseOutcome::Outdated),
             (AllSyncInner::GrandpaWarpSync { .. }, _) => panic!(), // Grandpa warp sync never starts block requests.
-            (AllSyncInner::AllForks(sync), RequestMapping::AllForks(request_id)) => {
-                match sync.finish_ancestry_search(
-                    request_id,
+            (AllSyncInner::AllForks(sync), RequestMapping::AllForks(inner_request_id)) => {
+                let (request_user_data, outcome) = sync.finish_ancestry_search(
+                    inner_request_id,
                     blocks.map(|iter| {
                         iter.map(|block| all_forks::RequestSuccessBlock {
                             scale_encoded_header: block.scale_encoded_header,
                             scale_encoded_justification: block.scale_encoded_justification,
                         })
                     }),
-                ) {
+                );
+
+                let outcome = match outcome {
                     all_forks::AncestrySearchResponseOutcome::Verify => ResponseOutcome::Queued,
                     all_forks::AncestrySearchResponseOutcome::NotFinalizedChain {
                         discarded_unverified_block_headers,
@@ -1089,27 +1091,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain => {
                         ResponseOutcome::AllAlreadyInChain
                     }
-                }
+                };
+
+                debug_assert_eq!(request_user_data.outer_request_id, request_id);
+                (request_user_data.user_data.unwrap(), outcome)
             }
-            (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(request_id)) => {
-                match inner
-                    .finish_request(
-                        request_id,
-                        blocks
-                            .map_err(|()| optimistic::RequestFail::BlocksUnavailable)
-                            .map(|iter| {
-                                iter.map(|block| optimistic::RequestSuccessBlock {
-                                    scale_encoded_header: block.scale_encoded_header,
-                                    scale_encoded_justification: block.scale_encoded_justification,
-                                    scale_encoded_extrinsics: block.scale_encoded_extrinsics,
-                                    user_data: block.user_data,
-                                })
-                            }),
-                    )
-                    .1
-                {
+            (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(inner_request_id)) => {
+                let (request_user_data, outcome) = inner.finish_request(
+                    inner_request_id,
+                    blocks
+                        .map_err(|()| optimistic::RequestFail::BlocksUnavailable)
+                        .map(|iter| {
+                            iter.map(|block| optimistic::RequestSuccessBlock {
+                                scale_encoded_header: block.scale_encoded_header,
+                                scale_encoded_justification: block.scale_encoded_justification,
+                                scale_encoded_extrinsics: block.scale_encoded_extrinsics,
+                                user_data: block.user_data,
+                            })
+                        }),
+                );
+
+                let outcome = match outcome {
                     _ => ResponseOutcome::Queued, // TODO: do correctly
-                }
+                };
+
+                debug_assert_eq!(request_user_data.outer_request_id, request_id);
+                (request_user_data.user_data, outcome)
             }
             _ => unreachable!(),
         }
@@ -1380,6 +1387,9 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
 
 /// Outcome of injecting a response in the [`AllSync`].
 pub enum ResponseOutcome {
+    /// Request was no longer interesting for the state machine.
+    Outdated,
+
     /// Content of the response has been queued and will be processed later.
     Queued,
 
@@ -1637,11 +1647,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
             OptimisticSourceExtra<TSrc>,
             TBl,
         >,
-        mut shared: Shared<TRq>,
+        shared: Shared<TRq>,
         user_data: TBl,
     ) -> Self {
         match inner {
-            optimistic::BlockVerification::NewBest { mut sync, .. } => {
+            optimistic::BlockVerification::NewBest { sync, .. } => {
                 // TODO: transition to all_forks
                 BlockVerification::Success {
                     is_new_best: true,
@@ -1652,7 +1662,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                 }
             }
             optimistic::BlockVerification::Finalized {
-                mut sync,
+                sync,
                 finalized_blocks,
                 ..
             } => {

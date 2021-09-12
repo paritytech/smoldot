@@ -788,7 +788,6 @@ where
                     peer_id,
                     connection_user_data: observed_addr,
                     protocol_index: 0,
-                    request_payload,
                     ..
                 } => {
                     let peer_id = peer_id.clone(); // TODO: cloning :-/

@@ -83,6 +83,8 @@
 //! be done manually.
 //!
 
+#![allow(dead_code)] // TODO: remove this after `all.rs` implements full node; right now many methods here are useless because expected to be used only for full node code
+
 use super::{disjoint, sources};
 
 use alloc::{collections::BTreeSet, vec::Vec};
