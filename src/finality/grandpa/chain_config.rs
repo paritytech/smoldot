@@ -173,7 +173,7 @@ fn decode_config(scale_encoded: &[u8]) -> Result<GrandpaGenesisConfiguration, ()
                     nom::bytes::complete::take(32u32),
                     nom::combinator::map_opt(nom::number::complete::le_u64, NonZeroU64::new),
                 )),
-                GrandpaGenesisConfiguration {
+                move || GrandpaGenesisConfiguration {
                     initial_authorities: Vec::with_capacity(num_elems),
                 },
                 |mut acc, (public_key, weight)| {

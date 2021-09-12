@@ -313,7 +313,7 @@ fn precommits(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitsRef> {
                 num_elems,
                 num_elems,
                 precommit,
-                (),
+                || {},
                 |(), _| (),
             ))
         }),
@@ -361,7 +361,7 @@ fn votes_ancestries(bytes: &[u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
                             ))
                         })
                     },
-                    (),
+                    || {},
                     |(), _| (),
                 )),
                 move |slice| VotesAncestriesIter {
