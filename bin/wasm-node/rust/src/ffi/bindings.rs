@@ -105,7 +105,7 @@ extern "C" {
     ///
     /// This is typically implemented by calling `Date.now()`.
     ///
-    /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now
+    /// See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now>
     ///
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
@@ -120,7 +120,7 @@ extern "C" {
     /// value can decrease if the user adjusts their machine's clock, but rather with
     /// `Performance.now()` or similar.
     ///
-    /// See https://developer.mozilla.org/fr/docs/Web/API/Performance/now
+    /// See <https://developer.mozilla.org/fr/docs/Web/API/Performance/now>
     ///
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
