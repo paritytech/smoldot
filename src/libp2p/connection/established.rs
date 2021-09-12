@@ -225,8 +225,8 @@ where
                 }
 
                 Some(yamux::IncomingDataDetail::StreamClosed {
-                    substream_id,
                     user_data: state_machine,
+                    ..
                 }) => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
@@ -256,7 +256,7 @@ where
                         wake_up_future: None,
                     };
 
-                    let (updated, event) = state_machine.read_write(&mut substream_read_write);
+                    let (_, _event) = state_machine.read_write(&mut substream_read_write);
 
                     if let Some(wake_up_after) = substream_read_write.wake_up_after {
                         read_write.wake_up_after(&wake_up_after);
