@@ -67,7 +67,7 @@ rand = { version = "0.8.4", default-features = false, features = ["std", "std_rn
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.2.4" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.1", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
-serde = { version = "1.0.126", default-features = false, features = ["alloc", "derive"] }
+serde = { version = "1.0.130", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.64", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.9.5", default-features = false }
 slab = { version = "0.4.4", default-features = false }
@@ -99,7 +99,7 @@ prost-build = "0.8.0"
 
 [dev-dependencies]
 async-std = "1.9.0"
-criterion = "0.3.4"
+criterion = "0.3.5"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
