@@ -510,7 +510,7 @@ impl SyncBackground {
                     // TODO: clarify this piece of code
                     if let Ok(result) = result {
                         let result = result.map_err(|_| ());
-                        let response_outcome = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                        let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
                             scale_encoded_justification: block.justification,
@@ -518,7 +518,8 @@ impl SyncBackground {
                         })));
 
                         match response_outcome {
-                            all::ResponseOutcome::Queued
+                            all::ResponseOutcome::Outdated
+                            | all::ResponseOutcome::Queued
                             | all::ResponseOutcome::NotFinalizedChain { .. }
                             | all::ResponseOutcome::AllAlreadyInChain { .. } => {
                             }
