@@ -260,7 +260,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                         num_elems,
                         num_elems,
                         core_version_api,
-                        (),
+                        || {},
                         |(), _| (),
                     ))
                 }),

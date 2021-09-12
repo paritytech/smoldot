@@ -467,7 +467,7 @@ fn grandpa_scheduled_change_ref<
                             num_authorities,
                             num_authorities,
                             grandpa_authority_ref,
-                            (),
+                            || {},
                             |(), _| (),
                         )),
                         |bytes| {
