@@ -81,6 +81,12 @@ use std::{cmp, convert::TryFrom as _, iter, num::NonZeroU32, pin::Pin, sync::Arc
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {
+    /// Name of the chain, for logging purposes.
+    ///
+    /// > **Note**: This name will be directly printed out. Any special character should already
+    /// >           have been filtered out from this name.
+    pub log_name: String,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
@@ -123,6 +129,7 @@ impl TransactionsService {
         (config.tasks_executor)(
             "transactions-service".into(),
             Box::pin(background_task(
+                config.log_name,
                 config.sync_service,
                 config.runtime_service,
                 config.network_service.0,
@@ -233,6 +240,7 @@ enum ToBackground {
 
 /// Background task running in parallel of the front service.
 async fn background_task(
+    log_name: String,
     sync_service: Arc<sync_service::SyncService>,
     runtime_service: Arc<runtime_service::RuntimeService>,
     network_service: Arc<network_service::NetworkService>,
@@ -261,6 +269,8 @@ async fn background_task(
         max_concurrent_downloads,
         max_pending_transactions,
     };
+
+    let log_target = format!("tx-service-{}", log_name);
 
     // TODO: must periodically re-send transactions that aren't included in block yet
 
@@ -302,7 +312,7 @@ async fn background_task(
         worker.next_reannounce.clear();
 
         log::debug!(
-            target: "tx-service",
+            target: &log_target,
             "Transactions watcher moved to finalized block {}.",
             HashDisplay(&current_finalized_block_hash),
         );
@@ -368,9 +378,14 @@ async fn background_task(
                 tx.validation_in_progress = Some(result_rx);
 
                 log::debug!(
-                    target: "tx-service-validation",
+                    target: &log_target,
                     "Starting for {}",
-                    HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(to_start_validate).unwrap()))
+                    HashDisplay(&blake2_hash(
+                        worker
+                            .pending_transactions
+                            .double_scale_encoding(to_start_validate)
+                            .unwrap()
+                    ))
                 );
             }
 
@@ -423,7 +438,7 @@ async fn background_task(
                     .downloading = true;
 
                 log::debug!(
-                    target: "tx-service-blocks-download",
+                    target: &log_target,
                     "Started download of {}",
                     HashDisplay(&block_hash)
                 );
@@ -504,7 +519,7 @@ async fn background_task(
                     }
 
                     log::debug!(
-                        target: "tx-service-blocks-download",
+                        target: &log_target,
                         "{} for {}",
                         if block_body.is_ok() { "Success" } else { "Failed" },
                         HashDisplay(&block_hash)
@@ -558,7 +573,7 @@ async fn background_task(
 
                     // Perform the announce.
                     log::debug!(
-                        target: "tx-service",
+                        target: &log_target,
                         "Announcing {}",
                         HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_reannounce_tx_id).unwrap()))
                     );
@@ -605,7 +620,7 @@ async fn background_task(
                             // that has already been finalized and removed from the pool.
                             if !worker.pending_transactions.has_block(&block_hash) {
                                 log::debug!(
-                                    target: "tx-service-validation",
+                                    target: &log_target,
                                     "Skipping success due to obsolete block {}",
                                     HashDisplay(&block_hash)
                                 );
@@ -613,7 +628,7 @@ async fn background_task(
                             }
 
                             log::debug!(
-                                target: "tx-service-validation",
+                                target: &log_target,
                                 "Successfully validated transaction {} at {}: {:?}",
                                 HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
                                 HashDisplay(&block_hash),
@@ -629,7 +644,7 @@ async fn background_task(
                         }
                         Err(error) => {
                             log::debug!(
-                                target: "tx-service-validation",
+                                target: &log_target,
                                 "Failed for {}: {}",
                                 HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
                                 error
@@ -638,7 +653,7 @@ async fn background_task(
                             // Transaction couldn't be validated because of an error while
                             // executing the runtime. This most likely indicates a compatibility
                             // problem between smoldot and the runtime code. Drop the transaction.
-                            log::warn!(target: "tx-service", "Failed to validate transaction: {}", error);
+                            log::warn!(target: &log_target, "Failed to validate transaction: {}", error);
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
                             tx.update_status(TransactionStatus::Dropped);
                         }

@@ -123,6 +123,7 @@ pub struct Client {
         ChainKey,
         (
             future::MaybeDone<future::Shared<future::RemoteHandle<RunningChain>>>,
+            String,
             NonZeroU32,
         ),
     >,
@@ -332,12 +333,54 @@ impl Client {
                 }
             });
 
+        // Determinate the name under which the chain will be identified in the logs.
+        // Because the chain spec is untrusted input, we must transform the `id` to remove all
+        // weird characters.
+        //
+        // By default, this log name will be equal to chain's `id`. Since it is possible for
+        // multiple different chains to have the same `id`, we need to look into the list of
+        // existing chains and make sure that there's no conflict, in which case the log name
+        // will have the suffix `-1`, or `-2`, or `-3`, and so on.
+        // This value is ignored if we enter the `Entry::Occupied` block below. Because the
+        // calculation requires accessing the list of existing chains, this block can't be put in
+        // the `Entry::Vacant` block below, even though it would make sense for it to be there.
+        let log_name = {
+            let base = chain_spec
+                .id()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>();
+            let mut suffix = None;
+
+            loop {
+                let attempt = if let Some(suffix) = suffix {
+                    format!("{}-{}", base, suffix)
+                } else {
+                    base.clone()
+                };
+
+                if !self
+                    .chains_by_key
+                    .values()
+                    .any(|(_, name, _)| *name == attempt)
+                {
+                    break attempt;
+                }
+
+                match &mut suffix {
+                    Some(v) => *v += 1,
+                    v @ None => *v = Some(1),
+                }
+            }
+        };
+
         // Start the services of the chain to add, or grab the services if they already exist.
-        let running_chain_init = match self.chains_by_key.entry(new_chain_key.clone()) {
+        let (running_chain_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
                 // TODO: must add bootnodes to the existing network service, otherwise the existing chain with the same key might only be using malicious bootnodes
-                entry.get_mut().1 = NonZeroU32::new(entry.get_mut().1.get() + 1).unwrap();
-                &mut entry.into_mut().0
+                entry.get_mut().2 = NonZeroU32::new(entry.get_mut().2.get() + 1).unwrap();
+                let entry = entry.into_mut();
+                (&mut entry.0, &entry.1)
             }
             Entry::Vacant(entry) => {
                 // Key used by the networking. Represents the identity of the node on the
@@ -349,6 +392,7 @@ impl Client {
                 let running_chain_init_future: future::RemoteHandle<RunningChain> = {
                     let new_tasks_tx = self.new_task_tx.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
+                    let log_name = log_name.clone();
 
                     let future = async move {
                         // Wait until the relay chain has finished initializing, if necessary.
@@ -374,6 +418,7 @@ impl Client {
                             chain_information.as_ref().finalized_block_header.hash();
 
                         let running_chain = start_services(
+                            log_name,
                             new_tasks_tx,
                             chain_information,
                             genesis_chain_information,
@@ -420,12 +465,12 @@ impl Client {
                     output_future
                 };
 
-                &mut entry
-                    .insert((
-                        future::maybe_done(running_chain_init_future.shared()),
-                        NonZeroU32::new(1).unwrap(),
-                    ))
-                    .0
+                let entry = entry.insert((
+                    future::maybe_done(running_chain_init_future.shared()),
+                    log_name,
+                    NonZeroU32::new(1).unwrap(),
+                ));
+                (&mut entry.0, &entry.1)
             }
         };
 
@@ -446,6 +491,7 @@ impl Client {
             // Spawn a background task that initializes the JSON-RPC service.
             let json_rpc_service_init: future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>> = {
                 let new_task_tx = self.new_task_tx.clone();
+                let log_name = log_name.clone();
                 let init_future = async move {
                     // Wait for the chain to finish initializing before starting the JSON-RPC service.
                     (&mut running_chain_init).await;
@@ -453,6 +499,7 @@ impl Client {
 
                     Arc::new(json_rpc_service::JsonRpcService::new(
                         json_rpc_service::Config {
+                            log_name, // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                             tasks_executor: Box::new({
                                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                             }),
@@ -558,10 +605,10 @@ impl Client {
                 }
 
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
-                if running_chain.1.get() == 1 {
+                if running_chain.2.get() == 1 {
                     self.chains_by_key.remove(&key);
                 } else {
-                    running_chain.1 = NonZeroU32::new(running_chain.1.get() - 1).unwrap();
+                    running_chain.2 = NonZeroU32::new(running_chain.2.get() - 1).unwrap();
                 }
             }
             _ => {}
@@ -583,7 +630,7 @@ impl Client {
 
     fn json_rpc_request_inner(&mut self, json_rpc_request: String, chain_id: ChainId) {
         log::debug!(
-            target: "json-rpc",
+            target: "json-rpc", // TODO: put chain id here
             "JSON-RPC => {:?}{}",
             if json_rpc_request.len() > 100 { &json_rpc_request[..100] } else { &json_rpc_request[..] },
             if json_rpc_request.len() > 100 { "…" } else { "" }
@@ -594,7 +641,7 @@ impl Client {
             Ok((rq_id, _)) => rq_id,
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: "json-rpc", // TODO: put chain id here
                     "Error in JSON-RPC method call: {}", error
                 );
                 send_back(&error.to_json_error(request_id), chain_id);
@@ -602,7 +649,7 @@ impl Client {
             }
             Err(error) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: "json-rpc", // TODO: put chain id here
                     "Ignoring malformed JSON-RPC call: {}", error
                 );
                 return;
@@ -686,7 +733,7 @@ enum PublicApiChain {
 /// >           in order to print a log message.
 fn send_back(message: &str, chain_id: ChainId) {
     log::debug!(
-        target: "json-rpc",
+        target: "json-rpc", // TODO: put chain id here
         "JSON-RPC <= {}{}",
         if message.len() > 100 { &message[..100] } else { &message[..] },
         if message.len() > 100 { "…" } else { "" }
@@ -728,6 +775,7 @@ struct RunningChain {
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
 async fn start_services(
+    log_name: String,
     new_task_tx: mpsc::UnboundedSender<(
         String,
         Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
@@ -753,9 +801,7 @@ async fn start_services(
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
-                // Because the chain spec is untrusted input, we format the `id` with
-                // `fmt::Debug` rather than `fmt::Display`.
-                log_name: format!("{:?}", chain_spec.id()),
+                log_name: log_name.clone(),
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
                     for node in chain_spec.boot_nodes() {
@@ -794,6 +840,7 @@ async fn start_services(
         // chain.
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
+                log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
@@ -812,6 +859,7 @@ async fn start_services(
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+            log_name: log_name.clone(),
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -834,6 +882,7 @@ async fn start_services(
         // chain.
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
+                log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
@@ -849,6 +898,7 @@ async fn start_services(
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+            log_name: log_name.clone(),
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -871,6 +921,7 @@ async fn start_services(
     // transaction will be submitted, the service itself is pretty low cost.
     let transactions_service = Arc::new(
         transactions_service::TransactionsService::new(transactions_service::Config {
+            log_name,
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()

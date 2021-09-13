@@ -61,6 +61,12 @@ pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
 /// Configuration for a runtime service.
 pub struct Config<'a> {
+    /// Name of the chain, for logging purposes.
+    ///
+    /// > **Note**: This name will be directly printed out. Any special character should already
+    /// >           have been filtered out from this name.
+    pub log_name: String,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
@@ -82,6 +88,9 @@ pub struct Config<'a> {
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService {
+    /// Target to use for the logs. See [`Config::log_name`].
+    log_target: String,
+
     /// See [`Config::tasks_executor`].
     tasks_executor: Mutex<Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
 
@@ -102,6 +111,9 @@ impl RuntimeService {
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
     pub async fn new(config: Config<'_>) -> Arc<Self> {
+        // Target to use for all the logs of this service.
+        let log_target = format!("runtime-{}", config.log_name);
+
         // Build the runtime of the genesis block.
         let latest_known_runtime = {
             let code = config
@@ -118,7 +130,7 @@ impl RuntimeService {
             // Note that in the absolute we don't need to panic in case of a problem, and could
             // simply store an `Err` and continue running.
             // However, in practice, it seems more sane to detect problems in the genesis block.
-            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages)
+            let mut runtime = SuccessfulRuntime::from_params(&log_target, &code, &heap_pages)
                 .await
                 .expect("invalid runtime at genesis block");
 
@@ -165,6 +177,7 @@ impl RuntimeService {
         };
 
         let runtime_service = Arc::new(RuntimeService {
+            log_target,
             tasks_executor: Mutex::new(config.tasks_executor),
             sync_service: config.sync_service,
             latest_known_runtime: Mutex::new(latest_known_runtime),
@@ -267,7 +280,7 @@ impl RuntimeService {
             (code, heap_pages)
         };
 
-        SuccessfulRuntime::from_params(&code, &heap_pages)
+        SuccessfulRuntime::from_params(&self.log_target, &code, &heap_pages)
             .await
             .map(|r| r.runtime_spec)
             .map_err(RuntimeVersionOfBlockError::InvalidRuntime)
@@ -833,6 +846,7 @@ struct SuccessfulRuntime {
 
 impl SuccessfulRuntime {
     async fn from_params(
+        log_target: &str,
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
@@ -848,7 +862,11 @@ impl SuccessfulRuntime {
         ) {
             Ok(vm) => vm,
             Err(error) => {
-                log::warn!(target: "runtime", "Failed to compile best block runtime: {}", error);
+                log::warn!(
+                    target: &log_target,
+                    "Failed to compile best block runtime: {}",
+                    error
+                );
                 return Err(RuntimeError::Build(error));
             }
         };
@@ -861,7 +879,7 @@ impl SuccessfulRuntime {
             (Ok(spec), vm) => (spec, vm),
             (Err(error), _) => {
                 log::warn!(
-                    target: "runtime",
+                    target: &log_target,
                     "Failed to call Core_version on runtime: {}",
                     error
                 );
@@ -985,8 +1003,12 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                         Ok(c) => c,
                         Err(error) => {
                             log::log!(
-                                target: "runtime",
-                                if error.is_network_problem() { log::Level::Debug } else { log::Level::Warn },
+                                target: &runtime_service.log_target,
+                                if error.is_network_problem() {
+                                    log::Level::Debug
+                                } else {
+                                    log::Level::Warn
+                                },
                                 "Failed to download :code and :heappages of new best block: {}",
                                 error
                             );
@@ -1015,10 +1037,12 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 // the best block in the first place.
                 if runtime_matches_best_block {
                     log::info!(
-                        target: "runtime",
+                        target: &runtime_service.log_target,
                         "Runtime code change detected between block #{} and block #{}",
                         // TODO: don't unwrap?
-                        header::decode(&latest_known_runtime.runtime_block_header).unwrap().number,
+                        header::decode(&latest_known_runtime.runtime_block_header)
+                            .unwrap()
+                            .number,
                         new_best_block_decoded.number
                     );
                 }
@@ -1029,6 +1053,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                 latest_known_runtime.runtime_code = new_code;
                 latest_known_runtime.heap_pages = new_heap_pages;
                 latest_known_runtime.runtime = SuccessfulRuntime::from_params(
+                    &runtime_service.log_target,
                     &latest_known_runtime.runtime_code,
                     &latest_known_runtime.heap_pages,
                 )
