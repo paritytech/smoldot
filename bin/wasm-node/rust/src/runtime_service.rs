@@ -1059,7 +1059,7 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
 
                     log::info!(
                         target: &runtime_service.log_target,
-                        "Runtime code change detected between block #{} and block #{}. {}",
+                        "Runtime code change detected between block #{} and block #{}. {}.",
                         // TODO: don't unwrap?
                         header::decode(&latest_known_runtime.runtime_block_header)
                             .unwrap()
