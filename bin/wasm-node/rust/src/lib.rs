@@ -315,22 +315,23 @@ impl Client {
         // relay chain services.
         //
         // This could in principle be done later on, but doing so raises borrow checker errors.
-        let relay_chain_ready_future: Option<future::MaybeDone<future::Shared<_>>> = relay_chain_id
-            .map(|relay_chain| {
+        let relay_chain_ready_future: Option<(future::MaybeDone<future::Shared<_>>, String)> =
+            relay_chain_id.map(|relay_chain| {
                 let relay_chain = &self
                     .chains_by_key
                     .get(match self.public_api_chains.get(relay_chain.0).unwrap() {
                         PublicApiChain::Ok { key, .. } => key,
                         _ => unreachable!(),
                     })
-                    .unwrap()
-                    .0;
+                    .unwrap();
 
-                match relay_chain {
+                let future = match &relay_chain.0 {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                     future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
                     future::MaybeDone::Gone => unreachable!(),
-                }
+                };
+
+                (future, relay_chain.1.clone())
             });
 
         // Determinate the name under which the chain will be identified in the logs.
@@ -397,21 +398,21 @@ impl Client {
                     let future = async move {
                         // Wait until the relay chain has finished initializing, if necessary.
                         let relay_chain =
-                            if let Some(mut relay_chain_ready_future) = relay_chain_ready_future {
+                            if let Some((mut relay_chain_ready_future, relay_chain_log_name)) =
+                                relay_chain_ready_future
+                            {
                                 (&mut relay_chain_ready_future).await;
-                                Some(
-                                    Pin::new(&mut relay_chain_ready_future)
-                                        .take_output()
-                                        .unwrap(),
-                                )
+                                let running_relay_chain = Pin::new(&mut relay_chain_ready_future)
+                                    .take_output()
+                                    .unwrap();
+                                Some((running_relay_chain, relay_chain_log_name))
                             } else {
                                 None
                             };
 
                         // TODO: avoid cloning here
                         let chain_name = chain_spec.name().to_owned();
-                        let relay_chain_id =
-                            chain_spec.relay_chain().map(|(r, id)| (r.to_owned(), id));
+                        let relay_chain_para_id = chain_spec.relay_chain().map(|(_, id)| id);
                         let starting_block_number =
                             chain_information.as_ref().finalized_block_header.number;
                         let starting_block_hash =
@@ -423,23 +424,23 @@ impl Client {
                             chain_information,
                             genesis_chain_information,
                             chain_spec,
-                            relay_chain.as_ref(),
+                            relay_chain.as_ref().map(|(r, _)| r),
                             network_noise_key,
                         )
                         .await;
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
-                        if let Some((relay_chain_id, para_id)) = relay_chain_id {
+                        if let Some((_, relay_chain_log_name)) = relay_chain.as_ref() {
                             log::info!(
                                 "Parachain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. Network identity: {}. Relay chain: {:?} (id: {})",
+                                hash: {}. Network identity: {}. Relay chain: {} (id: {})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
                                 running_chain.network_identity,
-                                relay_chain_id,
-                                para_id
+                                relay_chain_log_name,
+                                relay_chain_para_id.unwrap(),
                             );
                         } else {
                             log::info!(
