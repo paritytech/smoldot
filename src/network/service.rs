@@ -351,6 +351,36 @@ where
             )
         };
 
+        let chain_in_peers = config
+            .chains
+            .iter()
+            .map(|chain| {
+                let k0 = randomness.next_u64();
+                let k1 = randomness.next_u64();
+                let k2 = randomness.next_u64();
+                let k3 = randomness.next_u64();
+                hashbrown::HashSet::with_capacity_and_hasher(
+                    usize::try_from(chain.in_slots).unwrap_or(0),
+                    ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                )
+            })
+            .collect();
+
+        let chain_out_peers = config
+            .chains
+            .iter()
+            .map(|chain| {
+                let k0 = randomness.next_u64();
+                let k1 = randomness.next_u64();
+                let k2 = randomness.next_u64();
+                let k3 = randomness.next_u64();
+                hashbrown::HashSet::with_capacity_and_hasher(
+                    usize::try_from(chain.out_slots).unwrap_or(0),
+                    ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                )
+            })
+            .collect();
+
         let mut initial_desired_substreams = BTreeSet::new();
 
         for (node_index, (peer_id, multiaddr)) in config.known_nodes.into_iter().enumerate() {
@@ -396,12 +426,8 @@ where
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses,
                 chain_grandpa_config,
-                chain_in_peers: (0..config.chains.len())
-                    .map(|_| Default::default())
-                    .collect(), // TODO: proper randomness
-                chain_out_peers: (0..config.chains.len())
-                    .map(|_| Default::default())
-                    .collect(), // TODO: proper randomness
+                chain_in_peers,
+                chain_out_peers,
             }),
             chain_configs: config.chains,
             randomness: Mutex::new(randomness),
