@@ -996,7 +996,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                     &announced_scale_encoded_header,
                                 );
                         }
-                        BlockAnnounceOutcome::Disjoint // TODO: ?!
+                        BlockAnnounceOutcome::Discarded
                     }
                     Err(err) => BlockAnnounceOutcome::InvalidHeader(err),
                 }
@@ -1016,7 +1016,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     user_data.best_block_hash = header.hash();
                 }
 
-                BlockAnnounceOutcome::Disjoint
+                BlockAnnounceOutcome::Discarded
             }
             (AllSyncInner::Poisoned, _) => unreachable!(),
 
@@ -1112,7 +1112,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 );
 
                 let outcome = match outcome {
-                    _ => ResponseOutcome::Queued, // TODO: do correctly
+                    optimistic::FinishRequestOutcome::Obsolete => ResponseOutcome::Outdated,
+                    optimistic::FinishRequestOutcome::Queued => ResponseOutcome::Queued,
+                    optimistic::FinishRequestOutcome::SourcePunished(_) => ResponseOutcome::Queued, // TODO: what to do here?
                 };
 
                 debug_assert_eq!(request_user_data.outer_request_id, request_id);
@@ -1344,7 +1346,7 @@ pub struct BlockRequestSuccessBlock<TBl> {
 
 /// Outcome of calling [`AllSync::block_announce`].
 pub enum BlockAnnounceOutcome {
-    /// Header is ready to be verified.
+    /// Header is ready to be verified. Calling [`AllSync::process_one`] might yield that block.
     HeaderVerify,
 
     /// Announced block is too old to be part of the finalized chain.
@@ -1368,6 +1370,9 @@ pub enum BlockAnnounceOutcome {
     Disjoint,
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
+
+    /// Header cannot be verified now and has been silently discarded.
+    Discarded,
 }
 
 /// Outcome of calling [`AllSync::process_one`].

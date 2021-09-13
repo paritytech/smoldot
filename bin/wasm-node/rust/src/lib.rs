@@ -19,7 +19,7 @@
 //! `wasm-bindgen` library.
 
 #![recursion_limit = "512"]
-#![deny(broken_intra_doc_links)]
+#![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
 use futures::{channel::mpsc, prelude::*};
@@ -576,8 +576,7 @@ impl Client {
     /// queued and will be decoded and processed later. An error is returned if, for each
     /// individual chain, the queue of requests is too large.
     ///
-    /// This function doesn't return an error, as errors are yielded using
-    /// [`ffi::emit_json_rpc_response`].
+    /// This function doesn't return an error, as errors are yielded through the FFI layer.
     pub fn json_rpc_request(&mut self, json_rpc_request: impl Into<String>, chain_id: ChainId) {
         self.json_rpc_request_inner(json_rpc_request.into(), chain_id)
     }
