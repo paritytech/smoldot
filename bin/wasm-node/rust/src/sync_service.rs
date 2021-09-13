@@ -59,6 +59,12 @@ pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
+    /// Name of the chain, for logging purposes.
+    ///
+    /// > **Note**: This name will be directly printed out. Any special character should already
+    /// >           have been filtered out from this name.
+    pub log_name: String,
+
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
@@ -117,6 +123,7 @@ impl SyncService {
             (config.tasks_executor)(
                 "sync-para-fetch".into(),
                 Box::pin(fetch_paraheads(
+                    config.log_name,
                     config_parachain.relay_chain_sync.clone(),
                     config_parachain.parachain_id,
                     send_new_best,
@@ -138,6 +145,7 @@ impl SyncService {
                 "sync-relay".into(),
                 Box::pin(
                     start_relay_chain(
+                        config.log_name,
                         config.chain_information,
                         from_foreground,
                         config.network_service.0.clone(),
@@ -667,12 +675,15 @@ pub struct BlockNotification {
 }
 
 async fn start_relay_chain(
+    log_name: String,
     chain_information: chain::chain_information::ValidChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService>,
     network_chain_index: usize,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
+    let log_target = format!("sync-service-{}", log_name);
+
     // TODO: implicit generics
     let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
         chain_information,
@@ -878,8 +889,10 @@ async fn start_relay_chain(
 
                         if let Err(err) = result {
                             log::warn!(
-                                target: "sync-verify",
-                                "Failed to verify warp sync fragment from {}: {}", sender_peer_id, err
+                                target: &log_target,
+                                "Failed to verify warp sync fragment from {}: {}",
+                                sender_peer_id,
+                                err
                             );
                         }
 
@@ -902,7 +915,7 @@ async fn start_relay_chain(
                                 ..
                             } => {
                                 log::debug!(
-                                    target: "sync-verify",
+                                    target: &log_target,
                                     "Successfully verified header {} (new best: {})",
                                     HashDisplay(&verified_hash),
                                     if is_new_best { "yes" } else { "no" }
@@ -948,7 +961,7 @@ async fn start_relay_chain(
                                 ..
                             } => {
                                 log::warn!(
-                                    target: "sync-verify",
+                                    target: &log_target,
                                     "Error while verifying header {}: {}",
                                     HashDisplay(&verified_hash),
                                     error
@@ -1078,39 +1091,39 @@ async fn start_relay_chain(
                                 all::BlockAnnounceOutcome::HeaderVerify |
                                 all::BlockAnnounceOutcome::AlreadyInChain => {
                                     log::debug!(
-                                        target: "sync-verify",
+                                        target: &log_target,
                                         "Processed block announce from {}", peer_id
                                     );
                                 },
                                 all::BlockAnnounceOutcome::Discarded => {
                                     log::debug!(
-                                        target: "sync-verify",
+                                        target: &log_target,
                                         "Processed block announce from {} (discarded)", peer_id
                                     );
                                 },
                                 all::BlockAnnounceOutcome::Disjoint {} => {
                                     log::debug!(
-                                        target: "sync-verify",
+                                        target: &log_target,
                                         "Processed block announce from {} (disjoint)", peer_id
                                     );
                                 },
                                 all::BlockAnnounceOutcome::TooOld { announce_block_height, .. } => {
                                     log::warn!(
-                                        target: "sync-verify",
+                                        target: &log_target,
                                         "Block announce header height (#{}) from {} is below finalized block",
                                         announce_block_height, peer_id
                                     );
                                 },
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {
                                     log::warn!(
-                                        target: "sync-verify",
+                                        target: &log_target,
                                         "Block announce from {} isn't part of finalized chain",
                                         peer_id
                                     );
                                 },
                                 all::BlockAnnounceOutcome::InvalidHeader(err) => {
                                     log::warn!(
-                                        target: "sync-verify",
+                                        target: &log_target,
                                         "Failed to decode block announce header from {}: {}",
                                         peer_id, err
                                     );
@@ -1127,7 +1140,7 @@ async fn start_relay_chain(
                                 },
                                 Err(err) => {
                                     log::warn!(
-                                        target: "sync-verify",
+                                        target: &log_target,
                                         "Error when verifying GrandPa commit message: {}", err
                                     );
                                 }
@@ -1301,7 +1314,11 @@ async fn start_relay_chain(
                 | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
                 all::ResponseOutcome::WarpSyncFinished => {
                     let finalized_num = sync.finalized_block_header().number;
-                    log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
+                    log::info!(
+                        target: &log_target,
+                        "GrandPa warp sync finished to #{}",
+                        finalized_num
+                    );
                     has_new_finalized = true;
                     has_new_best = true;
                     // Since there is a gap in the blocks, all active notifications to all blocks
@@ -1473,6 +1490,7 @@ async fn start_parachain(
 }
 
 async fn fetch_paraheads(
+    log_target: String,
     relay_chain_sync: Arc<runtime_service::RuntimeService>,
     parachain_id: u32,
     mut send_new_best: mpsc::Sender<(header::Header, bool)>,
@@ -1516,9 +1534,9 @@ async fn fetch_paraheads(
             Err(err) => {
                 previous_best_head_data_hash = None;
                 if err.is_network_problem() {
-                    log::debug!(target: "sync-verify", "Failed to get chain heads: {}", err);
+                    log::debug!(target: &log_target, "Failed to get chain heads: {}", err);
                 } else {
-                    log::warn!(target: "sync-verify", "Failed to get chain heads: {}", err);
+                    log::warn!(target: &log_target, "Failed to get chain heads: {}", err);
                 }
                 continue;
             }
@@ -1536,9 +1554,12 @@ async fn fetch_paraheads(
                     // has synced. It might have occupied a core before, or might occupy
                     // a core in the future, and as such this is not a fatal error.
                     log::log!(
-                        target: "sync-verify",
-                        if relay_sync_near_head_of_chain { log::Level::Warn }
-                            else { log::Level::Debug },
+                        target: &log_target,
+                        if relay_sync_near_head_of_chain {
+                            log::Level::Warn
+                        } else {
+                            log::Level::Debug
+                        },
                         "Couldn't find the parachain head from relay chain. \
                         The parachain likely doesn't occupy a core."
                     );
@@ -1549,9 +1570,12 @@ async fn fetch_paraheads(
                     // to handle chains that have been upgraded later on to support
                     // parachains later.
                     log::log!(
-                        target: "sync-verify",
-                        if relay_sync_near_head_of_chain { log::Level::Error }
-                            else { log::Level::Debug },
+                        target: &log_target,
+                        if relay_sync_near_head_of_chain {
+                            log::Level::Error
+                        } else {
+                            log::Level::Debug
+                        },
                         "Failed to fetch the parachain head from relay chain: {}",
                         error
                     );
@@ -1581,7 +1605,7 @@ async fn fetch_paraheads(
             },
             Err(_) => {
                 log::warn!(
-                    target: "sync-verify",
+                    target: &log_target,
                     "Head data is not a block header. This isn't supported by smoldot."
                 );
             }

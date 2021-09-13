@@ -453,6 +453,7 @@ impl Client {
 
                     Arc::new(json_rpc_service::JsonRpcService::new(
                         json_rpc_service::Config {
+                            log_name: String::new(), // TODO: do properly
                             tasks_executor: Box::new({
                                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                             }),
@@ -738,6 +739,16 @@ async fn start_services(
     relay_chain: Option<&RunningChain>,
     network_noise_key: connection::NoiseKey,
 ) -> RunningChain {
+    // Name being used for this chain in the logs.
+    // Because the chain spec is untrusted input, we must transform the `id` to remove all weird
+    // characters.
+    // TODO: what if multiple different chains with the same id are added? differentiate them
+    let log_name = chain_spec
+        .id()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+
     // Since `network_noise_key` is moved out below, use it to build the network identity ahead
     // of the network service starting.
     let network_identity =
@@ -753,9 +764,7 @@ async fn start_services(
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
-                // Because the chain spec is untrusted input, we format the `id` with
-                // `fmt::Debug` rather than `fmt::Display`.
-                log_name: format!("{:?}", chain_spec.id()),
+                log_name: log_name.clone(),
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
                     for node in chain_spec.boot_nodes() {
@@ -794,6 +803,7 @@ async fn start_services(
         // chain.
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
+                log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
@@ -812,6 +822,7 @@ async fn start_services(
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+            log_name: log_name.clone(),
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -834,6 +845,7 @@ async fn start_services(
         // chain.
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
+                log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
@@ -849,6 +861,7 @@ async fn start_services(
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+            log_name: log_name.clone(),
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -871,6 +884,7 @@ async fn start_services(
     // transaction will be submitted, the service itself is pretty low cost.
     let transactions_service = Arc::new(
         transactions_service::TransactionsService::new(transactions_service::Config {
+            log_name,
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
