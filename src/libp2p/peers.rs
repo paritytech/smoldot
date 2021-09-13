@@ -1175,7 +1175,6 @@ where
     ///
     /// Panics if `connection_id` isn't a valid connection.
     ///
-    // TODO: document
     pub async fn read_write(
         &self,
         connection_id: ConnectionId,
