@@ -1526,15 +1526,20 @@ async fn fetch_paraheads(
             relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
         // Do the actual runtime call to obtain the parahead.
-        // Even if there isn't any bug, the runtime call can likely fail because the relay
-        // chain block has already been pruned from the network. This isn't a severe
-        // error.
+        // Even if there isn't any bug, the runtime call can fail because the relay chain block
+        // has already been pruned from the network, or if we haven't fully synced the relay chain
+        // yet and are still at a stage where the runtime doesn't support parachains or the
+        // parachain in question hasn't been registered. These aren't severe errors.
         let encoded_head_data = match parahead(&relay_chain_sync, parachain_id).await {
             Ok(v) => v,
             Err(err) => {
                 previous_best_head_data_hash = None;
-                if err.is_network_problem() {
-                    log::debug!(target: &log_target, "Failed to get chain heads: {}", err);
+                if err.is_network_problem() || !relay_sync_near_head_of_chain {
+                    log::debug!(
+                        target: &log_target,
+                        "Failed to get chain heads: {} (most likely benign)",
+                        err
+                    );
                 } else {
                     log::warn!(target: &log_target, "Failed to get chain heads: {}", err);
                 }
