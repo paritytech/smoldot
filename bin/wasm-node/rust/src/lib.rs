@@ -584,7 +584,7 @@ impl Client {
 
     fn json_rpc_request_inner(&mut self, json_rpc_request: String, chain_id: ChainId) {
         log::debug!(
-            target: "json-rpc",
+            target: "json-rpc", // TODO: put chain id here
             "JSON-RPC => {:?}{}",
             if json_rpc_request.len() > 100 { &json_rpc_request[..100] } else { &json_rpc_request[..] },
             if json_rpc_request.len() > 100 { "…" } else { "" }
@@ -595,7 +595,7 @@ impl Client {
             Ok((rq_id, _)) => rq_id,
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: "json-rpc", // TODO: put chain id here
                     "Error in JSON-RPC method call: {}", error
                 );
                 send_back(&error.to_json_error(request_id), chain_id);
@@ -603,7 +603,7 @@ impl Client {
             }
             Err(error) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: "json-rpc", // TODO: put chain id here
                     "Ignoring malformed JSON-RPC call: {}", error
                 );
                 return;
@@ -687,7 +687,7 @@ enum PublicApiChain {
 /// >           in order to print a log message.
 fn send_back(message: &str, chain_id: ChainId) {
     log::debug!(
-        target: "json-rpc",
+        target: "json-rpc", // TODO: put chain id here
         "JSON-RPC <= {}{}",
         if message.len() > 100 { &message[..100] } else { &message[..] },
         if message.len() > 100 { "…" } else { "" }
