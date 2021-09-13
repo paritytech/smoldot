@@ -1033,23 +1033,6 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     continue;
                 }
 
-                // Don't notify the user of an upgrade if we didn't expect the runtime to match
-                // the best block in the first place.
-                if runtime_matches_best_block {
-                    log::info!(
-                        target: &runtime_service.log_target,
-                        "Runtime code change detected between block #{} and block #{}",
-                        // TODO: don't unwrap?
-                        header::decode(&latest_known_runtime.runtime_block_header)
-                            .unwrap()
-                            .number,
-                        new_best_block_decoded.number
-                    );
-                }
-
-                runtime_matches_best_block = true;
-                latest_known_runtime.runtime_block_hash = new_best_block_hash;
-                latest_known_runtime.runtime_block_header = new_best_block.clone();
                 latest_known_runtime.runtime_code = new_code;
                 latest_known_runtime.heap_pages = new_heap_pages;
                 latest_known_runtime.runtime = SuccessfulRuntime::from_params(
@@ -1058,6 +1041,37 @@ async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
                     &latest_known_runtime.heap_pages,
                 )
                 .await;
+
+                // Don't notify the user of an upgrade if we didn't expect the runtime to match
+                // the best block in the first place.
+                if runtime_matches_best_block {
+                    let second_sentence = match latest_known_runtime.runtime.as_ref() {
+                        Ok(runtime) => {
+                            format!(
+                                "New runtime version: {}",
+                                runtime.runtime_spec.decode().spec_version
+                            )
+                        }
+                        Err(err) => {
+                            format!("Error while compiling new runtime: {}", err)
+                        }
+                    };
+
+                    log::info!(
+                        target: &runtime_service.log_target,
+                        "Runtime code change detected between block #{} and block #{}. {}",
+                        // TODO: don't unwrap?
+                        header::decode(&latest_known_runtime.runtime_block_header)
+                            .unwrap()
+                            .number,
+                        new_best_block_decoded.number,
+                        second_sentence,
+                    );
+                }
+
+                runtime_matches_best_block = true;
+                latest_known_runtime.runtime_block_hash = new_best_block_hash;
+                latest_known_runtime.runtime_block_header = new_best_block.clone();
 
                 // Elements in `runtime_version_subscriptions` are removed one by one and inserted
                 // back if the channel is still open.
