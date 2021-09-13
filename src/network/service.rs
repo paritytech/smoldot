@@ -200,21 +200,24 @@ struct EphemeralGuarded {
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
 
-    /// For each item in [`ChainNetwork::chain_configs`], the corresponding Grandpa state.
+    /// For each item in [`ChainNetwork::chain_configs`], the corresponding chain state.
     ///
-    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`]. The `Option`
-    /// is `None` if the chain doesn't use the Grandpa protocol.
-    chain_grandpa_config: Vec<Option<GrandpaState>>,
+    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`].
+    chains: Vec<EphemeralGuardedChain>,
+}
 
-    /// For each item in [`ChainNetwork::chain_configs`], the list of peers with an inbound
-    /// slot attributed to them. Only includes peers the local node is connected to and who have
-    /// opened a block announces substream with the local node.
-    chain_in_peers: Vec<hashbrown::HashSet<PeerId, ahash::RandomState>>,
+struct EphemeralGuardedChain {
+    /// Grandpa state. `None` if the chain doesn't use the Grandpa protocol.
+    grandpa_state: Option<GrandpaState>,
 
-    /// For each item in [`ChainNetwork::chain_configs`], the list of peers with an outbound
-    /// slot attributed to them. Can include peers not connected to the local node yet. The peers
-    /// in this list are always marked as desired in the underlying state machine.
-    chain_out_peers: Vec<hashbrown::HashSet<PeerId, ahash::RandomState>>,
+    /// List of peers with an inbound slot attributed to them. Only includes peers the local node
+    /// is connected to and who have opened a block announces substream with the local node.
+    in_peers: hashbrown::HashSet<PeerId, ahash::RandomState>,
+
+    /// List of peers with an outbound slot attributed to them. Can include peers not connected to
+    /// the local node yet. The peers in this list are always marked as desired in the underlying
+    /// state machine.
+    out_peers: hashbrown::HashSet<PeerId, ahash::RandomState>,
 }
 
 // Update this when a new request response protocol is added.
@@ -312,12 +315,6 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
         let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
 
-        let chain_grandpa_config = config
-            .chains
-            .iter()
-            .map(|chain| chain.grandpa_protocol_config)
-            .collect();
-
         let peers = {
             let k0 = randomness.next_u64();
             let k1 = randomness.next_u64();
@@ -351,33 +348,31 @@ where
             )
         };
 
-        let chain_in_peers = config
+        let chains = config
             .chains
             .iter()
-            .map(|chain| {
-                let k0 = randomness.next_u64();
-                let k1 = randomness.next_u64();
-                let k2 = randomness.next_u64();
-                let k3 = randomness.next_u64();
-                hashbrown::HashSet::with_capacity_and_hasher(
-                    usize::try_from(chain.in_slots).unwrap_or(0),
-                    ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                )
-            })
-            .collect();
-
-        let chain_out_peers = config
-            .chains
-            .iter()
-            .map(|chain| {
-                let k0 = randomness.next_u64();
-                let k1 = randomness.next_u64();
-                let k2 = randomness.next_u64();
-                let k3 = randomness.next_u64();
-                hashbrown::HashSet::with_capacity_and_hasher(
-                    usize::try_from(chain.out_slots).unwrap_or(0),
-                    ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                )
+            .map(|chain| EphemeralGuardedChain {
+                grandpa_state: chain.grandpa_protocol_config,
+                in_peers: {
+                    let k0 = randomness.next_u64();
+                    let k1 = randomness.next_u64();
+                    let k2 = randomness.next_u64();
+                    let k3 = randomness.next_u64();
+                    hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.in_slots).unwrap_or(0),
+                        ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                    )
+                },
+                out_peers: {
+                    let k0 = randomness.next_u64();
+                    let k1 = randomness.next_u64();
+                    let k2 = randomness.next_u64();
+                    let k3 = randomness.next_u64();
+                    hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.out_slots).unwrap_or(0),
+                        ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                    )
+                },
             })
             .collect();
 
@@ -425,9 +420,7 @@ where
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
                 potential_addresses,
-                chain_grandpa_config,
-                chain_in_peers,
-                chain_out_peers,
+                chains,
             }),
             chain_configs: config.chains,
             randomness: Mutex::new(randomness),
@@ -515,7 +508,7 @@ where
         // Update the locally-stored state, but only after the notification has been broadcasted.
         // This way, if the user cancels the future while `broadcast_notification` is executing,
         // the whole operation is cancelled.
-        *guarded.chain_grandpa_config[chain_index].as_mut().unwrap() = grandpa_state;
+        *guarded.chains[chain_index].grandpa_state.as_mut().unwrap() = grandpa_state;
     }
 
     /// Sends a blocks request to the given peer.
@@ -913,7 +906,8 @@ where
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
                     // TODO: futures cancellation issues
                     let ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let grandpa_config = ephemeral_guarded.chain_grandpa_config[chain_index]
+                    let grandpa_config = ephemeral_guarded.chains[chain_index]
+                        .grandpa_state
                         .as_ref()
                         .unwrap()
                         .clone();
@@ -1010,11 +1004,14 @@ where
 
                     {
                         let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let _was_in =
-                            ephemeral_guarded.chain_out_peers[chain_index].remove(peer_id);
+                        let _was_in = ephemeral_guarded.chains[chain_index]
+                            .out_peers
+                            .remove(peer_id);
                         debug_assert!(
                             !_was_in
-                                || !ephemeral_guarded.chain_in_peers[chain_index].contains(peer_id)
+                                || !ephemeral_guarded.chains[chain_index]
+                                    .in_peers
+                                    .contains(peer_id)
                         );
                     }
 
@@ -1046,10 +1043,14 @@ where
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let _was_in = ephemeral_guarded.chain_in_peers[chain_index].remove(peer_id);
+                    let _was_in = ephemeral_guarded.chains[chain_index]
+                        .in_peers
+                        .remove(peer_id);
                     debug_assert!(
                         !_was_in
-                            || !ephemeral_guarded.chain_out_peers[chain_index].contains(peer_id)
+                            || !ephemeral_guarded.chains[chain_index]
+                                .out_peers
+                                .contains(peer_id)
                     );
 
                     guarded.to_process_pre_event = None;
@@ -1181,10 +1182,11 @@ where
                     }
 
                     let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let has_out_slot =
-                        ephemeral_guarded.chain_out_peers[chain_index].contains(peer_id);
+                    let has_out_slot = ephemeral_guarded.chains[chain_index]
+                        .out_peers
+                        .contains(peer_id);
                     if !has_out_slot
-                        && ephemeral_guarded.chain_in_peers[chain_index].len()
+                        && ephemeral_guarded.chains[chain_index].in_peers.len()
                             >= usize::try_from(self.chain_configs[chain_index].in_slots)
                                 .unwrap_or(usize::max_value())
                     {
@@ -1220,7 +1222,8 @@ where
                         .is_ok()
                     {
                         if !has_out_slot {
-                            let _was_inserted = ephemeral_guarded.chain_in_peers[chain_index]
+                            let _was_inserted = ephemeral_guarded.chains[chain_index]
+                                .in_peers
                                 .insert(peer_id.clone());
                             debug_assert!(_was_inserted);
                         }
@@ -1625,7 +1628,7 @@ where
 
         for (peer_id, addrs) in self.outcome {
             // Only proceed if we have out slots available.
-            if lock.chain_out_peers[self.chain_index].len()
+            if lock.chains[self.chain_index].out_peers.len()
                 >= usize::try_from(self.service.chain_configs[self.chain_index].out_slots)
                     .unwrap_or(usize::max_value())
             {
@@ -1633,7 +1636,7 @@ where
             }
 
             // Don't assign slots to peers that already have a slot.
-            if lock.chain_out_peers[self.chain_index].contains(&peer_id) {
+            if lock.chains[self.chain_index].out_peers.contains(&peer_id) {
                 continue;
             }
 
@@ -1648,8 +1651,8 @@ where
 
             // It is possible that this peer already has an inbound slot, in which case we turn the
             // inbound slot into an outbound slot.
-            if lock.chain_in_peers[self.chain_index].remove(&peer_id) {
-                lock.chain_out_peers[self.chain_index].insert(peer_id);
+            if lock.chains[self.chain_index].in_peers.remove(&peer_id) {
+                lock.chains[self.chain_index].out_peers.insert(peer_id);
                 continue;
             }
 
@@ -1664,7 +1667,7 @@ where
                 )
                 .await;
 
-            lock.chain_out_peers[self.chain_index].insert(peer_id);
+            lock.chains[self.chain_index].out_peers.insert(peer_id);
         }
 
         self.service.next_start_connect_waker.wake();
