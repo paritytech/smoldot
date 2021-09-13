@@ -418,7 +418,7 @@ impl Client {
                             chain_information.as_ref().finalized_block_header.hash();
 
                         let running_chain = start_services(
-                            log_name,
+                            log_name.clone(),
                             new_tasks_tx,
                             chain_information,
                             genesis_chain_information,
@@ -432,8 +432,9 @@ impl Client {
                         // than `Display`) because it is an untrusted user input.
                         if let Some((relay_chain_id, para_id)) = relay_chain_id {
                             log::info!(
-                                "Parachain initialization complete. Name: {:?}. Genesis \
+                                "Parachain initialization complete for {}. Name: {:?}. Genesis \
                                 hash: {}. Network identity: {}. Relay chain: {:?} (id: {})",
+                                log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
                                 running_chain.network_identity,
@@ -442,8 +443,9 @@ impl Client {
                             );
                         } else {
                             log::info!(
-                                "Chain initialization complete. Name: {:?}. Genesis hash: {}. \
-                                Network identity: {}. Starting at block #{} ({})",
+                                "Chain initialization complete for {}. Name: {:?}. Genesis \
+                                hash: {}. Network identity: {}. Starting at block #{} ({})",
+                                log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
                                 running_chain.network_identity,
