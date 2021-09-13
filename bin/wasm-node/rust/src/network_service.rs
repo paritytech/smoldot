@@ -146,8 +146,8 @@ impl NetworkService {
                 bootstrap_nodes: (known_nodes.len()
                     ..(known_nodes.len() + chain.bootstrap_nodes.len()))
                     .collect(),
-                in_slots: 25,
-                out_slots: 25,
+                in_slots: 3,
+                out_slots: 4,
                 grandpa_protocol_config: if chain.has_grandpa_protocol {
                     // TODO: dummy values
                     Some(service::GrandpaState {
