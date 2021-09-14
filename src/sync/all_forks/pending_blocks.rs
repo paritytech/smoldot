@@ -347,6 +347,21 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.add_known_block(source_id, height, hash);
     }
 
+    /// Un-registers a new block that the source is aware of.
+    ///
+    /// Has no effect if the block wasn't marked as being known to this source.
+    ///
+    /// > **Note**: Use this function if for example a source is unable to serve a block that is
+    /// >           supposed to be known to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn remove_known_block(&mut self, source_id: SourceId, height: u64, hash: &[u8; 32]) {
+        self.sources.source_remove_known_block(source_id, height, hash);
+    }
+
     /// Sets the best block of this source.
     ///
     /// The block does not need to be known by the data structure.

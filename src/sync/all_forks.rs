@@ -487,8 +487,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // correct.
         // TODO: shouldn't that be done in the networking? ^
 
-        // Set to true below if any block is inserted in `disjoint_headers`.
-        //let mut any_progress = false; // TODO: restore
+        // Set to true below if any block at all have been received.
+        let mut any_progress = false;
 
         // The next block in the list of headers should have a hash and height equal to this one.
         let mut expected_next_hash = requested_block_hash;
@@ -534,6 +534,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 false,
             ) {
                 HeaderFromSourceOutcome::HeaderVerify => {
+                    // Note: we should normally set `any_progress` to `true` here, but this is
+                    // pointless since we return from the function.
                     return (request_user_data, AncestrySearchResponseOutcome::Verify);
                 }
                 HeaderFromSourceOutcome::TooOld { .. } => {
@@ -542,6 +544,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     // number. `TooOld` can happen if the source is misbehaving, but also if the
                     // finalized block has been updated between the moment the request was emitted
                     // and the moment the response is received.
+                    any_progress = true;
                     debug_assert_eq!(index_in_response, 0);
                     break;
                 }
@@ -560,13 +563,16 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     // Block is already in chain. Can happen if a different response or
                     // announcement has arrived and been processed between the moment the request
                     // was emitted and the moment the response is received.
+                    //
+                    // Note: we should normally set `any_progress` to `true` here, but this is
+                    // pointless since we return from the function.
                     debug_assert_eq!(index_in_response, 0);
                     let outcome = AncestrySearchResponseOutcome::AllAlreadyInChain;
                     return (request_user_data, outcome);
                 }
                 HeaderFromSourceOutcome::Disjoint => {
                     // Block of unknown ancestry. Continue looping.
-                    //any_progress = true; // TODO: restore
+                    any_progress = true;
                     expected_next_hash = *decoded_header.parent_hash;
                     debug_assert_ne!(expected_next_height, 0);
                     expected_next_height -= 1;
@@ -574,18 +580,16 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             }
         }
 
-        // TODO: restore
-        /*// If this is reached, then the ancestry search was inconclusive. Only disjoint blocks
-        // have been received.
+        // If this is reached, then the ancestry search was inconclusive. None of the blocks the
+        // source has sent back were useful.
         if !any_progress {
-            // TODO: distinguish errors from empty requests?
-            // Avoid sending the same request to the same source over and over again.
+            // Assume that the source doesn't know this block, as it is apparently unable to
+            // serve it anyway. This avoids sending the same request to the same source over and
+            // over again.
             self.inner
                 .blocks
-                .source_mut(source_id)
-                .unwrap()
-                .remove_known_block(requested_block_height, requested_block_hash);
-        }*/
+                .remove_known_block(source_id, requested_block_height, &requested_block_hash);
+        }
 
         (
             request_user_data,
