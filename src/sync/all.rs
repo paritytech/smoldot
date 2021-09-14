@@ -117,6 +117,8 @@ pub struct AllSync<TRq, TSrc, TBl> {
 impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Initializes a new state machine.
     pub fn new(config: Config) -> Self {
+        let is_full = config.full.is_some();
+
         AllSync {
             inner: if let Some(config_full) = config.full {
                 AllSyncInner::Optimistic {
@@ -141,6 +143,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             shared: Shared {
                 sources: slab::Slab::with_capacity(config.sources_capacity),
                 requests: slab::Slab::with_capacity(config.sources_capacity),
+                is_full,
                 sources_capacity: config.sources_capacity,
                 blocks_capacity: config.blocks_capacity,
                 max_disjoint_headers: config.max_disjoint_headers,
@@ -709,7 +712,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .map(move |(inner_source_id, rq_params)| {
                         (
                             sync.source_user_data(inner_source_id).outer_source_id,
-                            all_forks_request_convert(rq_params),
+                            all_forks_request_convert(rq_params, self.shared.is_full),
                         )
                     });
 
@@ -719,7 +722,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = inner.desired_requests().map(move |rq_detail| {
                     (
                         inner.source_user_data(rq_detail.source_id).outer_source_id,
-                        optimistic_request_convert(rq_detail),
+                        optimistic_request_convert(rq_detail, self.shared.is_full),
                     )
                 });
 
@@ -1844,6 +1847,9 @@ struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
 
+    /// True if full mode.
+    is_full: bool,
+
     /// Value passed through [`Config::sources_capacity`].
     sources_capacity: usize,
     /// Value passed through [`Config::blocks_capacity`].
@@ -1911,25 +1917,31 @@ enum SourceMapping {
     Optimistic(optimistic::SourceId),
 }
 
-fn all_forks_request_convert(rq_params: all_forks::RequestParams) -> RequestDetail {
+fn all_forks_request_convert(
+    rq_params: all_forks::RequestParams,
+    full_node: bool,
+) -> RequestDetail {
     RequestDetail::BlocksRequest {
-        ascending: false,
+        ascending: false, // Hardcoded based on the logic of the all-forks syncing.
         first_block_hash: Some(rq_params.first_block_hash),
         first_block_height: rq_params.first_block_height,
         num_blocks: rq_params.num_blocks,
-        request_bodies: false, // TODO: true if full?
+        request_bodies: full_node,
         request_headers: true,
         request_justification: true,
     }
 }
 
-fn optimistic_request_convert(rq_params: optimistic::RequestDetail) -> RequestDetail {
+fn optimistic_request_convert(
+    rq_params: optimistic::RequestDetail,
+    full_node: bool,
+) -> RequestDetail {
     RequestDetail::BlocksRequest {
-        ascending: true, // TODO: ?!?!
+        ascending: true, // Hardcoded based on the logic of the optimistic syncing.
         first_block_hash: None,
         first_block_height: rq_params.block_height.get(),
         num_blocks: rq_params.num_blocks.into(),
-        request_bodies: true, // TODO: only if full?
+        request_bodies: full_node,
         request_headers: true,
         request_justification: true,
     }
