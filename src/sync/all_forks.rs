@@ -586,9 +586,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             // Assume that the source doesn't know this block, as it is apparently unable to
             // serve it anyway. This avoids sending the same request to the same source over and
             // over again.
-            self.inner
-                .blocks
-                .remove_known_block(source_id, requested_block_height, &requested_block_hash);
+            self.inner.blocks.remove_known_block(
+                source_id,
+                requested_block_height,
+                &requested_block_hash,
+            );
         }
 
         (

@@ -359,7 +359,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the [`SourceId`] is out of range.
     ///
     pub fn remove_known_block(&mut self, source_id: SourceId, height: u64, hash: &[u8; 32]) {
-        self.sources.source_remove_known_block(source_id, height, hash);
+        self.sources
+            .source_remove_known_block(source_id, height, hash);
     }
 
     /// Sets the best block of this source.
