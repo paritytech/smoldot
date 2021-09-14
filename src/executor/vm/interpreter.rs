@@ -265,16 +265,14 @@ impl InterpreterPrototype {
                     return Err((StartErr::SignatureNotSupported, self));
                 }
 
-                match wasmi::FuncInstance::invoke_resumable(
+                wasmi::FuncInstance::invoke_resumable(
                     &f,
                     params
                         .iter()
                         .map(|v| wasmi::RuntimeValue::from(*v))
                         .collect::<Vec<_>>(),
-                ) {
-                    Ok(e) => e,
-                    Err(err) => unreachable!("{:?}", err), // TODO:
-                }
+                )
+                .map_err(|err| Trap(err.to_string()))
             }
             None => return Err((StartErr::FunctionNotFound, self)),
             _ => return Err((StartErr::NotAFunction, self)),
@@ -333,7 +331,9 @@ pub struct Interpreter {
     ///
     /// This field is an `Option` because we need to be able to temporarily extract it.
     /// If `None`, the state machine is in a poisoned state and cannot run any code anymore.
-    execution: Option<wasmi::FuncInvocation<'static>>,
+    /// Can contain an `Err` if the initialization failed, in which case the execution must
+    /// return an error immediately.
+    execution: Option<Result<wasmi::FuncInvocation<'static>, Trap>>,
 
     /// If false, then one must call `execution.start_execution()` instead of `resume_execution()`.
     /// This is a particularity of the Wasm interpreter that we don't want to expose in our API.
@@ -373,7 +373,12 @@ impl Interpreter {
         impl wasmi::HostError for Interrupt {}
 
         let mut execution = match self.execution.take() {
-            Some(e) => e,
+            Some(Ok(e)) => e,
+            Some(Err(err)) => {
+                return Ok(ExecOutcome::Finished {
+                    return_value: Err(err),
+                })
+            }
             None => return Err(RunErr::Poisoned),
         };
 
@@ -421,7 +426,7 @@ impl Interpreter {
                     },
                     _ => unreachable!(),
                 };
-                self.execution = Some(execution);
+                self.execution = Some(Ok(execution));
                 Ok(ExecOutcome::Interrupted {
                     id: interrupt.index,
                     params: interrupt
