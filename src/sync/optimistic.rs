@@ -217,7 +217,7 @@ pub struct Block<TBl> {
     pub justification: Option<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// List of changes to the offchain storage that this block performs.
     pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,

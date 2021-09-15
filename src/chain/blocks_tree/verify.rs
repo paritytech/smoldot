@@ -30,6 +30,7 @@ use crate::{
 
 use super::*;
 
+use alloc::collections::BTreeMap;
 use core::cmp::Ordering;
 
 impl<T> NonFinalizedTree<T> {
@@ -697,7 +698,7 @@ pub enum BodyVerifyStep2<T> {
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
-        storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+        storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
         /// List of changes to the offchain storage that this block performs.
         offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
         /// Cache of calculation for the storage trie of the best block.
