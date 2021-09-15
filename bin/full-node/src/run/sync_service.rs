@@ -24,7 +24,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::network_service;
+use crate::run::network_service;
 
 use core::{convert::TryFrom as _, num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
