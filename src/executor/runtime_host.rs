@@ -44,6 +44,7 @@ use crate::{
 };
 
 use alloc::{
+    collections::BTreeMap,
     string::{String, ToString as _},
     vec::Vec,
 };
@@ -68,7 +69,7 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_top_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
@@ -103,7 +104,7 @@ pub struct Success {
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     /// List of changes to the offchain storage that this block performs.
     pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Cache used for calculating the top trie root.
@@ -457,14 +458,12 @@ impl NextKey {
                 // The next key can be either the one passed by the user or one key in the current
                 // pending storage changes that has been inserted during the execution.
                 // As such, find the "next key" in the list of overlay changes.
-                // TODO: not optimized in terms of searching time ; should really be a BTreeMap or something
                 let in_overlay = self
                     .inner
                     .top_trie_changes
-                    .iter()
-                    .map(|(k, v)| (k, v.is_some()))
-                    .filter(|(k, _)| &***k > requested_key)
-                    .min_by_key(|(k, _)| *k);
+                    .range(requested_key.to_vec()..) // TODO: to_vec() :-/
+                    .find(|(k, _)| &***k > requested_key)
+                    .map(|(k, v)| (k, v.is_some()));
 
                 let outcome = match (key, in_overlay) {
                     (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
@@ -515,7 +514,7 @@ struct Inner {
     vm: host::HostVm,
 
     /// Pending changes to the top storage trie that this execution performs.
-    top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// `Some` if and only if we're within a storage transaction. When changes are applied to
     /// [`Inner::top_trie_changes`], the reverse operation is added here.
