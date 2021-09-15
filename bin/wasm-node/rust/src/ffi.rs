@@ -29,14 +29,17 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures::{channel::oneshot, prelude::*};
+use futures::prelude::*;
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
     task,
 };
 
+pub use timers::Delay;
+
 pub mod bindings;
+mod timers;
 
 /// Stops execution, throwing a string exception with the given content.
 pub(crate) fn throw(message: String) -> ! {
@@ -108,45 +111,14 @@ pub fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) 
     task::Wake::wake(waker);
 }
 
-/// Uses the environment to invoke `closure` after `duration` has elapsed.
+/// Uses the environment to invoke `closure` after at least `duration` has elapsed.
 fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
     let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
-    let milliseconds = u64::try_from(duration.as_millis()).unwrap_or(u64::max_value());
-    unsafe { bindings::start_timer(timer_id, (milliseconds as f64).ceil()) }
-}
-
-// TODO: cancel the timer if the `Delay` is destroyed? we create and destroy a lot of `Delay`s
-pub struct Delay {
-    rx: oneshot::Receiver<()>,
-}
-
-impl Delay {
-    pub fn new(when: Duration) -> Self {
-        let (tx, rx) = oneshot::channel();
-        if when == Duration::new(0, 0) {
-            let _ = tx.send(());
-        } else {
-            start_timer_wrap(when, move || {
-                let _ = tx.send(());
-            });
-        }
-        Delay { rx }
-    }
-}
-
-impl Future for Delay {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        Future::poll(Pin::new(&mut self.rx), cx).map(|v| v.unwrap())
-    }
-}
-
-impl future::FusedFuture for Delay {
-    fn is_terminated(&self) -> bool {
-        self.rx.is_terminated()
-    }
+    // Note that ideally `duration` should be rounded up in order to make sure that it is not
+    // truncated, but the precision of an `f64` is so high and the precision of the operating
+    // system generally so low that this is not worth dealing with.
+    unsafe { bindings::start_timer(timer_id, duration.as_secs_f64() * 1000.0) }
 }
 
 #[derive(Debug, Copy, Clone)]

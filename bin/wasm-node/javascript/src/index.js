@@ -74,10 +74,16 @@ export async function start(config) {
       clearTimeout(livenessTimeout);
     livenessTimeout = setTimeout(() => {
       livenessTimeout = null;
-      logCallback(1, 'smoldot', 'Smoldot worker appears unresponsive');
-    }, 7000);
+      console.warn(
+        "Smoldot appears unresponsive. Please open an issue at " +
+        "https://github.com/paritytech/smoldot/issues. If you have a debugger available, " +
+        "please pause execution, generate a stack trace of the thread that isn't the main " +
+        "execution thread, and paste it in the issue. Please also include any other log found " +
+        "in the console or elsewhere."
+      );
+    }, 10000);
   };
-  setTimeout(() => resetLivenessTimeout(), 10000);
+  setTimeout(() => resetLivenessTimeout(), 15000);
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
@@ -146,6 +152,10 @@ export async function start(config) {
   workerOnError(worker, (error) => {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
+    console.error(
+      "Smoldot has panicked. This is a bug in smoldot. Please open an issue at " +
+      "https://github.com/paritytech/smoldot/issues with the following message:"
+    );
     console.error(error);
     workerError = error;
 

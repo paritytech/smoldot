@@ -52,22 +52,17 @@ use crate::{
     trie::calculate_root,
 };
 
-use alloc::{
-    borrow::ToOwned as _,
-    collections::{BTreeMap, VecDeque},
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{
     cmp,
     convert::TryFrom as _,
-    fmt, iter,
-    marker::PhantomData,
-    mem,
+    fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
 use hashbrown::{HashMap, HashSet};
-use rand::{seq::IteratorRandom as _, SeedableRng as _};
+
+mod verification_queue;
 
 /// Configuration for the [`OptimisticSync`].
 #[derive(Debug)]
@@ -84,12 +79,6 @@ pub struct Config {
     /// Should be set to the maximum number of block between two consecutive justifications.
     pub blocks_capacity: usize,
 
-    /// Maximum number of blocks returned by a response.
-    ///
-    /// > **Note**: If blocks are requested from the network, this should match the network
-    /// >           protocol enforced limit.
-    pub blocks_request_granularity: NonZeroU32,
-
     /// Number of blocks to download ahead of the best block.
     ///
     /// Whenever the latest best block is updated, the state machine will start block
@@ -99,14 +88,7 @@ pub struct Config {
     ///
     /// The ideal value here depends on the speed of blocks verification speed and latency of
     /// block requests.
-    pub download_ahead_blocks: u32,
-
-    /// Seed used by the PRNG (Pseudo-Random Number Generator) that selects which source to start
-    /// requests with.
-    ///
-    /// You are encouraged to use something like `rand::random()` to fill this field, except in
-    /// situations where determinism/reproducibility is desired.
-    pub source_selection_randomness_seed: u64,
+    pub download_ahead_blocks: NonZeroU32,
 
     /// If `Some`, the block bodies and storage are also synchronized. Contains the extra
     /// configuration.
@@ -162,32 +144,49 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Providing this value when verifying a block considerably speeds up the verification.
     top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
 
-    /// See [`Config::blocks_request_granularity`].
-    blocks_request_granularity: NonZeroU32,
-
     /// See [`Config::download_ahead_blocks`].
-    download_ahead_blocks: u32,
+    download_ahead_blocks: NonZeroU32,
 
     /// List of sources of blocks.
     sources: HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
 
     /// Next [`SourceId`] to allocate.
-    /// SourceIds are unique so that the source in [`VerificationQueueEntryTy`] doesn't
-    /// accidentally collide with a new source.
+    /// SourceIds are unique so that the source in the [`verification_queue::VerificationQueue`]
+    /// doesn't accidentally collide with a new source.
     next_source_id: SourceId,
 
-    /// If true, the next step of the state machine is to cancel requests in progress, as they
-    /// are no longer valid.
-    cancelling_requests: bool,
-
     /// Queue of block requests, either waiting to be started, in progress, or completed.
-    verification_queue: VecDeque<VerificationQueueEntry<TRq, TBl>>,
+    verification_queue: verification_queue::VerificationQueue<TRq, RequestSuccessBlock<TBl>>,
 
     /// Identifier to assign to the next request.
     next_request_id: RequestId,
 
-    /// PRNG used to select the source to start a query with.
-    source_selection_rng: rand_chacha::ChaCha8Rng,
+    /// Requests that have been started but whose answers are no longer desired.
+    obsolete_requests: HashMap<RequestId, (SourceId, TRq), fnv::FnvBuildHasher>,
+}
+
+impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
+    fn make_requests_obsolete(&mut self, chain: &blocks_tree::NonFinalizedTree<Block<TBl>>) {
+        let former_queue = mem::replace(
+            &mut self.verification_queue,
+            verification_queue::VerificationQueue::new(chain.best_block_header().number + 1),
+        );
+
+        for (user_data, request_id, source) in former_queue.into_requests() {
+            let _was_in = self
+                .obsolete_requests
+                .insert(request_id, (source, user_data));
+            debug_assert!(_was_in.is_none());
+        }
+    }
+
+    fn with_requests_obsoleted(
+        mut self,
+        chain: &blocks_tree::NonFinalizedTree<Block<TBl>>,
+    ) -> Self {
+        self.make_requests_obsolete(chain);
+        self
+    }
 }
 
 struct Source<TSrc> {
@@ -201,26 +200,9 @@ struct Source<TSrc> {
     /// Note that the ban is lifted if the source is removed. This ban isn't meant to be a line of
     /// defense against malicious peers but rather an optimisation.
     banned: bool,
-}
 
-struct VerificationQueueEntry<TRq, TBl> {
-    block_height: NonZeroU64,
-    ty: VerificationQueueEntryTy<TRq, TBl>,
-}
-
-enum VerificationQueueEntryTy<TRq, TBl> {
-    Missing,
-    Requested {
-        id: RequestId,
-        /// User-chosen data for this request.
-        user_data: TRq,
-        // Index of this source within [`OptimisticSyncInner::sources`].
-        source: SourceId,
-    },
-    Queued {
-        source: SourceId,
-        blocks: VecDeque<RequestSuccessBlock<TBl>>,
-    },
+    /// Number of requests that use this source.
+    num_ongoing_requests: u32,
 }
 
 // TODO: doc
@@ -249,11 +231,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     pub fn new(config: Config) -> Self {
         let blocks_tree_config = blocks_tree::Config {
             chain_information: config.chain_information,
-            blocks_capacity: usize::try_from(config.blocks_request_granularity.get())
-                .unwrap_or(usize::max_value()),
+            blocks_capacity: config.blocks_capacity,
         };
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree_config.clone());
+        let best_block_header_num = chain.best_block_header().number;
 
         OptimisticSync {
             chain,
@@ -268,20 +250,12 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                     Default::default(),
                 ),
                 next_source_id: SourceId(0),
-                cancelling_requests: false,
-                verification_queue: VecDeque::with_capacity(
-                    usize::try_from(
-                        config.download_ahead_blocks / config.blocks_request_granularity.get(),
-                    )
-                    .unwrap()
-                    .saturating_add(1),
+                verification_queue: verification_queue::VerificationQueue::new(
+                    best_block_header_num + 1,
                 ),
-                blocks_request_granularity: config.blocks_request_granularity,
                 download_ahead_blocks: config.download_ahead_blocks,
                 next_request_id: RequestId(0),
-                source_selection_rng: rand_chacha::ChaCha8Rng::seed_from_u64(
-                    config.source_selection_randomness_seed,
-                ),
+                obsolete_requests: HashMap::with_capacity_and_hasher(0, Default::default()),
             },
         }
     }
@@ -349,15 +323,8 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             requests: self
                 .inner
                 .verification_queue
-                .into_iter()
-                .filter_map(|queue_elem| {
-                    if let VerificationQueueEntryTy::Requested { id, user_data, .. } = queue_elem.ty
-                    {
-                        Some((id, user_data))
-                    } else {
-                        None
-                    }
-                })
+                .into_requests()
+                .map(|(user_data, request_id, _)| (request_id, user_data))
                 .collect(),
         }
     }
@@ -376,6 +343,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 user_data: source,
                 best_block_number,
                 banned: false,
+                num_ongoing_requests: 0,
             },
         );
 
@@ -429,8 +397,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
         let src_user_data = self.inner.sources.remove(&source_id).unwrap().user_data;
         let drain = RequestsDrain {
-            iter: self.inner.verification_queue.iter_mut().fuse(),
-            source_id,
+            iter: self.inner.verification_queue.drain_source(source_id),
         };
         (src_user_data, drain)
     }
@@ -448,111 +415,73 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         &mut self.inner.sources.get_mut(&source_id).unwrap().user_data
     }
 
-    /// Returns an iterator that extracts all requests that need to be started and requests that
-    /// need to be cancelled.
-    pub fn next_request_action(&mut self) -> Option<RequestAction<TRq, TSrc, TBl>> {
-        if self.inner.cancelling_requests {
-            while let Some(queue_elem) = self.inner.verification_queue.pop_back() {
-                if let VerificationQueueEntryTy::Requested {
-                    id,
-                    source,
-                    user_data,
-                } = queue_elem.ty
-                {
-                    return Some(RequestAction::Cancel {
-                        request_id: id,
-                        user_data,
-                        source_id: source,
-                        source: &mut self.inner.sources.get_mut(&source).unwrap().user_data,
-                    });
-                }
-            }
-
-            self.inner.cancelling_requests = false;
-        }
-
-        while self.inner.verification_queue.back().map_or(true, |rq| {
-            rq.block_height.get() + u64::from(self.inner.blocks_request_granularity.get())
-                < self
-                    .chain
-                    .best_block_header()
-                    .number
-                    .checked_add(u64::from(self.inner.download_ahead_blocks))
-                    .unwrap()
-        }) {
-            let block_height = self
-                .inner
-                .verification_queue
-                .back()
-                .map(|rq| {
-                    rq.block_height.get() + u64::from(self.inner.blocks_request_granularity.get())
-                })
-                .unwrap_or(self.chain.best_block_header().number + 1);
-            self.inner
-                .verification_queue
-                .push_back(VerificationQueueEntry {
-                    block_height: NonZeroU64::new(block_height).unwrap(),
-                    ty: VerificationQueueEntryTy::Missing,
-                });
-        }
-
-        // If all sources are banned, unban them.
-        if self.inner.sources.iter().all(|(_, s)| s.banned) {
-            for src in self.inner.sources.values_mut() {
-                src.banned = false;
-            }
-        }
-
-        if let Some((missing_pos, _)) = self
-            .inner
-            .verification_queue
+    /// Returns an iterator that yields all the requests whose outcome is no longer desired.
+    pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> + '_ {
+        self.inner
+            .obsolete_requests
             .iter()
-            .enumerate()
-            .find(|(_, e)| matches!(e.ty, VerificationQueueEntryTy::Missing))
-        {
-            let block_height = self.inner.verification_queue[missing_pos].block_height;
+            .map(|(id, (_, ud))| (*id, ud))
+    }
 
-            let source_id = *self
-                .inner
-                .sources
-                .iter()
-                .filter(|(_, src)| !src.banned && src.best_block_number >= block_height.get())
-                .choose(&mut self.inner.source_selection_rng)?
-                .0;
+    /// Returns an iterator that yields all requests that could be started.
+    pub fn desired_requests(&'_ self) -> impl Iterator<Item = RequestDetail> + '_ {
+        let sources = &self.inner.sources;
+        self.inner
+            .verification_queue
+            .desired_requests(self.inner.download_ahead_blocks)
+            .flat_map(move |e| sources.iter().map(move |s| (e, s)))
+            .filter_map(|((block_height, num_blocks), (source_id, source))| {
+                if source.num_ongoing_requests != 0 {
+                    return None;
+                }
+                let source_avail_blocks =
+                    source.best_block_number.checked_sub(block_height.get())?;
+                Some(RequestDetail {
+                    block_height,
+                    num_blocks: cmp::min(
+                        NonZeroU32::new(u32::try_from(source_avail_blocks).unwrap()).unwrap(),
+                        num_blocks,
+                    ),
+                    source_id: *source_id,
+                })
+            })
+    }
 
-            let num_blocks = if let Some(next) = self.inner.verification_queue.get(missing_pos + 1)
-            {
-                NonZeroU32::new(
-                    u32::try_from(cmp::min(
-                        u64::from(self.inner.blocks_request_granularity.get()),
-                        next.block_height
-                            .get()
-                            .checked_sub(block_height.get())
-                            .unwrap(),
-                    ))
-                    .unwrap(),
-                )
-                .unwrap()
-            } else {
-                self.inner.blocks_request_granularity
-            };
+    /// Updates the [`OptimisticSync`] with the fact that a request has been started.
+    ///
+    /// Returns the identifier for the request that must later be passed back to
+    /// [`OptimisticSync::finish_request`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn insert_request(&mut self, detail: RequestDetail, user_data: TRq) -> RequestId {
+        self.inner
+            .sources
+            .get_mut(&detail.source_id)
+            .unwrap()
+            .num_ongoing_requests += 1;
 
-            return Some(RequestAction::Start {
-                source_id,
-                source: &mut self.inner.sources.get_mut(&source_id).unwrap().user_data,
-                block_height,
-                num_blocks,
-                start: Start {
-                    verification_queue: &mut self.inner.verification_queue,
-                    missing_pos,
-                    next_request_id: &mut self.inner.next_request_id,
-                    source: source_id,
-                    marker: PhantomData,
-                },
-            });
+        let request_id = self.inner.next_request_id;
+        self.inner.next_request_id.0 += 1;
+
+        match self.inner.verification_queue.insert_request(
+            detail.block_height,
+            detail.num_blocks,
+            request_id,
+            detail.source_id,
+            user_data,
+        ) {
+            Ok(()) => {}
+            Err(user_data) => {
+                self.inner
+                    .obsolete_requests
+                    .insert(request_id, (detail.source_id, user_data));
+            }
         }
 
-        None
+        request_id
     }
 
     /// Update the [`OptimisticSync`] with the outcome of a request.
@@ -575,89 +504,68 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         request_id: RequestId,
         outcome: Result<impl Iterator<Item = RequestSuccessBlock<TBl>>, RequestFail>,
     ) -> (TRq, FinishRequestOutcome<TSrc>) {
-        // TODO: what if cancelling requests?
+        if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
+            self.inner.obsolete_requests.shrink_to_fit();
+            self.inner
+                .sources
+                .get_mut(&source_id)
+                .unwrap()
+                .num_ongoing_requests -= 1;
+            return (user_data, FinishRequestOutcome::Obsolete);
+        }
 
-        let (verification_queue_entry, source_id) = self
+        let outcome_is_err = outcome.is_err();
+
+        let (user_data, source_id) = self
             .inner
             .verification_queue
-            .iter()
-            .enumerate()
-            .filter_map(|(pos, entry)| match entry.ty {
-                VerificationQueueEntryTy::Requested { id, source, .. } if id == request_id => {
-                    Some((pos, source))
+            .finish_request(request_id, outcome.map_err(|_| ()));
+
+        self.inner
+            .sources
+            .get_mut(&source_id)
+            .unwrap()
+            .num_ongoing_requests -= 1;
+
+        if outcome_is_err {
+            self.inner.sources.get_mut(&source_id).unwrap().banned = true;
+
+            // If all sources are banned, unban them.
+            if self.inner.sources.iter().all(|(_, s)| s.banned) {
+                for src in self.inner.sources.values_mut() {
+                    src.banned = false;
                 }
-                _ => None,
-            })
-            .next()
-            .expect("invalid RequestId");
-
-        let blocks = match outcome {
-            Ok(blocks) => blocks.collect(),
-            Err(_) => {
-                let user_data = match mem::replace(
-                    &mut self.inner.verification_queue[verification_queue_entry].ty,
-                    VerificationQueueEntryTy::Missing,
-                ) {
-                    VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
-                    _ => unreachable!(),
-                };
-
-                self.inner.sources.get_mut(&source_id).unwrap().banned = true;
-
-                return (
-                    user_data,
-                    FinishRequestOutcome::SourcePunished(
-                        &mut self.inner.sources.get_mut(&source_id).unwrap().user_data,
-                    ),
-                );
             }
-        };
+        }
 
-        // TODO: handle if blocks.len() < expected_number_of_blocks
-
-        let user_data = match mem::replace(
-            &mut self.inner.verification_queue[verification_queue_entry].ty,
-            VerificationQueueEntryTy::Queued {
-                source: source_id,
-                blocks,
+        (
+            user_data,
+            if !outcome_is_err {
+                FinishRequestOutcome::Queued
+            } else {
+                FinishRequestOutcome::SourcePunished(
+                    &mut self.inner.sources.get_mut(&source_id).unwrap().user_data,
+                )
             },
-        ) {
-            VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
-            _ => unreachable!(),
-        };
-
-        (user_data, FinishRequestOutcome::Queued)
+        )
     }
 
     /// Process the next block in the queue of verification.
     ///
     /// This method takes ownership of the [`OptimisticSync`]. The [`OptimisticSync`] is yielded
     /// back in the returned value.
-    pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
-        if self.inner.cancelling_requests {
-            return ProcessOne::AllSync { sync: self };
-        }
-
-        // Find out if there is a block ready to be processed.
+    pub fn process_one(self) -> ProcessOne<TRq, TSrc, TBl> {
         // The block isn't immediately extracted. A `Verify` struct is built, whose existence
         // confirms that a block is ready. If the `Verify` is dropped without `start` being called,
         // the block stays in the list.
-        loop {
-            match &mut self.inner.verification_queue.get_mut(0).map(|b| &mut b.ty) {
-                Some(VerificationQueueEntryTy::Queued { blocks, .. }) => match blocks.front() {
-                    Some(_) => break,
-                    None => {
-                        self.inner.verification_queue.pop_front().unwrap();
-                    }
-                },
-                _ => return ProcessOne::AllSync { sync: self },
-            }
+        if self.inner.verification_queue.blocks_ready() {
+            ProcessOne::Verify(Verify {
+                inner: self.inner,
+                chain: self.chain,
+            })
+        } else {
+            ProcessOne::Idle { sync: self }
         }
-
-        ProcessOne::Verify(Verify {
-            inner: self.inner,
-            chain: self.chain,
-        })
     }
 }
 
@@ -673,7 +581,7 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No processing is necessary.
     ///
     /// Calling [`OptimisticSync::process_one`] again is unnecessary.
-    AllSync {
+    Idle {
         /// The state machine.
         /// The [`OptimisticSync::process_one`] method takes ownership of the
         /// [`OptimisticSync`]. This field yields it back.
@@ -711,11 +619,7 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
         &self
             .inner
             .verification_queue
-            .get(0)
-            .map(|b| match &b.ty {
-                VerificationQueueEntryTy::Queued { blocks, .. } => blocks.front().unwrap(),
-                _ => unreachable!(),
-            })
+            .first_block()
             .unwrap()
             .scale_encoded_header
     }
@@ -725,19 +629,10 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
     /// Must be passed the current UNIX time in order to verify that the block doesn't pretend to
     /// come from the future.
     pub fn start(mut self, now_from_unix_epoch: Duration) -> BlockVerification<TRq, TSrc, TBl> {
-        // Extract the block to process.
+        // Extract the block to process. We are guaranteed that a block is available because a
+        // `Verify` is built only when that is the case.
         // Be aware that `source_id` might refer to an obsolete source.
-        let (block, source_id) = self
-            .inner
-            .verification_queue
-            .get_mut(0)
-            .map(|b| match &mut b.ty {
-                VerificationQueueEntryTy::Queued { blocks, source } => {
-                    (blocks.pop_front().unwrap(), *source)
-                }
-                _ => unreachable!(),
-            })
-            .unwrap();
+        let (block, source_id) = self.inner.verification_queue.pop_first_block().unwrap();
 
         if self.inner.finalized_runtime.is_some() {
             BlockVerification::from(
@@ -776,18 +671,27 @@ impl<TRq, TSrc, TBl> Verify<TRq, TSrc, TBl> {
                     None
                 }
                 Err(err) => {
-                    if let Some(src) = self.inner.sources.get_mut(&source_id) {
-                        src.banned = true;
-                    }
-                    self.inner.cancelling_requests = true;
-                    self.inner.best_to_finalized_storage_diff = Default::default();
-                    self.inner.best_runtime = None;
-                    self.inner.top_trie_root_calculation_cache = None;
                     Some(err)
                 }
             };
 
             if let Some(error) = error {
+                if let Some(src) = self.inner.sources.get_mut(&source_id) {
+                    src.banned = true;
+                }
+
+                // If all sources are banned, unban them.
+                if self.inner.sources.iter().all(|(_, s)| s.banned) {
+                    for src in self.inner.sources.values_mut() {
+                        src.banned = false;
+                    }
+                }
+
+                self.inner.make_requests_obsolete(&self.chain);
+                self.inner.best_to_finalized_storage_diff = Default::default();
+                self.inner.best_runtime = None;
+                self.inner.top_trie_root_calculation_cache = None;
+
                 let previous_best_height = self.chain.best_block_header().number;
                 BlockVerification::Reset {
                     sync: OptimisticSync {
@@ -991,20 +895,26 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                                     source.banned = true;
                                 }
 
+                                // If all sources are banned, unban them.
+                                if shared.inner.sources.iter().all(|(_, s)| s.banned) {
+                                    for src in shared.inner.sources.values_mut() {
+                                        src.banned = false;
+                                    }
+                                }
+
+                                let chain = blocks_tree::NonFinalizedTree::new(
+                                    shared.inner.finalized_chain_information.clone(),
+                                );
+                                let inner = OptimisticSyncInner {
+                                    best_to_finalized_storage_diff: Default::default(),
+                                    best_runtime: None,
+                                    top_trie_root_calculation_cache: None,
+                                    ..shared.inner.with_requests_obsoleted(&chain)
+                                };
+
                                 break BlockVerification::Reset {
                                     previous_best_height: chain.best_block_header().number,
-                                    sync: OptimisticSync {
-                                        chain: blocks_tree::NonFinalizedTree::new(
-                                            shared.inner.finalized_chain_information.clone(),
-                                        ),
-                                        inner: OptimisticSyncInner {
-                                            best_to_finalized_storage_diff: Default::default(),
-                                            best_runtime: None,
-                                            top_trie_root_calculation_cache: None,
-                                            cancelling_requests: true,
-                                            ..shared.inner
-                                        },
-                                    },
+                                    sync: OptimisticSync { chain, inner },
                                     reason: ResetCause::JustificationError(error),
                                 };
                             }
@@ -1130,20 +1040,27 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
                     }
+
+                    // If all sources are banned, unban them.
+                    if shared.inner.sources.iter().all(|(_, s)| s.banned) {
+                        for src in shared.inner.sources.values_mut() {
+                            src.banned = false;
+                        }
+                    }
+
+                    let chain = blocks_tree::NonFinalizedTree::new(
+                        shared.inner.finalized_chain_information.clone(),
+                    );
+                    let inner = OptimisticSyncInner {
+                        best_to_finalized_storage_diff: Default::default(),
+                        best_runtime: None,
+                        top_trie_root_calculation_cache: None,
+                        ..shared.inner.with_requests_obsoleted(&chain)
+                    };
+
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
-                        sync: OptimisticSync {
-                            chain: blocks_tree::NonFinalizedTree::new(
-                                shared.inner.finalized_chain_information.clone(),
-                            ),
-                            inner: OptimisticSyncInner {
-                                best_to_finalized_storage_diff: Default::default(),
-                                best_runtime: None,
-                                top_trie_root_calculation_cache: None,
-                                cancelling_requests: true,
-                                ..shared.inner
-                            },
-                        },
+                        sync: OptimisticSync { chain, inner },
                         reason: ResetCause::InvalidHeader(error),
                     };
                 }
@@ -1154,20 +1071,26 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
                     }
+                    // If all sources are banned, unban them.
+                    if shared.inner.sources.iter().all(|(_, s)| s.banned) {
+                        for src in shared.inner.sources.values_mut() {
+                            src.banned = false;
+                        }
+                    }
+
+                    let chain = blocks_tree::NonFinalizedTree::new(
+                        shared.inner.finalized_chain_information.clone(),
+                    );
+                    let inner = OptimisticSyncInner {
+                        best_to_finalized_storage_diff: Default::default(),
+                        best_runtime: None,
+                        top_trie_root_calculation_cache: None,
+                        ..shared.inner.with_requests_obsoleted(&chain)
+                    };
+
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
-                        sync: OptimisticSync {
-                            chain: blocks_tree::NonFinalizedTree::new(
-                                shared.inner.finalized_chain_information.clone(),
-                            ),
-                            inner: OptimisticSyncInner {
-                                best_to_finalized_storage_diff: Default::default(),
-                                best_runtime: None,
-                                top_trie_root_calculation_cache: None,
-                                cancelling_requests: true,
-                                ..shared.inner
-                            },
-                        },
+                        sync: OptimisticSync { chain, inner },
                         reason: ResetCause::NonCanonical,
                     };
                 }
@@ -1182,20 +1105,26 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
                     }
+                    // If all sources are banned, unban them.
+                    if shared.inner.sources.iter().all(|(_, s)| s.banned) {
+                        for src in shared.inner.sources.values_mut() {
+                            src.banned = false;
+                        }
+                    }
+
+                    let chain = blocks_tree::NonFinalizedTree::new(
+                        shared.inner.finalized_chain_information.clone(),
+                    );
+                    let inner = OptimisticSyncInner {
+                        best_to_finalized_storage_diff: Default::default(),
+                        best_runtime: None,
+                        top_trie_root_calculation_cache: None,
+                        ..shared.inner.with_requests_obsoleted(&chain)
+                    };
+
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
-                        sync: OptimisticSync {
-                            chain: blocks_tree::NonFinalizedTree::new(
-                                shared.inner.finalized_chain_information.clone(),
-                            ),
-                            inner: OptimisticSyncInner {
-                                best_to_finalized_storage_diff: Default::default(),
-                                best_runtime: None,
-                                top_trie_root_calculation_cache: None,
-                                cancelling_requests: true,
-                                ..shared.inner
-                            },
-                        },
+                        sync: OptimisticSync { chain, inner },
                         reason: ResetCause::HeaderBodyError(error),
                     };
                 }
@@ -1376,77 +1305,19 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
 
 /// Request that should be emitted towards a certain source.
 #[derive(Debug)]
-pub enum RequestAction<'a, TRq, TSrc, TBl> {
-    /// A request must be emitted for the given source.
-    ///
-    /// The request has **not** been acknowledged when this event is emitted. You **must** call
-    /// [`Start::start`] to notify the [`OptimisticSync`] that the request has been sent
-    /// out.
-    Start {
-        /// Source where to request blocks from.
-        source_id: SourceId,
-        /// User data of source where to request blocks from.
-        source: &'a mut TSrc,
-        /// Must be used to accept the request.
-        start: Start<'a, TRq, TSrc, TBl>,
-        /// Height of the block to request.
-        block_height: NonZeroU64,
-        /// Number of blocks to request. Always smaller than the value passed through
-        /// [`Config::blocks_request_granularity`].
-        num_blocks: NonZeroU32,
-    },
-
-    /// The given [`RequestId`] is no longer valid.
-    ///
-    /// > **Note**: The request can either be cancelled, or the request can be let through but
-    /// >           marked in a way that [`OptimisticSync::finish_request`] isn't called.
-    Cancel {
-        /// Identifier for the request. No longer valid.
-        request_id: RequestId,
-        /// User data associated with the request.
-        user_data: TRq,
-        /// Source where to request blocks from.
-        source_id: SourceId,
-        /// User data of source where to request blocks from.
-        source: &'a mut TSrc,
-    },
-}
-
-/// Must be used to accept the request.
-#[must_use]
-pub struct Start<'a, TRq, TSrc, TBl> {
-    verification_queue: &'a mut VecDeque<VerificationQueueEntry<TRq, TBl>>,
-    source: SourceId,
-    missing_pos: usize,
-    next_request_id: &'a mut RequestId,
-    marker: PhantomData<&'a TSrc>,
-}
-
-impl<'a, TRq, TSrc, TBl> Start<'a, TRq, TSrc, TBl> {
-    /// Updates the [`OptimisticSync`] with the fact that the request has actually been started.
-    /// Returns the identifier for the request that must later be passed back to
-    /// [`OptimisticSync::finish_request`].
-    pub fn start(self, user_data: TRq) -> RequestId {
-        let request_id = *self.next_request_id;
-        self.next_request_id.0 += 1;
-
-        self.verification_queue[self.missing_pos].ty = VerificationQueueEntryTy::Requested {
-            id: request_id,
-            source: self.source,
-            user_data,
-        };
-
-        request_id
-    }
-}
-
-impl<'a, TRq, TSrc, TBl> fmt::Debug for Start<'a, TRq, TSrc, TBl> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("Start").finish()
-    }
+pub struct RequestDetail {
+    /// Source where to request blocks from.
+    pub source_id: SourceId,
+    /// Height of the block to request.
+    pub block_height: NonZeroU64,
+    /// Number of blocks to request. This might be equal to `u32::max_value()` in case no upper
+    /// bound is required. The API user is responsible for clamping this value to a reasonable
+    /// limit.
+    pub num_blocks: NonZeroU32,
 }
 
 pub enum FinishRequestOutcome<'a, TSrc> {
+    Obsolete,
     Queued,
     SourcePunished(&'a mut TSrc),
 }
@@ -1459,32 +1330,18 @@ pub enum RequestFail {
 
 /// Iterator that drains requests after a source has been removed.
 pub struct RequestsDrain<'a, TRq, TBl> {
-    iter: iter::Fuse<alloc::collections::vec_deque::IterMut<'a, VerificationQueueEntry<TRq, TBl>>>,
-    source_id: SourceId,
+    iter: verification_queue::SourceDrain<'a, TRq, TBl>,
 }
 
 impl<'a, TRq, TBl> Iterator for RequestsDrain<'a, TRq, TBl> {
     type Item = (RequestId, TRq);
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let entry = self.iter.next()?;
-            match entry.ty {
-                VerificationQueueEntryTy::Requested { source, .. } if source == self.source_id => {
-                    match mem::replace(&mut entry.ty, VerificationQueueEntryTy::Missing) {
-                        VerificationQueueEntryTy::Requested { id, user_data, .. } => {
-                            return Some((id, user_data));
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-                _ => {}
-            }
-        }
+        self.iter.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, self.iter.size_hint().1)
+        self.iter.size_hint()
     }
 }
 
@@ -1497,7 +1354,7 @@ impl<'a, TRq, TBl> fmt::Debug for RequestsDrain<'a, TRq, TBl> {
 impl<'a, TRq, TBl> Drop for RequestsDrain<'a, TRq, TBl> {
     fn drop(&mut self) {
         // Drain all remaining elements even if the iterator is dropped eagerly.
-        // This is the reason why a custom iterator type is needed, rather than using combinators.
+        // This is the reason why a custom iterator type is needed.
         for _ in self {}
     }
 }

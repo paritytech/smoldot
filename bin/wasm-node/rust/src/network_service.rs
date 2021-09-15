@@ -70,6 +70,9 @@ pub struct Config {
 
 /// See [`Config::chains`].
 pub struct ConfigChain {
+    /// Name of the chain, for logging purposes.
+    pub log_name: String,
+
     /// List of node identities and addresses that are known to belong to the chain's peer-to-pee
     /// network.
     pub bootstrap_nodes: Vec<(PeerId, Multiaddr)>,
@@ -101,6 +104,10 @@ pub struct NetworkService {
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+
+    /// Names of the various chains the network service connects to. Used only for logging
+    /// purposes.
+    log_chain_names: Vec<String>,
 }
 
 /// Fields of [`NetworkService`] behind a mutex.
@@ -132,13 +139,15 @@ impl NetworkService {
         // TODO: this `bootstrap_nodes` field is weird ; should we de-duplicate entry in known_nodes?
         let mut known_nodes = Vec::new();
 
+        let mut log_chain_names = Vec::with_capacity(num_chains);
+
         for chain in config.chains {
             chains.push(service::ChainConfig {
                 bootstrap_nodes: (known_nodes.len()
                     ..(known_nodes.len() + chain.bootstrap_nodes.len()))
                     .collect(),
-                in_slots: 25,
-                out_slots: 25,
+                in_slots: 3,
+                out_slots: 4,
                 grandpa_protocol_config: if chain.has_grandpa_protocol {
                     // TODO: dummy values
                     Some(service::GrandpaState {
@@ -157,6 +166,7 @@ impl NetworkService {
             });
 
             known_nodes.extend(chain.bootstrap_nodes);
+            log_chain_names.push(chain.log_name);
         }
 
         let network_service = Arc::new(NetworkService {
@@ -175,6 +185,7 @@ impl NetworkService {
                 randomness_seed: rand::random(),
             }),
             important_nodes,
+            log_chain_names,
         });
 
         // Spawn a task pulling events from the network and transmitting them to the event senders.
@@ -225,8 +236,9 @@ impl NetworkService {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}) => BlockAnnounce({}, {}, is_best={})",
+                                        "Connection({}, {}) => BlockAnnounce({}, {}, is_best={})",
                                         peer_id,
+                                        &network_service.log_chain_names[chain_index],
                                         chain_index,
                                         HashDisplay(&announce.decode().header.hash()),
                                         announce.decode().is_best
@@ -246,9 +258,9 @@ impl NetworkService {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}) => ChainConnected({}, {}, {})",
+                                        "Connection({}, {}) => ChainConnected({}, {})",
                                         peer_id,
-                                        chain_index,
+                                        &network_service.log_chain_names[chain_index],
                                         best_number,
                                         HashDisplay(&best_hash)
                                     );
@@ -265,9 +277,9 @@ impl NetworkService {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}) => ChainDisconnected({})",
+                                        "Connection({}, {}) => ChainDisconnected",
                                         peer_id,
-                                        chain_index,
+                                        &network_service.log_chain_names[chain_index],
                                     );
                                     break Event::Disconnected {
                                         peer_id,
@@ -288,8 +300,8 @@ impl NetworkService {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection(?) => GrandpaCommitMessage({}, {})",
-                                        chain_index,
+                                        "Connection(?, {}) => GrandpaCommitMessage({})",
+                                        &network_service.log_chain_names[chain_index],
                                         HashDisplay(message.decode().message.target_hash),
                                     );
                                     break Event::GrandpaCommitMessage {

@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #![recursion_limit = "1024"]
-#![deny(broken_intra_doc_links)]
+#![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
 use futures::{channel::oneshot, prelude::*};
@@ -35,6 +35,7 @@ use structopt::StructOpt as _;
 use tracing::Instrument as _;
 
 mod cli;
+mod json_rpc_service;
 mod network_service;
 mod sync_service;
 
@@ -43,8 +44,12 @@ fn main() {
 }
 
 async fn async_main() {
-    let cli_options = cli::CliOptions::from_args();
+    match cli::CliOptions::from_args() {
+        cli::CliOptions::Run(r) => run(r).await,
+    }
+}
 
+async fn run(cli_options: cli::CliOptionsRun) {
     // Setup the logging system of the binary.
     if matches!(
         cli_options.output,
@@ -286,6 +291,29 @@ async fn async_main() {
         None
     };
 
+    // Start the JSON-RPC service.
+    // It only needs to be kept alive in order to function.
+    //
+    // Note that initialization can panic if, for example, the port is already occupied. It is
+    // preferable to fail to start the node altogether rather than make the user believe that they
+    // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
+    // something else.
+    let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
+        Some(
+            json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+                tasks_executor: {
+                    let threads_pool = threads_pool.clone();
+                    Box::new(move |task| threads_pool.spawn_ok(task))
+                },
+                bind_address,
+            })
+            .await
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+
     /*let mut telemetry = {
         let endpoints = chain_spec
             .telemetry_endpoints()
@@ -362,6 +390,8 @@ async fn async_main() {
                             None
                         },
                         max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(80),
+                        num_peers: u64::try_from(network_service.num_peers(0).await)
+                            .unwrap_or(u64::max_value()),
                         num_network_connections: u64::try_from(network_service.num_established_connections().await)
                             .unwrap_or(u64::max_value()),
                         best_number: sync_state.best_block_number,

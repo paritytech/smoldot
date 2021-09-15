@@ -365,10 +365,19 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
     }
 
     fn warp_sync_request_from_next_source(
-        sources: slab::Slab<Source<TSrc>>,
+        mut sources: slab::Slab<Source<TSrc>>,
         state: PreVerificationState,
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
     ) -> Self {
+        // It is possible for a source to be banned because of, say, networking errors.
+        // If all sources are "banned", unban them in order to try make progress again with the
+        // hopes that this time it will work.
+        if sources.iter().all(|(_, s)| s.already_tried) {
+            for (_, s) in &mut sources {
+                s.already_tried = false;
+            }
+        }
+
         let next_id = sources
             .iter()
             .find(|(_, s)| !s.already_tried)
@@ -382,6 +391,7 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
                 previous_verifier_values,
             })
         } else {
+            debug_assert!(sources.is_empty());
             Self::WaitingForSources(WaitingForSources {
                 sources,
                 state,
@@ -496,6 +506,19 @@ impl<TSrc> StorageGet<TSrc> {
             self.inner.inject_value(value),
             self.fetched_current_epoch,
             self.state,
+        )
+    }
+
+    /// Injects a failure to retrieve the storage value.
+    pub fn inject_error(self) -> GrandpaWarpSync<TSrc> {
+        GrandpaWarpSync::InProgress(
+            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.state.sources,
+                PreVerificationState {
+                    start_chain_information: self.state.start_chain_information,
+                },
+                None,
+            ),
         )
     }
 }
@@ -839,6 +862,19 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             user_data,
             already_tried: false,
         }))
+    }
+
+    /// Injects a failure to retrieve the parameters.
+    pub fn inject_error(self) -> GrandpaWarpSync<TSrc> {
+        GrandpaWarpSync::InProgress(
+            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.state.sources,
+                PreVerificationState {
+                    start_chain_information: self.state.start_chain_information,
+                },
+                None,
+            ),
+        )
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`

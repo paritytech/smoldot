@@ -611,6 +611,7 @@ impl ReadyToRun {
             HostFunction::ext_default_child_storage_storage_kill_version_2 => todo!(),
             HostFunction::ext_default_child_storage_storage_kill_version_3 => todo!(),
             HostFunction::ext_default_child_storage_clear_prefix_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_clear_prefix_version_2 => todo!(),
             HostFunction::ext_default_child_storage_set_version_1 => todo!(),
             HostFunction::ext_default_child_storage_clear_version_1 => todo!(),
             HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
@@ -989,6 +990,7 @@ impl ReadyToRun {
             HostFunction::ext_default_child_storage_storage_kill_version_2 => todo!(),
             HostFunction::ext_default_child_storage_storage_kill_version_3 => todo!(),
             HostFunction::ext_default_child_storage_clear_prefix_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_clear_prefix_version_2 => todo!(),
             HostFunction::ext_default_child_storage_set_version_1 => todo!(),
             HostFunction::ext_default_child_storage_clear_version_1 => todo!(),
             HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
@@ -1978,13 +1980,23 @@ impl CallRuntimeVersion {
     /// If an error happened during the execution (such as an invalid Wasm binary code), pass
     /// an `Err`.
     pub fn resume(self, scale_encoded_runtime_version: Result<&[u8], ()>) -> HostVm {
-        // TODO: don't allocate a Vec here
-        let scale_encoded_runtime_version =
-            parity_scale_codec::Encode::encode(&scale_encoded_runtime_version.ok());
-        self.inner.alloc_write_and_return_pointer_size(
-            HostFunction::ext_misc_runtime_version_version_1.name(),
-            iter::once(scale_encoded_runtime_version),
-        )
+        if let Ok(scale_encoded_runtime_version) = scale_encoded_runtime_version {
+            self.inner.alloc_write_and_return_pointer_size(
+                HostFunction::ext_misc_runtime_version_version_1.name(),
+                iter::once(either::Left([1]))
+                    .chain(iter::once(either::Right(either::Left(
+                        util::encode_scale_compact_usize(scale_encoded_runtime_version.len()),
+                    ))))
+                    .chain(iter::once(either::Right(either::Right(
+                        scale_encoded_runtime_version,
+                    )))),
+            )
+        } else {
+            self.inner.alloc_write_and_return_pointer_size(
+                HostFunction::ext_misc_runtime_version_version_1.name(),
+                iter::once([0]),
+            )
+        }
     }
 }
 
@@ -2471,6 +2483,7 @@ externalities! {
     ext_default_child_storage_storage_kill_version_2,
     ext_default_child_storage_storage_kill_version_3,
     ext_default_child_storage_clear_prefix_version_1,
+    ext_default_child_storage_clear_prefix_version_2,
     ext_default_child_storage_set_version_1,
     ext_default_child_storage_clear_version_1,
     ext_default_child_storage_exists_version_1,

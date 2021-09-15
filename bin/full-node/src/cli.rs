@@ -31,13 +31,19 @@
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
 use core::convert::TryFrom as _;
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
 // started with `--help`.
 
 #[derive(Debug, structopt::StructOpt)]
-pub struct CliOptions {
+pub enum CliOptions {
+    /// Connect to the chain and synchronize the local database with the network.
+    Run(CliOptionsRun),
+}
+
+#[derive(Debug, structopt::StructOpt)]
+pub struct CliOptionsRun {
     /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
     pub chain: CliChain,
@@ -50,6 +56,9 @@ pub struct CliOptions {
     /// Ed25519 private key of network identity (32 bytes hexadecimal).
     #[structopt(long)]
     pub node_key: Option<NodeKey>,
+    /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
+    #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
+    pub json_rpc_address: JsonRpcAddress,
     /// Do not load or store anything on disk.
     #[structopt(long)]
     pub tmp: bool,
@@ -188,4 +197,19 @@ pub enum NodeKeyParseError {
     FromHex(hex::FromHexError),
     #[display(fmt = "Invalid ed25519 private key")]
     BadKey,
+}
+
+#[derive(Debug)]
+pub struct JsonRpcAddress(pub Option<SocketAddr>);
+
+fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
+    if string == "none" {
+        return Ok(JsonRpcAddress(None));
+    }
+
+    if let Ok(addr) = string.parse::<SocketAddr>() {
+        return Ok(JsonRpcAddress(Some(addr)));
+    }
+
+    Err("Failed to parse JSON-RPC server address".into())
 }

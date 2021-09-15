@@ -110,9 +110,8 @@
 //! case of a (D)DoS attack on the WebSocket server, only up to one core of CPU processing power
 //! can be occupied by the attacker.
 
-// TODO: this guard against `unknown` is a hack because async_std doesn't provide TcpListener/TcpStream when target_os = "unknown"
-#![cfg(all(feature = "std", not(target_os = "unknown")))]
-#![cfg_attr(docsrs, doc(cfg(all(feature = "std", not(target_os = "unknown")))))]
+#![cfg(all(feature = "std"))]
+#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
 
 #[cfg(test)]
 mod tests;

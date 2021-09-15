@@ -37,7 +37,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{ffi, network_service, runtime_service, sync_service, transactions_service};
+use crate::{ffi, runtime_service, sync_service, transactions_service};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -66,12 +66,14 @@ use std::{
 
 /// Configuration for a JSON-RPC service.
 pub struct Config<'a> {
+    /// Name of the chain, for logging purposes.
+    ///
+    /// > **Note**: This name will be directly printed out. Any special character should already
+    /// >           have been filtered out from this name.
+    pub log_name: String,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
-
-    /// Service responsible for the networking of the chain, and index of the chain within the
-    /// network service to handle.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
@@ -157,6 +159,7 @@ impl JsonRpcService {
         let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
+            log_target: format!("json-rpc-{}", config.log_name),
             new_requests_rx: Mutex::new(new_requests_rx),
             responses_sender: Mutex::new(responses_sender),
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
@@ -167,7 +170,6 @@ impl JsonRpcService {
             chain_is_live: config.chain_spec.has_live_network(),
             chain_properties_json: config.chain_spec.properties().to_owned(),
             peer_id_base58: config.peer_id.to_base58(),
-            network_service: config.network_service.0,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
@@ -378,6 +380,9 @@ impl HandleRpcError {
 
 /// Fields used to process JSON-RPC requests in the background.
 struct Background {
+    /// Target to use for all the logs.
+    log_target: String,
+
     /// Receiver for new incoming JSON-RPC requests.
     new_requests_rx: Mutex<mpsc::Receiver<String>>,
 
@@ -402,8 +407,6 @@ struct Background {
     /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
     peer_id_base58: String,
 
-    /// See [`Config::network_service`].
-    network_service: Arc<network_service::NetworkService>,
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
     /// See [`Config::runtime_service`].
@@ -458,7 +461,7 @@ impl Background {
             Ok(v) => v,
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: &self.log_target,
                     "Error in JSON-RPC method call: {}", error
                 );
                 let _ = self
@@ -471,7 +474,7 @@ impl Background {
             }
             Err(error) => {
                 log::warn!(
-                    target: "json-rpc",
+                    target: &self.log_target,
                     "Ignoring malformed JSON-RPC call: {}", error
                 );
                 return;
@@ -858,7 +861,7 @@ impl Background {
                     }
                     Err(error) => {
                         log::warn!(
-                            target: "json-rpc",
+                            target: &self.log_target,
                             "Returning error from `state_getMetadata`. \
                             API user might not function properly. Error: {}",
                             error
@@ -1020,7 +1023,26 @@ impl Background {
                     .unwrap();
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                self.subscribe_storage(request_id, list).await;
+                if list.is_empty() {
+                    // When the list of keys is empty, that means we want to subscribe to *all*
+                    // storage changes. It is not possible to reasonably implement this in a
+                    // light client.
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Subscribing to all storage changes isn't supported",
+                            ),
+                            None,
+                        ))
+                        .await;
+                } else {
+                    self.subscribe_storage(request_id, list).await;
+                }
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 let invalid = if let Some(cancel_tx) = self
@@ -1215,7 +1237,7 @@ impl Background {
                     .await;
             }
             _method => {
-                log::error!(target: "json-rpc", "JSON-RPC call not supported yet: {:?}", _method);
+                log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 let _ = self
                     .responses_sender
                     .lock()
@@ -1632,11 +1654,13 @@ impl Background {
             let blocks_stream =
                 stream::once(future::ready(block_header)).chain(blocks_subscription);
             let sync_service = self.sync_service.clone();
+            let log_target = self.log_target.clone();
 
             stream::unfold(
                 (blocks_stream, list, known_values),
                 move |(mut blocks_stream, list, mut known_values)| {
                     let sync_service = sync_service.clone();
+                    let log_target = log_target.clone();
                     async move {
                         loop {
                             let block = blocks_stream.next().await?;
@@ -1670,8 +1694,12 @@ impl Background {
                                     }
                                     Err(error) => {
                                         log::log!(
-                                            target: "json-rpc",
-                                            if error.is_network_problem() { log::Level::Debug } else { log::Level::Warn },
+                                            target: &log_target,
+                                            if error.is_network_problem() {
+                                                log::Level::Debug
+                                            } else {
+                                                log::Level::Warn
+                                            },
                                             "state_subscribeStorage changes check failed: {}",
                                             error
                                         );

@@ -482,21 +482,7 @@ impl InherentExtrinsics {
     ///
     /// See the module-level documentation for more information.
     pub fn inject_inherents(self, inherents: InherentData) -> BlockBuild {
-        self.inject_raw_inherents_list(
-            [
-                (*b"timstap0", inherents.timestamp.to_le_bytes()),
-                match inherents.consensus {
-                    InherentDataConsensus::Aura { slot_number } => {
-                        (*b"auraslot", slot_number.to_le_bytes())
-                    }
-                    InherentDataConsensus::Babe { slot_number } => {
-                        (*b"babeslot", slot_number.to_le_bytes())
-                    }
-                },
-            ]
-            .iter()
-            .cloned(),
-        )
+        self.inject_raw_inherents_list(inherents.as_raw_list())
     }
 
     /// Injects a raw list of inherents and resumes execution.
@@ -565,6 +551,27 @@ pub struct InherentData {
     pub uncles: TUnc,*/
 
     // TODO: parachain-related inherents are missing
+}
+
+impl InherentData {
+    /// Turns this list of inherents into a list that can be passed as parameter to the runtime.
+    pub fn as_raw_list(
+        &'_ self,
+    ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
+        // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
+        // See https://doc.rust-lang.org/std/primitive.array.html#editions
+        core::array::IntoIter::new([
+            (*b"timstap0", self.timestamp.to_le_bytes()),
+            match self.consensus {
+                InherentDataConsensus::Aura { slot_number } => {
+                    (*b"auraslot", slot_number.to_le_bytes())
+                }
+                InherentDataConsensus::Babe { slot_number } => {
+                    (*b"babeslot", slot_number.to_le_bytes())
+                }
+            },
+        ])
+    }
 }
 
 /// Extra consensus-specific items in [`InherentData`].

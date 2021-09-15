@@ -173,23 +173,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         }
     }
 
-    /// Removes all transactions and blocks from the pool, and sets the current finalized block
-    /// hash to the value passed as parameter.
-    pub fn clear_and_reset(&mut self, new_finalized_block_hash: [u8; 32]) {
-        self.transactions.clear();
-        self.transactions_by_inclusion.clear();
-        self.included_transactions.clear();
-        self.transaction_validations.clear();
-        self.transactions_by_validation.clear();
-        self.not_validated.clear();
-        self.by_hash.clear();
-        self.blocks_tree.clear();
-        self.blocks_by_id.clear();
-        self.best_block_index = None;
-        self.finalized_block_index = None;
-        self.blocks_tree_root_hash = new_finalized_block_hash;
-    }
-
     /// Returns the number of transactions in the pool.
     pub fn num_transactions(&self) -> usize {
         self.transactions.len()
@@ -807,7 +790,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         }
 
         // Return value of the function.
-        let mut return_value = Vec::with_capacity(num_blocks_to_remove);
+        let return_value = Vec::with_capacity(num_blocks_to_remove);
 
         // Do the actual pruning.
         for pruned in self.blocks_tree.prune_ancestors(upmost_to_remove) {
@@ -828,7 +811,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 .map(|(_, tx_id)| *tx_id)
                 .collect::<Vec<_>>();
 
-            for tx_id in included_transactions {
+            for _tx_id in included_transactions {
                 // TODO: finish here
                 //self.remove_transaction();
             }
