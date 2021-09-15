@@ -31,7 +31,9 @@ use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use rand::seq::IteratorRandom as _;
 use smoldot::{
     database::full_sqlite,
-    executor, header, libp2p,
+    executor, header,
+    informant::HashDisplay,
+    libp2p,
     network::{self, protocol::BlockData, service::BlocksRequestError},
     sync::{all, optimistic},
 };
@@ -314,6 +316,17 @@ impl SyncBackground {
                 }
                 all::ProcessOne::VerifyWarpSyncFragment(_) => unreachable!(),
                 all::ProcessOne::VerifyBodyHeader(verify) => {
+                    let hash_to_verify = verify.hash();
+                    let height_to_verify = verify.height();
+
+                    let span = tracing::debug_span!(
+                        "block-verification",
+                        hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
+                        outcome = tracing::field::Empty, is_new_best = tracing::field::Empty,
+                        error = tracing::field::Empty,
+                    );
+                    let _enter = span.enter();
+
                     let mut verify = verify.start(unix_time, ());
                     loop {
                         match verify {
@@ -322,7 +335,8 @@ impl SyncBackground {
                                 error,
                                 ..
                             } => {
-                                tracing::warn!(%error, "failed-block-verification");
+                                span.record("outcome", &"failure");
+                                span.record("error", &tracing::field::display(error));
                                 self.sync = sync_out;
                                 break;
                             }
@@ -330,6 +344,9 @@ impl SyncBackground {
                                 sync: sync_out,
                                 finalized_blocks,
                             } => {
+                                span.record("outcome", &"success");
+                                span.record("is_new_best", &true);
+
                                 // Processing has made a step forward.
                                 // There is nothing to do, but this is used to update the
                                 // best block shown on the informant.
@@ -372,6 +389,9 @@ impl SyncBackground {
                                 sync: sync_out,
                                 ..
                             } => {
+                                span.record("outcome", &"success");
+                                span.record("is_new_best", &true);
+
                                 // Processing has made a step forward.
                                 // There is nothing to do, but this is used to update to best block
                                 // shown on the informant.
@@ -384,6 +404,8 @@ impl SyncBackground {
                                 break;
                             }
                             all::BlockVerification::Success { sync: sync_out, .. } => {
+                                span.record("outcome", &"success");
+                                span.record("is_new_best", &false);
                                 self.sync = sync_out;
                                 break;
                             }
@@ -420,9 +442,21 @@ impl SyncBackground {
                         }
                     }
                 }
+
                 all::ProcessOne::VerifyHeader(verify) => {
+                    let hash_to_verify = verify.hash();
+                    let height_to_verify = verify.height();
+
+                    let span = tracing::trace_span!(
+                        "header-verification",
+                        hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
+                        outcome = tracing::field::Empty, error = tracing::field::Empty,
+                    );
+                    let _enter = span.enter();
+
                     match verify.perform(unix_time, ()) {
                         all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
+                            span.record("outcome", &"success");
                             self.sync = sync_out;
                             continue;
                         }
@@ -431,9 +465,8 @@ impl SyncBackground {
                             error,
                             ..
                         } => {
-                            // TODO: print block info
-                            tracing::warn!(%error, "failed-block-verification");
-
+                            span.record("outcome", &"failure");
+                            span.record("error", &tracing::field::display(error));
                             self.sync = sync_out;
                             continue;
                         }
