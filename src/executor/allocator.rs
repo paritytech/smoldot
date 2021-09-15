@@ -67,7 +67,7 @@
 //!   wasted. This is more pronounced (in terms of absolute heap amounts) with larger allocation
 //!   sizes.
 
-use std::{
+use core::{
     convert::{TryFrom, TryInto},
     mem,
     ops::{Index, IndexMut, Range},
