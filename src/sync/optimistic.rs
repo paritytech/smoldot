@@ -1372,15 +1372,6 @@ pub enum ResetCause {
     HeaderBodyError(blocks_tree::BodyVerifyError),
     /// Received block isn't a child of the current best block.
     NonCanonical,
-    /// Received block number doesn't match expected number.
-    // TODO: unused?
-    #[display(fmt = "Received block height doesn't match expected number")]
-    UnexpectedBlockNumber {
-        /// Number of the block that was expected to be verified next.
-        expected: u64,
-        /// Number of the block that was verified.
-        actual: u64,
-    },
 }
 
 /// Output of [`OptimisticSync::disassemble`].
