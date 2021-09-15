@@ -1631,7 +1631,7 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
         /// Error that happened.
-        error: verify::header_only::Error,
+        error: BlockVerificationError,
         /// User data that was passed to [`HeaderVerify::perform`] and is unused.
         user_data: TBl,
     },
@@ -1646,6 +1646,20 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
     FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+}
+
+/// Error that can happen when verifying a block body.
+#[derive(Debug, derive_more::Display)]
+pub enum BlockVerificationError {
+    /// Error while verifying a justification.
+    // TODO: this should be a separate verification process; need some refactoring
+    JustificationError(blocks_tree::JustificationVerifyError),
+    /// Error while decoding a header.
+    InvalidHeader(header::Error),
+    /// Error while verifying a header.
+    HeaderError(blocks_tree::HeaderVerifyError),
+    /// Error while verifying a header and body.
+    HeaderBodyError(blocks_tree::BodyVerifyError),
 }
 
 impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
@@ -1683,16 +1697,34 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     finalized_blocks,
                 }
             }
-            optimistic::BlockVerification::Reset { sync, .. } => {
-                BlockVerification::Error {
-                    sync: AllSync {
-                        inner: AllSyncInner::Optimistic { inner: sync },
-                        shared,
-                    },
-                    error: verify::header_only::Error::NonSequentialBlockNumber, // TODO: this is the completely wrong error; needs some deeper API changes
-                    user_data,
-                }
-            }
+            optimistic::BlockVerification::Reset { sync, reason, .. } => BlockVerification::Error {
+                sync: AllSync {
+                    inner: AllSyncInner::Optimistic { inner: sync },
+                    shared,
+                },
+                error: match reason {
+                    optimistic::ResetCause::JustificationError(err) => {
+                        // TODO: justifications should be verified separately
+                        BlockVerificationError::JustificationError(err)
+                    }
+                    optimistic::ResetCause::InvalidHeader(err) => {
+                        BlockVerificationError::InvalidHeader(err)
+                    }
+                    optimistic::ResetCause::HeaderError(err) => {
+                        BlockVerificationError::HeaderError(err)
+                    }
+                    optimistic::ResetCause::HeaderBodyError(err) => {
+                        BlockVerificationError::HeaderBodyError(err)
+                    }
+                    optimistic::ResetCause::NonCanonical => BlockVerificationError::HeaderError(
+                        // TODO: completely wrong error; unclear how to handle this
+                        blocks_tree::HeaderVerifyError::VerificationFailed(
+                            verify::header_only::Error::NonSequentialBlockNumber,
+                        ),
+                    ),
+                },
+                user_data,
+            },
             optimistic::BlockVerification::FinalizedStorageGet(inner) => {
                 BlockVerification::FinalizedStorageGet(StorageGet {
                     inner,

@@ -22,7 +22,7 @@ use crate::{
     header, util,
 };
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
 /// Configuration for a transaction validation process.
@@ -322,10 +322,7 @@ pub fn validate_transaction(
                 }
                 .scale_encoding(),
                 top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: hashbrown::HashMap::with_capacity_and_hasher(
-                    64, // Rough estimate.
-                    Default::default(),
-                ),
+                storage_top_trie_changes: BTreeMap::new(),
                 offchain_storage_changes: hashbrown::HashMap::default(),
             });
 
@@ -361,7 +358,7 @@ pub fn validate_transaction(
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
                 top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: hashbrown::HashMap::default(),
+                storage_top_trie_changes: BTreeMap::default(),
                 offchain_storage_changes: hashbrown::HashMap::default(),
             });
 

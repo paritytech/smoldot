@@ -610,7 +610,9 @@ impl<'a> DigestRef<'a> {
                     babe_seal_index = Some(item_num);
                 }
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItem::ChangesTrieSignal(_) | DigestItem::Beefy { .. } => {}
+                DigestItem::ChangesTrieSignal(_)
+                | DigestItem::Beefy { .. }
+                | DigestItem::RuntimeEnvironmentUpdated => {}
             }
         }
 
@@ -693,7 +695,9 @@ impl<'a> DigestRef<'a> {
                     babe_seal_index = Some(item_num);
                 }
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItemRef::ChangesTrieSignal(_) | DigestItemRef::Beefy { .. } => {}
+                DigestItemRef::ChangesTrieSignal(_)
+                | DigestItemRef::Beefy { .. }
+                | DigestItemRef::RuntimeEnvironmentUpdated => {}
             }
         }
 
@@ -918,6 +922,10 @@ pub enum DigestItemRef<'a> {
         /// Smoldot doesn't interpret the content of the log item at the moment.
         opaque: &'a [u8],
     },
+
+    /// Runtime of the chain has been updated in this block. This can include the runtime code or
+    /// the heap pages.
+    RuntimeEnvironmentUpdated,
 }
 
 impl<'a> DigestItemRef<'a> {
@@ -1051,6 +1059,7 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
             }
+            DigestItemRef::RuntimeEnvironmentUpdated => iter::once(vec![8]),
         }
     }
 }
@@ -1068,6 +1077,7 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
             DigestItem::ChangesTrieRoot(v) => DigestItemRef::ChangesTrieRoot(v),
             DigestItem::ChangesTrieSignal(v) => DigestItemRef::ChangesTrieSignal(v.clone()),
             DigestItem::Beefy { opaque } => DigestItemRef::Beefy { opaque: &*opaque },
+            DigestItem::RuntimeEnvironmentUpdated => DigestItemRef::RuntimeEnvironmentUpdated,
         }
     }
 }
@@ -1095,6 +1105,10 @@ pub enum DigestItem {
         /// Smoldot doesn't interpret the content of the log item at the moment.
         opaque: Vec<u8>,
     },
+
+    /// Runtime of the chain has been updated in this block. This can include the runtime code or
+    /// the heap pages.
+    RuntimeEnvironmentUpdated,
 }
 
 impl<'a> From<DigestItemRef<'a>> for DigestItem {
@@ -1120,6 +1134,7 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
             DigestItemRef::Beefy { opaque } => DigestItem::Beefy {
                 opaque: opaque.to_vec(),
             },
+            DigestItemRef::RuntimeEnvironmentUpdated => DigestItem::RuntimeEnvironmentUpdated,
         }
     }
 }
@@ -1205,6 +1220,7 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
                 .map_err(|_| Error::DigestItemDecodeError)?;
             Ok((DigestItemRef::ChangesTrieSignal(item), slice))
         }
+        8 => Ok((DigestItemRef::RuntimeEnvironmentUpdated, slice)),
         ty => Err(Error::UnknownDigestLogType(ty)),
     }
 }
