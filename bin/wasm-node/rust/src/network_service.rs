@@ -492,6 +492,17 @@ impl NetworkService {
         result
     }
 
+    pub async fn set_local_best_block(
+        &self,
+        chain_index: usize,
+        best_hash: [u8; 32],
+        best_number: u64,
+    ) {
+        self.network
+            .set_local_best_block(chain_index, best_hash, best_number)
+            .await
+    }
+
     pub async fn set_local_grandpa_state(
         &self,
         chain_index: usize,
