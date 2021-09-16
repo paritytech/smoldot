@@ -355,6 +355,13 @@ impl SyncBackground {
                                 span.record("outcome", &"success");
                                 span.record("is_new_best", &true);
 
+                                let fut = self.network_service.set_local_best_block(
+                                    self.network_chain_index,
+                                    sync_out.best_block_hash(),
+                                    sync_out.best_block_number(),
+                                );
+                                fut.await;
+
                                 // Processing has made a step forward.
                                 // There is nothing to do, but this is used to update the
                                 // best block shown on the informant.

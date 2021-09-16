@@ -154,8 +154,8 @@ pub struct ChainNetwork<TNow> {
     /// Extra fields protected by a `Mutex` and that are briefly accessed.
     ephemeral_guarded: Mutex<EphemeralGuarded>,
 
-    /// See [`Config::chains`].
-    chain_configs: Vec<ChainConfig>,
+    /// Number of chains. Equal to the length of [`EphemeralGuarded::chains`].
+    num_chains: usize,
 
     /// Generator for randomness.
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
@@ -200,15 +200,15 @@ struct EphemeralGuarded {
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
 
-    /// For each item in [`ChainNetwork::chain_configs`], the corresponding chain state.
+    /// For each item in [`Config::chains`], the corresponding chain state.
     ///
-    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`].
+    /// The `Vec` always has the same length as [`Config::chains`].
     chains: Vec<EphemeralGuardedChain>,
 }
 
 struct EphemeralGuardedChain {
-    /// Grandpa state. `None` if the chain doesn't use the Grandpa protocol.
-    grandpa_state: Option<GrandpaState>,
+    /// See [`ChainConfig`].
+    chain_config: ChainConfig,
 
     /// List of peers with an inbound slot attributed to them. Only includes peers the local node
     /// is connected to and who have opened a block announces substream with the local node.
@@ -348,34 +348,6 @@ where
             )
         };
 
-        let chains = config
-            .chains
-            .iter()
-            .map(|chain| EphemeralGuardedChain {
-                grandpa_state: chain.grandpa_protocol_config,
-                in_peers: {
-                    let k0 = randomness.next_u64();
-                    let k1 = randomness.next_u64();
-                    let k2 = randomness.next_u64();
-                    let k3 = randomness.next_u64();
-                    hashbrown::HashSet::with_capacity_and_hasher(
-                        usize::try_from(chain.in_slots).unwrap_or(0),
-                        ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                    )
-                },
-                out_peers: {
-                    let k0 = randomness.next_u64();
-                    let k1 = randomness.next_u64();
-                    let k2 = randomness.next_u64();
-                    let k3 = randomness.next_u64();
-                    hashbrown::HashSet::with_capacity_and_hasher(
-                        usize::try_from(chain.out_slots).unwrap_or(0),
-                        ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                    )
-                },
-            })
-            .collect();
-
         let mut initial_desired_substreams = BTreeSet::new();
 
         for (node_index, (peer_id, multiaddr)) in config.known_nodes.into_iter().enumerate() {
@@ -398,6 +370,35 @@ where
                 .or_insert(Vec::new())
                 .push(multiaddr);
         }
+
+        let num_chains = config.chains.len();
+        let chains = config
+            .chains
+            .into_iter()
+            .map(|chain| EphemeralGuardedChain {
+                in_peers: {
+                    let k0 = randomness.next_u64();
+                    let k1 = randomness.next_u64();
+                    let k2 = randomness.next_u64();
+                    let k3 = randomness.next_u64();
+                    hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.in_slots).unwrap_or(0),
+                        ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                    )
+                },
+                out_peers: {
+                    let k0 = randomness.next_u64();
+                    let k1 = randomness.next_u64();
+                    let k2 = randomness.next_u64();
+                    let k3 = randomness.next_u64();
+                    hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.out_slots).unwrap_or(0),
+                        ahash::RandomState::with_seeds(k0, k1, k2, k3),
+                    )
+                },
+                chain_config: chain,
+            })
+            .collect();
 
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
@@ -422,7 +423,7 @@ where
                 potential_addresses,
                 chains,
             }),
-            chain_configs: config.chains,
+            num_chains,
             randomness: Mutex::new(randomness),
             next_start_connect_waker: AtomicWaker::new(),
         }
@@ -448,7 +449,7 @@ where
 
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
     pub fn num_chains(&self) -> usize {
-        self.chain_configs.len()
+        self.num_chains
     }
 
     /// Adds an incoming connection to the state machine.
@@ -464,6 +465,25 @@ where
     /// libp2p protocol, its own address, in which case we send it.
     pub async fn add_incoming_connection(&self, remote_addr: multiaddr::Multiaddr) -> ConnectionId {
         self.inner.add_incoming_connection(remote_addr).await
+    }
+
+    /// Modifies the best block of the local node. See [`ChainConfig::best_hash`] and
+    /// [`ChainConfig::best_number`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if `chain_index` is out of range.
+    ///
+    pub async fn set_local_best_block(
+        &self,
+        chain_index: usize,
+        best_hash: [u8; 32],
+        best_number: u64,
+    ) {
+        let mut guarded = self.ephemeral_guarded.lock().await;
+        let mut config = &mut guarded.chains[chain_index].chain_config;
+        config.best_hash = best_hash;
+        config.best_number = best_number;
     }
 
     /// Update the state of the local node with regards to GrandPa rounds.
@@ -508,7 +528,11 @@ where
         // Update the locally-stored state, but only after the notification has been broadcasted.
         // This way, if the user cancels the future while `broadcast_notification` is executing,
         // the whole operation is cancelled.
-        *guarded.chains[chain_index].grandpa_state.as_mut().unwrap() = grandpa_state;
+        *guarded.chains[chain_index]
+            .chain_config
+            .grandpa_protocol_config
+            .as_mut()
+            .unwrap() = grandpa_state;
     }
 
     /// Sends a blocks request to the given peer.
@@ -907,7 +931,8 @@ where
                     // TODO: futures cancellation issues
                     let ephemeral_guarded = self.ephemeral_guarded.lock().await;
                     let grandpa_config = ephemeral_guarded.chains[chain_index]
-                        .grandpa_state
+                        .chain_config
+                        .grandpa_protocol_config
                         .as_ref()
                         .unwrap()
                         .clone();
@@ -944,8 +969,11 @@ where
                     notifications_protocol_index,
                     ..
                 } => {
-                    let chain_config = &self.chain_configs
-                        [*notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN];
+                    // TODO: future cancellation concern
+                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let chain_config = &ephemeral_guarded.chains
+                        [*notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
+                        .chain_config;
 
                     let handshake = if *notifications_protocol_index
                         % NOTIFICATIONS_PROTOCOLS_PER_CHAIN
@@ -1187,8 +1215,10 @@ where
                         .contains(peer_id);
                     if !has_out_slot
                         && ephemeral_guarded.chains[chain_index].in_peers.len()
-                            >= usize::try_from(self.chain_configs[chain_index].in_slots)
-                                .unwrap_or(usize::max_value())
+                            >= usize::try_from(
+                                ephemeral_guarded.chains[chain_index].chain_config.in_slots,
+                            )
+                            .unwrap_or(usize::max_value())
                     {
                         // All in slots are occupied.
                         drop(ephemeral_guarded);
@@ -1201,7 +1231,7 @@ where
                         continue;
                     }
 
-                    let chain_config = &self.chain_configs[chain_index];
+                    let chain_config = &ephemeral_guarded.chains[chain_index].chain_config;
                     let handshake = protocol::encode_block_announces_handshake(
                         protocol::BlockAnnouncesHandshakeRef {
                             best_hash: &chain_config.best_hash,
@@ -1262,7 +1292,10 @@ where
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Grandpa substream.
-                    let handshake = self.chain_configs[chain_index]
+                    // TODO: future cancellation concern
+                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let handshake = ephemeral_guarded.chains[chain_index]
+                        .chain_config
                         .role
                         .scale_encoding()
                         .to_vec();
@@ -1629,7 +1662,7 @@ where
         for (peer_id, addrs) in self.outcome {
             // Only proceed if we have out slots available.
             if lock.chains[self.chain_index].out_peers.len()
-                >= usize::try_from(self.service.chain_configs[self.chain_index].out_slots)
+                >= usize::try_from(lock.chains[self.chain_index].chain_config.out_slots)
                     .unwrap_or(usize::max_value())
             {
                 break;
