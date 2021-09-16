@@ -1140,12 +1140,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         // TODO: don't use crate::network::protocol
         // TODO: Result instead of Option?
         response: Option<crate::network::protocol::GrandpaWarpSyncResponse>,
-    ) -> ResponseOutcome {
+    ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
-        assert!(matches!(request, RequestMapping::Inline(..)));
+        let user_data = match request {
+            RequestMapping::Inline(_, _, user_data) => user_data,
+            _ => panic!(),
+        };
 
-        match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
+        let outcome = match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
             AllSyncInner::GrandpaWarpSync {
                 inner: grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(grandpa),
             } => {
@@ -1161,7 +1164,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 self.inner = other;
                 ResponseOutcome::Queued // TODO: no
             }
-        }
+        };
+
+        (user_data, outcome)
     }
 
     /// Inject a response to a previously-emitted storage proof request.
@@ -1178,12 +1183,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         &mut self,
         request_id: RequestId,
         response: Result<impl Iterator<Item = Option<impl AsRef<[u8]>>>, ()>,
-    ) -> ResponseOutcome {
+    ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
-        assert!(matches!(request, RequestMapping::Inline(..)));
+        let user_data = match request {
+            RequestMapping::Inline(_, _, user_data) => user_data,
+            _ => panic!(),
+        };
 
-        match (
+        let outcome = match (
             mem::replace(&mut self.inner, AllSyncInner::Poisoned),
             response,
         ) {
@@ -1255,7 +1263,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 self.inner = other;
                 ResponseOutcome::Queued // TODO: no
             }
-        }
+        };
+
+        (user_data, outcome)
     }
 
     // TODO: questionable function
