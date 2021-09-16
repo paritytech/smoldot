@@ -441,6 +441,17 @@ impl NetworkService {
         self.network.num_peers(chain_index).await
     }
 
+    pub async fn set_local_best_block(
+        &self,
+        chain_index: usize,
+        best_hash: [u8; 32],
+        best_number: u64,
+    ) {
+        self.network
+            .set_local_best_block(chain_index, best_hash, best_number)
+            .await
+    }
+
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     // TODO: proper error type

@@ -990,6 +990,13 @@ async fn start_relay_chain(
                     }
                 }
 
+                let fut = network_service.set_local_best_block(
+                    network_chain_index,
+                    sync.best_block_hash(),
+                    sync.best_block_number(),
+                );
+                fut.await;
+
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
                 // much possible for it to take a long time before having to wait for some event.
                 // Since JavaScript/Wasm is single-threaded, this would prevent all the other
