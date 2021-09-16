@@ -1293,7 +1293,7 @@ where
 
                     // Grandpa substream.
                     // TODO: future cancellation concern
-                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
                     let handshake = ephemeral_guarded.chains[chain_index]
                         .chain_config
                         .role
