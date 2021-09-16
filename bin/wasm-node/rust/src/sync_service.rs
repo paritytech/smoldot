@@ -685,7 +685,7 @@ async fn start_relay_chain(
     let log_target = format!("sync-service-{}", log_name);
 
     // TODO: implicit generics
-    let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
+    let mut sync = all::AllSync::<_, libp2p::PeerId, ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
         blocks_capacity: {
@@ -723,10 +723,6 @@ async fn start_relay_chain(
         let mut pending_grandpa_requests = stream::FuturesUnordered::new();
         // List of storage requests currently in progress.
         let mut pending_storage_requests = stream::FuturesUnordered::new();
-
-        // TODO: remove; should store the aborthandle in the TRq user data instead
-        let mut pending_requests = HashMap::new();
-
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut all_notifications = Vec::<mpsc::Sender<BlockNotification>>::new();
@@ -744,7 +740,7 @@ async fn start_relay_chain(
             // `requests_to_start` as soon as an entry is added and before disconnect events can
             // remove sources from the state machine.
             loop {
-                let (source_id, mut request) =
+                let (source_id, mut request_detail) =
                     match sync.desired_requests().choose(&mut rand::thread_rng()) {
                         Some(v) => v,
                         None => break,
@@ -752,11 +748,9 @@ async fn start_relay_chain(
 
                 // Before notifying the syncing of the request, clamp the number of blocks to the
                 // number of blocks we expect to receive.
-                request.num_blocks_clamp(NonZeroU64::new(64).unwrap());
+                request_detail.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
-                let request_id = sync.add_request(source_id, request.clone(), ());
-
-                match request {
+                match request_detail {
                     all::RequestDetail::BlocksRequest {
                         first_block_hash,
                         first_block_height,
@@ -799,7 +793,7 @@ async fn start_relay_chain(
                         );
 
                         let (block_request, abort) = future::abortable(block_request);
-                        pending_requests.insert(request_id, abort);
+                        let request_id = sync.add_request(source_id, request_detail, abort);
 
                         pending_block_requests
                             .push(async move { (request_id, block_request.await) });
@@ -816,7 +810,7 @@ async fn start_relay_chain(
                         );
 
                         let (grandpa_request, abort) = future::abortable(grandpa_request);
-                        pending_requests.insert(request_id, abort);
+                        let request_id = sync.add_request(source_id, request_detail, abort);
 
                         pending_grandpa_requests
                             .push(async move { (request_id, grandpa_request.await) });
@@ -824,7 +818,7 @@ async fn start_relay_chain(
                     all::RequestDetail::StorageGet {
                         block_hash,
                         state_trie_root,
-                        keys,
+                        ref keys,
                     } => {
                         let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
 
@@ -837,11 +831,12 @@ async fn start_relay_chain(
                             },
                         );
 
+                        let keys = keys.clone();
                         let storage_request = async move {
                             if let Ok(outcome) = storage_request.await {
                                 // TODO: lots of copying around
                                 // TODO: log what happens
-                                keys.into_iter()
+                                keys.iter()
                                     .map(|key| {
                                         proof_verify::verify_proof(
                                             proof_verify::VerifyProofConfig {
@@ -860,7 +855,7 @@ async fn start_relay_chain(
                         };
 
                         let (storage_request, abort) = future::abortable(storage_request);
-                        pending_requests.insert(request_id, abort);
+                        let request_id = sync.add_request(source_id, request_detail, abort);
 
                         pending_storage_requests
                             .push(async move { (request_id, storage_request.await) });
@@ -1077,8 +1072,8 @@ async fn start_relay_chain(
                         {
                             let id = peers_source_id_map.remove(&peer_id).unwrap();
                             let (_, requests) = sync.remove_source(id);
-                            for (request_id, _) in requests {
-                                pending_requests.remove(&request_id).unwrap().abort();
+                            for (_, abort) in requests {
+                                abort.abort();
                             }
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
@@ -1236,8 +1231,6 @@ async fn start_relay_chain(
                 },
 
                 (request_id, result) = pending_block_requests.select_next_some() => {
-                    pending_requests.remove(&request_id);
-
                     // A block(s) request has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
@@ -1265,8 +1258,6 @@ async fn start_relay_chain(
                 },
 
                 (request_id, result) = pending_grandpa_requests.select_next_some() => {
-                    pending_requests.remove(&request_id);
-
                     // A GrandPa warp sync request has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
@@ -1275,7 +1266,7 @@ async fn start_relay_chain(
                         sync.grandpa_warp_sync_response(
                             request_id,
                             result.ok(),
-                        )
+                        ).1
 
                     } else {
                         // The sync state machine has emitted a `Action::Cancel` earlier, and is
@@ -1285,8 +1276,6 @@ async fn start_relay_chain(
                 },
 
                 (request_id, result) = pending_storage_requests.select_next_some() => {
-                    pending_requests.remove(&request_id);
-
                     // A storage request has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
@@ -1295,7 +1284,7 @@ async fn start_relay_chain(
                         sync.storage_get_response(
                             request_id,
                             result.map(|list| list.into_iter()),
-                        )
+                        ).1
 
                     } else {
                         // The sync state machine has emitted a `Action::Cancel` earlier, and is
