@@ -337,10 +337,11 @@ impl SyncBackground {
                             } => {
                                 // Print a separate warning because it is important for the user
                                 // to be aware of the verification failure.
+                                // `%error` is last because it's quite big.
                                 tracing::warn!(
-                                    parent: &span,
-                                    %error, hash = %HashDisplay(&hash_to_verify),
-                                    height = %height_to_verify, "failed-block-verification"
+                                    parent: &span, hash = %HashDisplay(&hash_to_verify),
+                                    height = %height_to_verify, %error,
+                                    "failed-block-verification"
                                 );
                                 span.record("outcome", &"failure");
                                 span.record("error", &tracing::field::display(error));
