@@ -200,9 +200,9 @@ struct EphemeralGuarded {
     // TODO: ideally we'd use a BTreeSet to optimize, but multiaddr has no min or max value
     potential_addresses: hashbrown::HashMap<PeerId, Vec<multiaddr::Multiaddr>, ahash::RandomState>,
 
-    /// For each item in [`ChainNetwork::chain_configs`], the corresponding chain state.
+    /// For each item in [`Config::chains`], the corresponding chain state.
     ///
-    /// The `Vec` always has the same length as [`ChainNetwork::chain_configs`].
+    /// The `Vec` always has the same length as [`Config::chains`].
     chains: Vec<EphemeralGuardedChain>,
 }
 
