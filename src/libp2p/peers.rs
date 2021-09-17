@@ -1206,27 +1206,18 @@ where
             .into_iter()
     }
 
-    /// Returns an iterator to the list of [`PeerId`]s we have an outgoing notifications
-    /// substream with.
-    ///
-    /// > **Note**: This method is subject to race conditions if other methods, such as
-    /// >           [`Peers::read_write`], are called simultaneously.
-    pub async fn outgoing_substreams(
-        &self,
-        notifications_protocol_index: usize,
-    ) -> impl Iterator<Item = PeerId> {
+    /// Returns the number of connections we have a substream with.
+    pub async fn num_outgoing_substreams(&self, notifications_protocol_index: usize) -> usize {
         let guarded = self.guarded.lock().await;
         // TODO: O(n)
-        let list = guarded
+        guarded
             .peers_notifications_out
             .iter()
             .filter(|((_, idx), state)| {
                 *idx == notifications_protocol_index
                     && matches!(state.open, NotificationsOutOpenState::Open(_, _))
             })
-            .map(|((peer_index, _), _)| guarded.peers[*peer_index].peer_id.clone())
-            .collect::<Vec<_>>();
-        list.into_iter()
+            .count()
     }
 
     /// Picks the connection to use to send requests or notifications to the given peer.
