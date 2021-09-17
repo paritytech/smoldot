@@ -437,13 +437,28 @@ where
     // TODO: note about race
     pub async fn num_established_connections(&self) -> usize {
         // TODO: better impl
-        self.peers_list().await.count()
+        self.inner.peers_list().await.count()
     }
 
     /// Returns the number of peers we have a substream with.
+    ///
+    /// > **Note**: This method is subject to race conditions if other methods, such as
+    /// >           [`ChainNetwork::read_write`], are called simultaneously.
     pub async fn num_peers(&self, chain_index: usize) -> usize {
         self.inner
-            .num_outgoing_substreams(self.protocol_index(chain_index, 0))
+            .outgoing_substreams(self.protocol_index(chain_index, 0))
+            .await
+            .count()
+    }
+
+    /// Returns an iterator to the list of [`PeerId`]s that we have a chain connection
+    /// with.
+    ///
+    /// > **Note**: This method is subject to race conditions if other methods, such as
+    /// >           [`ChainNetwork::read_write`], are called simultaneously.
+    pub async fn peers_list(&self, chain_index: usize) -> impl Iterator<Item = PeerId> {
+        self.inner
+            .outgoing_substreams(self.protocol_index(chain_index, 0))
             .await
     }
 
@@ -1476,12 +1491,6 @@ where
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> Result<(), peers::ConnectionError> {
         self.inner.read_write(connection_id, read_write).await
-    }
-
-    /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
-    /// with.
-    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
-        self.inner.peers_list().await
     }
 }
 

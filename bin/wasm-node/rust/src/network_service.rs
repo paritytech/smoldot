@@ -605,7 +605,7 @@ impl NetworkService {
 
         // TODO: keep track of which peer knows about which transaction, and don't send it again
 
-        for target in self.peers_list().await {
+        for target in self.peers_list(chain_index).await {
             if self
                 .network
                 .announce_transaction(&target, chain_index, &transaction)
@@ -621,8 +621,8 @@ impl NetworkService {
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
-    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
-        self.network.peers_list().await
+    pub async fn peers_list(&self, chain_index: usize) -> impl Iterator<Item = PeerId> {
+        self.network.peers_list(chain_index).await
     }
 }
 
