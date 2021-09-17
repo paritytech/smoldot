@@ -186,17 +186,25 @@ impl RuntimeService {
         // However, in practice, there is most likely always going to be one. It is way easier to
         // always have a task active rather than create and destroy it.
         (config.tasks_executor)("runtime-download".into(), {
-            let background = Background {
-                runtime_service: runtime_service.clone(),
-                blocks_stream: {
+            let runtime_service = runtime_service.clone();
+
+            async move {
+                let blocks_stream = {
                     let (best_block_header, best_blocks_subscription) =
                         runtime_service.sync_service.subscribe_best().await;
                     stream::once(future::ready(best_block_header)).chain(best_blocks_subscription)
                 }
-                .boxed(),
-                runtime_matches_best_block: false,
-            };
-            async move { background.run().await }.boxed()
+                .boxed();
+
+                Background {
+                    runtime_service,
+                    blocks_stream,
+                    runtime_matches_best_block: false,
+                }
+                .run()
+                .await
+            }
+            .boxed()
         });
 
         runtime_service
