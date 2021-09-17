@@ -318,12 +318,7 @@ impl SyncService {
 
         // TODO: better peers selection ; don't just take the first 3
         // TODO: must only ask the peers that know about this block
-        for target in self
-            .network_service
-            .peers_list(self.network_chain_index)
-            .await
-            .take(NUM_ATTEMPTS)
-        {
+        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
             let mut result = match self
                 .network_service
                 .clone()
@@ -403,12 +398,7 @@ impl SyncService {
 
         // TODO: better peers selection ; don't just take the first 3
         // TODO: must only ask the peers that know about this block
-        for target in self
-            .network_service
-            .peers_list(self.network_chain_index)
-            .await
-            .take(NUM_ATTEMPTS)
-        {
+        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
             let result = self
                 .network_service
                 .clone()
