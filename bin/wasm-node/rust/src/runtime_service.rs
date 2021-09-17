@@ -91,9 +91,6 @@ pub struct RuntimeService {
     /// Target to use for the logs. See [`Config::log_name`].
     log_target: String,
 
-    /// See [`Config::tasks_executor`].
-    tasks_executor: Mutex<Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
-
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
 
@@ -110,7 +107,7 @@ impl RuntimeService {
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(config: Config<'_>) -> Arc<Self> {
+    pub async fn new(mut config: Config<'_>) -> Arc<Self> {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
@@ -178,7 +175,6 @@ impl RuntimeService {
 
         let runtime_service = Arc::new(RuntimeService {
             log_target,
-            tasks_executor: Mutex::new(config.tasks_executor),
             sync_service: config.sync_service,
             latest_known_runtime: Mutex::new(latest_known_runtime),
         });
@@ -189,7 +185,19 @@ impl RuntimeService {
         // This is strictly speaking not necessary as long as there is no active subscription.
         // However, in practice, there is most likely always going to be one. It is way easier to
         // always have a task active rather than create and destroy it.
-        start_background_task(&runtime_service).await;
+        (config.tasks_executor)("runtime-download".into(), {
+            let background = Background {
+                runtime_service: runtime_service.clone(),
+                blocks_stream: {
+                    let (best_block_header, best_blocks_subscription) =
+                        runtime_service.sync_service.subscribe_best().await;
+                    stream::once(future::ready(best_block_header)).chain(best_blocks_subscription)
+                }
+                .boxed(),
+                runtime_matches_best_block: false,
+            };
+            async move { background.run().await }.boxed()
+        });
 
         runtime_service
     }
@@ -895,206 +903,205 @@ impl SuccessfulRuntime {
     }
 }
 
-/// Starts the background task that updates the [`LatestKnownRuntime`].
-async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
-    (runtime_service.tasks_executor.lock().await)("runtime-download".into(), {
-        let runtime_service = runtime_service.clone();
-        let blocks_stream = {
-            let (best_block_header, best_blocks_subscription) =
-                runtime_service.sync_service.subscribe_best().await;
-            stream::once(future::ready(best_block_header)).chain(best_blocks_subscription)
-        };
+struct Background {
+    runtime_service: Arc<RuntimeService>,
 
-        // Set to `true` when we expect the runtime in `latest_known_runtime` to match the runtime
-        // of the best block. Initially `false`, as `latest_known_runtime` uses the genesis
-        // runtime.
-        let mut runtime_matches_best_block = false;
+    /// Stream of best blocks updates. The background task stops if this stream ends.
+    blocks_stream: Pin<Box<dyn Stream<Item = Vec<u8>> + Send>>,
 
-        Box::pin(async move {
-            futures::pin_mut!(blocks_stream);
+    /// Set to `true` when we expect the runtime in `latest_known_runtime` to match the runtime
+    /// of the best block. Initially `false`, as `latest_known_runtime` uses the genesis
+    /// runtime.
+    runtime_matches_best_block: bool,
+}
 
-            loop {
-                // While major-syncing a chain, best blocks are updated continously. In that
-                // situation, the delay below is too short to prevent the runtime code from being
-                // continuously downloaded.
-                // To avoid using too much bandwidth, we force another delay between two runtime
-                // code downloads.
-                // This delay is done at the beginning of the loop because the runtime is built
-                // as part of the initialization of the `RuntimeService`, and in order to make it
-                // possible to use `continue` without accidentally skipping this delay.
-                ffi::Delay::new(Duration::from_secs(3)).await;
+impl Background {
+    /// Starts the background task that updates the [`LatestKnownRuntime`] until
+    /// [`Background::blocks_stream`] finishes.
+    async fn run(mut self) {
+        loop {
+            // While major-syncing a chain, best blocks are updated continously. In that
+            // situation, the delay below is too short to prevent the runtime code from being
+            // continuously downloaded.
+            // To avoid using too much bandwidth, we force another delay between two runtime
+            // code downloads.
+            // This delay is done at the beginning of the loop because the runtime is built
+            // as part of the initialization of the `RuntimeService`, and in order to make it
+            // possible to use `continue` without accidentally skipping this delay.
+            ffi::Delay::new(Duration::from_secs(3)).await;
 
-                // Wait until a new best block is known.
-                let mut new_best_block = match blocks_stream.next().await {
+            // Wait until a new best block is known.
+            let mut new_best_block = match self.blocks_stream.next().await {
+                Some(b) => b,
+                None => break, // Stream is finished.
+            };
+
+            // While the chain is running, it is often the case that more than one blocks
+            // is generated and announced roughly at the same time.
+            // We would like to avoid a situation where we receive a new best block, start
+            // downloading the runtime code, then a few milliseconds later receive another
+            // block that becomes the new best, and download the runtime code of that new
+            // block as well. This would lead to downloading the runtime code twice (or more,
+            // if more than two blocks are received) in a small time frame, which is usually a
+            // waste of bandwidth.
+            // Instead, whenever a new best block is received, we wait a little bit before
+            // downloading the runtime, in order to see if there isn't any other new best
+            // block already on the way.
+            // This delay needs to be long enough to de-duplicate forks, but it should still
+            // be small, as it adds artifical latency to the detecting runtime upgrades.
+            ffi::Delay::new(Duration::from_millis(500)).await;
+            while let Some(best_update) = self.blocks_stream.next().now_or_never() {
+                new_best_block = match best_update {
                     Some(b) => b,
                     None => break, // Stream is finished.
                 };
+            }
 
-                // While the chain is running, it is often the case that more than one blocks
-                // is generated and announced roughly at the same time.
-                // We would like to avoid a situation where we receive a new best block, start
-                // downloading the runtime code, then a few milliseconds later receive another
-                // block that becomes the new best, and download the runtime code of that new
-                // block as well. This would lead to downloading the runtime code twice (or more,
-                // if more than two blocks are received) in a small time frame, which is usually a
-                // waste of bandwidth.
-                // Instead, whenever a new best block is received, we wait a little bit before
-                // downloading the runtime, in order to see if there isn't any other new best
-                // block already on the way.
-                // This delay needs to be long enough to de-duplicate forks, but it should still
-                // be small, as it adds artifical latency to the detecting runtime upgrades.
-                ffi::Delay::new(Duration::from_millis(500)).await;
-                while let Some(best_update) = blocks_stream.next().now_or_never() {
-                    new_best_block = match best_update {
-                        Some(b) => b,
-                        None => break, // Stream is finished.
-                    };
-                }
-
-                // Download the runtime code of this new best block.
-                // TODO: don't unwrap?
-                let new_best_block_decoded = header::decode(&new_best_block).unwrap();
-                let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
-                let code_query_result = runtime_service
-                    .sync_service
-                    .clone()
-                    .storage_query(
-                        &new_best_block_hash,
-                        new_best_block_decoded.state_root,
-                        iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-                    )
-                    .await;
-
-                let best_near_head_of_chain = runtime_service
-                    .sync_service
-                    .is_near_head_of_chain_heuristic()
-                    .await;
-
-                // Only lock `latest_known_runtime` now that everything is synchronous.
-                let mut latest_known_runtime = runtime_service.latest_known_runtime.lock().await;
-                let latest_known_runtime = &mut *latest_known_runtime;
-
-                // Whatever the result of `code_query_result` is, notify the best block
-                // subscriptions. After this, we shouldn't unlock `latest_known_runtime` ever
-                // again to avoid giving the possibility to inspect the runtime in response
-                // to the notification.
-
-                // Elements in `best_blocks_subscriptions` are removed one by one and inserted
-                // back if the channel is still open.
-                for index in (0..latest_known_runtime.best_blocks_subscriptions.len()).rev() {
-                    let mut subscription = latest_known_runtime
-                        .best_blocks_subscriptions
-                        .swap_remove(index);
-                    if subscription.send(new_best_block.clone()).is_ok() {
-                        latest_known_runtime
-                            .best_blocks_subscriptions
-                            .push(subscription);
-                    }
-                }
-
-                latest_known_runtime
-                    .best_blocks_subscriptions
-                    .shrink_to_fit();
-
-                latest_known_runtime.best_near_head_of_chain = best_near_head_of_chain;
-
-                let (new_code, new_heap_pages) = {
-                    let mut results = match code_query_result {
-                        Ok(c) => c,
-                        Err(error) => {
-                            log::log!(
-                                target: &runtime_service.log_target,
-                                if error.is_network_problem() {
-                                    log::Level::Debug
-                                } else {
-                                    log::Level::Warn
-                                },
-                                "Failed to download :code and :heappages of new best block: {}",
-                                error
-                            );
-                            continue;
-                        }
-                    };
-
-                    let new_heap_pages = results.pop().unwrap();
-                    let new_code = results.pop().unwrap();
-                    (new_code, new_heap_pages)
-                };
-
-                // `continue` if there wasn't any change in `:code` and `:heappages`.
-                if new_code == latest_known_runtime.runtime_code
-                    && new_heap_pages == latest_known_runtime.heap_pages
-                {
-                    runtime_matches_best_block = true;
-                    // `runtime_block_hash` is always updated in order to have the most recent
-                    // block possible.
-                    latest_known_runtime.runtime_block_hash = new_best_block_hash;
-                    latest_known_runtime.runtime_block_header = new_best_block.clone();
-                    continue;
-                }
-
-                latest_known_runtime.runtime_code = new_code;
-                latest_known_runtime.heap_pages = new_heap_pages;
-                latest_known_runtime.runtime = SuccessfulRuntime::from_params(
-                    &runtime_service.log_target,
-                    &latest_known_runtime.runtime_code,
-                    &latest_known_runtime.heap_pages,
+            // Download the runtime code of this new best block.
+            // TODO: don't unwrap?
+            let new_best_block_decoded = header::decode(&new_best_block).unwrap();
+            let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
+            let code_query_result = self
+                .runtime_service
+                .sync_service
+                .clone()
+                .storage_query(
+                    &new_best_block_hash,
+                    new_best_block_decoded.state_root,
+                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
                 )
                 .await;
 
-                // Don't notify the user of an upgrade if we didn't expect the runtime to match
-                // the best block in the first place.
-                if runtime_matches_best_block {
-                    let second_sentence = match latest_known_runtime.runtime.as_ref() {
-                        Ok(runtime) => {
-                            format!(
-                                "New runtime version: {}",
-                                runtime.runtime_spec.decode().spec_version
-                            )
-                        }
-                        Err(err) => {
-                            format!("Error while compiling new runtime: {}", err)
-                        }
-                    };
+            let best_near_head_of_chain = self
+                .runtime_service
+                .sync_service
+                .is_near_head_of_chain_heuristic()
+                .await;
 
-                    log::info!(
-                        target: &runtime_service.log_target,
-                        "Runtime code change detected between block #{} and block #{}. {}.",
-                        // TODO: don't unwrap?
-                        header::decode(&latest_known_runtime.runtime_block_header)
-                            .unwrap()
-                            .number,
-                        new_best_block_decoded.number,
-                        second_sentence,
-                    );
+            // Only lock `latest_known_runtime` now that everything is synchronous.
+            let mut latest_known_runtime = self.runtime_service.latest_known_runtime.lock().await;
+            let latest_known_runtime = &mut *latest_known_runtime;
+
+            // Whatever the result of `code_query_result` is, notify the best block
+            // subscriptions. After this, we shouldn't unlock `latest_known_runtime` ever
+            // again to avoid giving the possibility to inspect the runtime in response
+            // to the notification.
+
+            // Elements in `best_blocks_subscriptions` are removed one by one and inserted
+            // back if the channel is still open.
+            for index in (0..latest_known_runtime.best_blocks_subscriptions.len()).rev() {
+                let mut subscription = latest_known_runtime
+                    .best_blocks_subscriptions
+                    .swap_remove(index);
+                if subscription.send(new_best_block.clone()).is_ok() {
+                    latest_known_runtime
+                        .best_blocks_subscriptions
+                        .push(subscription);
                 }
+            }
 
-                runtime_matches_best_block = true;
+            latest_known_runtime
+                .best_blocks_subscriptions
+                .shrink_to_fit();
+
+            latest_known_runtime.best_near_head_of_chain = best_near_head_of_chain;
+
+            let (new_code, new_heap_pages) = {
+                let mut results = match code_query_result {
+                    Ok(c) => c,
+                    Err(error) => {
+                        log::log!(
+                            target: &self.runtime_service.log_target,
+                            if error.is_network_problem() {
+                                log::Level::Debug
+                            } else {
+                                log::Level::Warn
+                            },
+                            "Failed to download :code and :heappages of new best block: {}",
+                            error
+                        );
+                        continue;
+                    }
+                };
+
+                let new_heap_pages = results.pop().unwrap();
+                let new_code = results.pop().unwrap();
+                (new_code, new_heap_pages)
+            };
+
+            // `continue` if there wasn't any change in `:code` and `:heappages`.
+            if new_code == latest_known_runtime.runtime_code
+                && new_heap_pages == latest_known_runtime.heap_pages
+            {
+                self.runtime_matches_best_block = true;
+                // `runtime_block_hash` is always updated in order to have the most recent
+                // block possible.
                 latest_known_runtime.runtime_block_hash = new_best_block_hash;
                 latest_known_runtime.runtime_block_header = new_best_block.clone();
-
-                // Elements in `runtime_version_subscriptions` are removed one by one and inserted
-                // back if the channel is still open.
-                for index in (0..latest_known_runtime.runtime_version_subscriptions.len()).rev() {
-                    let mut subscription = latest_known_runtime
-                        .runtime_version_subscriptions
-                        .swap_remove(index);
-                    let to_send = latest_known_runtime
-                        .runtime
-                        .as_ref()
-                        .map(|r| r.runtime_spec.clone())
-                        .map_err(|err| err.clone());
-                    if subscription.send(to_send).is_ok() {
-                        latest_known_runtime
-                            .runtime_version_subscriptions
-                            .push(subscription);
-                    }
-                }
-
-                latest_known_runtime
-                    .runtime_version_subscriptions
-                    .shrink_to_fit();
+                continue;
             }
-        })
-    });
+
+            latest_known_runtime.runtime_code = new_code;
+            latest_known_runtime.heap_pages = new_heap_pages;
+            latest_known_runtime.runtime = SuccessfulRuntime::from_params(
+                &self.runtime_service.log_target,
+                &latest_known_runtime.runtime_code,
+                &latest_known_runtime.heap_pages,
+            )
+            .await;
+
+            // Don't notify the user of an upgrade if we didn't expect the runtime to match
+            // the best block in the first place.
+            if self.runtime_matches_best_block {
+                let second_sentence = match latest_known_runtime.runtime.as_ref() {
+                    Ok(runtime) => {
+                        format!(
+                            "New runtime version: {}",
+                            runtime.runtime_spec.decode().spec_version
+                        )
+                    }
+                    Err(err) => {
+                        format!("Error while compiling new runtime: {}", err)
+                    }
+                };
+
+                log::info!(
+                    target: &self.runtime_service.log_target,
+                    "Runtime code change detected between block #{} and block #{}. {}.",
+                    // TODO: don't unwrap?
+                    header::decode(&latest_known_runtime.runtime_block_header)
+                        .unwrap()
+                        .number,
+                    new_best_block_decoded.number,
+                    second_sentence,
+                );
+            }
+
+            self.runtime_matches_best_block = true;
+            latest_known_runtime.runtime_block_hash = new_best_block_hash;
+            latest_known_runtime.runtime_block_header = new_best_block.clone();
+
+            // Elements in `runtime_version_subscriptions` are removed one by one and inserted
+            // back if the channel is still open.
+            for index in (0..latest_known_runtime.runtime_version_subscriptions.len()).rev() {
+                let mut subscription = latest_known_runtime
+                    .runtime_version_subscriptions
+                    .swap_remove(index);
+                let to_send = latest_known_runtime
+                    .runtime
+                    .as_ref()
+                    .map(|r| r.runtime_spec.clone())
+                    .map_err(|err| err.clone());
+                if subscription.send(to_send).is_ok() {
+                    latest_known_runtime
+                        .runtime_version_subscriptions
+                        .push(subscription);
+                }
+            }
+
+            latest_known_runtime
+                .runtime_version_subscriptions
+                .shrink_to_fit();
+        }
+    }
 }
