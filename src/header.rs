@@ -199,6 +199,8 @@ pub enum Error {
     MultipleBabeEpochDescriptors,
     /// There are multiple Babe configuration descriptor digests in the block header.
     MultipleBabeConfigDescriptors,
+    /// There are multiple runtime environment updated digests in the block header.
+    MutipleRuntimeEnvironmentUpdated,
     /// Found a Babe configuration change digest without an epoch change digest.
     UnexpectedBabeConfigDescriptor,
     GrandpaConsensusLogDecodeError,
@@ -342,6 +344,8 @@ pub struct DigestRef<'a> {
     /// Index of the [`DigestItemRef::BabeConsensus`] item containing a
     /// [`BabeConsensusLogRef::NextConfigData`], if any.
     babe_next_config_data_index: Option<usize>,
+    /// `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    has_runtime_environment_updated: bool,
 }
 
 #[derive(Clone)]
@@ -370,6 +374,7 @@ impl<'a> DigestRef<'a> {
             babe_predigest_index: None,
             babe_next_epoch_data_index: None,
             babe_next_config_data_index: None,
+            has_runtime_environment_updated: false,
         }
     }
 
@@ -469,6 +474,11 @@ impl<'a> DigestRef<'a> {
         }
     }
 
+    /// Returns `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    pub fn has_runtime_environment_updated(&self) -> bool {
+        self.has_runtime_environment_updated
+    }
+
     /// If the last element of the list is a seal, removes it from the [`DigestRef`].
     pub fn pop_seal(&mut self) -> Option<Seal<'a>> {
         let seal_pos = self.babe_seal_index.or(self.aura_seal_index)?;
@@ -566,6 +576,7 @@ impl<'a> DigestRef<'a> {
         let mut babe_predigest_index = None;
         let mut babe_next_epoch_data_index = None;
         let mut babe_next_config_data_index = None;
+        let mut has_runtime_environment_updated = false;
 
         // Iterate through the log items to see if anything is wrong.
         for (item_num, item) in slice.iter().enumerate() {
@@ -609,10 +620,14 @@ impl<'a> DigestRef<'a> {
                     debug_assert!(babe_seal_index.is_none());
                     babe_seal_index = Some(item_num);
                 }
+                DigestItem::RuntimeEnvironmentUpdated if has_runtime_environment_updated => {
+                    return Err(Error::MutipleRuntimeEnvironmentUpdated);
+                }
+                DigestItem::RuntimeEnvironmentUpdated => {
+                    has_runtime_environment_updated = true;
+                }
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItem::ChangesTrieSignal(_)
-                | DigestItem::Beefy { .. }
-                | DigestItem::RuntimeEnvironmentUpdated => {}
+                DigestItem::ChangesTrieSignal(_) | DigestItem::Beefy { .. } => {}
             }
         }
 
@@ -628,6 +643,7 @@ impl<'a> DigestRef<'a> {
             babe_predigest_index,
             babe_next_epoch_data_index,
             babe_next_config_data_index,
+            has_runtime_environment_updated,
         })
     }
 
@@ -643,6 +659,7 @@ impl<'a> DigestRef<'a> {
         let mut babe_predigest_index = None;
         let mut babe_next_epoch_data_index = None;
         let mut babe_next_config_data_index = None;
+        let mut has_runtime_environment_updated = false;
 
         // Iterate through the log items to see if anything is wrong.
         let mut next_digest = scale_encoded;
@@ -694,10 +711,14 @@ impl<'a> DigestRef<'a> {
                     debug_assert!(babe_seal_index.is_none());
                     babe_seal_index = Some(item_num);
                 }
+                DigestItemRef::RuntimeEnvironmentUpdated if has_runtime_environment_updated => {
+                    return Err(Error::MutipleRuntimeEnvironmentUpdated);
+                }
+                DigestItemRef::RuntimeEnvironmentUpdated => {
+                    has_runtime_environment_updated = true;
+                }
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItemRef::ChangesTrieSignal(_)
-                | DigestItemRef::Beefy { .. }
-                | DigestItemRef::RuntimeEnvironmentUpdated => {}
+                DigestItemRef::ChangesTrieSignal(_) | DigestItemRef::Beefy { .. } => {}
             }
         }
 
@@ -716,6 +737,7 @@ impl<'a> DigestRef<'a> {
             babe_predigest_index,
             babe_next_epoch_data_index,
             babe_next_config_data_index,
+            has_runtime_environment_updated,
         };
 
         Ok((out, next_digest))
@@ -738,6 +760,7 @@ impl<'a> From<&'a Digest> for DigestRef<'a> {
             babe_predigest_index: digest.babe_predigest_index,
             babe_next_epoch_data_index: digest.babe_next_epoch_data_index,
             babe_next_config_data_index: digest.babe_next_config_data_index,
+            has_runtime_environment_updated: digest.has_runtime_environment_updated,
         }
     }
 }
@@ -767,6 +790,8 @@ pub struct Digest {
     /// Index of the [`DigestItemRef::BabeConsensus`] item containing a
     /// [`BabeConsensusLogRef::NextConfigData`], if any.
     babe_next_config_data_index: Option<usize>,
+    /// `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    has_runtime_environment_updated: bool,
 }
 
 impl Digest {
@@ -821,6 +846,11 @@ impl Digest {
     pub fn babe_epoch_information(&self) -> Option<(BabeNextEpochRef, Option<BabeNextConfig>)> {
         DigestRef::from(self).babe_epoch_information()
     }
+
+    /// Returns `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    pub fn has_runtime_environment_updated(&self) -> bool {
+        self.has_runtime_environment_updated
+    }
 }
 
 impl fmt::Debug for Digest {
@@ -841,6 +871,7 @@ impl<'a> From<DigestRef<'a>> for Digest {
             babe_predigest_index: digest.babe_predigest_index,
             babe_next_epoch_data_index: digest.babe_next_epoch_data_index,
             babe_next_config_data_index: digest.babe_next_config_data_index,
+            has_runtime_environment_updated: digest.has_runtime_environment_updated,
         }
     }
 }
