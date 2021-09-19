@@ -657,13 +657,22 @@ pub struct SubscribeAll {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// Hash of the block that has been finalized.
+        /// Blake2 hash of the block that has been finalized.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
+        /// [`Notification::Block`].
         hash: [u8; 32],
+
         /// Hash of the best block after the finalization.
         ///
         /// If the newly-finalized block is an ancestor of the current best block, then this field
         /// contains the hash of this current best block. Otherwise, the best block is now
         /// the non-finalized block with the given hash.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
+        /// [`Notification::Block`].
         best_block_hash: [u8; 32],
     },
 
@@ -682,7 +691,12 @@ pub struct BlockNotification {
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Hash of the header of the parent of this block.
+    /// Blake2 hash of the header of the parent of this block.
+    ///
+    ///
+    /// A block with this hash is guaranteed to have earlier been reported in a
+    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
+    /// [`Notification::Block`].
     ///
     /// > **Note**: The header of a block contains the hash of its parent. When it comes to
     /// >           consensus algorithms such as Babe or Aura, the syncing code verifies that this
