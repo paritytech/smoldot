@@ -288,9 +288,17 @@ async fn background_task(
             let subscribe_all = worker.sync_service.subscribe_all(32).await;
             (
                 subscribe_all.finalized_block_scale_encoded_header,
-                stream::iter(subscribe_all.non_finalized_blocks).chain(subscribe_all.new_blocks),
+                stream::iter(subscribe_all.non_finalized_blocks).chain(
+                    subscribe_all.new_blocks.filter_map(|notif| {
+                        future::ready(match notif {
+                            sync_service::Notification::Block(b) => Some(b),
+                            _ => None,
+                        })
+                    }),
+                ),
             )
         };
+        // TODO: use the new_blocks_receiver instead of subscribing separately to these
         let (_, mut best_block_receiver) = worker.sync_service.subscribe_best().await;
         let (_, mut finalized_block_receiver) = worker.sync_service.subscribe_finalized().await;
         let current_finalized_block_hash =
