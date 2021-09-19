@@ -1234,8 +1234,7 @@ where
                 (peer_index, collection::ConnectionId::min_value())
                     ..=(peer_index, collection::ConnectionId::max_value()),
             )
-            .filter(|(_, established)| **established)
-            .next()
+            .find(|(_, established)| **established)
         {
             return Some(*connection_id);
         }

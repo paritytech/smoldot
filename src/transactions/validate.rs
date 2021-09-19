@@ -370,12 +370,10 @@ pub fn validate_transaction(
                 },
             }
         }
-        _ => {
-            return Query::Finished {
-                result: Err(Error::UnknownApiVersion),
-                virtual_machine,
-            }
-        }
+        _ => Query::Finished {
+            result: Err(Error::UnknownApiVersion),
+            virtual_machine,
+        },
     }
 }
 

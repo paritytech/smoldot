@@ -460,10 +460,12 @@ impl<'a> ChainInformationRef<'a> {
                 {
                     return Err(ValidityError::NonLinearBabeEpochs);
                 }
-            } else {
-                if self.finalized_block_header.number != 0 {
-                    return Err(ValidityError::NoBabeFinalizedEpoch);
-                }
+            }
+
+            if finalized_block_epoch_information.is_none()
+                && self.finalized_block_header.number != 0
+            {
+                return Err(ValidityError::NoBabeFinalizedEpoch);
             }
         }
 
@@ -478,10 +480,10 @@ impl<'a> ChainInformationRef<'a> {
                     return Err(ValidityError::ScheduledGrandPaChangeBeforeFinalized);
                 }
             }
-            if self.finalized_block_header.number == 0 {
-                if *after_finalized_block_authorities_set_id != 0 {
-                    return Err(ValidityError::FinalizedZeroButNonZeroAuthoritiesSetId);
-                }
+            if self.finalized_block_header.number == 0
+                && *after_finalized_block_authorities_set_id != 0
+            {
+                return Err(ValidityError::FinalizedZeroButNonZeroAuthoritiesSetId);
             }
         }
 
