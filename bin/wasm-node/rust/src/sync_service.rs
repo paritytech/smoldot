@@ -639,13 +639,36 @@ impl fmt::Display for CallProofQueryError {
 pub struct SubscribeAll {
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
+
     /// List of all known non-finalized blocks at the time of subscription.
     ///
     /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
     pub non_finalized_blocks: Vec<BlockNotification>,
+
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
-    pub new_blocks: mpsc::Receiver<BlockNotification>,
+    pub new_blocks: mpsc::Receiver<Notification>,
+}
+
+/// Notification about a new block or a new finalized block.
+///
+/// See [`SyncService::subscribe_all`].
+#[derive(Debug)]
+pub enum Notification {
+    /// A non-finalized block has been finalized.
+    Finalized {
+        /// Hash of the block that has been finalized.
+        hash: [u8; 32],
+        /// Hash of the best block after the finalization.
+        ///
+        /// If the newly-finalized block is an ancestor of the current best block, then this field
+        /// contains the hash of this current best block. Otherwise, the best block is now
+        /// the non-finalized block with the given hash.
+        best_block_hash: [u8; 32],
+    },
+
+    /// A new block has been added to the list of unfinalized blocks.
+    Block(BlockNotification),
 }
 
 /// Notification about a new block.
@@ -724,7 +747,7 @@ async fn start_relay_chain(
         let mut pending_storage_requests = stream::FuturesUnordered::new();
         let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
-        let mut all_notifications = Vec::<mpsc::Sender<BlockNotification>>::new();
+        let mut all_notifications = Vec::<mpsc::Sender<Notification>>::new();
 
         let mut has_new_best = false;
         let mut has_new_finalized = false;
@@ -933,15 +956,27 @@ async fn start_relay_chain(
                                         .non_finalized_blocks()
                                         .find(|h| h.hash() == verified_hash)
                                         .unwrap();
-                                    let notification = BlockNotification {
+                                    let notification = Notification::Block(BlockNotification {
                                         is_new_best,
                                         scale_encoded_header: header.scale_encoding_vec(),
                                         parent_hash: *header.parent_hash,
-                                    };
+                                    });
 
-                                    if subscription.try_send(notification).is_ok() {
-                                        all_notifications.push(subscription);
+                                    if subscription.try_send(notification).is_err() {
+                                        continue;
                                     }
+                                    if is_new_finalized {
+                                        if subscription
+                                            .try_send(Notification::Finalized {
+                                                hash: verified_hash,
+                                                best_block_hash: sync_out.best_block_hash(),
+                                            })
+                                            .is_err()
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                    all_notifications.push(subscription);
                                 }
 
                                 sync = sync_out;
@@ -1136,6 +1171,22 @@ async fn start_relay_chain(
                                 Ok(()) => {
                                     has_new_finalized = true;
                                     has_new_best = true;  // TODO: done in case finality changes the best block; make this clearer in the sync layer
+
+                                    // Elements in `all_notifications` are removed one by one and
+                                    // inserted back if the channel is still open.
+                                    for index in (0..all_notifications.len()).rev() {
+                                        let mut subscription = all_notifications.swap_remove(index);
+                                        if subscription
+                                            .try_send(Notification::Finalized {
+                                                hash: sync.finalized_block_header().hash(),
+                                                best_block_hash: sync.best_block_hash(),
+                                            })
+                                            .is_err()
+                                        {
+                                            continue;
+                                        }
+                                        all_notifications.push(subscription);
+                                    }
                                 },
                                 Err(err) => {
                                     log::warn!(
