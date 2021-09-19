@@ -549,6 +549,50 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        debug_assert!(self.shared.sources.contains(source_id.0));
+
+        // TODO: O(n) :-/
+        let num_inline = self
+            .shared
+            .requests
+            .iter()
+            .filter(|(_, rq)| match rq {
+                RequestMapping::Inline(id, _, _) if *id == source_id => true,
+                _ => false,
+            })
+            .count();
+
+        let num_inner = match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
+                sync.source_num_ongoing_requests(*src)
+            }
+            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
+                inner.source_num_ongoing_requests(*src)
+            }
+            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::GrandpaWarpSync(_)) => 0,
+
+            (AllSyncInner::Poisoned, _) => unreachable!(),
+            // Invalid combinations of syncing state machine and source id.
+            // This indicates a internal bug during the switch from one state machine to the
+            // other.
+            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
+            (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
+            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
+            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
+            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
+            (AllSyncInner::Optimistic { .. }, SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
+        };
+
+        num_inline + num_inner
+    }
+
     /// Returns the current best block of the given source.
     ///
     /// This corresponds either the latest call to [`AllSync::block_announce`] where `is_best` was
@@ -704,17 +748,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// This method doesn't modify the state machine in any way. [`AllSync::add_request`] must be
     /// called in order for the request to actually be marked as started.
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestDetail)> + '_ {
+    pub fn desired_requests(
+        &'_ self,
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
         match &self.inner {
             AllSyncInner::AllForks(sync) => {
-                let iter = sync
-                    .desired_requests()
-                    .map(move |(inner_source_id, rq_params)| {
+                let iter = sync.desired_requests().map(
+                    move |(inner_source_id, src_user_data, rq_params)| {
                         (
                             sync.source_user_data(inner_source_id).outer_source_id,
+                            &src_user_data.user_data,
                             all_forks_request_convert(rq_params, self.shared.is_full),
                         )
-                    });
+                    },
+                );
 
                 either::Left(iter)
             }
@@ -722,6 +769,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = inner.desired_requests().map(move |rq_detail| {
                     (
                         inner.source_user_data(rq_detail.source_id).outer_source_id,
+                        &inner.source_user_data(rq_detail.source_id).user_data,
                         optimistic_request_convert(rq_detail, self.shared.is_full),
                     )
                 });
@@ -734,12 +782,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let desired_request = match inner {
                     grandpa_warp_sync::InProgressGrandpaWarpSync::WarpSyncRequest(rq) => Some((
                         rq.current_source().1.outer_source_id,
+                        &rq.current_source().1.user_data,
                         RequestDetail::GrandpaWarpSync {
                             sync_start_block_hash: rq.start_block_hash(),
                         },
                     )),
                     grandpa_warp_sync::InProgressGrandpaWarpSync::StorageGet(get) => Some((
                         get.warp_sync_source().1.outer_source_id,
+                        &get.warp_sync_source().1.user_data,
                         RequestDetail::StorageGet {
                             block_hash: get.warp_sync_header().hash(),
                             state_trie_root: *get.warp_sync_header().state_root,
@@ -749,6 +799,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     grandpa_warp_sync::InProgressGrandpaWarpSync::VirtualMachineParamsGet(rq) => {
                         Some((
                             rq.warp_sync_source().1.outer_source_id,
+                            &rq.warp_sync_source().1.user_data,
                             RequestDetail::StorageGet {
                                 block_hash: rq.warp_sync_header().hash(),
                                 state_trie_root: *rq.warp_sync_header().state_root,
@@ -762,7 +813,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = if let Some(desired_request) = desired_request {
                     if self.shared.requests.iter().any(|(_, rq)| match rq {
                         RequestMapping::Inline(src_id, ud, _) => {
-                            (src_id, ud) == (&desired_request.0, &desired_request.1)
+                            (src_id, ud) == (&desired_request.0, &desired_request.2)
                         }
                         _ => false,
                     }) {

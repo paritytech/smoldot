@@ -399,25 +399,40 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.source_user_data_mut(source_id)
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        self.inner.blocks.source_num_ongoing_requests(source_id)
+    }
+
     /// Returns the details of a request to start towards a source.
     ///
     /// This method doesn't modify the state machine in any way. [`AllForksSync::add_request`]
     /// must be called in order for the request to actually be marked as started.
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
+    pub fn desired_requests(
+        &'_ self,
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestParams)> + '_ {
         // TODO: need to periodically query for justifications of non-finalized blocks that change GrandPa authorities
-
-        // TODO: allow multiple requests towards the same source?
 
         self.inner
             .blocks
             .desired_requests()
-            .filter(|rq| rq.source_num_existing_requests == 0)
             .filter(move |rq| {
                 !self
                     .chain
                     .contains_non_finalized_block(&rq.request_params.first_block_hash)
             })
-            .map(|rq| (rq.source_id, rq.request_params))
+            .map(move |rq| {
+                (
+                    rq.source_id,
+                    self.inner.blocks.source_user_data(rq.source_id),
+                    rq.request_params,
+                )
+            })
     }
 
     /// Inserts a new request in the data structure.

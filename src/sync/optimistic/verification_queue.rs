@@ -374,6 +374,17 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             source_id,
         }
     }
+
+    /// Returns the number of ongoing requests that concern this source.
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        self.verification_queue
+            .iter()
+            .filter(|elem| match elem.ty {
+                VerificationQueueEntryTy::Requested { source, .. } if source == source_id => true,
+                _ => false,
+            })
+            .count()
+    }
 }
 
 /// See [`VerificationQueue::drain_source`].

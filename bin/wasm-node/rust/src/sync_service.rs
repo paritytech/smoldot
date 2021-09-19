@@ -35,7 +35,6 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use rand::seq::IteratorRandom as _;
 use smoldot::{
     chain,
     executor::{host, read_only_runtime_host},
@@ -732,19 +731,17 @@ async fn start_relay_chain(
 
         // Main loop of the syncing logic.
         loop {
-            // Drain the content of `requests_to_start` to actually start the requests that have
-            // been queued by the previous iteration of the main loop.
-            //
-            // Note that the code below assumes that the `source_id`s found in `requests_to_start`
-            // still exist. This is only guaranteed to be case because we process
-            // `requests_to_start` as soon as an entry is added and before disconnect events can
-            // remove sources from the state machine.
             loop {
-                let (source_id, mut request_detail) =
-                    match sync.desired_requests().choose(&mut rand::thread_rng()) {
-                        Some(v) => v,
-                        None => break,
-                    };
+                // `desired_requests()` returns, in decreasing order of priority, the requests
+                // that should be started in order for the syncing to proceed. We simply pick the
+                // first request, but enforce one ongoing request per source.
+                let (source_id, _, mut request_detail) = match sync
+                    .desired_requests()
+                    .find(|(source_id, _, _)| sync.source_num_ongoing_requests(*source_id) == 0)
+                {
+                    Some(v) => v,
+                    None => break,
+                };
 
                 // Before notifying the syncing of the request, clamp the number of blocks to the
                 // number of blocks we expect to receive.
