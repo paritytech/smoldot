@@ -1215,7 +1215,7 @@ where
     TConn: Clone,
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    fn read_write<'a>(
+    fn read_write(
         &mut self,
         parent: &Network<TConn, TNow>,
         read_write: &mut ReadWrite<TNow>,

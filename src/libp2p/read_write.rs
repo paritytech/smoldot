@@ -283,7 +283,7 @@ impl<'a, 'b, TNow> Iterator for IncomingBytes<'a, 'b, TNow> {
                 self.me.read_bytes += 1;
                 Some(byte)
             }
-            None => return None,
+            None => None,
         }
     }
 

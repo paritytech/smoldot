@@ -89,7 +89,7 @@ pub fn core_version(
         match vm {
             host::HostVm::ReadyToRun(r) => vm = r.run(),
             host::HostVm::Finished(finished) => {
-                if decode(&finished.value().as_ref()).is_err() {
+                if decode(finished.value().as_ref()).is_err() {
                     return (Err(CoreVersionError::Decode), finished.into_prototype());
                 }
 

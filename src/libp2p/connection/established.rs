@@ -119,7 +119,7 @@ where
     /// If an error is returned, the socket should be entirely shut down.
     // TODO: in case of error, we're supposed to first send a yamux goaway frame
     // TODO: consider exposing an API more similar to the one of substream::Substream::read_write?
-    pub fn read_write<'a>(
+    pub fn read_write(
         mut self,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> Result<

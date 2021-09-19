@@ -863,7 +863,7 @@ where
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     let remote_handshake =
-                        match protocol::decode_block_announces_handshake(&remote_handshake) {
+                        match protocol::decode_block_announces_handshake(remote_handshake) {
                             Ok(hs) => hs,
                             Err(err) => {
                                 // TODO: close the substream?
@@ -1196,7 +1196,7 @@ where
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
+                    if let Err(err) = protocol::decode_block_announces_handshake(handshake) {
                         self.inner
                             .in_notification_refuse(*desired_in_notification_id)
                             .await;

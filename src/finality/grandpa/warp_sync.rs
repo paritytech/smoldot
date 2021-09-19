@@ -85,7 +85,7 @@ impl Verifier {
                 after_finalized_block_authorities_set_id,
                 ..
             } => {
-                let authorities_list = finalized_triggered_authorities.iter().cloned().collect();
+                let authorities_list = finalized_triggered_authorities.to_vec();
                 (authorities_list, after_finalized_block_authorities_set_id)
             }
             // TODO:

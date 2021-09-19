@@ -283,7 +283,7 @@ where
     /// If both the reading side and the writing side are closed and no other event can happen, or
     /// if at any point a protocol error happens, then `None` is returned. In that case, the
     /// substream must be reset if it is not closed.
-    pub fn read_write<'a>(
+    pub fn read_write(
         self,
         read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
     ) -> (Option<Self>, Option<Event<TRqUd, TNotifUd>>) {
@@ -291,7 +291,7 @@ where
         (me.map(|inner| Substream { inner }), event)
     }
 
-    fn read_write2<'a>(
+    fn read_write2(
         self,
         read_write: &'_ mut read_write::ReadWrite<'_, TNow>,
     ) -> (
@@ -301,7 +301,7 @@ where
         match self.inner {
             SubstreamInner::InboundNegotiating(nego) => match nego.read_write(read_write) {
                 Ok(multistream_select::Negotiation::InProgress(nego)) => {
-                    return (Some(SubstreamInner::InboundNegotiating(nego)), None);
+                    (Some(SubstreamInner::InboundNegotiating(nego)), None)
                 }
                 Ok(multistream_select::Negotiation::Success(protocol)) => (
                     Some(SubstreamInner::InboundNegotiatingApiWait),
@@ -614,7 +614,7 @@ where
                     }
                 };
 
-                match request.update(&incoming_buffer) {
+                match request.update(incoming_buffer) {
                     Ok((num_read, leb128::Framed::Finished(request))) => {
                         read_write.advance_read(num_read);
                         (
@@ -699,10 +699,10 @@ where
             SubstreamInner::NotificationsInWait { protocol_index } => {
                 // TODO: what to do with data?
                 read_write.discard_all_incoming();
-                return (
+                (
                     Some(SubstreamInner::NotificationsInWait { protocol_index }),
                     None,
-                );
+                )
             }
             SubstreamInner::NotificationsInRefused => {
                 read_write.discard_all_incoming();
@@ -862,7 +862,7 @@ where
                     user_data,
                 }
             }
-            _ => return, // TODO: too defensive, should be panic!()
+            _ => {} // TODO: too defensive, should be panic!()
         }
     }
 

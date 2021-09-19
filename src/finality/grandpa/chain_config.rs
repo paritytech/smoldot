@@ -70,10 +70,7 @@ impl GrandpaGenesisConfiguration {
                 .map_err(FromGenesisStorageError::VmError)?
         };
 
-        match decode_config(&encoded_list) {
-            Ok(cfg) => Ok(cfg),
-            Err(()) => return Err(FromGenesisStorageError::OutputDecode),
-        }
+        decode_config(&encoded_list).map_err(|()| FromGenesisStorageError::OutputDecode)
     }
 
     fn from_virtual_machine_prototype(

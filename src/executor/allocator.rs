@@ -67,6 +67,8 @@
 //!   wasted. This is more pronounced (in terms of absolute heap amounts) with larger allocation
 //!   sizes.
 
+#![allow(clippy::all)] // TODO: since this code has been copy-pasted from Substrate, we simply silence clippy warnings
+
 use core::{
     convert::{TryFrom, TryInto},
     mem,
