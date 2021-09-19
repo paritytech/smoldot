@@ -689,8 +689,8 @@ async fn connection_task(
         }
     };
 
+    // Connection process is successful. Notify the network state machine.
     let id = network_service.network.pending_outcome_ok(pending_id).await;
-
     log::debug!(
         target: "connections",
         "Pending({:?}, {}) => Connection({:?}) through {}",
@@ -707,8 +707,10 @@ async fn connection_task(
 
         let mut read_write = ReadWrite {
             now,
+            // `read_buffer()` isn't ready immediately if no data is available. If the reading
+            // side is closed, then it will instantly produce `None`.
             incoming_buffer: websocket.read_buffer().now_or_never().unwrap_or(Some(&[])),
-            outgoing_buffer: Some((&mut write_buffer, &mut [])),
+            outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
             read_bytes: 0,
             written_bytes: 0,
             wake_up_after: None,
@@ -721,32 +723,32 @@ async fn connection_task(
             .await
         {
             Ok(rw) => rw,
-            Err(_err) => {
-                if is_important_peer {
-                    log::warn!(
-                        target: "connections", "Error in connection with {}: {}",
-                        expected_peer_id, _err
-                    );
+            Err(err) if is_important_peer => {
+                log::warn!(
+                    target: "connections", "Error in connection with {}: {}",
+                    expected_peer_id, err
+                );
 
-                    // For any handshake error other than "no protocol in common has been found",
-                    // it is likely that the cause is connecting to a port that isn't serving the
-                    // libp2p protocol.
-                    match _err {
-                        ConnectionError::Handshake(HandshakeError::NoEncryptionProtocol)
-                        | ConnectionError::Handshake(HandshakeError::NoMultiplexingProtocol) => {}
-                        ConnectionError::Handshake(_) => {
-                            log::warn!(
-                                target: "connections",
-                                "Is {} the address of a libp2p port?",
-                                attemped_multiaddr
-                            );
-                        }
-                        _ => {}
+                // For any handshake error other than "no protocol in common has been found",
+                // it is likely that the cause is connecting to a port that isn't serving the
+                // libp2p protocol.
+                match err {
+                    ConnectionError::Handshake(HandshakeError::NoEncryptionProtocol)
+                    | ConnectionError::Handshake(HandshakeError::NoMultiplexingProtocol) => {}
+                    ConnectionError::Handshake(_) => {
+                        log::warn!(
+                            target: "connections",
+                            "Is {} the address of a libp2p port?",
+                            attemped_multiaddr
+                        );
                     }
-                } else {
-                    log::debug!(target: "connections", "Connection({:?}, {}) => Closed: {}", id, expected_peer_id, _err);
+                    _ => {}
                 }
 
+                return;
+            }
+            Err(err) => {
+                log::debug!(target: "connections", "Connection({:?}, {}) => Closed: {}", id, expected_peer_id, err);
                 return;
             }
         };
