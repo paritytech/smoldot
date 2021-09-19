@@ -388,6 +388,21 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.best_block(source_id)
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        self.source_occupations
+            .range(
+                (source_id, RequestId(usize::min_value()))
+                    ..=(source_id, RequestId(usize::max_value())),
+            )
+            .count()
+    }
+
     /// Returns the list of sources for which [`PendingBlocks::source_knows_non_finalized_block`]
     /// would return `true`.
     ///
@@ -928,13 +943,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
                         DesiredRequest {
                             source_id,
-                            source_num_existing_requests: self
-                                .source_occupations
-                                .range(
-                                    (source_id, RequestId(usize::min_value()))
-                                        ..=(source_id, RequestId(usize::max_value())),
-                                )
-                                .count(),
                             request_params: RequestParams {
                                 first_block_hash: *unknown_block_hash,
                                 first_block_height: unknown_block_height,
@@ -954,8 +962,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 pub struct DesiredRequest {
     /// Source onto which to start this request.
     pub source_id: SourceId,
-    /// Number of requests that the source is already performing.
-    pub source_num_existing_requests: usize,
     /// Details of the request.
     pub request_params: RequestParams,
 }

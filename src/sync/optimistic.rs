@@ -415,6 +415,26 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         &mut self.inner.sources.get_mut(&source_id).unwrap().user_data
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        let num_obsolete = self
+            .inner
+            .obsolete_requests
+            .values()
+            .filter(|(id, _)| *id == source_id)
+            .count();
+        let num_regular = self
+            .inner
+            .verification_queue
+            .source_num_ongoing_requests(source_id);
+        num_obsolete + num_regular
+    }
+
     /// Returns an iterator that yields all the requests whose outcome is no longer desired.
     pub fn obsolete_requests(&'_ self) -> impl Iterator<Item = (RequestId, &'_ TRq)> + '_ {
         self.inner
