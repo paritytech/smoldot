@@ -333,7 +333,11 @@ where
                 // succeed), which should be silently discarded.
                 read_write.discard_all_incoming();
                 read_write.close_write();
-                (Some(SubstreamInner::NegotiationFailed), None)
+                if read_write.is_dead() {
+                    (None, None)
+                } else {
+                    (Some(SubstreamInner::NegotiationFailed), None)
+                }
             }
 
             SubstreamInner::NotificationsOutNegotiating {
@@ -402,7 +406,11 @@ where
                 read_write.discard_all_incoming();
                 read_write.close_write();
                 (
-                    Some(SubstreamInner::NotificationsOutNegotiationFailed),
+                    if read_write.is_dead() {
+                        None
+                    } else {
+                        Some(SubstreamInner::NotificationsOutNegotiationFailed)
+                    },
                     None,
                 )
             }
@@ -487,9 +495,16 @@ where
                 )
             }
             SubstreamInner::NotificationsOutClosed => {
-                read_write.close_write();
                 read_write.discard_all_incoming();
-                (Some(SubstreamInner::NotificationsOutClosed), None)
+                read_write.close_write();
+                (
+                    if read_write.is_dead() {
+                        None
+                    } else {
+                        Some(SubstreamInner::NotificationsOutClosed)
+                    },
+                    None,
+                )
             }
 
             SubstreamInner::RequestOutNegotiating {
