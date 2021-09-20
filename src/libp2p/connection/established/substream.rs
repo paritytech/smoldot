@@ -65,6 +65,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// Data passed by the user to [`Substream::notifications_out`].
         user_data: TNotifUd,
     },
+    /// Failure to negotiate an outbound notifications substream.
+    NotificationsOutNegotiationFailed,
     /// A notifications protocol has been negotiated on a substream. Either a successful handshake
     /// or an abrupt closing is now expected.
     NotificationsOutHandshakeRecv {
@@ -196,7 +198,15 @@ where
     }
 
     /// Initializes an outgoing notifications substream.
-    // TODO: detail the events that can happen
+    ///
+    /// After the remote has sent back a handshake or after an error occured, an
+    /// [`Event::NotificationsOutResult`] event will be generated locally.
+    ///
+    /// If this event contains an `Ok`, then [`Substream::write_notification_unbounded`],
+    /// [`Substream::notification_substream_queued_bytes`] and
+    /// [`Substream::close_notifications_substream`] can be used, and
+    /// [`Event::NotificationsOutCloseDemanded`] and [`Event::NotificationsOutReset`] can be
+    /// generated.
     pub fn notifications_out(
         timeout: TNow,
         requested_protocol: String,
@@ -325,6 +335,7 @@ where
                 read_write.close_write();
                 (Some(SubstreamInner::NegotiationFailed), None)
             }
+
             SubstreamInner::NotificationsOutNegotiating {
                 negotiation,
                 timeout,
@@ -334,7 +345,7 @@ where
             } => {
                 if timeout < read_write.now {
                     return (
-                        Some(SubstreamInner::NegotiationFailed),
+                        Some(SubstreamInner::NotificationsOutNegotiationFailed),
                         Some(Event::NotificationsOutResult {
                             result: Err((NotificationsOutErr::Timeout, user_data)),
                         }),
@@ -372,7 +383,7 @@ where
                         )
                     }
                     Ok(multistream_select::Negotiation::NotAvailable) => (
-                        None,
+                        Some(SubstreamInner::NotificationsOutNegotiationFailed),
                         Some(Event::NotificationsOutResult {
                             result: Err((NotificationsOutErr::ProtocolNotAvailable, user_data)),
                         }),
@@ -385,6 +396,16 @@ where
                     ),
                 }
             }
+            SubstreamInner::NotificationsOutNegotiationFailed => {
+                // Substream has failed to negotiate a protocol. The substream is expected to
+                // close soon.
+                read_write.discard_all_incoming();
+                read_write.close_write();
+                (
+                    Some(SubstreamInner::NotificationsOutNegotiationFailed),
+                    None,
+                )
+            }
             SubstreamInner::NotificationsOutHandshakeRecv {
                 handshake_in,
                 mut handshake_out,
@@ -395,10 +416,8 @@ where
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
-                        read_write.close_write();
-                        // TODO: transition
                         return (
-                            Some(SubstreamInner::NegotiationFailed),
+                            Some(SubstreamInner::NotificationsOutNegotiationFailed),
                             Some(Event::NotificationsOutResult {
                                 result: Err((NotificationsOutErr::RefusedHandshake, user_data)),
                             }),
@@ -444,9 +463,12 @@ where
                             None,
                         )
                     }
-                    Err(_) => {
-                        todo!() // TODO: report to user and all
-                    }
+                    Err(err) => (
+                        None,
+                        Some(Event::NotificationsOutResult {
+                            result: Err((NotificationsOutErr::HandshakeRecvError(err), user_data)),
+                        }),
+                    ),
                 }
             }
             SubstreamInner::NotificationsOut {
@@ -469,6 +491,7 @@ where
                 read_write.discard_all_incoming();
                 (Some(SubstreamInner::NotificationsOutClosed), None)
             }
+
             SubstreamInner::RequestOutNegotiating {
                 negotiation,
                 timeout,
@@ -490,7 +513,6 @@ where
                         }),
                     );
                 }
-
                 read_write.wake_up_after(&timeout);
 
                 match negotiation.read_write(read_write) {
@@ -835,11 +857,12 @@ where
                     result: Err((NotificationsOutErr::SubstreamReset, user_data)),
                 })
             }
-            SubstreamInner::PingIn { .. } => None,
+            SubstreamInner::NotificationsOutNegotiationFailed => None,
             SubstreamInner::NotificationsOut { user_data, .. } => {
                 Some(Event::NotificationsOutReset { user_data })
             }
             SubstreamInner::NotificationsOutClosed { .. } => None,
+            SubstreamInner::PingIn { .. } => None,
             SubstreamInner::RequestInRecv { .. } => None,
             SubstreamInner::RequestInRecvEmpty { .. } => None,
             SubstreamInner::RequestInApiWait => None,
@@ -1046,11 +1069,14 @@ where
                 f.debug_tuple("incoming-negotiated-api-wait").finish()
             }
             SubstreamInner::NotificationsOutNegotiating { .. } => {
-                todo!() // TODO:
+                f.debug_tuple("notifications-out-negotiating").finish()
             }
             SubstreamInner::NotificationsOutHandshakeRecv { .. } => {
-                todo!() // TODO:
+                f.debug_tuple("notifications-out-handshake-recv").finish()
             }
+            SubstreamInner::NotificationsOutNegotiationFailed { .. } => f
+                .debug_tuple("notifications-out-negotiation-failed")
+                .finish(),
             SubstreamInner::NotificationsOut { .. } => f.debug_tuple("notifications-out").finish(),
             SubstreamInner::NotificationsOutClosed { .. } => {
                 f.debug_tuple("notifications-out-closed").finish()
@@ -1143,11 +1169,9 @@ pub enum Event<TRqUd, TNotifUd> {
         /// scope of this module.
         result: Result<Vec<u8>, (NotificationsOutErr, TNotifUd)>,
     },
-
     /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
     /// of the substream.
     NotificationsOutCloseDemanded,
-
     /// Remote has reset an outgoing notifications substream. The substream is instantly closed.
     NotificationsOutReset {
         /// Value that was passed to [`Substream::notifications_out`].
@@ -1210,4 +1234,6 @@ pub enum NotificationsOutErr {
     NegotiationError(multistream_select::Error),
     /// Substream has been reset during the negotiation.
     SubstreamReset,
+    /// Error while receiving the remote's handshake.
+    HandshakeRecvError(leb128::FramedError),
 }
