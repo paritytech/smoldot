@@ -176,7 +176,7 @@ export interface SmoldotAddChainOptions {
    * Defaults to `[]`.
    *
    * The primary way smoldot determines which relay chain is associated to a parachain is by
-   * inspecting the chain specification of that parachain.
+   * inspecting the chain specification of that parachain (i.e. the `chainSpec` field).
    *
    * This poses a problem in situations where the same client is shared between multiple different
    * applications: multiple applications could add mutiple different chains with the same `id`,
@@ -184,10 +184,10 @@ export interface SmoldotAddChainOptions {
    * of a popular chain's `id` and try to benefit from a typo in a legitimate application's
    * `relay_chain`.
    *
-   * This parameter can be used in order to segregate multiple different uses of the same client
-   * and solve these problems. To use it, pass the list of all chains that the same application
-   * has previously added to the client. By doing so, you are guaranteed that the chains of
-   * multiple different applications can't interact in bad ways, while still benefiting from the
+   * These problems can be solved by using this parameter to segregate multiple different uses of
+   * the same client. To use it, pass the list of all chains that the same application has
+   * previously added to the client. By doing so, you are guaranteed that the chains of multiple
+   * different applications can't interact in bad ways, while still benefiting from the
    * de-duplication of resources that smoldot performs in `addChain`.
    *
    * When multiple different parachains use the same relay chain, it is important to be sure that
