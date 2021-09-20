@@ -88,6 +88,10 @@ pub struct Config {
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
 
+    /// Amount of time after which a connection handshake is considered to have taken too long
+    /// and must be aborted.
+    pub handshake_timeout: Duration,
+
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
@@ -189,6 +193,7 @@ where
                 notification_protocols: config.notification_protocols,
                 request_response_protocols: config.request_response_protocols,
                 ping_protocol: config.ping_protocol,
+                handshake_timeout: config.handshake_timeout,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
             }),
@@ -668,15 +673,22 @@ where
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    ///
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
-    pub async fn add_incoming_connection(&self, user_data: TConn) -> ConnectionId {
+    pub async fn add_incoming_connection(
+        &self,
+        when_connected: TNow,
+        user_data: TConn,
+    ) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
 
         // A slab entry is first reserved without being inserted, so that the state remains
         // consistent if the user cancels the returned future.
         let entry = guarded.connections.vacant_entry();
-        let connection_id = self.inner.insert(false, entry.key()).await;
+        let connection_id = self.inner.insert(when_connected, false, entry.key()).await;
         entry.insert((None, user_data));
         connection_id
     }
@@ -688,10 +700,14 @@ where
     /// called, the provided `expected_peer_id` will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    ///
     /// After this function has returned, you must process the connection with
     /// [`Peers::read_write`].
     pub async fn add_outgoing_connection(
         &self,
+        when_connected: TNow,
         expected_peer_id: &PeerId,
         user_data: TConn,
     ) -> ConnectionId {
@@ -701,7 +717,7 @@ where
         // A slab entry is first reserved without being inserted, so that the state remains
         // consistent if the user cancels the returned future.
         let entry = guarded.connections.vacant_entry();
-        let connection_id = self.inner.insert(true, entry.key()).await;
+        let connection_id = self.inner.insert(when_connected, true, entry.key()).await;
 
         // TODO: could use `peer_index_or_insert` but causes borrowck issues
         let peer_index = if let Some(idx) = guarded.peer_indices.get(expected_peer_id) {

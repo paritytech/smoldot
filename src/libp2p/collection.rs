@@ -153,6 +153,10 @@ pub struct Config {
 
     pub request_response_protocols: Vec<ConfigRequestResponse>,
 
+    /// Amount of time after which a connection handshake is considered to have taken too long
+    /// and must be aborted.
+    pub handshake_timeout: Duration,
+
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
 
@@ -216,6 +220,9 @@ impl ConnectionId {
 pub struct Network<TConn, TNow> {
     /// Fields behind a mutex.
     guarded: Mutex<Guarded<TConn, TNow>>,
+
+    /// See [`Config::handshake_timeout`].
+    handshake_timeout: Duration,
 
     /// See [`Config::noise_key`].
     noise_key: NoiseKey,
@@ -313,6 +320,7 @@ where
             .collect::<Arc<[_]>>();
 
         Network {
+            handshake_timeout: config.handshake_timeout,
             noise_key: config.noise_key,
             notification_protocols,
             request_response_protocols: config.request_response_protocols,
@@ -334,9 +342,17 @@ where
 
     /// Adds a new connection to the collection.
     ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    ///
     /// `is_initiator` must be `true` if the connection has been initiated locally, or `false` if
     /// it has been initiated by the remote.
-    pub async fn insert(&self, is_initiator: bool, user_data: TConn) -> ConnectionId {
+    pub async fn insert(
+        &self,
+        when_connected: TNow,
+        is_initiator: bool,
+        user_data: TConn,
+    ) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
@@ -347,6 +363,7 @@ where
             connection: ConnectionInner::Handshake {
                 handshake: handshake::HealthyHandshake::new(is_initiator),
                 randomness_seed: guarded.randomness_seeds.gen(),
+                timeout: when_connected + self.handshake_timeout,
             },
             id: connection_id,
             pending_event: None,
@@ -1160,15 +1177,25 @@ impl Future for ConnectionReadyFuture {
     }
 }
 
-/// Protocol error within the context of a connection. See [`Network::read_write`].
+/// Error within the context of a connection. See [`Network::read_write`].
 #[derive(Debug, derive_more::Display)]
 pub enum ConnectionError {
     /// Protocol error after the connection has been established.
     #[display(fmt = "{}", _0)]
     Established(established::Error),
-    /// Protocol error during the handshake phase.
+    /// Eror during the handshake phase.
     #[display(fmt = "{}", _0)]
-    Handshake(handshake::HandshakeError),
+    Handshake(HandshakeError),
+}
+
+/// Protocol error within the context of a connection. See [`Network::read_write`].
+#[derive(Debug, derive_more::Display)]
+pub enum HandshakeError {
+    /// The handshake took too long.
+    Timeout,
+    /// Protocol error.
+    #[display(fmt = "{}", _0)]
+    Protocol(handshake::HandshakeError),
 }
 
 /// See [`Network::open_notifications_substream`].
@@ -1264,8 +1291,13 @@ where
             ConnectionInner::Handshake {
                 mut handshake,
                 randomness_seed,
+                timeout,
             } => {
-                // TODO: check timeout
+                // Check that the handshake isn't taking too long.
+                if timeout < read_write.now {
+                    return Err(ConnectionError::Handshake(HandshakeError::Timeout));
+                }
+                read_write.wake_up_after(&timeout);
 
                 loop {
                     let (read_before, written_before) =
@@ -1274,7 +1306,7 @@ where
                     let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
                         Err(err) => {
-                            return Err(ConnectionError::Handshake(err));
+                            return Err(ConnectionError::Handshake(HandshakeError::Protocol(err)));
                         }
                     };
 
@@ -1286,6 +1318,7 @@ where
                             self.connection = ConnectionInner::Handshake {
                                 handshake: updated_handshake,
                                 randomness_seed,
+                                timeout,
                             };
                             break;
                         }
@@ -1627,6 +1660,9 @@ enum ConnectionInner<TNow> {
         /// randomness isn't used for anything critical or related to cryptography, but only for
         /// example to avoid hash collision attacks.
         randomness_seed: [u8; 32],
+
+        /// When the handshake times out.
+        timeout: TNow,
     },
     Established(
         established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
