@@ -254,7 +254,9 @@ impl SyncService {
     /// This function is subject to race condition. The list returned by this function can change
     /// at any moment. The return value should only ever be shown to the user and not used for any
     /// meaningful logic
-    pub async fn syncing_peers(&self) -> impl ExactSizeIterator<Item = (PeerId, u64, [u8; 32])> {
+    pub async fn syncing_peers(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (PeerId, protocol::Role, u64, [u8; 32])> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -721,7 +723,7 @@ async fn start_relay_chain(
     let log_target = format!("sync-service-{}", log_name);
 
     // TODO: implicit generics
-    let mut sync = all::AllSync::<_, libp2p::PeerId, ()>::new(all::Config {
+    let mut sync = all::AllSync::<_, (libp2p::PeerId, protocol::Role), ()>::new(all::Config {
         chain_information,
         sources_capacity: 32,
         blocks_capacity: {
@@ -794,7 +796,7 @@ async fn start_relay_chain(
                         request_bodies,
                         request_justification,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
+                        let peer_id = sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let block_request = network_service.clone().blocks_request(
                             peer_id,
@@ -835,7 +837,7 @@ async fn start_relay_chain(
                     all::RequestDetail::GrandpaWarpSync {
                         sync_start_block_hash,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
+                        let peer_id = sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let grandpa_request = network_service.clone().grandpa_warp_sync_request(
                             peer_id,
@@ -854,7 +856,7 @@ async fn start_relay_chain(
                         state_trie_root,
                         ref keys,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
+                        let peer_id = sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let storage_request = network_service.clone().storage_proof_request(
                             network_chain_index,
@@ -911,7 +913,7 @@ async fn start_relay_chain(
                         break;
                     }
                     all::ProcessOne::VerifyWarpSyncFragment(verify) => {
-                        let sender_peer_id = verify.proof_sender().1.clone(); // TODO: unnecessary cloning most of the time
+                        let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
 
                         let (sync_out, result) = verify.perform();
                         sync = sync_out;
@@ -1114,10 +1116,10 @@ async fn start_relay_chain(
                     };
 
                     match network_event {
-                        network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
+                        network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
-                            let id = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let id = sync.add_source((peer_id.clone(), role), best_block_number, best_block_hash);
                             peers_source_id_map.insert(peer_id, id);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
@@ -1273,13 +1275,13 @@ async fn start_relay_chain(
                                         source_best.0 > block_number ||
                                             (source_best.0 == block_number && *source_best.1 == block_hash)
                                     })
-                                    .map(|id| sync.source_user_data(id).clone())
+                                    .map(|id| sync.source_user_data(id).0.clone())
                                     .collect()
                             } else {
                                 // As documented, `knows_non_finalized_block` would panic if the
                                 // block height was below the one of the known finalized block.
                                 sync.knows_non_finalized_block(block_number, &block_hash)
-                                    .map(|id| sync.source_user_data(id).clone())
+                                    .map(|id| sync.source_user_data(id).0.clone())
                                     .collect()
                             };
                             let _ = send_back.send(outcome);
@@ -1287,9 +1289,9 @@ async fn start_relay_chain(
                         ToBackground::SyncingPeers { send_back } => {
                             let out = sync.sources()
                                 .map(|src| {
-                                    let peer_id = sync.source_user_data(src).clone();
+                                    let (peer_id, role) = sync.source_user_data(src).clone();
                                     let (height, hash) = sync.source_best_block(src);
-                                    (peer_id, height, *hash)
+                                    (peer_id, role, height, *hash)
                                 })
                                 .collect::<Vec<_>>();
                             let _ = send_back.send(out);
@@ -1406,8 +1408,10 @@ async fn start_parachain(
 
     // State machine that tracks the list of sources and their blocks.
     // TODO: need to call sync_sources.set_finalized_block_height once finalization is implemented
-    let mut sync_sources =
-        sources::AllForksSources::<PeerId>::new(40, current_finalized_block.number);
+    let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
+        40,
+        current_finalized_block.number,
+    );
     // Maps `PeerId`s to their indices within `sync_sources`.
     let mut sync_sources_map = HashMap::new();
 
@@ -1462,7 +1466,7 @@ async fn start_parachain(
                         // best block is superior to `block_number` have it.
                         let list = if block_number > current_finalized_block.number {
                             sync_sources.knows_non_finalized_block(block_number, &block_hash)
-                                .map(|local_id| sync_sources.user_data(local_id).clone())
+                                .map(|local_id| sync_sources.user_data(local_id).0.clone())
                                 .collect()
                         } else {
                             sync_sources
@@ -1470,7 +1474,7 @@ async fn start_parachain(
                                 .filter(|local_id| {
                                     sync_sources.best_block(*local_id).0 >= block_number
                                 })
-                                .map(|local_id| sync_sources.user_data(local_id).clone())
+                                .map(|local_id| sync_sources.user_data(local_id).0.clone())
                                 .collect()
                         };
 
@@ -1479,8 +1483,8 @@ async fn start_parachain(
                     ToBackground::SyncingPeers { send_back } => {
                         let _ = send_back.send(sync_sources.keys().map(|local_id| {
                             let (height, hash) = sync_sources.best_block(local_id);
-                            let peer_id = sync_sources.user_data(local_id).clone();
-                            (peer_id, height, *hash)
+                            let (peer_id, role) = sync_sources.user_data(local_id).clone();
+                            (peer_id, role, height, *hash)
                         }).collect());
                     }
                 }
@@ -1499,17 +1503,17 @@ async fn start_parachain(
                 };
 
                 match network_event {
-                    network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
+                    network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
                         if chain_index == network_chain_index =>
                     {
-                        let local_id = sync_sources.add_source(best_block_number, best_block_hash, peer_id.clone());
+                        let local_id = sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
                         sync_sources_map.insert(peer_id, local_id);
                     },
                     network_service::Event::Disconnected { peer_id, chain_index }
                         if chain_index == network_chain_index =>
                     {
                         let local_id = sync_sources_map.remove(&peer_id).unwrap();
-                        let _peer_id = sync_sources.remove(local_id);
+                        let (_peer_id, _role) = sync_sources.remove(local_id);
                         debug_assert_eq!(peer_id, _peer_id);
                     },
                     network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
@@ -1786,6 +1790,6 @@ enum ToBackground {
     },
     /// See [`SyncService::syncing_peers`].
     SyncingPeers {
-        send_back: oneshot::Sender<Vec<(PeerId, u64, [u8; 32])>>,
+        send_back: oneshot::Sender<Vec<(PeerId, protocol::Role, u64, [u8; 32])>>,
     },
 }
