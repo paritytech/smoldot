@@ -835,7 +835,7 @@ where
         &self,
         peer_id: &PeerId,
         notification_protocol: usize,
-        new_desired_state: bool,
+        new_desired_state: DesiredState,
     ) {
         let mut guarded = self.guarded.lock().await;
         let peer_index = guarded.peer_index_or_insert(peer_id);
@@ -844,11 +844,13 @@ where
             .peers_notifications_out
             .entry((peer_index, notification_protocol));
 
-        if new_desired_state {
+        if matches!(
+            new_desired_state,
+            DesiredState::Desired | DesiredState::DesiredReset
+        ) {
             // Do nothing if it was already desired.
-            // TODO: instead of doing nothing, try again if remote has refused?
-            match current_state {
-                btree_map::Entry::Occupied(e) if e.get().desired => return,
+            match (&current_state, new_desired_state) {
+                (btree_map::Entry::Occupied(e), DesiredState::Desired) if e.get().desired => return,
                 _ => {}
             }
 
@@ -916,6 +918,9 @@ where
 
     /// Returns the combinations of notification and [`PeerId`] that are marked as "desired", but
     /// where the remote has refused the request for a notifications substream.
+    ///
+    /// Use [`Peers::set_peer_notifications_out_desired`] with [`DesiredState::DesiredReset`] in
+    /// order to try again.
     pub async fn refused_notifications_out(&self) -> impl Iterator<Item = (PeerId, usize)> {
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
@@ -1428,7 +1433,8 @@ pub enum Event<TConn> {
         /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
         /// scope of this module.
         /// If `Err`, the state machine will *not* automatically try to re-open a substream again.
-        // TODO: expand how to do try again
+        /// Use [`Peers::set_peer_notifications_out_desired`] with [`DesiredState::DesiredReset`]
+        /// in order to try again.
         result: Result<Vec<u8>, NotificationsOutErr>,
     },
 
@@ -1466,6 +1472,19 @@ pub enum Event<TConn> {
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
     },
+}
+
+/// See [`Peers::set_peer_notifications_out_desired`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DesiredState {
+    /// Substream is no longer desired. Close any existing substream.
+    NotDesired,
+    /// Substream is now desired. If the state was already "desired" and the peer has refused this
+    /// substream in the past, do nothing.
+    Desired,
+    /// Substream is now desired. If the peer has refused this substream in the past, try to open
+    /// one again.
+    DesiredReset,
 }
 
 /// Error potentially returned by [`Peers::request`].
