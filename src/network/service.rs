@@ -79,6 +79,10 @@ pub struct Config {
     /// Signed using the actual libp2p key.
     pub noise_key: connection::NoiseKey,
 
+    /// Amount of time after which a connection handshake is considered to have taken too long
+    /// and must be aborted.
+    pub handshake_timeout: Duration,
+
     /// Number of events that can be buffered internally before connections are back-pressured.
     ///
     /// A good default value is 64.
@@ -146,13 +150,16 @@ pub struct ChainNetwork<TNow> {
     /// Underlying data structure.
     inner: peers::Peers<multiaddr::Multiaddr, TNow>,
 
+    /// See [`Config::handshake_timeout`].
+    handshake_timeout: Duration,
+
     /// Extra fields protected by a `Mutex` and that relate to the logic in
     /// [`ChainNetwork::next_event`]. Must only be locked within that method and is kept locked
     /// throughout that method.
     next_event_guarded: Mutex<NextEventGuarded>,
 
     /// Extra fields protected by a `Mutex` and that are briefly accessed.
-    ephemeral_guarded: Mutex<EphemeralGuarded>,
+    ephemeral_guarded: Mutex<EphemeralGuarded<TNow>>,
 
     /// Number of chains. Equal to the length of [`EphemeralGuarded::chains`].
     num_chains: usize,
@@ -180,7 +187,7 @@ struct NextEventGuarded {
 }
 
 /// See [`ChainNetwork::ephemeral_guarded`].
-struct EphemeralGuarded {
+struct EphemeralGuarded<TNow> {
     /// For each peer, the number of pending attempts.
     num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
 
@@ -188,7 +195,7 @@ struct EphemeralGuarded {
     /// [`PendingId`].
     /// The entries here correspond to the entries in
     /// [`EphemeralGuarded::num_pending_per_peer`].
-    pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr)>,
+    pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
 
     /// Combination of addresses that we assume could be dialed to reach a certain peer. When
     /// an address is attempted, it is immediately removed from this list. It is later added
@@ -410,6 +417,7 @@ where
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 notification_protocols,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
+                handshake_timeout: config.handshake_timeout,
                 initial_desired_peers: Default::default(), // Empty
                 initial_desired_substreams,
             }),
@@ -423,6 +431,7 @@ where
                 potential_addresses,
                 chains,
             }),
+            handshake_timeout: config.handshake_timeout,
             num_chains,
             randomness: Mutex::new(randomness),
             next_start_connect_waker: AtomicWaker::new(),
@@ -457,14 +466,23 @@ where
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    ///
     /// After this function has returned, you must process the connection with
     /// [`ChainNetwork::read_write`].
     ///
     /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
     /// libp2p protocol, its own address, in which case we send it.
-    pub async fn add_incoming_connection(&self, remote_addr: multiaddr::Multiaddr) -> ConnectionId {
-        self.inner.add_incoming_connection(remote_addr).await
+    pub async fn add_incoming_connection(
+        &self,
+        when_connected: TNow,
+        remote_addr: multiaddr::Multiaddr,
+    ) -> ConnectionId {
+        self.inner
+            .add_incoming_connection(when_connected, remote_addr)
+            .await
     }
 
     /// Modifies the best block of the local node. See [`ChainConfig::best_hash`] and
@@ -693,11 +711,11 @@ where
 
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr) = lock.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = lock.pending_ids.get(id.0).unwrap();
 
         let connection_id = self
             .inner
-            .add_outgoing_connection(expected_peer_id, multiaddr.clone())
+            .add_outgoing_connection(when_connected.clone(), expected_peer_id, multiaddr.clone())
             .await;
 
         // Update `lock.peers`.
@@ -733,7 +751,7 @@ where
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
         let mut lock = self.ephemeral_guarded.lock().await;
-        let (expected_peer_id, _) = lock.pending_ids.remove(id.0);
+        let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
 
         // Update `lock.peers`.
         let has_any_attempt_left = {
@@ -1430,10 +1448,13 @@ where
     /// Later, the API user must use [`ChainNetwork::pending_outcome_ok`] or
     /// [`ChainNetwork::pending_outcome_err`] to report how the connection attempt went.
     ///
+    /// The returned [`StartConnect`] contains the [`StartConnect::timeout`] field. It is the
+    /// responsibility of the API user to ensure that [`ChainNetwork::pending_outcome_err`] is
+    /// called if this timeout is reached.
+    ///
     /// If no outgoing connection is desired, the method waits until there is one.
-    // TODO: document the timeout system
     // TODO: give more control, with number of slots and node choice
-    pub async fn next_start_connect<'a>(&self) -> StartConnect {
+    pub async fn next_start_connect<'a>(&self, now: TNow) -> StartConnect<TNow> {
         loop {
             let mut pending_lock = self.ephemeral_guarded.lock().await;
             let pending = &mut *pending_lock; // Prevents borrow checker issues.
@@ -1468,16 +1489,17 @@ where
                     continue;
                 };
 
-                let pending_id = PendingId(
-                    pending
-                        .pending_ids
-                        .insert((entry.key().clone(), multiaddr.clone())),
-                );
+                let pending_id = PendingId(pending.pending_ids.insert((
+                    entry.key().clone(),
+                    multiaddr.clone(),
+                    now.clone(),
+                )));
 
                 let start_connect = StartConnect {
                     expected_peer_id: entry.key().clone(),
                     id: pending_id,
                     multiaddr,
+                    timeout: now + self.handshake_timeout,
                 };
 
                 entry.insert(NonZeroUsize::new(1).unwrap());
@@ -1535,13 +1557,16 @@ where
 /// later be called in order to inform of the outcome of the connection.
 #[derive(Debug)]
 #[must_use]
-pub struct StartConnect {
+pub struct StartConnect<TNow> {
     /// Identifier of this connection request. Must be passed back later.
     pub id: PendingId,
     /// Address to attempt to connect to.
     pub multiaddr: multiaddr::Multiaddr,
     /// [`PeerId`] that is expected to be reached with this connection attempt.
     pub expected_peer_id: PeerId,
+    /// When the attempt should be considered as a failure. You must call
+    /// [`ChainNetwork::pending_outcome_err`] if this moment is reached.
+    pub timeout: TNow,
 }
 
 /// Event generated by [`ChainNetwork::next_event`].

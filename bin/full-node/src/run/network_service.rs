@@ -29,6 +29,7 @@
 
 use core::{cmp, pin::Pin, time::Duration};
 use futures::{channel::mpsc, prelude::*};
+use futures_timer::Delay;
 use smoldot::{
     informant::HashDisplay,
     libp2p::{
@@ -234,6 +235,7 @@ impl NetworkService {
                 connections_capacity: 100, // TODO: ?
                 peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
+                handshake_timeout: Duration::from_secs(8),
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 64
                 pending_api_events_buffer_size: NonZeroUsize::new(2048).unwrap(),
@@ -399,7 +401,7 @@ impl NetworkService {
                         }
                     };
 
-                    let start_connect = network_service.network.next_start_connect().await;
+                    let start_connect = network_service.network.next_start_connect(Instant::now()).await;
 
                     let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                     let _enter = span.enter();
@@ -419,7 +421,7 @@ impl NetworkService {
 
                     let network_service2 = network_service.clone();
                     (network_service.guarded.lock().tasks_executor)(Box::pin({
-                        connection_task(socket, network_service2, start_connect.id).instrument(
+                        connection_task(socket, start_connect.timeout, network_service2, start_connect.id).instrument(
                             tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
                         )
                     }));
@@ -482,15 +484,29 @@ pub enum InitError {
 #[tracing::instrument(skip(tcp_socket, network_service))]
 async fn connection_task(
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
+    timeout: Instant,
     network_service: Arc<NetworkService>,
     id: service::PendingId,
 ) {
     // Finishing ongoing connection process.
-    let tcp_socket = match tcp_socket.await {
-        Ok(s) => s,
-        Err(_) => {
-            network_service.network.pending_outcome_err(id).await;
-            return;
+    let tcp_socket = {
+        let mut timeout = Delay::new(timeout - Instant::now()).fuse();
+        let tcp_socket = tcp_socket.fuse();
+        futures::pin_mut!(tcp_socket);
+        futures::select! {
+            _ = timeout => {
+                network_service.network.pending_outcome_err(id).await;
+                return;
+            }
+            result = tcp_socket => {
+                match result {
+                    Ok(s) => s,
+                    Err(_) => {
+                        network_service.network.pending_outcome_err(id).await;
+                        return;
+                    }
+                }
+            }
         }
     };
 
