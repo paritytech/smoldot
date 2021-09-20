@@ -44,7 +44,10 @@ use futures::{
 };
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
-pub use crate::libp2p::{collection::ReadWrite, peers::ConnectionId};
+pub use crate::libp2p::{
+    collection::ReadWrite,
+    peers::{ConnectionId, InboundError},
+};
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
@@ -842,6 +845,18 @@ where
                 }
                 peers::Event::Disconnected { .. } => {
                     guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::InboundError { .. } => {
+                    match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::InboundError { peer_id, error, .. } => {
+                            return Event::ProtocolError {
+                                peer_id,
+                                error: ProtocolError::InboundError(error),
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
                 }
 
                 peers::Event::RequestIn {
@@ -1889,6 +1904,8 @@ pub enum GrandpaWarpSyncRequestError {
 /// See [`Event::ProtocolError`].
 #[derive(Debug, derive_more::Display)]
 pub enum ProtocolError {
+    /// Error in an incoming substream.
+    InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
     BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.

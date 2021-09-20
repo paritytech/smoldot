@@ -59,7 +59,10 @@ use core::{
 
 pub mod substream;
 
-pub use substream::{NotificationsOutErr, RequestError, RespondInRequestError};
+pub use substream::{
+    InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
+    RespondInRequestError,
+};
 
 /// State machine of a fully-established connection.
 pub struct Established<TNow, TRqUd, TNotifUd> {
@@ -492,7 +495,7 @@ where
     ///
     /// # Panics
     ///
-    /// Intentionally panics on [`substream::Event::InboundNegotiated`]. Please handler this
+    /// Intentionally panics on [`substream::Event::InboundNegotiated`]. Please handle this
     /// variant separately.
     ///
     fn pass_through_substream_event(
@@ -501,7 +504,7 @@ where
     ) -> Event<TRqUd, TNotifUd> {
         match event {
             substream::Event::InboundNegotiated(_) => panic!(),
-            substream::Event::InboundError(_) => {},
+            substream::Event::InboundError(error) => Event::InboundError(error),
             substream::Event::RequestIn {
                 protocol_index,
                 request,
@@ -535,6 +538,14 @@ where
             substream::Event::NotificationIn { notification } => Event::NotificationIn {
                 notification,
                 id: SubstreamId(substream_id),
+            },
+            substream::Event::NotificationsInClose {
+                protocol_index,
+                outcome,
+            } => Event::NotificationsInClose {
+                protocol_index,
+                id: SubstreamId(substream_id),
+                outcome,
             },
             substream::Event::NotificationsOutResult { result } => Event::NotificationsOutResult {
                 id: SubstreamId(substream_id),
@@ -838,6 +849,12 @@ impl SubstreamId {
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
+    /// Received an incoming substream, but this substream has produced an error.
+    ///
+    /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
+    /// >           return.
+    InboundError(InboundError),
+
     /// Received a request in the context of a request-response protocol.
     RequestIn {
         /// Identifier of the request. Needs to be provided back when answering the request.
@@ -877,7 +894,6 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
-
     /// Remote has canceled an inbound notifications substream opening.
     ///
     /// This can only happen after [`Event::NotificationsInOpen`].
@@ -892,7 +908,6 @@ pub enum Event<TRqUd, TNotifUd> {
         /// [`Config::notifications_protocols`].
         protocol_index: usize,
     },
-
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
     /// after the substream has been accepted.
     // TODO: give a way to back-pressure notifications
@@ -901,6 +916,19 @@ pub enum Event<TRqUd, TNotifUd> {
         id: SubstreamId,
         /// Notification sent by the remote.
         notification: Vec<u8>,
+    },
+    /// Remote has closed an inbound notifications substream.Can only happen
+    /// after the substream has been accepted.
+    NotificationsInClose {
+        /// Identifier of the substream.
+        id: SubstreamId,
+        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
+        outcome: Result<(), NotificationsInClosedErr>,
+        /// Index of the notifications protocol concerned by the substream.
+        ///
+        /// The index refers to the position of the protocol in
+        /// [`Config::notifications_protocols`].
+        protocol_index: usize,
     },
 
     /// Outcome of trying to open a substream with [`Established::open_notifications_substream`].

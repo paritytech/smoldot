@@ -67,7 +67,8 @@ use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionError, ConnectionReadyFuture,
-    NotificationProtocolConfig, NotificationsOutErr, ReadWrite,
+    InboundError, NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr,
+    ReadWrite,
 };
 
 /// Configuration for a [`Peers`].
@@ -498,6 +499,24 @@ where
                     }
                 }
 
+                collection::Event::InboundError {
+                    id,
+                    error,
+                    user_data: local_connection_index,
+                } => {
+                    let peer_id = {
+                        let (peer_index, _) =
+                            guarded.connections[local_connection_index].clone();
+                        guarded.peers[peer_index.unwrap()].peer_id.clone()
+                    };
+
+                    return Event::InboundError {
+                        peer_id,
+                        connection_id: id,
+                        error,
+                    };
+                }
+
                 collection::Event::RequestIn {
                     id,
                     substream_id,
@@ -655,10 +674,9 @@ where
                 collection::Event::NotificationsInClose {
                     notifications_protocol_index,
                     user_data: local_connection_index,
+                    outcome,
                     ..
                 } => {
-                    // TODO: does this event also mean a NotificationsInOpen is no longer valid?
-
                     let peer_index = guarded.connections[local_connection_index].0.unwrap();
                     let peer_id = guarded.peers[peer_index].peer_id.clone();
 
@@ -670,6 +688,7 @@ where
                     return Event::NotificationsInClose {
                         peer_id,
                         notifications_protocol_index,
+                        outcome,
                     };
                 }
             }
@@ -1316,6 +1335,19 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
+    /// Received an incoming substream, but this substream has produced an error.
+    ///
+    /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
+    /// >           return.
+    InboundError {
+        /// Peer which opened the substream.
+        peer_id: PeerId,
+        /// Identifier of the connection on which the problem happened.
+        connection_id: ConnectionId,
+        /// Error that happened.
+        error: InboundError,
+    },
+
     /// Received a request from a request-response protocol.
     RequestIn {
         /// Identifier for this request. Must be passed back when calling [`Peers::respond`].
@@ -1427,6 +1459,8 @@ pub enum Event<TConn> {
         peer_id: PeerId,
         /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
+        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
+        outcome: Result<(), NotificationsInClosedErr>,
     },
 }
 
