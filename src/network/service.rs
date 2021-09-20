@@ -872,10 +872,10 @@ where
                     guarded.to_process_pre_event = None;
                 }
 
-                peers::Event::NotificationsOutAccept {
+                peers::Event::NotificationsOutResult {
                     peer_id,
                     notifications_protocol_index,
-                    remote_handshake,
+                    result: Ok(remote_handshake),
                 } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
@@ -930,17 +930,19 @@ where
                     };
                 }
 
-                peers::Event::NotificationsOutAccept {
+                peers::Event::NotificationsOutResult {
                     notifications_protocol_index,
+                    result: Ok(_),
                     ..
                 } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
                     // Nothing to do.
                     guarded.to_process_pre_event = None;
                 }
 
-                peers::Event::NotificationsOutAccept {
+                peers::Event::NotificationsOutResult {
                     peer_id,
                     notifications_protocol_index,
+                    result: Ok(_),
                     ..
                 } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
                     // Grandpa notification has been opened. Send neighbor packet.
@@ -980,7 +982,7 @@ where
                     // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
                 }
 
-                peers::Event::NotificationsOutAccept { .. } => unreachable!(),
+                peers::Event::NotificationsOutResult { result: Ok(_), .. } => unreachable!(),
 
                 peers::Event::DesiredOutNotification {
                     id,
@@ -1023,6 +1025,49 @@ where
                         .open_out_notification(*id, now.clone(), handshake)
                         .await;
 
+                    guarded.to_process_pre_event = None;
+                }
+
+                peers::Event::NotificationsOutResult {
+                    notifications_protocol_index,
+                    peer_id,
+                    result: Err(_),
+                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    self.inner
+                        .set_peer_notifications_out_desired(
+                            peer_id,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                            false,
+                        )
+                        .await;
+                    self.inner
+                        .set_peer_notifications_out_desired(
+                            peer_id,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                            false,
+                        )
+                        .await;
+
+                    {
+                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                        let _was_in = ephemeral_guarded.chains[chain_index]
+                            .out_peers
+                            .remove(peer_id);
+                        debug_assert!(
+                            !_was_in
+                                || !ephemeral_guarded.chains[chain_index]
+                                    .in_peers
+                                    .contains(peer_id)
+                        );
+                    }
+
+                    self.next_start_connect_waker.wake();
+                    guarded.to_process_pre_event = None;
+                }
+                peers::Event::NotificationsOutResult { result: Err(_), .. } => {
                     guarded.to_process_pre_event = None;
                 }
 
@@ -1075,7 +1120,6 @@ where
                         chain_index,
                     };
                 }
-
                 peers::Event::NotificationsOutClose { .. } => {
                     guarded.to_process_pre_event = None;
                 }
