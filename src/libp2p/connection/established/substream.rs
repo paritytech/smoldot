@@ -333,10 +333,11 @@ where
                 user_data,
             } => {
                 if timeout < read_write.now {
-                    // TODO: report that it's a timeout and not a rejection
                     return (
                         Some(SubstreamInner::NegotiationFailed),
-                        Some(Event::NotificationsOutReject { user_data }),
+                        Some(Event::NotificationsOutResult {
+                            result: Err((NotificationsOutErr::Timeout, user_data)),
+                        }),
                     );
                 }
 
@@ -370,10 +371,18 @@ where
                             None,
                         )
                     }
-                    _ => {
-                        // TODO: differentiate between actual error and protocol unavailable?
-                        (None, Some(Event::NotificationsOutReject { user_data }))
-                    }
+                    Ok(multistream_select::Negotiation::NotAvailable) => (
+                        None,
+                        Some(Event::NotificationsOutResult {
+                            result: Err((NotificationsOutErr::ProtocolNotAvailable, user_data)),
+                        }),
+                    ),
+                    Err(err) => (
+                        None,
+                        Some(Event::NotificationsOutResult {
+                            result: Err((NotificationsOutErr::NegotiationError(err), user_data)),
+                        }),
+                    ),
                 }
             }
             SubstreamInner::NotificationsOutHandshakeRecv {
@@ -390,7 +399,9 @@ where
                         // TODO: transition
                         return (
                             Some(SubstreamInner::NegotiationFailed),
-                            Some(Event::NotificationsOutReject { user_data }),
+                            Some(Event::NotificationsOutResult {
+                                result: Err((NotificationsOutErr::RefusedHandshake, user_data)),
+                            }),
                         );
                     }
                 };
@@ -417,7 +428,9 @@ where
                                 notifications: VecDeque::new(),
                                 user_data,
                             }),
-                            Some(Event::NotificationsOutAccept { remote_handshake }),
+                            Some(Event::NotificationsOutResult {
+                                result: Ok(remote_handshake),
+                            }),
                         )
                     }
                     Ok((num_read, leb128::Framed::InProgress(handshake_in))) => {
@@ -723,8 +736,8 @@ where
                     None => {
                         read_write.close_write();
                         return (
-                            Some(SubstreamInner::NegotiationFailed), // TODO: proper transitio
-                            Some(Event::NotificationsOutReject { user_data }),
+                            Some(SubstreamInner::NegotiationFailed), // TODO: proper transition
+                            todo!(),                                 // TODO: !
                         );
                     }
                 };
@@ -818,7 +831,9 @@ where
             SubstreamInner::NotificationsInRefused => None,
             SubstreamInner::NotificationsOutNegotiating { user_data, .. }
             | SubstreamInner::NotificationsOutHandshakeRecv { user_data, .. } => {
-                Some(Event::NotificationsOutReject { user_data })
+                Some(Event::NotificationsOutResult {
+                    result: Err((NotificationsOutErr::SubstreamReset, user_data)),
+                })
             }
             SubstreamInner::PingIn { .. } => None,
             SubstreamInner::NotificationsOut { user_data, .. } => {
@@ -1119,18 +1134,13 @@ pub enum Event<TRqUd, TNotifUd> {
         notification: Vec<u8>,
     },
 
-    /// Remote has accepted a substream opened with [`Substream::notifications_out`].
+    /// Remote has accepted or refused a substream opened with [`Substream::notifications_out`].
     ///
-    /// It is now possible to send notifications on this substream.
-    NotificationsOutAccept {
-        /// Handshake sent back by the remote. Its interpretation is out of scope of this module.
-        remote_handshake: Vec<u8>,
-    },
-
-    /// Remote has rejected a substream opened with [`Substream::notifications_out`].
-    NotificationsOutReject {
-        /// Value that was passed to [`Substream::notifications_out`].
-        user_data: TNotifUd,
+    /// If `Ok`, it is now possible to send notifications on this substream.
+    NotificationsOutResult {
+        /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
+        /// scope of this module.
+        result: Result<Vec<u8>, (NotificationsOutErr, TNotifUd)>,
     },
 
     /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
@@ -1184,4 +1194,19 @@ pub enum RequestError {
 pub enum RespondInRequestError {
     /// The substream has already been closed.
     SubstreamClosed,
+}
+
+/// Error that can happen when trying to open an outbound notifications substream.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum NotificationsOutErr {
+    /// Remote took too long to perform the handshake.
+    Timeout,
+    /// Remote has refused the handshake by closing the substream.
+    RefusedHandshake,
+    /// Remote has indicated that it doesn't support the requested protocol.
+    ProtocolNotAvailable,
+    /// Error during the multistream-select handshake.
+    NegotiationError(multistream_select::Error),
+    /// Substream has been reset during the negotiation.
+    SubstreamReset,
 }
