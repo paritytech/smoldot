@@ -521,7 +521,7 @@ where
                 if timeout < read_write.now {
                     read_write.close_write();
                     return (
-                        Some(SubstreamInner::NegotiationFailed),
+                        None,
                         Some(Event::Response {
                             response: Err(RequestError::Timeout),
                             user_data,
@@ -652,6 +652,7 @@ where
                     ),
                 }
             }
+
             SubstreamInner::RequestInRecv {
                 request,
                 protocol_index,
