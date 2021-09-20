@@ -43,8 +43,10 @@ export interface SmoldotClient {
   addChain(options: SmoldotAddChainOptions): Promise<SmoldotChain>;
 
   /**
-   * Terminates the client. Trying to use the client or any of its chains again will lead to an
-   * exception being thrown.
+   * Terminates the client.
+   *
+   * Afterwards, trying to use the client or any of its chains again will lead to an exception
+   * being thrown.
    */
   terminate(): void;
 }
@@ -66,7 +68,7 @@ export interface SmoldotChain {
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
    *
-   * The available requests are documented here: <https://polkadot.js.org/docs/substrate/rpc>
+   * The available methods are documented here: <https://polkadot.js.org/docs/substrate/rpc>
    *
    * @param rpc JSON-encoded RPC request.
    */
@@ -104,7 +106,7 @@ export type SmoldotLogCallback = (level: number, target: string, message: string
  */
 export interface SmoldotOptions {
   /**
-   * Callback that the client will invoke in order to reported a log event.
+   * Callback that the client will invoke in order to report a log event.
    */
   logCallback?: SmoldotLogCallback;
 
@@ -146,7 +148,8 @@ export interface SmoldotOptions {
    * If `true`, then the client will never open any secure WebSocket connection.
    * Defaults to `false`.
    *
-   * This option exists of the sake of completeness.
+   * This option exists of the sake of completeness. All environments support secure WebSocket
+   * connections.
    */
   forbidWss?: boolean;
 }
@@ -217,6 +220,8 @@ export interface SmoldotHealth {
 export interface Smoldot {
   /**
    * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
+   *
+   * Can never fail.
    *
    * @param options Configuration of the client. Defaults to `{}`.
    */
