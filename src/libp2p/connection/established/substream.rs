@@ -187,7 +187,28 @@ where
     TNow: Clone + Ord,
 {
     /// Initializes an new ingoing substream.
-    // TODO: detail events that can happen
+    ///
+    /// After the remote has requested a protocol, an [`Event::InboundNegotiated`] event will be
+    /// generated, after which [`Substream::set_inbound_ty`] must be called in order to indicate
+    /// the nature of the negotiated protocol.
+    /// A [`Event::InboundError`] can also be generated, either before or after the
+    /// [`Event::InboundNegotiated`], but always before any [`Event::NotificationsInOpen`].
+    ///
+    /// If [̀ InboundTy::Notifications`] is passed, then a [`Event::NotificationsInOpen`] will be
+    /// generated (unless an error happens, in which case [`Event::InboundError`]).
+    /// In response, the API user must call either [`Substream::accept_in_notifications_substream`]
+    /// or [`Substream::reject_in_notifications_substream`]. Before one of these two methods is
+    /// called, it is possible for an [`Event::NotificationsInOpenCancel`] to be generated, in
+    /// which case the inbound request is cancelled and the substream closed.
+    /// After [`Substream::accept_in_notifications_substream`] is called, zero or more
+    /// [`Event::NotificationIn`] will be generated, until a [`Event::NotificationInClose`] which
+    /// indicates the end of the substream.
+    ///
+    /// If [`InboundTy::Request`] is passed, then a [`Event::RequestIn`] will be generated, after
+    /// which the API user must call [`Substream::respond_in_request`]. An [`Event::InboundError`]
+    /// can happen at any point.
+    ///
+    /// This flow is also true if you call [`Substream::reset`] at any point.
     pub fn ingoing(supported_protocols: Vec<String>) -> Self {
         let negotiation =
             multistream_select::InProgress::new(multistream_select::Config::Listener {
