@@ -505,8 +505,7 @@ where
                     user_data: local_connection_index,
                 } => {
                     let peer_id = {
-                        let (peer_index, _) =
-                            guarded.connections[local_connection_index].clone();
+                        let (peer_index, _) = guarded.connections[local_connection_index].clone();
                         guarded.peers[peer_index.unwrap()].peer_id.clone()
                     };
 
@@ -556,6 +555,7 @@ where
                         .peers_notifications_out
                         .get_mut(&(peer_index, notifications_protocol_index))
                         .unwrap();
+                    let desired = notification_out.desired;
 
                     debug_assert!(matches!(
                         notification_out.open,
@@ -565,11 +565,12 @@ where
                     if result.is_ok() {
                         notification_out.open =
                             NotificationsOutOpenState::Open(connection_id, substream_id);
+                        // TODO: close if `!desired`
                     } else {
                         notification_out.open = NotificationsOutOpenState::Closed;
 
                         // Remove entry from map if it has become useless.
-                        if !notification_out.desired {
+                        if !desired {
                             guarded
                                 .peers_notifications_out
                                 .remove(&(peer_index, notifications_protocol_index));
@@ -1414,8 +1415,9 @@ pub enum Event<TConn> {
 
     /// A handshaking outbound substream has been accepted by the remote.
     ///
-    /// Can only happen for combinations of [`PeerId`] and notification protocols that have been
-    /// marked as desired.
+    /// Will happen for combinations of [`PeerId`] and notification protocols that have been
+    /// marked as desired. Can also happen for other combinations, if there were marked as desired
+    /// in the past but no longer are.
     ///
     /// If `Ok`, it is now possible to send notifications on this substream.
     NotificationsOutResult {
@@ -1425,6 +1427,8 @@ pub enum Event<TConn> {
         notifications_protocol_index: usize,
         /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
         /// scope of this module.
+        /// If `Err`, the state machine will *not* automatically try to re-open a substream again.
+        // TODO: expand how to do try again
         result: Result<Vec<u8>, NotificationsOutErr>,
     },
 

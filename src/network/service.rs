@@ -46,7 +46,7 @@ use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
-    peers::{ConnectionId, InboundError},
+    peers::{ConnectionId, InboundError, NotificationsOutErr},
 };
 
 /// Configuration for a [`ChainNetwork`].
@@ -1080,7 +1080,21 @@ where
                     }
 
                     self.next_start_connect_waker.wake();
-                    guarded.to_process_pre_event = None;
+
+                    match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::NotificationsOutResult {
+                            peer_id,
+                            result: Err(error),
+                            ..
+                        } => {
+                            return Event::ChainConnectAttemptFailed {
+                                peer_id,
+                                chain_index,
+                                error,
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
                 }
                 peers::Event::NotificationsOutResult { result: Err(_), .. } => {
                     guarded.to_process_pre_event = None;
@@ -1613,6 +1627,14 @@ pub enum Event<'a, TNow> {
     ChainDisconnected {
         peer_id: peer_id::PeerId,
         chain_index: usize,
+    },
+
+    /// An attempt has been made to open the given chain, but a problem happened.
+    ChainConnectAttemptFailed {
+        chain_index: usize,
+        peer_id: peer_id::PeerId,
+        /// Problem that happened.
+        error: NotificationsOutErr,
     },
 
     /// Received a new block announce from a peer.
