@@ -43,8 +43,8 @@ use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     informant::HashDisplay,
     libp2p::{
-        collection::ConnectionError,
-        connection::{self, handshake::HandshakeError},
+        collection::{ConnectionError, HandshakeError},
+        connection::{self, handshake},
         multiaddr::Multiaddr,
         peer_id::PeerId,
         read_write::ReadWrite,
@@ -179,6 +179,7 @@ impl NetworkService {
                 connections_capacity: 100, // TODO: ?
                 peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
+                handshake_timeout: Duration::from_secs(8),
                 // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
                 // once the issue is solved, this should be restored to a smaller value, such as 16
                 pending_api_events_buffer_size: NonZeroUsize::new(2048).unwrap(),
@@ -351,7 +352,10 @@ impl NetworkService {
                             }
                         };
 
-                        let start_connect = network_service.network.next_start_connect().await;
+                        let start_connect = network_service
+                            .network
+                            .next_start_connect(ffi::Instant::now())
+                            .await;
 
                         let is_important_peer = network_service
                             .important_nodes
@@ -374,6 +378,7 @@ impl NetworkService {
                                     socket,
                                     network_service2,
                                     start_connect.id,
+                                    start_connect.timeout,
                                     start_connect.expected_peer_id,
                                     start_connect.multiaddr,
                                     is_important_peer,
@@ -658,34 +663,63 @@ async fn connection_task(
     websocket: impl Future<Output = Result<Pin<Box<ffi::Connection>>, impl fmt::Display>>,
     network_service: Arc<NetworkService>,
     pending_id: service::PendingId,
+    timeout: ffi::Instant,
     expected_peer_id: PeerId,
     attemped_multiaddr: Multiaddr,
     is_important_peer: bool,
 ) {
     // Finishing the ongoing connection process.
-    let mut websocket = match websocket.await {
-        Ok(s) => s,
-        Err(err) => {
-            if is_important_peer {
+    let mut websocket = {
+        let websocket = websocket.fuse();
+        futures::pin_mut!(websocket);
+        let mut timeout = ffi::Delay::new_at(timeout);
+
+        let result = futures::select! {
+            _ = timeout => Err(None),
+            result = websocket => result.map_err(Some),
+        };
+
+        match (&result, is_important_peer) {
+            (Ok(_), _) => {}
+            (Err(None), true) => {
+                log::warn!(
+                    target: "connections",
+                    "Timeout when trying to reach {} through {}",
+                    expected_peer_id, attemped_multiaddr
+                );
+            }
+            (Err(None), false) => {
+                log::debug!(
+                    target: "connections",
+                    "Pending({:?}, {}) => Timeout ({})",
+                    pending_id, expected_peer_id, attemped_multiaddr
+                );
+            }
+            (Err(Some(err)), true) => {
                 log::warn!(
                     target: "connections",
                     "Failed to reach {} through {}: {}",
                     expected_peer_id, attemped_multiaddr, err
                 );
-            } else {
+            }
+            (Err(Some(err)), false) => {
                 log::debug!(
                     target: "connections",
                     "Pending({:?}, {}) => Failed to reach ({}): {}",
                     pending_id, expected_peer_id, attemped_multiaddr, err
                 );
             }
+        }
 
-            network_service
-                .network
-                .pending_outcome_err(pending_id)
-                .await;
-
-            return;
+        match result {
+            Ok(ws) => ws,
+            Err(_) => {
+                network_service
+                    .network
+                    .pending_outcome_err(pending_id)
+                    .await;
+                return;
+            }
         }
     };
 
@@ -733,8 +767,13 @@ async fn connection_task(
                 // it is likely that the cause is connecting to a port that isn't serving the
                 // libp2p protocol.
                 match err {
-                    ConnectionError::Handshake(HandshakeError::NoEncryptionProtocol)
-                    | ConnectionError::Handshake(HandshakeError::NoMultiplexingProtocol) => {}
+                    ConnectionError::Handshake(HandshakeError::Protocol(
+                        handshake::HandshakeError::NoEncryptionProtocol,
+                    ))
+                    | ConnectionError::Handshake(HandshakeError::Protocol(
+                        handshake::HandshakeError::NoMultiplexingProtocol,
+                    ))
+                    | ConnectionError::Handshake(HandshakeError::Timeout) => {}
                     ConnectionError::Handshake(_) => {
                         log::warn!(
                             target: "connections",
