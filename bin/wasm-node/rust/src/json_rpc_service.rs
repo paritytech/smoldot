@@ -1200,12 +1200,20 @@ impl Background {
                     self.sync_service
                         .syncing_peers()
                         .await
-                        .map(|(peer_id, best_number, best_hash)| methods::SystemPeer {
-                            peer_id: peer_id.to_string(),
-                            roles: "unknown".to_string(), // TODO: do properly
-                            best_hash: methods::HashHexString(best_hash),
-                            best_number,
-                        })
+                        .map(
+                            |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
+                                peer_id: peer_id.to_string(),
+                                // TODO: use an enum
+                                roles: match role {
+                                    protocol::Role::Authority => "authority",
+                                    protocol::Role::Full => "full",
+                                    protocol::Role::Light => "light",
+                                }
+                                .to_string(),
+                                best_hash: methods::HashHexString(best_hash),
+                                best_number,
+                            },
+                        )
                         .collect(),
                 )
                 .to_json_response(request_id);
