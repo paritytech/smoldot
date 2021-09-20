@@ -36,9 +36,11 @@ pub(super) struct ClientSpec {
     #[serde(default)]
     pub(super) chain_type: ChainType,
 
-    /// Each key is a block hash. The block with that hash and all of its children that share the
-    /// same [`crate::executor::CoreVersionRef::spec_version`] should instead use the Wasm runtime
-    /// code found in the value.
+    /// Each key is a block hash. The descendants of the block with this hash that share the same
+    /// [`crate::executor::CoreVersionRef::spec_version`] should instead use the Wasm runtime code
+    /// found in the value.
+    /// The block with that hash uses its unmodified runtime code. Only its children can be
+    /// affected.
     ///
     /// This can be used in order to substitute faulty runtimes with functioning ones.
     ///
