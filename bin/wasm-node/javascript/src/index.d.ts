@@ -187,8 +187,8 @@ export interface SmoldotAddChainOptions {
    * These problems can be solved by using this parameter to segregate multiple different uses of
    * the same client. To use it, pass the list of all chains that the same application has
    * previously added to the client. By doing so, you are guaranteed that the chains of multiple
-   * different applications can't interact in bad ways, while still benefiting from the
-   * de-duplication of resources that smoldot performs in `addChain`.
+   * different applications can't interact in any way (good or bad), while still benefiting from
+   * the de-duplication of resources that smoldot performs in `addChain`.
    *
    * When multiple different parachains use the same relay chain, it is important to be sure that
    * they are indeed using the same relay chain, and not accidentally using different ones. For
