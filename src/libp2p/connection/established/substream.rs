@@ -121,6 +121,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// Data passed by the user to [`Substream::accept_in_notifications_substream`].
         user_data: TNotifUd,
     },
+    /// An inbound notifications protocol was open, but then the remote closed its writing side.
+    NotificationsInClosed,
 
     /// Negotiating a protocol for an outgoing request.
     RequestOutNegotiating {
@@ -723,8 +725,10 @@ where
                     None => {
                         read_write.close_write();
                         return (
-                            Some(SubstreamInner::InboundFailed), // TODO: proper transition
-                            Some(Event::NotificationsInOpenCancel { protocol_index }),
+                            None,
+                            Some(Event::InboundError(
+                                InboundError::NotificationsInUnexpectedEof { protocol_index },
+                            )),
                         );
                     }
                 };
@@ -750,21 +754,40 @@ where
                             None,
                         )
                     }
-                    Err(_) => (None, None),
+                    Err(error) => (
+                        None,
+                        Some(Event::InboundError(InboundError::NotificationsInError {
+                            error,
+                            protocol_index,
+                        })),
+                    ),
                 }
             }
             SubstreamInner::NotificationsInWait { protocol_index } => {
-                // TODO: what to do with data?
-                read_write.discard_all_incoming();
-                (
-                    Some(SubstreamInner::NotificationsInWait { protocol_index }),
-                    None,
-                )
+                // Incoming data isn't processed, potentially back-pressuring it.
+                if read_write.incoming_buffer.is_some() {
+                    (
+                        Some(SubstreamInner::NotificationsInWait { protocol_index }),
+                        None,
+                    )
+                } else {
+                    (
+                        Some(SubstreamInner::NotificationsInRefused),
+                        Some(Event::NotificationsInOpenCancel { protocol_index }),
+                    )
+                }
             }
             SubstreamInner::NotificationsInRefused => {
                 read_write.discard_all_incoming();
                 read_write.close_write();
-                (Some(SubstreamInner::NotificationsInRefused), None)
+                (
+                    if read_write.is_dead() {
+                        None
+                    } else {
+                        Some(SubstreamInner::NotificationsInRefused)
+                    },
+                    None,
+                )
             }
             SubstreamInner::NotificationsIn {
                 mut next_notification,
@@ -780,8 +803,11 @@ where
                     None => {
                         read_write.close_write();
                         return (
-                            Some(SubstreamInner::InboundFailed), // TODO: proper transition
-                            todo!(),                             // TODO: !
+                            Some(SubstreamInner::NotificationsInClosed),
+                            Some(Event::NotificationsInClose {
+                                protocol_index,
+                                outcome: Ok(()),
+                            }),
                         );
                     }
                 };
@@ -818,12 +844,30 @@ where
                             None,
                         )
                     }
-                    Err(_) => {
-                        // TODO: report to user; there's no corresponding event yet
-                        (None, None)
+                    Err(error) => {
+                        return (
+                            Some(SubstreamInner::NotificationsInClosed),
+                            Some(Event::NotificationsInClose {
+                                protocol_index,
+                                outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
+                            }),
+                        );
                     }
                 }
             }
+            SubstreamInner::NotificationsInClosed => {
+                read_write.discard_all_incoming();
+                read_write.close_write();
+                (
+                    if read_write.is_dead() {
+                        None
+                    } else {
+                        Some(SubstreamInner::NotificationsInClosed)
+                    },
+                    None,
+                )
+            }
+
             SubstreamInner::PingIn {
                 mut payload_in,
                 mut payload_out,
@@ -868,11 +912,14 @@ where
             SubstreamInner::NotificationsInWait { protocol_index, .. } => {
                 Some(Event::NotificationsInOpenCancel { protocol_index })
             }
-            SubstreamInner::NotificationsIn { .. } => {
-                // TODO: report to user
-                None
+            SubstreamInner::NotificationsIn { protocol_index, .. } => {
+                Some(Event::NotificationsInClose {
+                    protocol_index,
+                    outcome: Err(NotificationsInClosedErr::SubstreamReset),
+                })
             }
             SubstreamInner::NotificationsInRefused => None,
+            SubstreamInner::NotificationsInClosed => None,
             SubstreamInner::NotificationsOutNegotiating { user_data, .. }
             | SubstreamInner::NotificationsOutHandshakeRecv { user_data, .. } => {
                 Some(Event::NotificationsOutResult {
@@ -1106,11 +1153,14 @@ where
                 .field(protocol_index)
                 .finish(),
             SubstreamInner::NotificationsInWait { .. } => {
-                todo!() // TODO:
+                f.debug_tuple("notifications-in-wait").finish()
             }
             SubstreamInner::NotificationsIn { .. } => f.debug_tuple("notifications-in").finish(),
             SubstreamInner::NotificationsInRefused => {
                 f.debug_tuple("notifications-in-refused").finish()
+            }
+            SubstreamInner::NotificationsInClosed => {
+                f.debug_tuple("notifications-in-closed").finish()
             }
             SubstreamInner::RequestOutNegotiating { user_data, .. }
             | SubstreamInner::RequestOut { user_data, .. } => {
@@ -1165,7 +1215,6 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Handshake sent by the remote. Its interpretation is out of scope of this module.
         handshake: Vec<u8>,
     },
-
     /// Remote has canceled an inbound notifications substream opening.
     ///
     /// This can only happen after [`Event::NotificationsInOpen`].
@@ -1175,13 +1224,22 @@ pub enum Event<TRqUd, TNotifUd> {
         /// Index of the notifications protocol concerned by the substream.
         protocol_index: usize,
     },
-
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
     /// after the substream has been accepted.
     // TODO: give a way to back-pressure notifications
     NotificationIn {
         /// Notification sent by the remote.
         notification: Vec<u8>,
+    },
+    /// Remote has closed an inbound notifications substream opening. No more notifications will
+    /// be received.
+    ///
+    /// This can only happen after the substream has been accepted.
+    NotificationsInClose {
+        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
+        outcome: Result<(), NotificationsInClosedErr>,
+        /// Index of the notifications protocol concerned by the substream.
+        protocol_index: usize,
     },
 
     /// Remote has accepted or refused a substream opened with [`Substream::notifications_out`].
@@ -1227,6 +1285,25 @@ pub enum InboundError {
     RequestInLebError(leb128::FramedError),
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
+    /// Error while receiving an inbound notifications substream handshake.
+    #[display(
+        fmt = "Error while receiving an inbound notifications substream handshake: {}",
+        error
+    )]
+    NotificationsInError {
+        /// Error that happened.
+        error: leb128::FramedError,
+        /// Index of the protocol that was passed in the [`InboundTy::Notifications`].
+        protocol_index: usize,
+    },
+    /// Unexpected end of file while receiving an inbound notifications substream handshake.
+    #[display(
+        fmt = "Unexpected end of file while receiving an inbound notifications substream handshake"
+    )]
+    NotificationsInUnexpectedEof {
+        /// Index of the protocol that was passed in the [`InboundTy::Notifications`].
+        protocol_index: usize,
+    },
 }
 
 /// Error that can happen during a request in a request-response scheme.
@@ -1270,4 +1347,13 @@ pub enum NotificationsOutErr {
     SubstreamReset,
     /// Error while receiving the remote's handshake.
     HandshakeRecvError(leb128::FramedError),
+}
+
+/// Reason why an inbound notifications substream has been closed.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum NotificationsInClosedErr {
+    /// Error in the protocol.
+    ProtocolError(leb128::FramedError),
+    /// Substream has been reset.
+    SubstreamReset,
 }

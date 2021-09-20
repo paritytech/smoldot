@@ -501,6 +501,7 @@ where
     ) -> Event<TRqUd, TNotifUd> {
         match event {
             substream::Event::InboundNegotiated(_) => panic!(),
+            substream::Event::InboundError(_) => {},
             substream::Event::RequestIn {
                 protocol_index,
                 request,
