@@ -43,8 +43,17 @@ pub struct Delay {
 
 impl Delay {
     pub fn new(after: Duration) -> Self {
+        let now = Instant::now();
+        Self::new_inner(now + after, now)
+    }
+
+    pub fn new_at(when: Instant) -> Self {
+        Self::new_inner(when, Instant::now())
+    }
+
+    fn new_inner(when: Instant, now: Instant) -> Self {
         // Small optimization because sleeps of 0 seconds are frequent.
-        if after == Duration::new(0, 0) {
+        if when <= now {
             return Delay { timer_id: None };
         }
 
@@ -57,7 +66,7 @@ impl Delay {
             waker: None,
         });
 
-        let when_from_time_zero = Instant::now() + after - lock.time_zero;
+        let when_from_time_zero = when - lock.time_zero;
         lock.timers_queue.push(QueuedTimer {
             when_from_time_zero,
             timer_id,
@@ -66,7 +75,7 @@ impl Delay {
         // If this was the first timer being inserted, then actually start the callback that
         // will process timers.
         if lock.timers_queue.len() == 1 {
-            super::start_timer_wrap(after, process_timers);
+            super::start_timer_wrap(when - now, process_timers);
         }
 
         Delay {
