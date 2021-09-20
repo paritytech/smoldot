@@ -1060,7 +1060,7 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
-    /// Outcome of trying to open a substream with [`Established::open_notifications_substream`].
+    /// Outcome of trying to open a substream with [`Network::open_notifications_substream`].
     ///
     /// If `Ok`, it is now possible to send notifications on this substream.
     /// If `Err`, the substream no longer exists.
