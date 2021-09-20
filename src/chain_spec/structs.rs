@@ -35,9 +35,17 @@ pub(super) struct ClientSpec {
     pub(super) id: String,
     #[serde(default)]
     pub(super) chain_type: ChainType,
+
+    /// Each key is a block hash. The block with that hash and all of its children that share the
+    /// same [`crate::executor::CoreVersionRef::spec_version`] should instead use the Wasm runtime
+    /// code found in the value.
+    ///
+    /// This can be used in order to substitute faulty runtimes with functioning ones.
+    ///
+    /// See also https://github.com/paritytech/substrate/pull/8898.
     #[serde(default)]
     // TODO: make use of this
-    pub(super) code_substitutes: HashMap<String, HexString, fnv::FnvBuildHasher>,
+    pub(super) code_substitutes: HashMap<HexString, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
     pub(super) protocol_id: Option<String>,
@@ -90,7 +98,7 @@ pub(super) struct RawGenesis {
     pub(super) children_default: BTreeMap<HexString, ChildRawStorage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct HexString(pub(super) Vec<u8>);
 
 impl core::borrow::Borrow<[u8]> for HexString {
