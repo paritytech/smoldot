@@ -44,7 +44,10 @@ use futures::{
 };
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
-pub use crate::libp2p::{collection::ReadWrite, peers::ConnectionId};
+pub use crate::libp2p::{
+    collection::ReadWrite,
+    peers::{ConnectionId, InboundError, NotificationsOutErr},
+};
 
 /// Configuration for a [`ChainNetwork`].
 pub struct Config {
@@ -844,6 +847,18 @@ where
                     guarded.to_process_pre_event = None;
                 }
 
+                peers::Event::InboundError { .. } => {
+                    match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::InboundError { peer_id, error, .. } => {
+                            return Event::ProtocolError {
+                                peer_id,
+                                error: ProtocolError::InboundError(error),
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
                 peers::Event::RequestIn {
                     request_id,
                     peer_id,
@@ -1065,7 +1080,21 @@ where
                     }
 
                     self.next_start_connect_waker.wake();
-                    guarded.to_process_pre_event = None;
+
+                    match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::NotificationsOutResult {
+                            peer_id,
+                            result: Err(error),
+                            ..
+                        } => {
+                            return Event::ChainConnectAttemptFailed {
+                                peer_id,
+                                chain_index,
+                                error,
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
                 }
                 peers::Event::NotificationsOutResult { result: Err(_), .. } => {
                     guarded.to_process_pre_event = None;
@@ -1600,6 +1629,14 @@ pub enum Event<'a, TNow> {
         chain_index: usize,
     },
 
+    /// An attempt has been made to open the given chain, but a problem happened.
+    ChainConnectAttemptFailed {
+        chain_index: usize,
+        peer_id: peer_id::PeerId,
+        /// Problem that happened.
+        error: NotificationsOutErr,
+    },
+
     /// Received a new block announce from a peer.
     ///
     /// Can only happen after a [`Event::ChainConnected`] with the given `PeerId` and chain index
@@ -1889,6 +1926,8 @@ pub enum GrandpaWarpSyncRequestError {
 /// See [`Event::ProtocolError`].
 #[derive(Debug, derive_more::Display)]
 pub enum ProtocolError {
+    /// Error in an incoming substream.
+    InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
     BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.

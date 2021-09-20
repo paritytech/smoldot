@@ -309,6 +309,14 @@ impl NetworkService {
                                     peer_id,
                                 };
                             }
+                            service::Event::ChainConnectAttemptFailed {
+                                peer_id, error, ..
+                            } => {
+                                tracing::debug!(
+                                    %peer_id, %error,
+                                    "chain-connect-attempt-failed"
+                                );
+                            }
                             service::Event::IdentifyRequestIn { peer_id, request } => {
                                 tracing::debug!(%peer_id, "identify-request");
                                 request.respond("smoldot").await;

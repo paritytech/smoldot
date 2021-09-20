@@ -628,7 +628,9 @@ impl ReadyToRun {
             HostFunction::ext_crypto_sr25519_verify_version_2 => 3,
             HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => 2,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => 2,
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => 2,
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => 2,
             HostFunction::ext_crypto_start_batch_verify_version_1 => 0,
             HostFunction::ext_crypto_finish_batch_verify_version_1 => 0,
             HostFunction::ext_hashing_keccak_256_version_1 => 1,
@@ -1075,7 +1077,8 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => {
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
+            | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
                 // TODO: clean up
                 #[derive(parity_scale_codec::Encode)]
                 enum EcdsaVerifyError {
@@ -1088,10 +1091,18 @@ impl ReadyToRun {
                 let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
                 // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
                 let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
+                let is_v2 = matches!(
+                    host_fn,
+                    HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
+                );
 
                 let result = (|| -> Result<_, EcdsaVerifyError> {
-                    let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
-                        .map_err(|_| EcdsaVerifyError::RsError)?;
+                    let rs = if is_v2 {
+                        libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
+                    } else {
+                        libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
+                    }
+                    .map_err(|_| EcdsaVerifyError::RsError)?;
                     let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
                         sig[64] - 27
                     } else {
@@ -1115,7 +1126,8 @@ impl ReadyToRun {
                     iter::once(&result_encoded),
                 )
             }
-            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => {
+            HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1
+            | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => {
                 // TODO: clean up
                 #[derive(parity_scale_codec::Encode)]
                 enum EcdsaVerifyError {
@@ -1128,10 +1140,18 @@ impl ReadyToRun {
                 let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
                 // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
                 let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
+                let is_v2 = matches!(
+                    host_fn,
+                    HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2
+                );
 
                 let result = (|| -> Result<_, EcdsaVerifyError> {
-                    let rs = libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
-                        .map_err(|_| EcdsaVerifyError::RsError)?;
+                    let rs = if is_v2 {
+                        libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
+                    } else {
+                        libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
+                    }
+                    .map_err(|_| EcdsaVerifyError::RsError)?;
                     let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
                         sig[64] - 27
                     } else {
@@ -2500,7 +2520,9 @@ externalities! {
     ext_crypto_sr25519_verify_version_2,
     ext_crypto_ecdsa_generate_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_1,
+    ext_crypto_secp256k1_ecdsa_recover_version_2,
     ext_crypto_secp256k1_ecdsa_recover_compressed_version_1,
+    ext_crypto_secp256k1_ecdsa_recover_compressed_version_2,
     ext_crypto_start_batch_verify_version_1,
     ext_crypto_finish_batch_verify_version_1,
     ext_hashing_keccak_256_version_1,

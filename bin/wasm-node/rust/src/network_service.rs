@@ -272,6 +272,17 @@ impl NetworkService {
                                         best_block_hash: best_hash,
                                     };
                                 }
+                                service::Event::ChainConnectAttemptFailed {
+                                    peer_id,
+                                    error,
+                                    ..
+                                } => {
+                                    log::debug!(
+                                        target: "network",
+                                        "Connection({}) => ChainConnectAttemptFailed: {}",
+                                        peer_id, error,
+                                    );
+                                }
                                 service::Event::ChainDisconnected {
                                     peer_id,
                                     chain_index,
