@@ -110,6 +110,8 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     /// A notifications protocol has been negotiated on a substream. Remote can now send
     /// notifications.
     NotificationsIn {
+        /// If true, the local node wants to shut down the substream.
+        close_desired: bool,
         /// Buffer for the next notification.
         next_notification: leb128::FramedInProgress,
         /// Handshake payload to write out.
@@ -811,6 +813,7 @@ where
                 )
             }
             SubstreamInner::NotificationsIn {
+                close_desired,
                 mut next_notification,
                 mut handshake,
                 protocol_index,
@@ -839,6 +842,7 @@ where
 
                         (
                             Some(SubstreamInner::NotificationsIn {
+                                close_desired,
                                 next_notification: leb128::FramedInProgress::new(
                                     max_notification_size,
                                 ),
@@ -856,6 +860,7 @@ where
 
                         (
                             Some(SubstreamInner::NotificationsIn {
+                                close_desired,
                                 next_notification,
                                 handshake,
                                 protocol_index,
@@ -978,6 +983,7 @@ where
                 let protocol_index = *protocol_index;
 
                 self.inner = SubstreamInner::NotificationsIn {
+                    close_desired: false,
                     next_notification: leb128::FramedInProgress::new(max_notification_size),
                     handshake: {
                         let handshake_len = handshake.len();
@@ -1051,23 +1057,27 @@ where
     /// In the case of an outbound substream, this can be done even when in the negotiation phase,
     /// in other words before the remote has accepted/refused the substream.
     ///
+    /// In the case of an inbound substream, notifications can continue to be received. Calling
+    /// this function only asynchronously signals to the remote that the substream should be
+    /// closed. It does not enforce the closing.
+    ///
     /// # Panic
     ///
     /// Panics if the substream isn't a notifications substream, or if the notifications substream
     /// isn't in the appropriate state.
     ///
     pub fn close_notifications_substream(&mut self) {
-        if !matches!(
-            self.inner,
+        match &mut self.inner {
             SubstreamInner::NotificationsOutNegotiating { .. }
-                | SubstreamInner::NotificationsOutHandshakeRecv { .. }
-                | SubstreamInner::NotificationsOut { .. }
-                | SubstreamInner::NotificationsIn { .. }
-        ) {
-            panic!()
-        }
-
-        self.inner = SubstreamInner::NotificationsOutClosed; // TODO: not correct for notifs in
+            | SubstreamInner::NotificationsOutHandshakeRecv { .. }
+            | SubstreamInner::NotificationsOut { .. } => {
+                self.inner = SubstreamInner::NotificationsOutClosed;
+            }
+            SubstreamInner::NotificationsIn { close_desired, .. } if !*close_desired => {
+                *close_desired = true
+            }
+            _ => panic!(),
+        };
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
