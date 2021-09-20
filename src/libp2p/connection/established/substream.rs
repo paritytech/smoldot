@@ -931,8 +931,9 @@ where
         }
     }
 
-    /// Closes a notifications substream opened after an [`Event::NotificationsOutAccept`] or that
-    /// was accepted using [`Substream::accept_in_notifications_substream`].
+    /// Closes a notifications substream opened after a successful
+    /// [`Event::NotificationsOutResult`] or that was accepted using
+    /// [`Substream::accept_in_notifications_substream`].
     ///
     /// In the case of an outbound substream, this can be done even when in the negotiation phase,
     /// in other words before the remote has accepted/refused the substream.
