@@ -67,7 +67,7 @@ use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionError, ConnectionReadyFuture,
-    NotificationProtocolConfig, ReadWrite,
+    NotificationProtocolConfig, NotificationsOutErr, ReadWrite,
 };
 
 /// Configuration for a [`Peers`].
@@ -525,11 +525,11 @@ where
                     };
                 }
 
-                collection::Event::NotificationsOutAccept {
+                collection::Event::NotificationsOutResult {
                     id: connection_id,
                     substream_id,
                     notifications_protocol_index,
-                    remote_handshake,
+                    result,
                     user_data: local_connection_index,
                 } => {
                     let peer_index = guarded.connections[local_connection_index].0.unwrap();
@@ -537,17 +537,30 @@ where
                         .peers_notifications_out
                         .get_mut(&(peer_index, notifications_protocol_index))
                         .unwrap();
+
                     debug_assert!(matches!(
                         notification_out.open,
                         NotificationsOutOpenState::Opening(_, _)
                     ));
-                    notification_out.open =
-                        NotificationsOutOpenState::Open(connection_id, substream_id);
 
-                    return Event::NotificationsOutAccept {
+                    if result.is_ok() {
+                        notification_out.open =
+                            NotificationsOutOpenState::Open(connection_id, substream_id);
+                    } else {
+                        notification_out.open = NotificationsOutOpenState::Closed;
+
+                        // Remove entry from map if it has become useless.
+                        if !notification_out.desired {
+                            guarded
+                                .peers_notifications_out
+                                .remove(&(peer_index, notifications_protocol_index));
+                        }
+                    }
+
+                    return Event::NotificationsOutResult {
                         peer_id: guarded.peers[peer_index].peer_id.clone(),
                         notifications_protocol_index,
-                        remote_handshake,
+                        result,
                     };
                 }
 
@@ -565,10 +578,7 @@ where
                     debug_assert!(matches!(
                         notification_out.open,
                         NotificationsOutOpenState::Open(_, _)
-                            | NotificationsOutOpenState::Opening(_, _)
                     ));
-                    let was_open =
-                        matches!(notification_out.open, NotificationsOutOpenState::Open(_, _));
                     notification_out.open = NotificationsOutOpenState::Closed;
 
                     // Remove entry from map if it has become useless.
@@ -578,12 +588,10 @@ where
                             .remove(&(peer_index, notifications_protocol_index));
                     }
 
-                    if was_open {
-                        return Event::NotificationsOutClose {
-                            peer_id: guarded.peers[peer_index].peer_id.clone(),
-                            notifications_protocol_index,
-                        };
-                    }
+                    return Event::NotificationsOutClose {
+                        peer_id: guarded.peers[peer_index].peer_id.clone(),
+                        notifications_protocol_index,
+                    };
                 }
 
                 collection::Event::NotificationsInOpen {
@@ -1376,17 +1384,21 @@ pub enum Event<TConn> {
     ///
     /// Can only happen for combinations of [`PeerId`] and notification protocols that have been
     /// marked as desired.
-    NotificationsOutAccept {
+    ///
+    /// If `Ok`, it is now possible to send notifications on this substream.
+    NotificationsOutResult {
         /// Peer the substream is open with.
         peer_id: PeerId,
         /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
-        /// Handshake sent in return by the remote.
-        remote_handshake: Vec<u8>,
+        /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
+        /// scope of this module.
+        result: Result<Vec<u8>, NotificationsOutErr>,
     },
 
     /// A previously open outbound substream has been closed by the remote. Can only happen after
-    /// a corresponding [`Event::NotificationsOutAccept`] event has been emitted in the past.
+    /// a corresponding successful [`Event::NotificationsOutResult`] event has been emitted in the
+    /// past.
     ///
     /// This combination of [`PeerId`] and notification protocol will now be returned when calling
     /// [`Peers::refused_notifications_out`].
