@@ -349,7 +349,7 @@ impl Client {
             let base = chain_spec
                 .id()
                 .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
+                .filter(|c| c.is_ascii_graphic())
                 .collect::<String>();
             let mut suffix = None;
 
