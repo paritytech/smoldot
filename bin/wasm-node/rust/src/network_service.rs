@@ -253,9 +253,9 @@ impl NetworkService {
                                 service::Event::ChainConnected {
                                     peer_id,
                                     chain_index,
+                                    role,
                                     best_number,
                                     best_hash,
-                                    ..
                                 } => {
                                     log::debug!(
                                         target: "network",
@@ -268,6 +268,7 @@ impl NetworkService {
                                     break Event::Connected {
                                         peer_id,
                                         chain_index,
+                                        role,
                                         best_block_number: best_number,
                                         best_block_hash: best_hash,
                                     };
@@ -649,6 +650,7 @@ pub enum Event {
     Connected {
         peer_id: PeerId,
         chain_index: usize,
+        role: protocol::Role,
         best_block_number: u64,
         best_block_hash: [u8; 32],
     },
