@@ -137,7 +137,8 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
 pub use established::{
-    ConfigRequestResponse, ConfigRequestResponseIn, NotificationsOutErr, SubstreamId,
+    ConfigRequestResponse, ConfigRequestResponseIn, InboundError, NotificationsInClosedErr,
+    NotificationsOutErr, SubstreamId,
 };
 pub use multiaddr::Multiaddr;
 #[doc(inline)]
@@ -1065,6 +1066,18 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
+    /// Received an incoming substream, but this substream has produced an error.
+    ///
+    /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
+    /// >           return.
+    InboundError {
+        id: ConnectionId,
+        /// Error that happened.
+        error: InboundError,
+        /// Copy of the user data provided when creating the connection.
+        user_data: TConn,
+    },
+
     /// Received a request from a request-response protocol.
     RequestIn {
         id: ConnectionId,
@@ -1129,6 +1142,7 @@ pub enum Event<TConn> {
         id: ConnectionId,
         substream_id: SubstreamId,
         notifications_protocol_index: usize,
+        outcome: Result<(), NotificationsInClosedErr>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
@@ -1140,6 +1154,7 @@ impl<TConn> Event<TConn> {
         match self {
             Event::HandshakeFinished { id, .. } => *id,
             Event::Shutdown { id, .. } => *id,
+            Event::InboundError { id, .. } => *id,
             Event::RequestIn { id, .. } => *id,
             Event::NotificationsOutResult { id, .. } => *id,
             Event::NotificationsOutClose { id, .. } => *id,
@@ -1154,6 +1169,7 @@ impl<TConn> Event<TConn> {
         match self {
             Event::HandshakeFinished { user_data, .. } => user_data,
             Event::Shutdown { user_data, .. } => user_data,
+            Event::InboundError { user_data, .. } => user_data,
             Event::RequestIn { user_data, .. } => user_data,
             Event::NotificationsOutResult { user_data, .. } => user_data,
             Event::NotificationsOutClose { user_data, .. } => user_data,
@@ -1420,6 +1436,16 @@ where
                     })
                     .unwrap();
             }
+            PendingEvent::Inner(established::Event::InboundError(error)) => {
+                guarded
+                    .events_tx
+                    .try_send(Event::InboundError {
+                        id: self.id,
+                        error,
+                        user_data: self.user_data.clone(),
+                    })
+                    .unwrap();
+            }
             PendingEvent::Inner(established::Event::RequestIn {
                 id: substream_id,
                 protocol_index,
@@ -1506,6 +1532,29 @@ where
                         notifications_protocol_index: overlay_network_index,
                         notification,
                         user_data: self.user_data.clone(),
+                    })
+                    .unwrap();
+            }
+            PendingEvent::Inner(established::Event::NotificationsInClose {
+                id: substream_id,
+                protocol_index: overlay_network_index,
+                outcome,
+            }) => {
+                let _was_in = guarded.connection_overlays.remove(&(
+                    connection_index,
+                    SubstreamDirection::In,
+                    substream_id,
+                ));
+                debug_assert_eq!(_was_in, Some(SubstreamState::Open));
+
+                guarded
+                    .events_tx
+                    .try_send(Event::NotificationsInClose {
+                        id: self.id,
+                        substream_id,
+                        notifications_protocol_index: overlay_network_index,
+                        user_data: self.user_data.clone(),
+                        outcome,
                     })
                     .unwrap();
             }
