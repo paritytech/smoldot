@@ -50,7 +50,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
     /// In order to save a round-trip time, the remote might assume that the protocol negotiation
     /// has succeeded. As such, it might send additional data on this substream that should be
     /// ignored.
-    NegotiationFailed,
+    InboundFailed,
 
     /// Negotiating a protocol for a notifications protocol substream.
     NotificationsOutNegotiating {
@@ -318,15 +318,17 @@ where
                     Some(Event::InboundNegotiated(protocol)),
                 ),
                 Ok(multistream_select::Negotiation::NotAvailable) => {
-                    read_write.close_write(); // TODO: unclear how multistream-select adjusts the read_write
-                    (Some(SubstreamInner::NegotiationFailed), None)
+                    (Some(SubstreamInner::InboundFailed), None)
                 }
-                Err(_) => (None, None),
+                Err(err) => (
+                    None,
+                    Some(Event::InboundError(InboundError::NegotiationError(err))),
+                ),
             },
             SubstreamInner::InboundNegotiatingApiWait => {
                 (Some(SubstreamInner::InboundNegotiatingApiWait), None)
             }
-            SubstreamInner::NegotiationFailed => {
+            SubstreamInner::InboundFailed => {
                 // Substream is an inbound substream that has failed to negotiate a
                 // protocol. The substream is expected to close soon, but the remote might
                 // have been eagerly sending data (assuming that the negotiation would
@@ -336,7 +338,7 @@ where
                 if read_write.is_dead() {
                     (None, None)
                 } else {
-                    (Some(SubstreamInner::NegotiationFailed), None)
+                    (Some(SubstreamInner::InboundFailed), None)
                 }
             }
 
@@ -660,8 +662,10 @@ where
                 let incoming_buffer = match read_write.incoming_buffer {
                     Some(buf) => buf,
                     None => {
-                        read_write.close_write();
-                        panic!(); // TODO: return
+                        return (
+                            None,
+                            Some(Event::InboundError(InboundError::RequestInExpectedEof)),
+                        );
                     }
                 };
 
@@ -686,11 +690,10 @@ where
                             None,
                         )
                     }
-                    Err(_err) => {
-                        // TODO: report to user
-                        todo!()
-                        // (None, ...)
-                    }
+                    Err(err) => (
+                        None,
+                        Some(Event::InboundError(InboundError::RequestInLebError(err))),
+                    ),
                 }
             }
             SubstreamInner::RequestInRecvEmpty { protocol_index } => (
@@ -705,9 +708,12 @@ where
                 read_write.write_from_vec_deque(&mut response);
                 if response.is_empty() {
                     read_write.close_write();
+                    (None, None)
+                } else {
+                    (Some(SubstreamInner::RequestInRespond { response }), None)
                 }
-                (Some(SubstreamInner::RequestInRespond { response }), None)
             }
+
             SubstreamInner::NotificationsInHandshake {
                 handshake,
                 protocol_index,
@@ -717,7 +723,7 @@ where
                     None => {
                         read_write.close_write();
                         return (
-                            Some(SubstreamInner::NegotiationFailed), // TODO: proper transition
+                            Some(SubstreamInner::InboundFailed), // TODO: proper transition
                             Some(Event::NotificationsInOpenCancel { protocol_index }),
                         );
                     }
@@ -774,8 +780,8 @@ where
                     None => {
                         read_write.close_write();
                         return (
-                            Some(SubstreamInner::NegotiationFailed), // TODO: proper transition
-                            todo!(),                                 // TODO: !
+                            Some(SubstreamInner::InboundFailed), // TODO: proper transition
+                            todo!(),                             // TODO: !
                         );
                     }
                 };
@@ -852,7 +858,7 @@ where
         match self.inner {
             SubstreamInner::InboundNegotiating(_) => None,
             SubstreamInner::InboundNegotiatingApiWait => None,
-            SubstreamInner::NegotiationFailed => None,
+            SubstreamInner::InboundFailed => None,
             SubstreamInner::RequestOutNegotiating { user_data, .. }
             | SubstreamInner::RequestOut { user_data, .. } => Some(Event::Response {
                 user_data,
@@ -1077,9 +1083,7 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.inner {
-            SubstreamInner::NegotiationFailed => {
-                f.debug_tuple("incoming-negotiation-failed").finish()
-            }
+            SubstreamInner::InboundFailed => f.debug_tuple("incoming-negotiation-failed").finish(),
             SubstreamInner::InboundNegotiating(_) => f.debug_tuple("incoming-negotiating").finish(),
             SubstreamInner::InboundNegotiatingApiWait => {
                 f.debug_tuple("incoming-negotiated-api-wait").finish()
@@ -1127,6 +1131,9 @@ where
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
+    /// Error while receiving an inbound substream.
+    InboundError(InboundError),
+
     /// An inbound substream has successfully negotiated a protocol. Call
     /// [`Substream::set_inbound_ty`] in order to resume.
     InboundNegotiated(String),
@@ -1209,6 +1216,17 @@ pub enum InboundTy {
         protocol_index: usize,
         max_handshake_size: usize,
     },
+}
+
+/// Error that can happen while processing an inbound substream.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum InboundError {
+    /// Error during protocol negotiation.
+    NegotiationError(multistream_select::Error),
+    /// Error while receiving an inbound request.
+    RequestInLebError(leb128::FramedError),
+    /// Unexpected end of file while receiving an inbound request.
+    RequestInExpectedEof,
 }
 
 /// Error that can happen during a request in a request-response scheme.
