@@ -847,6 +847,7 @@ where
                     guarded.to_process_pre_event = None;
                 }
 
+                // Insubstantial error for diagnostic purposes.
                 peers::Event::InboundError { .. } => {
                     match guarded.to_process_pre_event.take().unwrap() {
                         peers::Event::InboundError { peer_id, error, .. } => {
@@ -859,6 +860,7 @@ where
                     }
                 }
 
+                // Incoming requests of the "identify" protocol.
                 peers::Event::RequestIn {
                     request_id,
                     peer_id,
@@ -883,10 +885,17 @@ where
                 }
                 // Only protocol 0 (identify) can receive requests at the moment.
                 peers::Event::RequestIn { .. } => unreachable!(),
+
+                // Remote is no longer interested in the response.
+                // We don't do anything yet. The obsolescence is detected when trying to answer
+                // it.
                 peers::Event::RequestInCancel { .. } => {
                     guarded.to_process_pre_event = None;
                 }
 
+                // Successfully opened block announces substream.
+                // The block announces substream is the main substream that determines whether
+                // a "chain" is open.
                 peers::Event::NotificationsOutResult {
                     peer_id,
                     notifications_protocol_index,
@@ -895,21 +904,26 @@ where
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
+                    // Check validity of the handshake.
                     let remote_handshake =
                         match protocol::decode_block_announces_handshake(remote_handshake) {
                             Ok(hs) => hs,
                             Err(err) => {
-                                // TODO: close the substream?
-                                let peer_id = peer_id.clone(); // TODO: cloning :-/
-                                guarded.to_process_pre_event = None;
-
+                                // TODO: must close the substream and unassigned the slot
                                 return Event::ProtocolError {
-                                    peer_id,
                                     error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                                    peer_id: match guarded.to_process_pre_event.take().unwrap() {
+                                        peers::Event::NotificationsOutResult {
+                                            peer_id, ..
+                                        } => peer_id,
+                                        _ => unreachable!(),
+                                    },
                                 };
                             }
                         };
 
+                    // The desirability of the transactions and grandpa substreams is always equal
+                    // to whether the block announces substream is open.
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
@@ -930,21 +944,25 @@ where
                     let _was_inserted = guarded.open_chains.insert((peer_id.clone(), chain_index));
                     debug_assert!(_was_inserted);
 
-                    let peer_id = peer_id.clone(); // TODO: cloning :-/
                     let best_hash = *remote_handshake.best_hash;
                     let best_number = remote_handshake.best_number;
                     let role = remote_handshake.role;
-                    guarded.to_process_pre_event = None;
 
-                    return Event::ChainConnected {
-                        peer_id,
-                        chain_index,
-                        best_hash,
-                        best_number,
-                        role,
+                    return match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::NotificationsOutResult { peer_id, .. } => {
+                            Event::ChainConnected {
+                                peer_id,
+                                chain_index,
+                                best_hash,
+                                best_number,
+                                role,
+                            }
+                        }
+                        _ => unreachable!(),
                     };
                 }
 
+                // Successfully opened transactions substream.
                 peers::Event::NotificationsOutResult {
                     notifications_protocol_index,
                     result: Ok(_),
@@ -954,24 +972,26 @@ where
                     guarded.to_process_pre_event = None;
                 }
 
+                // Successfully opened Grandpa substream.
+                // Need to send a Grandpa neighbor packet in response.
                 peers::Event::NotificationsOutResult {
                     peer_id,
                     notifications_protocol_index,
                     result: Ok(_),
                     ..
                 } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
-                    // Grandpa notification has been opened. Send neighbor packet.
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                    // TODO: futures cancellation issues
                     let ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let grandpa_config = ephemeral_guarded.chains[chain_index]
-                        .chain_config
-                        .grandpa_protocol_config
-                        .as_ref()
-                        .unwrap()
-                        .clone();
-                    let notification =
+
+                    let notification = {
+                        let grandpa_config = ephemeral_guarded.chains[chain_index]
+                            .chain_config
+                            .grandpa_protocol_config
+                            .as_ref()
+                            .unwrap()
+                            .clone();
+
                         protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
                             round_number: grandpa_config.round_number,
                             set_id: grandpa_config.set_id,
@@ -981,7 +1001,8 @@ where
                         .fold(Vec::new(), |mut a, b| {
                             a.extend_from_slice(b.as_ref());
                             a
-                        });
+                        })
+                    };
 
                     let _ = self
                         .inner
@@ -993,18 +1014,19 @@ where
                         .await;
 
                     guarded.to_process_pre_event = None;
-
-                    // TODO: could cause issues if two parallel threads were both waiting on self.inner.next_event(), and the next two events close and reopen the substream; this would send the notification the "wrong" obsolete substream
                 }
 
+                // Unrecognized protocol.
                 peers::Event::NotificationsOutResult { result: Ok(_), .. } => unreachable!(),
 
+                // The underlying state machine is requesting our local handshake in order to
+                // send it out.
+                // This is a purely local event that isn't related to any networking activity.
                 peers::Event::DesiredOutNotification {
                     id,
                     notifications_protocol_index,
                     ..
                 } => {
-                    // TODO: future cancellation concern
                     let ephemeral_guarded = self.ephemeral_guarded.lock().await;
                     let chain_config = &ephemeral_guarded.chains
                         [*notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
@@ -1043,6 +1065,7 @@ where
                     guarded.to_process_pre_event = None;
                 }
 
+                // Failed to open block announces substream.
                 peers::Event::NotificationsOutResult {
                     notifications_protocol_index,
                     peer_id,
@@ -1051,34 +1074,29 @@ where
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
+                    // Unassign the out and in slots of the remote, if any.
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
                             false,
                         )
                         .await;
-                    self.inner
-                        .set_peer_notifications_out_desired(
-                            peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                            false,
-                        )
-                        .await;
-
                     {
                         let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let _was_in = ephemeral_guarded.chains[chain_index]
+                        let _was_in_out = ephemeral_guarded.chains[chain_index]
                             .out_peers
                             .remove(peer_id);
-                        debug_assert!(
-                            !_was_in
-                                || !ephemeral_guarded.chains[chain_index]
-                                    .in_peers
-                                    .contains(peer_id)
-                        );
+                        let _was_in_in = ephemeral_guarded.chains[chain_index]
+                            .in_peers
+                            .remove(peer_id);
+                        debug_assert!(!_was_in_out || !_was_in_in);
                     }
 
+                    // As a slot has been unassigned, wake up the discovery process in order for
+                    // it to be filled.
+                    // TODO: correct?
+                    // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
                     self.next_start_connect_waker.wake();
 
                     match guarded.to_process_pre_event.take().unwrap() {
@@ -1096,10 +1114,13 @@ where
                         _ => unreachable!(),
                     }
                 }
+
+                // Other protocol.
                 peers::Event::NotificationsOutResult { result: Err(_), .. } => {
                     guarded.to_process_pre_event = None;
                 }
 
+                // Remote closes our outbound block announces substream.
                 peers::Event::NotificationsOutClose {
                     notifications_protocol_index,
                     peer_id,
@@ -1107,6 +1128,8 @@ where
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
+                    // The desirability of the transactions and grandpa substreams is always equal
+                    // to whether the block announces substream is open.
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
@@ -1122,63 +1145,58 @@ where
                         )
                         .await;
 
+                    // Unassign the out and in slots of the remote, if any.
+                    self.inner
+                        .set_peer_notifications_out_desired(
+                            peer_id,
+                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+                            false,
+                        )
+                        .await;
                     {
                         let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let _was_in = ephemeral_guarded.chains[chain_index]
+                        let _was_in_out = ephemeral_guarded.chains[chain_index]
                             .out_peers
                             .remove(peer_id);
-                        debug_assert!(
-                            !_was_in
-                                || !ephemeral_guarded.chains[chain_index]
-                                    .in_peers
-                                    .contains(peer_id)
-                        );
+                        let _was_in_in = ephemeral_guarded.chains[chain_index]
+                            .in_peers
+                            .remove(peer_id);
+                        debug_assert!(!_was_in_out || !_was_in_in);
                     }
 
+                    // The chain is now considered as closed.
                     let _was_removed = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
                     debug_assert!(_was_removed);
 
+                    // As a slot has been unassigned, wake up the discovery process in order for
+                    // it to be filled.
+                    // TODO: correct?
                     // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-
                     self.next_start_connect_waker.wake();
 
-                    let peer_id = peer_id.clone(); // TODO: cloning :-/
-                    guarded.to_process_pre_event = None;
                     return Event::ChainDisconnected {
-                        peer_id,
                         chain_index,
+                        peer_id: match guarded.to_process_pre_event.take().unwrap() {
+                            peers::Event::NotificationsOutClose { peer_id, .. } => peer_id,
+                            _ => unreachable!(),
+                        },
                     };
                 }
+
+                // Other protocol.
                 peers::Event::NotificationsOutClose { .. } => {
+                    // TODO: should try reopen the substream
                     guarded.to_process_pre_event = None;
                 }
 
-                peers::Event::NotificationsInClose {
-                    peer_id,
-                    notifications_protocol_index,
-                    ..
-                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
-                    let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-
-                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let _was_in = ephemeral_guarded.chains[chain_index]
-                        .in_peers
-                        .remove(peer_id);
-                    debug_assert!(
-                        !_was_in
-                            || !ephemeral_guarded.chains[chain_index]
-                                .out_peers
-                                .contains(peer_id)
-                    );
-
-                    guarded.to_process_pre_event = None;
-                }
-
+                // Remote closes a substream.
+                // There isn't anything to do as long as the remote doesn't close our local
+                // outbound substream.
                 peers::Event::NotificationsInClose { .. } => {
                     guarded.to_process_pre_event = None;
                 }
 
+                // Received a block announce.
                 peers::Event::NotificationsIn {
                     notifications_protocol_index,
                     peer_id,
@@ -1202,34 +1220,55 @@ where
                         continue;
                     }
 
+                    // Check the format of the block announce.
                     if let Err(err) = protocol::decode_block_announce(&notification) {
-                        let peer_id = peer_id.clone(); // TODO: cloning :-/
-                        guarded.to_process_pre_event = None;
                         return Event::ProtocolError {
-                            peer_id,
                             error: ProtocolError::BadBlockAnnounce(err),
+                            peer_id: match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::NotificationsIn { peer_id, .. } => peer_id,
+                                _ => unreachable!(),
+                            },
                         };
                     }
 
-                    let peer_id = peer_id.clone(); // TODO: cloning :-/
-                    let notification = mem::take(notification);
-                    guarded.to_process_pre_event = None;
-
-                    return Event::BlockAnnounce {
-                        chain_index,
-                        peer_id,
-                        announce: EncodedBlockAnnounce(notification),
+                    return match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::NotificationsIn {
+                            peer_id,
+                            notification,
+                            ..
+                        } => Event::BlockAnnounce {
+                            chain_index,
+                            peer_id,
+                            announce: EncodedBlockAnnounce(notification),
+                        },
+                        _ => unreachable!(),
                     };
                 }
 
+                // Received transaction notification.
                 peers::Event::NotificationsIn {
+                    peer_id,
                     notifications_protocol_index,
                     ..
                 } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
-                    // TODO: transaction announce
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // Don't report events about nodes we don't have an outbound substream with.
+                    // TODO: cloning of peer_id :(
+                    if !guarded
+                        .open_chains
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        guarded.to_process_pre_event = None;
+                        continue;
+                    }
+
+                    // TODO: this is unimplemented
                     guarded.to_process_pre_event = None;
                 }
 
+                // Received Grandpa notification.
                 peers::Event::NotificationsIn {
                     notifications_protocol_index,
                     peer_id,
@@ -1251,11 +1290,12 @@ where
                     let decoded_notif = match protocol::decode_grandpa_notification(&notification) {
                         Ok(n) => n,
                         Err(err) => {
-                            let peer_id = peer_id.clone(); // TODO: cloning :-/
-                            guarded.to_process_pre_event = None;
                             return Event::ProtocolError {
-                                peer_id,
                                 error: ProtocolError::BadGrandpaNotification(err),
+                                peer_id: match guarded.to_process_pre_event.take().unwrap() {
+                                    peers::Event::NotificationsIn { peer_id, .. } => peer_id,
+                                    _ => unreachable!(),
+                                },
                             };
                         }
                     };
@@ -1274,33 +1314,42 @@ where
                     guarded.to_process_pre_event = None;
                 }
 
-                peers::Event::NotificationsIn { .. } => unreachable!(),
+                peers::Event::NotificationsIn { .. } => {
+                    // Unrecognized notifications protocol.
+                    unreachable!()
+                }
 
+                // Remote wants to open a block announces substream.
+                // The block announces substream is the main substream that determines whether
+                // a "chain" is open.
                 peers::Event::DesiredInNotification {
                     peer_id,
                     handshake,
                     id: desired_in_notification_id,
                     notifications_protocol_index,
                 } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
-                    // Remote requests to open a notifications substream.
-
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
+                    // Immediately reject the substream if the handshake fails to parse.
                     if let Err(err) = protocol::decode_block_announces_handshake(handshake) {
                         self.inner
                             .in_notification_refuse(*desired_in_notification_id)
                             .await;
 
-                        let peer_id = peer_id.clone(); // TODO: cloning :-/
-                        guarded.to_process_pre_event = None;
                         return Event::ProtocolError {
-                            peer_id,
                             error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                            peer_id: match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::DesiredInNotification { peer_id, .. } => peer_id,
+                                _ => unreachable!(),
+                            },
                         };
                     }
 
                     let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+
+                    // If the peer doesn't already have an outbound slot, check whether we can
+                    // allocate an inbound slot for it.
                     let has_out_slot = ephemeral_guarded.chains[chain_index]
                         .out_peers
                         .contains(peer_id);
@@ -1311,45 +1360,42 @@ where
                             )
                             .unwrap_or(usize::max_value())
                     {
-                        // All in slots are occupied.
+                        // All in slots are occupied. Refuse the substream.
                         drop(ephemeral_guarded);
-
                         self.inner
                             .in_notification_refuse(*desired_in_notification_id)
                             .await;
-
                         guarded.to_process_pre_event = None;
                         continue;
                     }
 
-                    let chain_config = &ephemeral_guarded.chains[chain_index].chain_config;
-                    let handshake = protocol::encode_block_announces_handshake(
-                        protocol::BlockAnnouncesHandshakeRef {
-                            best_hash: &chain_config.best_hash,
-                            best_number: chain_config.best_number,
-                            genesis_hash: &chain_config.genesis_hash,
-                            role: chain_config.role,
-                        },
-                    )
-                    .fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    });
+                    // At this point, accept the node can no longer fail.
+
+                    // Generate the handshake to send back.
+                    let handshake = {
+                        let chain_config = &ephemeral_guarded.chains[chain_index].chain_config;
+                        protocol::encode_block_announces_handshake(
+                            protocol::BlockAnnouncesHandshakeRef {
+                                best_hash: &chain_config.best_hash,
+                                best_number: chain_config.best_number,
+                                genesis_hash: &chain_config.genesis_hash,
+                                role: chain_config.role,
+                            },
+                        )
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        })
+                    };
 
                     if self
                         .inner
                         .in_notification_accept(*desired_in_notification_id, handshake)
                         .await
                         .is_ok()
+                        && !has_out_slot
                     {
-                        if !has_out_slot {
-                            let _was_inserted = ephemeral_guarded.chains[chain_index]
-                                .in_peers
-                                .insert(peer_id.clone());
-                            debug_assert!(_was_inserted);
-                        }
-
-                        // TODO: future cancellation issue
+                        // TODO: future cancellation issue; if this future is cancelled, then trying to do the `in_notification_accept` again next time will panic
                         self.inner
                             .set_peer_notifications_out_desired(
                                 peer_id,
@@ -1357,40 +1403,81 @@ where
                                 true,
                             )
                             .await;
+
+                        // The state modification is done at the very end, to not have any
+                        // future cancellation issue.
+                        let _was_inserted = ephemeral_guarded.chains[chain_index]
+                            .in_peers
+                            .insert(peer_id.clone());
+                        debug_assert!(_was_inserted);
                     }
 
                     guarded.to_process_pre_event = None;
                 }
 
+                // Remote wants to open a transactions substream.
                 peers::Event::DesiredInNotification {
+                    peer_id,
                     id: desired_in_notification_id,
                     notifications_protocol_index,
                     ..
                 } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
-                    let _ = self
-                        .inner
-                        .in_notification_accept(*desired_in_notification_id, Vec::new())
-                        .await;
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // Accept the substream only if the peer is "chain connected".
+                    if guarded
+                        .open_chains // TODO: clone :-/
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        // It doesn't matter if the substream is obsolete.
+                        let _ = self
+                            .inner
+                            .in_notification_accept(*desired_in_notification_id, Vec::new())
+                            .await;
+                    } else {
+                        self.inner
+                            .in_notification_refuse(*desired_in_notification_id)
+                            .await;
+                    }
                     guarded.to_process_pre_event = None;
                 }
 
+                // Remote wants to open a grandpa substream.
                 peers::Event::DesiredInNotification {
+                    peer_id,
                     id: desired_in_notification_id,
                     notifications_protocol_index,
                     ..
                 } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
+                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    // Grandpa substream.
-                    // TODO: future cancellation concern
-                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let handshake = ephemeral_guarded.chains[chain_index]
-                        .chain_config
-                        .role
-                        .scale_encoding()
-                        .to_vec();
+                    // Reject the substream if the this peer isn't "chain connected".
+                    if !guarded
+                        .open_chains // TODO: clone :-/
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        self.inner
+                            .in_notification_refuse(*desired_in_notification_id)
+                            .await;
+                        guarded.to_process_pre_event = None;
+                        continue;
+                    }
 
+                    // Peer is indeed connected. Accept the substream.
+
+                    // Build the handshake to send back.
+                    let handshake = {
+                        ephemeral_guarded.chains[chain_index]
+                            .chain_config
+                            .role
+                            .scale_encoding()
+                            .to_vec()
+                    };
+
+                    // It doesn't matter if the substream is obsolete.
                     let _ = self
                         .inner
                         .in_notification_accept(*desired_in_notification_id, handshake)
@@ -1400,6 +1487,7 @@ where
                 }
 
                 peers::Event::DesiredInNotification { .. } => {
+                    // Unrecognized notifications protocol.
                     unreachable!()
                 }
 
@@ -1656,8 +1744,9 @@ pub enum Event<'a, TNow> {
         message: EncodedGrandpaCommitMessage,
     },
 
-    /// Error in the protocol in a connection, such as failure to decode a message.
-    // TODO: explain consequences
+    /// Error in the protocol in a connection, such as failure to decode a message. This event
+    /// doesn't have any consequence on the health of the connection, and is purely for diagnostic
+    /// purposes.
     ProtocolError {
         /// Peer that has caused the protocol error.
         peer_id: peer_id::PeerId,
