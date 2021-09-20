@@ -274,12 +274,13 @@ impl NetworkService {
                                 }
                                 service::Event::ChainConnectAttemptFailed {
                                     peer_id,
+                                    chain_index,
                                     error,
-                                    ..
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}) => ChainConnectAttemptFailed: {}",
+                                        "Connection({}, {}) => ChainConnectAttemptFailed: {}",
+                                        &network_service.log_chain_names[chain_index],
                                         peer_id, error,
                                     );
                                 }
