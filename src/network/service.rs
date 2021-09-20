@@ -928,14 +928,14 @@ where
                         .set_peer_notifications_out_desired(
                             peer_id,
                             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                            true,
+                            peers::DesiredState::DesiredReset,
                         )
                         .await;
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
                             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                            true,
+                            peers::DesiredState::DesiredReset,
                         )
                         .await;
 
@@ -1079,7 +1079,7 @@ where
                         .set_peer_notifications_out_desired(
                             peer_id,
                             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                            false,
+                            peers::DesiredState::NotDesired,
                         )
                         .await;
                     {
@@ -1134,14 +1134,14 @@ where
                         .set_peer_notifications_out_desired(
                             peer_id,
                             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                            false,
+                            peers::DesiredState::NotDesired,
                         )
                         .await;
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
                             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                            false,
+                            peers::DesiredState::NotDesired,
                         )
                         .await;
 
@@ -1150,7 +1150,7 @@ where
                         .set_peer_notifications_out_desired(
                             peer_id,
                             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                            false,
+                            peers::DesiredState::NotDesired,
                         )
                         .await;
                     {
@@ -1400,7 +1400,7 @@ where
                             .set_peer_notifications_out_desired(
                                 peer_id,
                                 *notifications_protocol_index,
-                                true,
+                                peers::DesiredState::DesiredReset,
                             )
                             .await;
 
@@ -1891,7 +1891,7 @@ where
                 .set_peer_notifications_out_desired(
                     &peer_id,
                     chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                    true,
+                    peers::DesiredState::DesiredReset, // TODO: opinionated
                 )
                 .await;
 
