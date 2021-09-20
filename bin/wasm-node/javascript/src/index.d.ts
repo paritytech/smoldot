@@ -43,8 +43,10 @@ export interface SmoldotClient {
   addChain(options: SmoldotAddChainOptions): Promise<SmoldotChain>;
 
   /**
-   * Terminates the client. Trying to use the client or any of its chains again will lead to an
-   * exception being thrown.
+   * Terminates the client.
+   *
+   * Afterwards, trying to use the client or any of its chains again will lead to an exception
+   * being thrown.
    */
   terminate(): void;
 }
@@ -66,7 +68,7 @@ export interface SmoldotChain {
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
    *
-   * The available requests are documented here: <https://polkadot.js.org/docs/substrate/rpc>
+   * The available methods are documented here: <https://polkadot.js.org/docs/substrate/rpc>
    *
    * @param rpc JSON-encoded RPC request.
    */
@@ -104,7 +106,7 @@ export type SmoldotLogCallback = (level: number, target: string, message: string
  */
 export interface SmoldotOptions {
   /**
-   * Callback that the client will invoke in order to reported a log event.
+   * Callback that the client will invoke in order to report a log event.
    */
   logCallback?: SmoldotLogCallback;
 
@@ -146,7 +148,8 @@ export interface SmoldotOptions {
    * If `true`, then the client will never open any secure WebSocket connection.
    * Defaults to `false`.
    *
-   * This option exists of the sake of completeness.
+   * This option exists of the sake of completeness. All environments support secure WebSocket
+   * connections.
    */
   forbidWss?: boolean;
 }
@@ -173,7 +176,7 @@ export interface SmoldotAddChainOptions {
    * Defaults to `[]`.
    *
    * The primary way smoldot determines which relay chain is associated to a parachain is by
-   * inspecting the chain specification of that parachain.
+   * inspecting the chain specification of that parachain (i.e. the `chainSpec` field).
    *
    * This poses a problem in situations where the same client is shared between multiple different
    * applications: multiple applications could add mutiple different chains with the same `id`,
@@ -181,11 +184,11 @@ export interface SmoldotAddChainOptions {
    * of a popular chain's `id` and try to benefit from a typo in a legitimate application's
    * `relay_chain`.
    *
-   * This parameter can be used in order to segregate multiple different uses of the same client
-   * and solve these problems. To use it, pass the list of all chains that the same application
-   * has previously added to the client. By doing so, you are guaranteed that the chains of
-   * multiple different applications can't interact in bad ways, while still benefiting from the
-   * de-duplication of resources that smoldot performs in `addChain`.
+   * These problems can be solved by using this parameter to segregate multiple different uses of
+   * the same client. To use it, pass the list of all chains that the same application has
+   * previously added to the client. By doing so, you are guaranteed that the chains of multiple
+   * different applications can't interact in any way (good or bad), while still benefiting from
+   * the de-duplication of resources that smoldot performs in `addChain`.
    *
    * When multiple different parachains use the same relay chain, it is important to be sure that
    * they are indeed using the same relay chain, and not accidentally using different ones. For
@@ -217,6 +220,8 @@ export interface SmoldotHealth {
 export interface Smoldot {
   /**
    * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
+   *
+   * Can never fail.
    *
    * @param options Configuration of the client. Defaults to `{}`.
    */
