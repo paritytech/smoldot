@@ -136,7 +136,9 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{ConfigRequestResponse, ConfigRequestResponseIn, SubstreamId};
+pub use established::{
+    ConfigRequestResponse, ConfigRequestResponseIn, NotificationsOutErr, SubstreamId,
+};
 pub use multiaddr::Multiaddr;
 #[doc(inline)]
 pub use parity_multiaddr as multiaddr;
@@ -575,11 +577,11 @@ where
     /// Calling this method will emit a [`Event::NotificationsOutClose`] if there was indeed a
     /// notifications substream being open or already open.
     ///
-    /// The interaction of this method with [`Event::NotificationsOutAccept`] and
+    /// The interaction of this method with [`Event::NotificationsOutResult`] and
     /// [`Event::NotificationsOutClose`] is non-trivial.
     ///
-    /// It is possible for a [`Event::NotificationsOutAccept`] to be emitted *after* this method
-    /// has been called. In any situation, if a [`Event::NotificationsOutAccept`] regarding this
+    /// It is possible for a [`Event::NotificationsOutResult`] to be emitted *after* this method
+    /// has been called. In any situation, if a [`Event::NotificationsOutResult`] regarding this
     /// notifications protocol is emitted in the past, then a corresponding
     /// [`Event::NotificationsOutClose`] will always be emitted.
     ///
@@ -1075,20 +1077,23 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
-    /// A handshaking outbound substream has been accepted by the remote.
-    NotificationsOutAccept {
+    /// Outcome of trying to open a substream with [`Network::open_notifications_substream`].
+    ///
+    /// If `Ok`, it is now possible to send notifications on this substream.
+    /// If `Err`, the substream no longer exists.
+    NotificationsOutResult {
         id: ConnectionId,
         // TODO: what if fallback?
         substream_id: SubstreamId,
         notifications_protocol_index: usize,
-        /// Handshake sent in return by the remote.
-        remote_handshake: Vec<u8>,
+        /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
+        /// scope of this module.
+        result: Result<Vec<u8>, NotificationsOutErr>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
 
-    /// A previously open outbound substream has been closed by the remote, or a handshaking
-    /// outbound substream has been denied by the remote.
+    /// A previously open outbound substream has been closed by the remote.
     NotificationsOutClose {
         id: ConnectionId,
         substream_id: SubstreamId,
@@ -1136,7 +1141,7 @@ impl<TConn> Event<TConn> {
             Event::HandshakeFinished { id, .. } => *id,
             Event::Shutdown { id, .. } => *id,
             Event::RequestIn { id, .. } => *id,
-            Event::NotificationsOutAccept { id, .. } => *id,
+            Event::NotificationsOutResult { id, .. } => *id,
             Event::NotificationsOutClose { id, .. } => *id,
             Event::NotificationsInOpen { id, .. } => *id,
             Event::NotificationsIn { id, .. } => *id,
@@ -1150,7 +1155,7 @@ impl<TConn> Event<TConn> {
             Event::HandshakeFinished { user_data, .. } => user_data,
             Event::Shutdown { user_data, .. } => user_data,
             Event::RequestIn { user_data, .. } => user_data,
-            Event::NotificationsOutAccept { user_data, .. } => user_data,
+            Event::NotificationsOutResult { user_data, .. } => user_data,
             Event::NotificationsOutClose { user_data, .. } => user_data,
             Event::NotificationsInOpen { user_data, .. } => user_data,
             Event::NotificationsIn { user_data, .. } => user_data,
@@ -1504,16 +1509,19 @@ where
                     })
                     .unwrap();
             }
-            PendingEvent::Inner(established::Event::NotificationsOutAccept {
+            PendingEvent::Inner(established::Event::NotificationsOutResult {
                 id: substream_id,
-                remote_handshake,
+                result,
             }) => {
-                let overlay_network_index = *self
-                    .connection
-                    .as_established()
-                    .unwrap() // TODO: shouldn't unwrap here
-                    .notifications_substream_user_data_mut(substream_id)
-                    .unwrap();
+                let overlay_network_index = match result {
+                    Ok(_) => *self
+                        .connection
+                        .as_established()
+                        .unwrap() // TODO: shouldn't unwrap here
+                        .notifications_substream_user_data_mut(substream_id)
+                        .unwrap(),
+                    Err((_, idx)) => idx,
+                };
 
                 let _value_removed = guarded.connection_overlays.remove(&(
                     connection_index,
@@ -1525,43 +1533,21 @@ where
                     Some(SubstreamState::Pending(overlay_network_index))
                 );
 
-                let _prev_value = guarded.connection_overlays.insert(
-                    (connection_index, SubstreamDirection::Out, substream_id),
-                    SubstreamState::Open,
-                );
-                debug_assert_eq!(_prev_value, None);
+                if result.is_ok() {
+                    let _prev_value = guarded.connection_overlays.insert(
+                        (connection_index, SubstreamDirection::Out, substream_id),
+                        SubstreamState::Open,
+                    );
+                    debug_assert_eq!(_prev_value, None);
+                }
 
                 guarded
                     .events_tx
-                    .try_send(Event::NotificationsOutAccept {
+                    .try_send(Event::NotificationsOutResult {
                         id: self.id,
                         substream_id,
                         notifications_protocol_index: overlay_network_index,
-                        remote_handshake,
-                        user_data: self.user_data.clone(),
-                    })
-                    .unwrap();
-            }
-            PendingEvent::Inner(established::Event::NotificationsOutReject {
-                id: substream_id,
-                user_data: overlay_network_index,
-            }) => {
-                let _value_removed = guarded.connection_overlays.remove(&(
-                    connection_index,
-                    SubstreamDirection::Out,
-                    substream_id,
-                ));
-                debug_assert_eq!(
-                    _value_removed,
-                    Some(SubstreamState::Pending(overlay_network_index))
-                );
-
-                guarded
-                    .events_tx
-                    .try_send(Event::NotificationsOutClose {
-                        id: self.id,
-                        substream_id,
-                        notifications_protocol_index: overlay_network_index,
+                        result: result.map_err(|(err, _)| err),
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();

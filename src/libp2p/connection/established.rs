@@ -59,7 +59,7 @@ use core::{
 
 pub mod substream;
 
-pub use substream::{RequestError, RespondInRequestError};
+pub use substream::{NotificationsOutErr, RequestError, RespondInRequestError};
 
 /// State machine of a fully-established connection.
 pub struct Established<TNow, TRqUd, TNotifUd> {
@@ -535,19 +535,10 @@ where
                 notification,
                 id: SubstreamId(substream_id),
             },
-
-            substream::Event::NotificationsOutAccept { remote_handshake } => {
-                Event::NotificationsOutAccept {
-                    id: SubstreamId(substream_id),
-                    remote_handshake,
-                }
-            }
-            substream::Event::NotificationsOutReject { user_data } => {
-                Event::NotificationsOutReject {
-                    id: SubstreamId(substream_id),
-                    user_data,
-                }
-            }
+            substream::Event::NotificationsOutResult { result } => Event::NotificationsOutResult {
+                id: SubstreamId(substream_id),
+                result,
+            },
             substream::Event::NotificationsOutCloseDemanded => {
                 Event::NotificationsOutCloseDemanded {
                     id: SubstreamId(substream_id),
@@ -771,8 +762,9 @@ where
         already_queued + from_substream
     }
 
-    /// Closes a notifications substream opened after an [`Event::NotificationsOutAccept`] or that
-    /// was accepted using [`Established::accept_in_notifications_substream`].
+    /// Closes a notifications substream opened after a successful
+    /// [`Event::NotificationsOutResult`] or that was accepted using
+    /// [`Established::accept_in_notifications_substream`].
     ///
     /// In the case of an outbound substream, this can be done even when in the negotiation phase,
     /// in other words before the remote has accepted/refused the substream.
@@ -910,24 +902,17 @@ pub enum Event<TRqUd, TNotifUd> {
         notification: Vec<u8>,
     },
 
-    /// Remote has accepted a substream opened with [`Established::open_notifications_substream`].
+    /// Outcome of trying to open a substream with [`Established::open_notifications_substream`].
     ///
-    /// It is now possible to send notifications on this substream.
-    NotificationsOutAccept {
+    /// If `Ok`, it is now possible to send notifications on this substream.
+    /// If `Err`, the substream no longer exists.
+    NotificationsOutResult {
         /// Identifier of the substream. Value that was returned by
         /// [`Established::open_notifications_substream`].
         id: SubstreamId,
-        /// Handshake sent back by the remote. Its interpretation is out of scope of this module.
-        remote_handshake: Vec<u8>,
-    },
-
-    /// Remote has rejected a substream opened with [`Established::open_notifications_substream`].
-    NotificationsOutReject {
-        /// Identifier of the substream. Value that was returned by
-        /// [`Established::open_notifications_substream`].
-        id: SubstreamId,
-        /// Value that was passed to [`Established::open_notifications_substream`].
-        user_data: TNotifUd,
+        /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
+        /// scope of this module.
+        result: Result<Vec<u8>, (NotificationsOutErr, TNotifUd)>,
     },
 
     /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
