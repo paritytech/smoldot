@@ -29,6 +29,7 @@ const westmint = fs.readFileSync('../../westend-westmint.json', 'utf8');
 const polkadot = fs.readFileSync('../../polkadot.json', 'utf8');
 const kusama = fs.readFileSync('../../kusama.json', 'utf8');
 const statemine = fs.readFileSync('../../kusama-statemine.json', 'utf8');
+const rococo = fs.readFileSync('../../rococo.json', 'utf8');
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
@@ -62,6 +63,7 @@ server.listen(9944, function () {
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fkusama');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fstatemine');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
+    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frococo');
 });
 let wsServer = new websocket.server({
     httpServer: server,
@@ -135,6 +137,17 @@ wsServer.on('request', function (request) {
             return {
                 relay: await client.addChain({
                     chainSpec: polkadot,
+                    jsonRpcCallback: (resp) => {
+                        connection.sendUTF(resp);
+                    },
+                })
+            };
+        });
+    } else if (request.resource == '/rococo') {
+        chain = client.then(async client => {
+            return {
+                relay: await client.addChain({
+                    chainSpec: rococo,
                     jsonRpcCallback: (resp) => {
                         connection.sendUTF(resp);
                     },
