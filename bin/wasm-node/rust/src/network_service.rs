@@ -429,13 +429,21 @@ impl NetworkService {
                             {
                                 Ok(insert) => {
                                     for peer_id in insert.peer_ids() {
-                                        log::trace!(target: "connections", "Discovered {}", peer_id);
+                                        log::trace!(
+                                            target: "connections", "Discovered {} on {}",
+                                            peer_id, &network_service.log_chain_names[chain_index]
+                                        );
                                     }
 
                                     insert.insert().await;
                                 }
                                 Err(error) => {
-                                    log::warn!(target: "connections", "Problem during discovery: {}", error);
+                                    log::warn!(
+                                        target: "connections",
+                                        "Problem during discovery on {}: {}",
+                                        &network_service.log_chain_names[chain_index],
+                                        error
+                                    );
                                 }
                             }
                         }
