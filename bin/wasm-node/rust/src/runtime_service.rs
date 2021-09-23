@@ -120,10 +120,10 @@ impl RuntimeService {
                 best_blocks_subscriptions: Vec::new(),
                 runtime_version_subscriptions: Vec::new(),
                 best_near_head_of_chain,
-                tree: download_tree::Guarded::from_finalized_block_and_storage(
+                tree: Some(download_tree::Guarded::from_finalized_block_and_storage(
                     config.genesis_block_scale_encoded_header,
                     config.chain_spec.genesis_storage(),
-                ),
+                )),
             }),
         });
 
@@ -159,6 +159,8 @@ impl RuntimeService {
         guarded.runtime_version_subscriptions.push(tx);
         let current_version = guarded
             .tree
+            .as_ref()
+            .unwrap()
             .best_block_runtime_spec()
             .map(|spec| spec.clone())
             .map_err(|err| err.clone());
@@ -244,6 +246,8 @@ impl RuntimeService {
         let guarded = self.guarded.lock().await;
         guarded
             .tree
+            .as_ref()
+            .unwrap()
             .best_block_runtime_spec()
             .map(|spec| spec.clone())
             .map_err(|err| err.clone())
@@ -312,6 +316,7 @@ impl RuntimeService {
                 // the hash, height, and state trie root of a recent best block that uses this runtime.
                 let (spec_version, runtime_block_hash, runtime_block_header) = {
                     let guarded = self.guarded.lock().await;
+                    let tree = guarded.tree.as_ref().unwrap();
 
                     let best_block = match guarded.best_block_index {
                         Some(idx) => guarded.non_finalized_blocks.get(idx).unwrap(),
@@ -319,12 +324,8 @@ impl RuntimeService {
                     };
 
                     (
-                        guarded
-                            .best_block_runtime()
-                            .runtime
-                            .as_ref()
+                        tree.best_block_runtime_spec()
                             .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
-                            .runtime_spec
                             .decode()
                             .spec_version,
                         best_block.hash,
@@ -353,23 +354,32 @@ impl RuntimeService {
                 // Lock `guarded_lock` again. `continue` if the runtime has changed
                 // in-between.
                 let mut guarded = self.guarded.lock().await;
-                let runtime = guarded
-                    .best_block_runtime_mut()
-                    .runtime
-                    .as_mut()
+                let runtime_spec = guarded
+                    .tree
+                    .as_ref()
+                    .unwrap()
+                    .best_block_runtime_spec()
                     .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
-                if runtime.runtime_spec.decode().spec_version != spec_version {
+                if runtime_spec.decode().spec_version != spec_version {
                     continue;
                 }
 
-                let virtual_machine = runtime.virtual_machine.take().unwrap();
+                // Extraction is guaranteed to success because we successfully loaded the spec
+                // just above.
+                let extracted_runtime = guarded
+                    .tree
+                    .as_ref()
+                    .unwrap()
+                    .best_block_runtime_extract()
+                    .unwrap_or_else(|_| panic!());
                 let lock = RuntimeCallLock {
                     guarded,
+                    extracted: Some(extracted_runtime.tree),
                     runtime_block_header,
                     call_proof,
                 };
 
-                break Ok((lock, virtual_machine));
+                break Ok((lock, extracted_runtime.runtime));
             }
         }
     }
@@ -529,9 +539,10 @@ impl<'a> RuntimeLock<'a> {
 
         let runtime = self
             .guarded
-            .best_block_runtime_mut()
-            .runtime
-            .as_mut()
+            .tree
+            .as_ref()
+            .unwrap()
+            .best_block_runtime_extract()
             .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
 
         let virtual_machine = runtime.virtual_machine.take().unwrap();
@@ -550,6 +561,7 @@ impl<'a> RuntimeLock<'a> {
 #[must_use]
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Guarded>,
+    extracted: Option<download_tree::ExtractedGuarded>,
     runtime_block_header: Vec<u8>,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
@@ -651,29 +663,13 @@ impl<'a> RuntimeCallLock<'a> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        let store_back = &mut self
-            .guarded
-            .best_block_runtime_mut()
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine;
-        debug_assert!(store_back.is_none());
-        *store_back = Some(vm);
+        self.guarded.tree = Some(self.extracted.take().unwrap().unlock(vm));
     }
 }
 
 impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        if self
-            .guarded
-            .best_block_runtime_mut()
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine
-            .is_none()
-        {
+        if self.extracted.is_some() {
             // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
             panic!()
         }
@@ -755,8 +751,9 @@ struct Guarded {
     /// after the latest best block update.
     best_near_head_of_chain: bool,
 
-    /// Tree of blocks. Holds the state of the download of everything.
-    tree: download_tree::Guarded,
+    /// Tree of blocks. Holds the state of the download of everything. Always `true` when the
+    /// `Mutex` is being locked. Switched to `None` during some operations.
+    tree: Option<download_tree::Guarded>,
 }
 
 struct Block {
@@ -948,9 +945,9 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                     best_blocks_subscriptions: Vec::new(),
                     runtime_version_subscriptions: Vec::new(),
                     best_near_head_of_chain: false,
-                    tree: download_tree::Guarded::from_finalized_block(
+                    tree: Some(download_tree::Guarded::from_finalized_block(
                         subscription.finalized_block_scale_encoded_header,
-                    ),
+                    )),
                 }),
             }),
             blocks_stream: subscription.new_blocks.boxed(),
@@ -966,6 +963,8 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 .lock()
                 .await
                 .tree
+                .as_mut()
+                .unwrap()
                 .insert_block(block);
         }
 
@@ -976,12 +975,12 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             if !Arc::ptr_eq(&background.runtime_service, &original_runtime_service) {
                 // The `Background` object is manipulating a temporary runtime service. Check if
                 // it is possible to write to the original runtime service.
-                let temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
-                if temporary_guarded.tree.is_ready() {
+                let mut temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
+                if temporary_guarded.tree.as_ref().unwrap().is_ready() {
                     let mut original_guarded = original_runtime_service.guarded.lock().await;
                     original_guarded.best_near_head_of_chain =
                         temporary_guarded.best_near_head_of_chain;
-                    original_guarded.tree = temporary_guarded.tree;
+                    original_guarded.tree = Some(temporary_guarded.tree.take().unwrap());
 
                     drop(temporary_guarded);
                     background.runtime_service = original_runtime_service.clone();
@@ -996,7 +995,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         None => return,
                         Some(sync_service::Notification::Block(new_block)) => {
                             let mut guarded = background.runtime_service.guarded.lock().await;
-                            guarded.tree.insert_block(new_block);
+                            guarded.tree.as_mut().unwrap().insert_block(new_block);
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             background.finalize(hash, best_block_hash).await;
@@ -1013,7 +1012,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         Err(err) => {
                             // TODO: logging
                             let mut guarded = background.runtime_service.guarded.lock().await;
-                            guarded.tree.runtime_download_failure(download_id);
+                            guarded.tree.as_mut().unwrap().runtime_download_failure(download_id);
                         }
                     }
 
@@ -1064,9 +1063,11 @@ impl Background {
         let mut guarded = self.runtime_service.guarded.lock().await;
         let guarded = &mut *guarded;
 
-        guarded
-            .tree
-            .runtime_download_finished(download_id, storage_code, storage_heap_pages);
+        guarded.tree.as_mut().unwrap().runtime_download_finished(
+            download_id,
+            storage_code,
+            storage_heap_pages,
+        );
 
         // TODO: must potentially notify best and finalized subscriptions
     }
@@ -1083,7 +1084,7 @@ impl Background {
             }
 
             // If there's nothing more to download, break out of the loop.
-            let download_params = match guarded.tree.next_necessary_download() {
+            let download_params = match guarded.tree.as_mut().unwrap().next_necessary_download() {
                 Some(dl) => dl,
                 None => break,
             };
@@ -1133,7 +1134,11 @@ impl Background {
     /// Updates `self` to take into account that the sync service has finalized the given block.
     async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
         let mut guarded = self.runtime_service.guarded.lock().await;
-        guarded.tree.finalize(hash_to_finalize, new_best_block_hash);
+        guarded
+            .tree
+            .as_mut()
+            .unwrap()
+            .finalize(hash_to_finalize, new_best_block_hash);
 
         // TODO: must potentially notify best and finalized subscriptions
     }

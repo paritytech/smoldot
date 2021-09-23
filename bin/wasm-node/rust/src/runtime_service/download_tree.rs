@@ -239,6 +239,40 @@ impl Guarded {
             .map(|r| &r.runtime_spec)
     }
 
+    /// Extracts the runtime of the current "output" best block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    ///
+    pub fn best_block_runtime_extract(self) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
+        let runtime_index = self.best_block_runtime_index();
+        self.runtime_extract_inner(runtime_index)
+    }
+
+    fn runtime_extract_inner(
+        mut self,
+        runtime_index: usize,
+    ) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
+        match self.runtimes[runtime_index].runtime.as_mut() {
+            Err(err) => {
+                let err = err.clone();
+                Err((self, err))
+            }
+            Ok(runtime) => {
+                let runtime = runtime.virtual_machine.take().unwrap();
+
+                Ok(ExtractedRuntime {
+                    runtime,
+                    tree: ExtractedGuarded {
+                        inner: self,
+                        extracted_runtime_index: runtime_index,
+                    },
+                })
+            }
+        }
+    }
+
     /// Injects into the state of the data structure a completed runtime download.
     pub fn runtime_download_finished(
         &mut self,
@@ -615,7 +649,13 @@ impl Guarded {
             .sync_service_best_block_report_id = best_block_report_id;
     }
 
-    /// Might panic for temporary `Guarded`s.
+    /// Returns the index of the runtime of the "output" best block, as an index within
+    /// [`Guarded::runtimes`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    ///
     fn best_block_runtime_index(&self) -> usize {
         let best_block = if let Some(best_block_index) = self.best_block_index {
             self.non_finalized_blocks.get(best_block_index).unwrap()
@@ -630,19 +670,13 @@ impl Guarded {
         }
     }
 
-    /// Might panic for temporary `Guarded`s.
-    fn best_block_runtime(&self) -> &Runtime {
-        let index = self.best_block_runtime_index();
-        &self.runtimes[index]
-    }
-
-    /// Might panic for temporary `Guarded`s.
-    fn best_block_runtime_mut(&mut self) -> &mut Runtime {
-        let index = self.best_block_runtime_index();
-        &mut self.runtimes[index]
-    }
-
-    /// Might panic for temporary `Guarded`s.
+    /// Returns the index of the runtime of the "output" finalized block, as an index within
+    /// [`Guarded::runtimes`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    ///
     fn finalized_block_runtime_index(&self) -> usize {
         match self.finalized_block.runtime {
             Ok(RuntimeDownloadState::Finished(index)) => index,
@@ -651,17 +685,36 @@ impl Guarded {
             _ => unreachable!(),
         }
     }
+}
 
-    /// Might panic for temporary `Guarded`s.
-    fn finalized_block_runtime(&self) -> &Runtime {
-        let index = self.finalized_block_runtime_index();
-        &self.runtimes[index]
-    }
+pub struct ExtractedRuntime {
+    /// Equivalent to [`Guarded`] but with a runtime extracted.
+    pub tree: ExtractedGuarded,
 
-    /// Might panic for temporary `Guarded`s.
-    fn finalized_block_runtime_mut(&mut self) -> &mut Runtime {
-        let index = self.finalized_block_runtime_index();
-        &mut self.runtimes[index]
+    /// Runtime extracted from the [`Guarded`].
+    pub runtime: executor::host::HostVmPrototype,
+}
+
+// TODO: rename
+pub struct ExtractedGuarded {
+    inner: Guarded,
+    extracted_runtime_index: usize,
+}
+
+impl ExtractedGuarded {
+    /// Puts back the runtime that was extracted.
+    ///
+    /// Note that no effort is made to ensure that the runtime being put back is the one that was
+    /// extracted. It is a serious logic error to put back a different runtime.
+    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) -> Guarded {
+        let mut vm_slot = &mut self.inner.runtimes[self.extracted_runtime_index]
+            .runtime
+            .as_mut()
+            .unwrap()
+            .virtual_machine;
+        debug_assert!(vm_slot.is_none());
+        *vm_slot = Some(vm);
+        self.inner
     }
 }
 
