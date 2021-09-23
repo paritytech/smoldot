@@ -857,8 +857,8 @@ enum RuntimeDownloadState {
     /// Runtime is currently being downloaded. The future can be found in
     // [`Background::runtime_downloads`].
     Downloading {
-        /// Identified for this download. Can be found in [`Background::runtime_downloads`].
-        /// Attributed from [`Background::next_download_it`]. Multiple different blocks can point
+        /// Identifier for this download. Can be found in [`Background::runtime_downloads`].
+        /// Attributed from [`Background::next_download_id`]. Multiple different blocks can point
         /// to the same `download_id` when it is known that they point to the same runtime.
         download_id: u64,
 
@@ -869,6 +869,8 @@ enum RuntimeDownloadState {
     /// Runtime hasn't started being downloaded from the network.
     Unknown {
         /// `true` if it is known that this runtime is the same as its parent's.
+        /// If `true`, it is illegal for the parent to be in the state
+        /// [`RuntimeDownloadState::Finished`] or [`RuntimeDownloadState::Downloading`].
         same_as_parent: bool,
 
         /// State trie root of the block. Necessary in order to download the runtime.
@@ -1001,7 +1003,7 @@ struct Background {
     >,
 
     /// Identifier to assign to the next download.
-    next_download_it: u64,
+    next_download_id: u64,
 
     /// Set to `true` when we expect the runtime in `latest_known_runtime` to match the runtime
     /// of the best block. Initially `false`, as `latest_known_runtime` uses the genesis
@@ -1204,22 +1206,31 @@ impl Background {
         // TODO: implement properly
 
         if let Ok(runtime) = &mut guarded.finalized_block.runtime {
-            if let RuntimeDownloadState::Unknown { state_root } = *runtime {
-                let code_query_result = {
+            if let RuntimeDownloadState::Unknown { state_root, .. } = *runtime {
+                let download_id = self.next_download_id;
+                self.next_download_id += 1;
+
+                self.runtime_downloads.push(Box::pin({
                     let sync_service = self.runtime_service.sync_service.clone();
                     let block_hash = guarded.finalized_block.hash;
                     async move {
-                        sync_service
+                        let result = sync_service
                             .storage_query(
                                 &block_hash,
                                 &state_root,
                                 iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
                             )
-                            .await;
+                            .await?;
+                        (download_id, result)
                     }
+                }));
+
+                *runtime = RuntimeDownloadState::Downloading {
+                    download_id,
+                    state_root,
                 };
 
-                *runtime = RuntimeDownloadState::Downloading { state_root };
+                // TODO: update all children that have same as parent to point to the same download
             }
         }
     }
@@ -1227,6 +1238,7 @@ impl Background {
     /// Updates `self` with a new block received from the sync service.
     async fn insert_block(&mut self, new_block: sync_service::BlockNotification) {
         let mut guarded = self.runtime_service.guarded.lock().await;
+        let guarded = &mut *guarded;
 
         // Find the parent of the new block in the list of blocks that we know.
         // It is guaranteed by the API of the sync service for the parent to have been
@@ -1274,31 +1286,52 @@ impl Background {
             decoded_header.digest.has_runtime_environment_updated() && false;
         if !runtime_environment_update {
             // Runtime of the new block is the same as the parent.
-            // TODO: update this
             let parent_runtime = match parent_index {
-                None => guarded.finalized_block.runtime.clone(),
-                Some(parent_index) => guarded
-                    .non_finalized_blocks
-                    .get(parent_index)
-                    .unwrap()
-                    .runtime
-                    .clone(),
+                None => &guarded.finalized_block.runtime,
+                Some(parent_index) => {
+                    &guarded
+                        .non_finalized_blocks
+                        .get(parent_index)
+                        .unwrap()
+                        .runtime
+                }
             };
 
             // It is possible, however, that the parent's runtime is unknown, in
             // which case we proceed with the rest of the function as if
             // `runtime_environment_update` was `true`.
-            if let Ok(parent_runtime) = parent_runtime {
-                guarded.non_finalized_blocks.insert(
-                    parent_index,
-                    Block {
-                        hash: header::hash_from_scale_encoded_header(
-                            new_block.scale_encoded_header,
-                        ),
-                        runtime: Ok(parent_runtime),
-                    },
-                );
-                return;
+            match *parent_runtime {
+                Ok(RuntimeDownloadState::Unknown { .. }) | Err(_) => {}
+                Ok(RuntimeDownloadState::Downloading { download_id, .. }) => {
+                    guarded.non_finalized_blocks.insert(
+                        parent_index,
+                        Block {
+                            runtime: Ok(RuntimeDownloadState::Downloading {
+                                download_id,
+                                state_root: *decoded_header.state_root,
+                            }),
+                            hash: header::hash_from_scale_encoded_header(
+                                new_block.scale_encoded_header,
+                            ),
+                        },
+                    );
+                    return;
+                }
+                Ok(RuntimeDownloadState::Finished(runtime_index)) => {
+                    guarded.runtimes[runtime_index].num_blocks =
+                        NonZeroUsize::new(guarded.runtimes[runtime_index].num_blocks.get() + 1)
+                            .unwrap();
+                    guarded.non_finalized_blocks.insert(
+                        parent_index,
+                        Block {
+                            runtime: Ok(RuntimeDownloadState::Finished(runtime_index)),
+                            hash: header::hash_from_scale_encoded_header(
+                                new_block.scale_encoded_header,
+                            ),
+                        },
+                    );
+                    return;
+                }
             }
         }
 
@@ -1306,10 +1339,11 @@ impl Background {
         let inserted_index = guarded.non_finalized_blocks.insert(
             parent_index,
             Block {
-                hash: header::hash_from_scale_encoded_header(new_block.scale_encoded_header),
                 runtime: Ok(RuntimeDownloadState::Unknown {
+                    same_as_parent: !runtime_environment_update,
                     state_root: *decoded_header.state_root,
                 }),
+                hash: header::hash_from_scale_encoded_header(new_block.scale_encoded_header),
             },
         );
 
