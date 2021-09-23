@@ -45,7 +45,7 @@
 // TODO: the doc above mentions that you can subscribe to the finalized block, but this is isn't implemented yet ^
 
 use crate::{
-    ffi, lossy_channel,
+    lossy_channel,
     sync_service::{self, StorageQueryError},
 };
 
@@ -59,13 +59,7 @@ use smoldot::{
     network::protocol,
     trie::{self, proof_verify},
 };
-use std::{
-    iter, mem,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    sync::Arc,
-    time::Duration,
-};
+use std::{iter, mem, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
@@ -118,7 +112,7 @@ impl RuntimeService {
         let log_target = format!("runtime-{}", config.log_name);
 
         // Build the runtime of the genesis block.
-        let latest_known_runtime = {
+        let genesis_runtime = {
             let code = config
                 .chain_spec
                 .genesis_storage()
@@ -166,23 +160,32 @@ impl RuntimeService {
                 runtime: Ok(runtime),
                 runtime_code: code,
                 heap_pages,
-                runtime_block_hash: header::hash_from_scale_encoded_header(
-                    &config.genesis_block_scale_encoded_header,
-                ),
-                runtime_block_header: config.genesis_block_scale_encoded_header,
-                runtime_version_subscriptions: Vec::new(),
-                best_blocks_subscriptions: Vec::new(),
-                best_near_head_of_chain: config
-                    .sync_service
-                    .is_near_head_of_chain_heuristic()
-                    .await,
+                num_blocks: NonZeroUsize::new(1).unwrap(),
             }
         };
+
+        let mut runtimes = slab::Slab::with_capacity(4); // Usual len is `1`, rarely `2`.
+        let genesis_runtime_index = runtimes.insert(genesis_runtime);
+
+        let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
         let runtime_service = Arc::new(RuntimeService {
             log_target,
             sync_service: config.sync_service,
-            latest_known_runtime: Mutex::new(latest_known_runtime),
+            guarded: Mutex::new(Guarded {
+                best_blocks_subscriptions: Vec::new(),
+                runtime_version_subscriptions: Vec::new(),
+                best_near_head_of_chain,
+                runtimes,
+                best_block_index: None,
+                non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
+                finalized_block: Block {
+                    runtime: Ok(RuntimeDownloadState::Finished(genesis_runtime_index)),
+                    hash: header::hash_from_scale_encoded_header(
+                        &config.genesis_block_scale_encoded_header,
+                    ),
+                },
+            }),
         });
 
         // Spawns a task that downloads the runtime code at every block to check whether it has
@@ -193,19 +196,13 @@ impl RuntimeService {
         // always have a task active rather than create and destroy it.
         (config.tasks_executor)("runtime-download".into(), {
             let runtime_service = runtime_service.clone();
-
             async move {
-                let blocks_stream = {
-                    let (best_block_header, best_blocks_subscription) =
-                        runtime_service.sync_service.subscribe_best().await;
-                    stream::once(future::ready(best_block_header)).chain(best_blocks_subscription)
-                }
-                .boxed();
-
                 Background {
                     runtime_service,
                     blocks_stream: stream::pending().boxed(),
                     runtime_matches_best_block: false,
+                    next_download_id: 0,
+                    runtime_downloads: stream::FuturesUnordered::new(),
                 }
                 .run()
                 .await
@@ -227,9 +224,9 @@ impl RuntimeService {
         NotificationsReceiver<Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let (tx, rx) = lossy_channel::channel();
-        let mut latest_known_runtime = self.latest_known_runtime.lock().await;
-        latest_known_runtime.runtime_version_subscriptions.push(tx);
-        let current_version = latest_known_runtime
+        let mut guarded = self.guarded.lock().await;
+        guarded.runtime_version_subscriptions.push(tx);
+        let current_version = guarded
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
@@ -245,9 +242,9 @@ impl RuntimeService {
         // If the requested block is the best known block, optimize by
         // immediately returning the cached spec.
         {
-            let latest_known_runtime = self.latest_known_runtime.lock().await;
-            if latest_known_runtime.runtime_block_hash == *block_hash {
-                return latest_known_runtime
+            let guarded = self.guarded.lock().await;
+            if guarded.runtime_block_hash == *block_hash {
+                return guarded
                     .runtime
                     .as_ref()
                     .map(|r| r.runtime_spec.clone())
@@ -312,8 +309,8 @@ impl RuntimeService {
     pub async fn best_block_runtime(
         self: &Arc<RuntimeService>,
     ) -> Result<executor::CoreVersion, RuntimeError> {
-        let latest_known_runtime = self.latest_known_runtime.lock().await;
-        latest_known_runtime
+        let guarded = self.guarded.lock().await;
+        guarded
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
@@ -333,10 +330,10 @@ impl RuntimeService {
         self: &Arc<RuntimeService>,
     ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
         let (tx, rx) = lossy_channel::channel();
-        let mut latest_known_runtime = self.latest_known_runtime.lock().await;
-        latest_known_runtime.best_blocks_subscriptions.push(tx);
-        drop(latest_known_runtime);
-        let (current, _) = self.sync_service.subscribe_best().await; // TODO: not correct; should load from latest_known_runtime
+        let mut guarded = self.guarded.lock().await;
+        guarded.best_blocks_subscriptions.push(tx);
+        drop(guarded);
+        let (current, _) = self.sync_service.subscribe_best().await; // TODO: not correct; should load from guarded
         (current, rx)
     }
 
@@ -345,7 +342,7 @@ impl RuntimeService {
         self: &'a Arc<RuntimeService>,
     ) -> impl Future<Output = RuntimeLock<'a>> + 'b {
         async move {
-            let lock = self.latest_known_runtime.lock().await;
+            let lock = self.guarded.lock().await;
             debug_assert_eq!(
                 lock.runtime_block_hash,
                 header::hash_from_scale_encoded_header(&lock.runtime_block_header)
@@ -378,16 +375,16 @@ impl RuntimeService {
     > + 'b {
         // An `async move` has to be used because of borrowing issue.
         async move {
-            // `latest_known_runtime` should be kept locked as little as possible.
+            // `guarded` should be kept locked as little as possible.
             // In order to handle the possibility a runtime upgrade happening during the operation,
-            // every time `latest_known_runtime` is locked, we compare the runtime version stored in
+            // every time `guarded` is locked, we compare the runtime version stored in
             // it with the value previously found. If there is a mismatch, the entire runtime call
             // is restarted from scratch.
             loop {
                 // Get `runtime_block_hash`, `runtime_block_height` and `runtime_block_state_root`,
                 // the hash, height, and state trie root of a recent best block that uses this runtime.
                 let (spec_version, runtime_block_hash, runtime_block_header) = {
-                    let lock = self.latest_known_runtime.lock().await;
+                    let lock = self.guarded.lock().await;
                     debug_assert_eq!(
                         lock.runtime_block_hash,
                         header::hash_from_scale_encoded_header(&lock.runtime_block_header)
@@ -406,7 +403,7 @@ impl RuntimeService {
                 };
 
                 // Perform the call proof request.
-                // Note that `latest_known_runtime` is not locked.
+                // Note that `guarded` is not locked.
                 // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
                 // TODO: also, an empty proof will be reported as an error right now, which is weird
                 let call_proof = self
@@ -423,10 +420,10 @@ impl RuntimeService {
                     .await
                     .map_err(RuntimeCallError::CallProof);
 
-                // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
+                // Lock `guarded_lock` again. `continue` if the runtime has changed
                 // in-between.
-                let mut latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-                let runtime = latest_known_runtime_lock
+                let mut guarded_lock = self.guarded.lock().await;
+                let runtime = guarded_lock
                     .runtime
                     .as_mut()
                     .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
@@ -436,7 +433,7 @@ impl RuntimeService {
 
                 let virtual_machine = runtime.virtual_machine.take().unwrap();
                 let lock = RuntimeCallLock {
-                    lock: latest_known_runtime_lock,
+                    lock: guarded_lock,
                     runtime_block_header,
                     call_proof,
                 };
@@ -454,8 +451,8 @@ impl RuntimeService {
     pub async fn metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
         // First, try the cache.
         {
-            let latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-            match latest_known_runtime_lock.runtime.as_ref() {
+            let guarded_lock = self.guarded.lock().await;
+            match guarded_lock.runtime.as_ref() {
                 Ok(runtime) => {
                     if let Some(metadata) = runtime.metadata.as_ref() {
                         return Ok(metadata.clone());
@@ -521,10 +518,7 @@ impl RuntimeService {
         // when called at the latest best block that the runtime service reported through its API,
         // to make sure that we don't report "near" while having reported only blocks that were
         // far.
-        self.latest_known_runtime
-            .lock()
-            .await
-            .best_near_head_of_chain
+        self.guarded.lock().await.best_near_head_of_chain
     }
 }
 
@@ -565,7 +559,7 @@ impl<'a> RuntimeLock<'a> {
         // TODO: DRY :-/ this whole thing is messy
 
         // Perform the call proof request.
-        // Note that `latest_known_runtime` is not locked.
+        // Note that `guarded` is not locked.
         // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
         // TODO: also, an empty proof will be reported as an error right now, which is weird
         let call_proof = self
@@ -1012,8 +1006,8 @@ struct Background {
     /// Identifier to assign to the next download.
     next_download_id: u64,
 
-    /// Set to `true` when we expect the runtime in `latest_known_runtime` to match the runtime
-    /// of the best block. Initially `false`, as `latest_known_runtime` uses the genesis
+    /// Set to `true` when we expect the runtime in `guarded` to match the runtime
+    /// of the best block. Initially `false`, as `guarded` uses the genesis
     /// runtime.
     runtime_matches_best_block: bool,
 }
@@ -1071,13 +1065,13 @@ impl Background {
                         match download_result {
                             Ok((storage_code, storage_heap_pages)) => {
                                 self.runtime_download_finished(download_id, storage_code, storage_heap_pages).await;
-                                self.start_necessary_downloads().await;
                             }
                             Err(err) => {
                                 self.runtime_download_failure(download_id);
-                                self.start_necessary_downloads().await;
                             }
                         }
+
+                        self.start_necessary_downloads().await;
                     }
                 }
             }
@@ -1245,8 +1239,8 @@ impl Background {
                             .await;
                         let result = match result {
                             Ok(mut c) => {
-                                let code = c.pop().unwrap();
                                 let heap_pages = c.pop().unwrap();
+                                let code = c.pop().unwrap();
                                 Ok((code, heap_pages))
                             }
                             Err(error) => {
