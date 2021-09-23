@@ -871,6 +871,10 @@ enum RuntimeDownloadState {
         /// `true` if it is known that this runtime is the same as its parent's.
         /// If `true`, it is illegal for the parent to be in the state
         /// [`RuntimeDownloadState::Finished`] or [`RuntimeDownloadState::Downloading`].
+        ///
+        /// When in doubt, `false`.
+        ///
+        /// Value is irrelevant for the finalized block.
         same_as_parent: bool,
 
         /// State trie root of the block. Necessary in order to download the runtime.
@@ -998,7 +1002,10 @@ struct Background {
     runtime_downloads: stream::FuturesUnordered<
         future::BoxFuture<
             'static,
-            Result<(u64, Option<Vec<u8>>, Option<Vec<u8>>), StorageQueryError>,
+            (
+                u64,
+                Result<(Option<Vec<u8>>, Option<Vec<u8>>), StorageQueryError>,
+            ),
         >,
     >,
 
@@ -1060,13 +1067,16 @@ impl Background {
 
                         self.start_necessary_downloads().await;
                     },
-                    download_result = self.runtime_downloads.select_next_some() => {
+                    (download_id, download_result) = self.runtime_downloads.select_next_some() => {
                         match download_result {
-                            Ok((download_id, storage_code, storage_heap_pages)) => {
+                            Ok((storage_code, storage_heap_pages)) => {
                                 self.runtime_download_finished(download_id, storage_code, storage_heap_pages).await;
                                 self.start_necessary_downloads().await;
                             }
-                            Err(err) => todo!(), // TODO: put back unknown
+                            Err(err) => {
+                                self.runtime_download_failure(download_id);
+                                self.start_necessary_downloads().await;
+                            }
                         }
                     }
                 }
@@ -1084,17 +1094,35 @@ impl Background {
         let mut guarded = self.runtime_service.guarded.lock().await;
         let guarded = &mut *guarded;
 
+        // Find the number of blocks that are bound to this download.
+        let num_concerned_blocks = iter::once(&guarded.finalized_block)
+            .chain(
+                guarded
+                    .non_finalized_blocks
+                    .iter_unordered()
+                    .map(|(_, b)| b),
+            )
+            .filter(|b| match b.runtime {
+                Ok(RuntimeDownloadState::Downloading {
+                    download_id: id, ..
+                }) if id == download_id => true,
+                _ => false,
+            })
+            .count();
+        debug_assert_ne!(num_concerned_blocks, 0);
+
         // Try find the identifier of an existing runtime that has this code and heap pages. If
         // none is found, compile the runtime.
         // This search is `O(n)`, but considering the very low number of runtimes (most of the
         // time one, occasionally two), this shouldn't be a problem.
-        // The runtime's `num_blocks` is also incremented here.
+        // The runtime's `num_blocks` is also increased by `num_concerned_blocks` here.
         let runtime_index = if let Some((runtime_index, runtime)) = guarded
             .runtimes
             .iter_mut()
             .find(|(_, r)| r.runtime_code == storage_code && r.heap_pages == storage_heap_pages)
         {
-            runtime.num_blocks = NonZeroUsize::new(runtime.num_blocks.get() + 1).unwrap();
+            runtime.num_blocks =
+                NonZeroUsize::new(runtime.num_blocks.get() + num_concerned_blocks).unwrap();
             runtime_index
         } else {
             let runtime = SuccessfulRuntime::from_params(
@@ -1105,87 +1133,38 @@ impl Background {
             .await;
 
             guarded.runtimes.insert(Runtime {
-                num_blocks: NonZeroUsize::new(1).unwrap(),
+                num_blocks: NonZeroUsize::new(num_concerned_blocks).unwrap(),
                 runtime,
                 runtime_code: storage_code,
                 heap_pages: storage_heap_pages,
             })
         };
 
-        // Find the block that has the given hash, and its parent.
-        let (block_index, block_parent): (Option<fork_tree::NodeIndex>, Option<&mut Block>) = {
-            if guarded.finalized_block.hash == block_hash {
-                (None, None)
-            } else if let Some(idx) = guarded.non_finalized_blocks.find(|b| b.hash == block_hash) {
-                let parent_index = guarded.non_finalized_blocks.parent(idx);
-                let parent_block = parent_index
-                    .map({
-                        let nf = &mut guarded.non_finalized_blocks;
-                        move |p_idx| nf.get_mut(p_idx).unwrap()
-                    })
-                    .unwrap_or(&mut guarded.finalized_block);
-                (Some(idx), Some(parent_block))
-            } else {
-                // No block found. The block was probably pruned due to finalization earlier.
-                return;
+        // Update the blocks that were downloading this runtime.
+        match guarded.finalized_block.runtime {
+            Ok(RuntimeDownloadState::Downloading {
+                download_id: id, ..
+            }) if id == download_id => {
+                guarded.finalized_block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
             }
-        };
-
-        // Compare the storage code and heap pages with the parent's.
-        // Contains `Some` if these values are the same as the parent's.
-        let same_as_parent: Option<_> =
-            if let Some(parent_runtime) = block_parent.and_then(|b| b.runtime.as_mut().ok()) {
-                match parent_runtime {
-                    RuntimeDownloadState::Finished(r)
-                        if guarded.runtimes[*r].runtime_code == storage_code
-                            && guarded.runtimes[*r].heap_pages == storage_heap_pages =>
-                    {
-                        Some(*r)
-                    }
-                    // It is possible for the parent's runtime to not be available yet, e.g.
-                    // because it's still being downloaded.
-                    _ => None,
+            _ => {}
+        }
+        for index in guarded
+            .non_finalized_blocks
+            .iter_unordered()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+        {
+            let block = guarded.non_finalized_blocks.get_mut(index).unwrap();
+            match block.runtime {
+                Ok(RuntimeDownloadState::Downloading {
+                    download_id: id, ..
+                }) if id == download_id => {
+                    block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
                 }
-            } else {
-                None
-            };
-
-        // If not the same as the parent's, compile the runtime now and insert it in `guarded`.
-        // The runtime's `num_blocks` is also incremented here.
-        let final_runtime = if let Some(same_as_parent) = same_as_parent {
-            guarded.runtimes[same_as_parent].num_blocks =
-                NonZeroUsize::new(guarded.runtimes[same_as_parent].num_blocks.get() + 1).unwrap();
-            same_as_parent
-        } else {
-            let runtime = SuccessfulRuntime::from_params(
-                &self.runtime_service.log_target,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
-
-            guarded.runtimes.insert(Runtime {
-                num_blocks: NonZeroUsize::new(1).unwrap(),
-                runtime,
-                runtime_code: storage_code,
-                heap_pages: storage_heap_pages,
-            })
-        };
-
-        // TODO: consider also looking into the children, see if they don't also have the same runtime by any chance; this can be useful in case a download was particularly long and finished after the childrens'
-
-        // Now finally update `block`.
-        let block = block_index
-            .map({
-                let nf = &mut guarded.non_finalized_blocks;
-                move |i| nf.get_mut(i).unwrap()
-            })
-            .unwrap_or(&mut guarded.finalized_block);
-        debug_assert!(matches!(
-            block.runtime,
-            Ok(RuntimeDownloadState::Downloading { .. })
-        ));
-        *block.runtime.as_mut().unwrap() = RuntimeDownloadState::Finished(final_runtime);
+                _ => {}
+            }
+        }
 
         // Sanity check.
         debug_assert_eq!(
@@ -1196,6 +1175,47 @@ impl Background {
                 .sum::<usize>(),
             guarded.non_finalized_blocks.len() + 1
         );
+    }
+
+    /// Injects into the state of `self` a failed runtime download.
+    async fn runtime_download_failure(&mut self, download_id: u64) {
+        let mut guarded = self.runtime_service.guarded.lock().await;
+        let guarded = &mut *guarded;
+
+        // Update the blocks that were downloading this runtime.
+        match guarded.finalized_block.runtime {
+            Ok(RuntimeDownloadState::Downloading {
+                download_id: id,
+                state_root,
+            }) if id == download_id => {
+                // Note: the value of `same_as_parent` is irrelevant for the finalized block.
+                guarded.finalized_block.runtime = Ok(RuntimeDownloadState::Unknown {
+                    state_root,
+                    same_as_parent: false,
+                });
+            }
+            _ => {}
+        }
+        for index in guarded
+            .non_finalized_blocks
+            .iter_unordered()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+        {
+            let block = guarded.non_finalized_blocks.get_mut(index).unwrap();
+            match block.runtime {
+                Ok(RuntimeDownloadState::Downloading {
+                    state_root,
+                    download_id: id,
+                }) if id == download_id => {
+                    block.runtime = Ok(RuntimeDownloadState::Unknown {
+                        same_as_parent: todo!(), // TODO: not implemented
+                        state_root,
+                    });
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
@@ -1213,6 +1233,8 @@ impl Background {
                 self.runtime_downloads.push(Box::pin({
                     let sync_service = self.runtime_service.sync_service.clone();
                     let block_hash = guarded.finalized_block.hash;
+                    let log_target = self.runtime_service.log_target.clone();
+
                     async move {
                         let result = sync_service
                             .storage_query(
@@ -1220,7 +1242,29 @@ impl Background {
                                 &state_root,
                                 iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
                             )
-                            .await?;
+                            .await;
+                        let result = match result {
+                            Ok(mut c) => {
+                                let code = c.pop().unwrap();
+                                let heap_pages = c.pop().unwrap();
+                                Ok((code, heap_pages))
+                            }
+                            Err(error) => {
+                                // TODO: log differently
+                                log::log!(
+                                    target: &log_target,
+                                    if error.is_network_problem() {
+                                        log::Level::Debug
+                                    } else {
+                                        log::Level::Warn
+                                    },
+                                    "Failed to download :code and :heappages of block: {}",
+                                    error
+                                );
+                                Err(error)
+                            }
+                        };
+
                         (download_id, result)
                     }
                 }));
