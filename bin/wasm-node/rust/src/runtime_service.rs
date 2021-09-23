@@ -52,7 +52,6 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain::fork_tree,
     chain_spec, executor, header, metadata,
     network::protocol,
     trie::{self, proof_verify},
@@ -112,62 +111,6 @@ impl RuntimeService {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
-        // Build the runtime of the genesis block.
-        let genesis_runtime = {
-            let code = config
-                .chain_spec
-                .genesis_storage()
-                .find(|(k, _)| k == b":code")
-                .map(|(_, v)| v.to_vec());
-            let heap_pages = config
-                .chain_spec
-                .genesis_storage()
-                .find(|(k, _)| k == b":heappages")
-                .map(|(_, v)| v.to_vec());
-
-            // Note that in the absolute we don't need to panic in case of a problem, and could
-            // simply store an `Err` and continue running.
-            // However, in practice, it seems more sane to detect problems in the genesis block.
-            let mut runtime = SuccessfulRuntime::from_params(&log_target, &code, &heap_pages)
-                .await
-                .expect("invalid runtime at genesis block");
-
-            // As documented in the `metadata` field, we must fill it using the genesis storage.
-            let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
-            loop {
-                match query {
-                    metadata::Query::Finished(Ok(metadata), vm) => {
-                        runtime.virtual_machine = Some(vm);
-                        runtime.metadata = Some(metadata);
-                        break;
-                    }
-                    metadata::Query::StorageGet(get) => {
-                        let key = get.key_as_vec();
-                        let value = config
-                            .chain_spec
-                            .genesis_storage()
-                            .find(|(k, _)| &**k == key)
-                            .map(|(_, v)| v);
-                        query = get.inject_value(value.map(iter::once));
-                    }
-                    metadata::Query::Finished(Err(err), _) => {
-                        panic!("Unable to generate genesis metadata: {}", err)
-                    }
-                }
-            }
-
-            debug_assert!(header::decode(&config.genesis_block_scale_encoded_header).is_ok());
-            Runtime {
-                runtime: Ok(runtime),
-                runtime_code: code,
-                heap_pages,
-                num_blocks: NonZeroUsize::new(1).unwrap(),
-            }
-        };
-
-        let mut runtimes = slab::Slab::with_capacity(4); // Usual len is `1`, rarely `2`.
-        let genesis_runtime_index = runtimes.insert(genesis_runtime);
-
         let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
         let runtime_service = Arc::new(RuntimeService {
@@ -177,19 +120,10 @@ impl RuntimeService {
                 best_blocks_subscriptions: Vec::new(),
                 runtime_version_subscriptions: Vec::new(),
                 best_near_head_of_chain,
-                runtimes,
-                best_block_index: None,
-                non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
-                finalized_block: Block {
-                    runtime: Ok(RuntimeDownloadState::Finished(genesis_runtime_index)),
-                    hash: header::hash_from_scale_encoded_header(
-                        &config.genesis_block_scale_encoded_header,
-                    ),
-                    header: config.genesis_block_scale_encoded_header,
-                    sync_service_best_block_report_id: 1,
-                },
-                sync_service_finalized_index: None,
-                sync_service_best_block_next_report_id: 2,
+                tree: download_tree::Guarded::from_finalized_block_and_storage(
+                    config.genesis_block_scale_encoded_header,
+                    config.chain_spec.genesis_storage(),
+                ),
             }),
         });
 

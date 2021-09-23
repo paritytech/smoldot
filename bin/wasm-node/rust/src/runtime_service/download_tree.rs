@@ -105,17 +105,98 @@ impl Guarded {
     ///
     /// This [`Guarded`] is in a non-ready state.
     pub fn from_finalized_block(finalized_block_scale_encoded_header: Vec<u8>) -> Self {
+        Guarded::new_inner(finalized_block_scale_encoded_header, None)
+    }
+
+    /// Returns a new [`Guarded`] containing one finalized block. The runtime of this finalized
+    /// block will be compiled from the given storage.
+    ///
+    /// This [`Guarded`] is in a ready state.
+    pub fn from_finalized_block_and_storage<'a>(
+        finalized_block_scale_encoded_header: Vec<u8>,
+        genesis_storage: impl ExactSizeIterator<Item = (&'a [u8], &'a [u8])> + Clone,
+    ) -> Self {
+        // Build the runtime of the genesis block.
+        let genesis_runtime = {
+            let code = genesis_storage
+                .clone()
+                .find(|(k, _)| k == b":code")
+                .map(|(_, v)| v.to_vec());
+            let heap_pages = genesis_storage
+                .clone()
+                .find(|(k, _)| k == b":heappages")
+                .map(|(_, v)| v.to_vec());
+
+            // Note that in the absolute we don't need to panic in case of a problem, and could
+            // simply store an `Err` and continue running.
+            // However, in practice, it seems more sane to detect problems in the genesis block.
+            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages);
+
+            // As documented in the `metadata` field, we must fill it using the genesis storage.
+            if let Ok(runtime) = runtime.as_mut() {
+                let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
+                loop {
+                    match query {
+                        metadata::Query::Finished(Ok(metadata), vm) => {
+                            runtime.virtual_machine = Some(vm);
+                            runtime.metadata = Some(metadata);
+                            break;
+                        }
+                        metadata::Query::StorageGet(get) => {
+                            let key = get.key_as_vec();
+                            let value = genesis_storage
+                                .clone()
+                                .find(|(k, _)| &**k == key)
+                                .map(|(_, v)| v);
+                            query = get.inject_value(value.map(iter::once));
+                        }
+                        metadata::Query::Finished(Err(err), _) => {
+                            panic!("Unable to generate genesis metadata: {}", err)
+                        }
+                    }
+                }
+            }
+
+            Runtime {
+                runtime,
+                runtime_code: code,
+                heap_pages,
+                num_blocks: NonZeroUsize::new(1).unwrap(),
+            }
+        };
+
+        Guarded::new_inner(finalized_block_scale_encoded_header, Some(genesis_runtime))
+    }
+
+    fn new_inner(
+        finalized_block_scale_encoded_header: Vec<u8>,
+        genesis_runtime: Option<Runtime>,
+    ) -> Self {
+        let mut runtimes = slab::Slab::with_capacity(4); // Usual len is `1`, rarely `2`.
+
+        let genesis_runtime_index = if let Some(genesis_runtime) = genesis_runtime {
+            Some(runtimes.insert(genesis_runtime))
+        } else {
+            None
+        };
+
         Guarded {
-            runtimes: slab::Slab::with_capacity(4), // Usual len is `1`, rarely `2`.
+            runtimes,
             best_block_index: None,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
             finalized_block: Block {
                 runtime: match header::decode(&finalized_block_scale_encoded_header) {
                     Err(_) => Err(BlockRuntimeErr::InvalidHeader),
-                    Ok(header) => Ok(RuntimeDownloadState::Unknown {
-                        same_as_parent: false,
-                        state_root: *header.state_root,
-                    }),
+                    Ok(header) => {
+                        if let Some(genesis_runtime_index) = genesis_runtime_index {
+                            Ok(RuntimeDownloadState::Finished(genesis_runtime_index))
+                        } else {
+                            Ok(RuntimeDownloadState::Unknown {
+                                same_as_parent: false,
+                                state_root: *header.state_root,
+                            })
+                        }
+                    }
                 },
                 hash: header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header),
                 header: finalized_block_scale_encoded_header,
