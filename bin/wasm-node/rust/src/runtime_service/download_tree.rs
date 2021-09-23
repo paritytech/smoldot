@@ -21,17 +21,12 @@
 //! new best or finalized of the data structure.
 
 // TODO: move this module to /src directory
-// TODO: remove references to sync service in the documentation
+// TODO: remove references to sync service everywhere, including in docs
 
-use crate::sync_service::{self, StorageQueryError};
+use crate::sync_service;
 
-use core::{iter, mem, num::NonZeroUsize, pin::Pin};
-use smoldot::{
-    chain::fork_tree,
-    chain_spec, executor, header, metadata,
-    network::protocol,
-    trie::{self, proof_verify},
-};
+use core::{iter, num::NonZeroUsize};
+use smoldot::{chain::fork_tree, executor, header, metadata};
 
 /// Error when analyzing the runtime.
 #[derive(Debug, derive_more::Display, Clone)]
@@ -101,17 +96,18 @@ pub struct Guarded {
 }
 
 impl Guarded {
-    /// Returns a new [`Guarded`] containing one finalized block.
+    /// Returns a new [`Guarded`] containing one "input" finalized block.
     ///
     /// This [`Guarded`] is in a non-ready state.
     pub fn from_finalized_block(finalized_block_scale_encoded_header: Vec<u8>) -> Self {
         Guarded::new_inner(finalized_block_scale_encoded_header, None)
     }
 
-    /// Returns a new [`Guarded`] containing one finalized block. The runtime of this finalized
-    /// block will be compiled from the given storage.
+    /// Returns a new [`Guarded`] containing one "input" finalized block. The runtime of this
+    /// finalized block will be compiled from the given storage, meaning that this block also
+    /// becomes the "output" finalized block and the "output" best block.
     ///
-    /// This [`Guarded`] is in a ready state.
+    /// This [`Guarded`] is immediately in a ready state.
     pub fn from_finalized_block_and_storage<'a>(
         finalized_block_scale_encoded_header: Vec<u8>,
         genesis_storage: impl ExactSizeIterator<Item = (&'a [u8], &'a [u8])> + Clone,
@@ -206,6 +202,41 @@ impl Guarded {
             sync_service_best_block_next_report_id: 2,
             next_download_id: DownloadId(0),
         }
+    }
+
+    /// Returns `true` if the state machine is in a ready state, meaning that it has an "output"
+    /// finalized block and an "output" best block.
+    ///
+    /// Several methods panic if the state machine isn't in a ready state.
+    pub fn is_ready(&self) -> bool {
+        if matches!(
+            self.finalized_block.runtime,
+            Ok(RuntimeDownloadState::Finished(_))
+        ) {
+            debug_assert!(!self.runtimes.is_empty());
+            debug_assert!(self.best_block_index.map_or(true, |idx| matches!(
+                self.non_finalized_blocks.get(idx).unwrap().runtime,
+                Ok(RuntimeDownloadState::Finished(_))
+            )));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns the specificiation of the current "output" best block. Returns an error if the
+    /// runtime had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    ///
+    pub fn best_block_runtime_spec(&self) -> Result<&executor::CoreVersion, &RuntimeError> {
+        let index = self.best_block_runtime_index();
+        self.runtimes[index]
+            .runtime
+            .as_ref()
+            .map(|r| &r.runtime_spec)
     }
 
     /// Injects into the state of the data structure a completed runtime download.
@@ -356,17 +387,30 @@ impl Guarded {
     /// Examines the state of `self` and, if a block's runtime should be downloaded, changes the
     /// state of the block to "downloading" and returns the parameters of the download.
     pub fn next_necessary_download(&mut self) -> Option<DownloadParams> {
+        // Local finalized block, in case the state machine isn't in a ready state.
         if let Some(download) = self.start_necessary_download(None) {
             return Some(download);
         }
 
+        // Finalized block according to the blocks input.
         if let Some(idx) = self.sync_service_finalized_index {
             if let Some(download) = self.start_necessary_download(Some(idx)) {
                 return Some(download);
             }
         }
 
-        // TODO: sync service best block
+        // Best block according to the blocks input.
+        if let Some((idx, _)) = self
+            .non_finalized_blocks
+            .iter_unordered()
+            .max_by_key(|(_, b)| b.sync_service_best_block_report_id)
+        {
+            if let Some(download) = self.start_necessary_download(Some(idx)) {
+                return Some(download);
+            }
+        }
+
+        // TODO: consider also downloading the forks' runtimes, but only once the `RuntimeEnvironmentUpdated` digest item is deployed everywhere, otherwise too much bandwidth is used
 
         None
     }

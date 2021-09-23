@@ -158,10 +158,9 @@ impl RuntimeService {
         let mut guarded = self.guarded.lock().await;
         guarded.runtime_version_subscriptions.push(tx);
         let current_version = guarded
-            .best_block_runtime()
-            .runtime
-            .as_ref()
-            .map(|r| r.runtime_spec.clone())
+            .tree
+            .best_block_runtime_spec()
+            .map(|spec| spec.clone())
             .map_err(|err| err.clone());
         (current_version, rx)
     }
@@ -244,10 +243,9 @@ impl RuntimeService {
     ) -> Result<executor::CoreVersion, RuntimeError> {
         let guarded = self.guarded.lock().await;
         guarded
-            .best_block_runtime()
-            .runtime
-            .as_ref()
-            .map(|r| r.runtime_spec.clone())
+            .tree
+            .best_block_runtime_spec()
+            .map(|spec| spec.clone())
             .map_err(|err| err.clone())
     }
 
@@ -978,37 +976,12 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             if !Arc::ptr_eq(&background.runtime_service, &original_runtime_service) {
                 // The `Background` object is manipulating a temporary runtime service. Check if
                 // it is possible to write to the original runtime service.
-                let mut temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
-                if matches!(
-                    temporary_guarded.finalized_block.runtime,
-                    Ok(RuntimeDownloadState::Finished(_))
-                ) {
-                    debug_assert!(!temporary_guarded.runtimes.is_empty());
-                    debug_assert!(temporary_guarded
-                        .best_block_index
-                        .map_or(true, |idx| matches!(
-                            temporary_guarded
-                                .non_finalized_blocks
-                                .get(idx)
-                                .unwrap()
-                                .runtime,
-                            Ok(RuntimeDownloadState::Finished(_))
-                        )));
-
+                let temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
+                if temporary_guarded.tree.is_ready() {
                     let mut original_guarded = original_runtime_service.guarded.lock().await;
-                    let merged_guarded = Guarded {
-                        best_blocks_subscriptions: mem::take(
-                            &mut original_guarded.best_blocks_subscriptions,
-                        ),
-                        runtime_version_subscriptions: mem::take(
-                            &mut original_guarded.runtime_version_subscriptions,
-                        ),
-                        best_near_head_of_chain: mem::take(
-                            &mut temporary_guarded.best_near_head_of_chain,
-                        ),
-                        tree: mem::take(&mut temporary_guarded.tree),
-                    };
-                    *original_guarded = merged_guarded;
+                    original_guarded.best_near_head_of_chain =
+                        temporary_guarded.best_near_head_of_chain;
+                    original_guarded.tree = temporary_guarded.tree;
 
                     drop(temporary_guarded);
                     background.runtime_service = original_runtime_service.clone();
@@ -1094,6 +1067,8 @@ impl Background {
         guarded
             .tree
             .runtime_download_finished(download_id, storage_code, storage_heap_pages);
+
+        // TODO: must potentially notify best and finalized subscriptions
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
@@ -1101,7 +1076,19 @@ impl Background {
         let mut guarded = self.runtime_service.guarded.lock().await;
         let guarded = &mut *guarded;
 
-        while let Some(download_params) = guarded.tree.next_necessary_download() {
+        loop {
+            // Don't download more than 2 runtimes at a time.
+            if self.runtime_downloads.len() >= 2 {
+                break;
+            }
+
+            // If there's nothing more to download, break out of the loop.
+            let download_params = match guarded.tree.next_necessary_download() {
+                Some(dl) => dl,
+                None => break,
+            };
+
+            // Dispatches a runtime download task to `runtime_downloads`.
             self.runtime_downloads.push(Box::pin({
                 let sync_service = self.runtime_service.sync_service.clone();
                 let log_target = self.runtime_service.log_target.clone();
@@ -1114,6 +1101,7 @@ impl Background {
                             iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
                         )
                         .await;
+
                     let result = match result {
                         Ok(mut c) => {
                             let heap_pages = c.pop().unwrap();
@@ -1146,5 +1134,7 @@ impl Background {
     async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
         let mut guarded = self.runtime_service.guarded.lock().await;
         guarded.tree.finalize(hash_to_finalize, new_best_block_hash);
+
+        // TODO: must potentially notify best and finalized subscriptions
     }
 }
