@@ -42,8 +42,6 @@
 //! [`RuntimeService::recent_best_block_runtime_call`], that performs a runtime call on the latest
 //! reported best block or more recent.
 
-// TODO: the doc above mentions that you can subscribe to the finalized block, but this is isn't implemented yet ^
-
 use crate::{
     lossy_channel,
     sync_service::{self, StorageQueryError},
@@ -227,6 +225,7 @@ impl RuntimeService {
         let mut guarded = self.guarded.lock().await;
         guarded.runtime_version_subscriptions.push(tx);
         let current_version = guarded
+            .best_block()
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
@@ -311,6 +310,7 @@ impl RuntimeService {
     ) -> Result<executor::CoreVersion, RuntimeError> {
         let guarded = self.guarded.lock().await;
         guarded
+            .best_block()
             .runtime
             .as_ref()
             .map(|r| r.runtime_spec.clone())
@@ -526,7 +526,7 @@ impl RuntimeService {
 #[must_use]
 pub struct RuntimeLock<'a> {
     service: &'a Arc<RuntimeService>,
-    lock: MutexGuard<'a, Runtime>,
+    lock: MutexGuard<'a, Guarded>,
 }
 
 impl<'a> RuntimeLock<'a> {
@@ -824,6 +824,24 @@ struct Guarded {
     /// Index within [`Guarded::non_finalized_blocks`] of the current best block. `None` if the
     /// best block is the finalized block.
     best_block_index: Option<fork_tree::NodeIndex>,
+}
+
+impl Guarded {
+    fn best_block(&self) -> &Block {
+        if let Some(best_block_index) = self.best_block_index {
+            self.non_finalized_blocks.get(best_block_index).unwrap()
+        } else {
+            &self.finalized_block
+        }
+    }
+
+    fn best_block_mut(&mut self) -> &mut Block {
+        if let Some(best_block_index) = self.best_block_index {
+            self.non_finalized_blocks.get_mut(best_block_index).unwrap()
+        } else {
+            &mut self.finalized_block
+        }
+    }
 }
 
 struct Block {
