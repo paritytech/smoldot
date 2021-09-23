@@ -1425,12 +1425,30 @@ impl Background {
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
     async fn start_necessary_downloads(&mut self) {
-        let mut guarded = self.runtime_service.guarded.lock().await;
-        let guarded = &mut *guarded;
+        let runtime_service = self.runtime_service.clone(); // Solves borrow checking errors.
+        let mut guarded = runtime_service.guarded.lock().await;
 
-        // TODO: implement properly
+        self.start_necessary_download(&mut *guarded, None).await;
+        if let Some(idx) = guarded.sync_service_finalized_index {
+            self.start_necessary_download(&mut *guarded, Some(idx))
+                .await;
+        }
 
-        if let Ok(runtime) = &mut guarded.finalized_block.runtime {
+        // TODO: sync service best block
+    }
+
+    /// Starts downloading the runtime of the block with the given index, if necessary.
+    async fn start_necessary_download(
+        &'_ mut self,
+        guarded: &'_ mut Guarded,
+        block_index: Option<fork_tree::NodeIndex>,
+    ) {
+        let runtime = match block_index {
+            None => &mut guarded.finalized_block.runtime,
+            Some(idx) => &mut guarded.non_finalized_blocks.get_mut(idx).unwrap().runtime,
+        };
+
+        if let Ok(runtime) = runtime {
             if let RuntimeDownloadState::Unknown { state_root, .. } = *runtime {
                 let download_id = self.next_download_id;
                 self.next_download_id += 1;
