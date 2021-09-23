@@ -60,6 +60,9 @@ use smoldot::{
 use std::{iter, mem, num::NonZeroUsize, pin::Pin, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
+pub use download_tree::RuntimeError;
+
+mod download_tree;
 
 /// Configuration for a runtime service.
 pub struct Config<'a> {
@@ -745,19 +748,6 @@ impl<'a> Drop for RuntimeCallLock<'a> {
     }
 }
 
-/// Error when analyzing the runtime.
-#[derive(Debug, derive_more::Display, Clone)]
-pub enum RuntimeError {
-    /// The `:code` key of the storage is empty..
-    CodeNotFound,
-    /// Error while parsing the `:heappages` storage value.
-    InvalidHeapPages(executor::InvalidHeapPagesError),
-    /// Error while compiling the runtime.
-    Build(executor::host::NewErr),
-    /// Error when determining the runtime specification.
-    CoreVersion(executor::CoreVersionError),
-}
-
 /// Error that can happen when calling a runtime function.
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum RuntimeCallError {
@@ -833,87 +823,8 @@ struct Guarded {
     /// after the latest best block update.
     best_near_head_of_chain: bool,
 
-    /// List of all compiled runtime. Referenced by the various blocks below.
-    runtimes: slab::Slab<Runtime>,
-
-    /// State of the finalized block reported through the public API of the runtime service.
-    /// This doesn't necessarily match the one of the sync service.
-    ///
-    /// When not a temporary `Guarded`, The value of [`Block::runtime`] for this block is
-    /// guaranteed to be [`RuntimeDownloadState::Finished`].
-    finalized_block: Block,
-
-    /// State of all the non-finalized blocks.
-    non_finalized_blocks: fork_tree::ForkTree<Block>,
-
-    /// Index within [`Guarded::non_finalized_blocks`] of the current best block. `None` if the
-    /// best block is the finalized block.
-    ///
-    /// When not a temporary `Guarded`, the value of [`Block::runtime`] for this block is
-    /// guaranteed to be [`RuntimeDownloadState::Finished`].
-    best_block_index: Option<fork_tree::NodeIndex>,
-
-    /// Index within [`Guarded::non_finalized_blocks`] of the finalized block according to the
-    /// sync service. `None` if the sync service finalized block is the same as the runtime
-    /// service's finalized block.
-    ///
-    /// If `Some` and when not a temporary `Guarded`, the value of [`Block::runtime`] for this
-    /// block is guaranteed to **not** be [`RuntimeDownloadState::Finished`].
-    sync_service_finalized_index: Option<fork_tree::NodeIndex>,
-
-    /// Incremented by one and stored within [`Block::sync_service_best_block_report_id`].
-    sync_service_best_block_next_report_id: u32,
-}
-
-impl Guarded {
-    /// Might panic for temporary `Guarded`s.
-    fn best_block_runtime_index(&self) -> usize {
-        let best_block = if let Some(best_block_index) = self.best_block_index {
-            self.non_finalized_blocks.get(best_block_index).unwrap()
-        } else {
-            &self.finalized_block
-        };
-
-        match best_block.runtime {
-            Ok(RuntimeDownloadState::Finished(index)) => index,
-            // It is guaranteed that the best block's runtime is always in the `Finished` state.
-            _ => unreachable!(),
-        }
-    }
-
-    /// Might panic for temporary `Guarded`s.
-    fn best_block_runtime(&self) -> &Runtime {
-        let index = self.best_block_runtime_index();
-        &self.runtimes[index]
-    }
-
-    /// Might panic for temporary `Guarded`s.
-    fn best_block_runtime_mut(&mut self) -> &mut Runtime {
-        let index = self.best_block_runtime_index();
-        &mut self.runtimes[index]
-    }
-
-    /// Might panic for temporary `Guarded`s.
-    fn finalized_block_runtime_index(&self) -> usize {
-        match self.finalized_block.runtime {
-            Ok(RuntimeDownloadState::Finished(index)) => index,
-            // It is guaranteed that the finalized block's runtime is always in the `Finished`
-            // state.
-            _ => unreachable!(),
-        }
-    }
-
-    /// Might panic for temporary `Guarded`s.
-    fn finalized_block_runtime(&self) -> &Runtime {
-        let index = self.finalized_block_runtime_index();
-        &self.runtimes[index]
-    }
-
-    /// Might panic for temporary `Guarded`s.
-    fn finalized_block_runtime_mut(&mut self) -> &mut Runtime {
-        let index = self.finalized_block_runtime_index();
-        &mut self.runtimes[index]
-    }
+    /// Tree of blocks. Holds the state of the download of everything.
+    tree: download_tree::Guarded,
 }
 
 struct Block {
@@ -1105,27 +1016,9 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                     best_blocks_subscriptions: Vec::new(),
                     runtime_version_subscriptions: Vec::new(),
                     best_near_head_of_chain: false,
-                    runtimes: slab::Slab::with_capacity(4),
-                    best_block_index: None,
-                    non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
-                    finalized_block: Block {
-                        runtime: match header::decode(
-                            &subscription.finalized_block_scale_encoded_header,
-                        ) {
-                            Err(_) => Err(BlockRuntimeErr::InvalidHeader),
-                            Ok(header) => Ok(RuntimeDownloadState::Unknown {
-                                same_as_parent: false,
-                                state_root: *header.state_root,
-                            }),
-                        },
-                        hash: header::hash_from_scale_encoded_header(
-                            &subscription.finalized_block_scale_encoded_header,
-                        ),
-                        header: subscription.finalized_block_scale_encoded_header,
-                        sync_service_best_block_report_id: 1,
-                    },
-                    sync_service_finalized_index: None,
-                    sync_service_best_block_next_report_id: 2,
+                    tree: download_tree::Guarded::from_finalized_block(
+                        subscription.finalized_block_scale_encoded_header,
+                    ),
                 }),
             }),
             blocks_stream: subscription.new_blocks.boxed(),
@@ -1135,7 +1028,13 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
         };
 
         for block in subscription.non_finalized_blocks {
-            background.insert_block(block).await;
+            background
+                .runtime_service
+                .guarded
+                .lock()
+                .await
+                .tree
+                .insert_block(block);
         }
 
         background.start_necessary_downloads().await;
@@ -1173,26 +1072,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         best_near_head_of_chain: mem::take(
                             &mut temporary_guarded.best_near_head_of_chain,
                         ),
-                        runtimes: mem::take(&mut temporary_guarded.runtimes),
-                        best_block_index: temporary_guarded.best_block_index,
-                        non_finalized_blocks: mem::take(
-                            &mut temporary_guarded.non_finalized_blocks,
-                        ),
-                        finalized_block: Block {
-                            hash: temporary_guarded.finalized_block.hash,
-                            header: mem::take(&mut temporary_guarded.finalized_block.header),
-                            runtime: mem::replace(
-                                &mut temporary_guarded.finalized_block.runtime,
-                                Err(BlockRuntimeErr::InvalidHeader),
-                            ),
-                            sync_service_best_block_report_id: temporary_guarded
-                                .finalized_block
-                                .sync_service_best_block_report_id,
-                        },
-                        sync_service_finalized_index: temporary_guarded
-                            .sync_service_finalized_index,
-                        sync_service_best_block_next_report_id: temporary_guarded
-                            .sync_service_best_block_next_report_id,
+                        tree: mem::take(&mut temporary_guarded.tree),
                     };
                     *original_guarded = merged_guarded;
 
@@ -1207,10 +1087,12 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 notification = background.blocks_stream.next().fuse() => {
                     match notification {
                         None => return,
-                        Some(sync_service::Notification::Block(new_block)) =>
-                            background.insert_block(new_block).await,
+                        Some(sync_service::Notification::Block(new_block)) => {
+                            let mut guarded = background.runtime_service.guarded.lock().await;
+                            guarded.tree.insert_block(new_block);
+                        },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
-                            background.sync_service_finalize(hash, best_block_hash).await;
+                            background.finalize(hash, best_block_hash).await;
                         }
                     };
 
@@ -1223,7 +1105,8 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         }
                         Err(err) => {
                             // TODO: logging
-                            background.runtime_download_failure(download_id).await;
+                            let mut guarded = background.runtime_service.guarded.lock().await;
+                            guarded.tree.runtime_download_failure(download_id);
                         }
                     }
 
@@ -1248,7 +1131,7 @@ struct Background {
         future::BoxFuture<
             'static,
             (
-                u64,
+                download_tree::DownloadId,
                 Result<(Option<Vec<u8>>, Option<Vec<u8>>), StorageQueryError>,
             ),
         >,
@@ -1267,497 +1150,67 @@ impl Background {
     /// Injects into the state of `self` a completed runtime download.
     async fn runtime_download_finished(
         &mut self,
-        download_id: u64,
+        download_id: download_tree::DownloadId,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
     ) {
         let mut guarded = self.runtime_service.guarded.lock().await;
         let guarded = &mut *guarded;
 
-        // Find the number of blocks that are bound to this download.
-        debug_assert!(matches!(
-            guarded.finalized_block.runtime,
-            Ok(RuntimeDownloadState::Finished(_))
-        ));
-        let num_concerned_blocks = guarded
-            .non_finalized_blocks
-            .iter_unordered()
-            .map(|(_, b)| b)
-            .filter(|b| match b.runtime {
-                Ok(RuntimeDownloadState::Downloading {
-                    download_id: id, ..
-                }) if id == download_id => true,
-                _ => false,
-            })
-            .count();
-        debug_assert_ne!(num_concerned_blocks, 0);
-
-        // Try find the identifier of an existing runtime that has this code and heap pages. If
-        // none is found, compile the runtime.
-        // This search is `O(n)`, but considering the very low number of runtimes (most of the
-        // time one, occasionally two), this shouldn't be a problem.
-        // The runtime's `num_blocks` is also increased by `num_concerned_blocks` here.
-        let runtime_index = if let Some((runtime_index, runtime)) = guarded
-            .runtimes
-            .iter_mut()
-            .find(|(_, r)| r.runtime_code == storage_code && r.heap_pages == storage_heap_pages)
-        {
-            runtime.num_blocks =
-                NonZeroUsize::new(runtime.num_blocks.get() + num_concerned_blocks).unwrap();
-            runtime_index
-        } else {
-            let runtime = SuccessfulRuntime::from_params(
-                &self.runtime_service.log_target,
-                &storage_code,
-                &storage_heap_pages,
-            )
-            .await;
-
-            guarded.runtimes.insert(Runtime {
-                num_blocks: NonZeroUsize::new(num_concerned_blocks).unwrap(),
-                runtime,
-                runtime_code: storage_code,
-                heap_pages: storage_heap_pages,
-            })
-        };
-
-        // Weight of the current runtime service best block, to check whether this successful
-        // download updates the runtime service best block.
-        let current_runtime_service_best_block_weight = match guarded.best_block_index {
-            None => guarded.finalized_block.sync_service_best_block_report_id,
-            Some(idx) => {
-                guarded
-                    .non_finalized_blocks
-                    .get(idx)
-                    .unwrap()
-                    .sync_service_best_block_report_id
-            }
-        };
-
-        // Update the blocks that were downloading this runtime.
-        debug_assert!(matches!(
-            guarded.finalized_block.runtime,
-            Ok(RuntimeDownloadState::Finished(_))
-        ));
-        for index in guarded
-            .non_finalized_blocks
-            .iter_unordered()
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>()
-        {
-            if Some(index) == guarded.sync_service_finalized_index {
-                // TODO: prune blocks
-                // TODO: report new finalized block to subscribers
-            }
-
-            let block = guarded.non_finalized_blocks.get_mut(index).unwrap();
-            match block.runtime {
-                Ok(RuntimeDownloadState::Downloading {
-                    download_id: id, ..
-                }) if id == download_id => {
-                    block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
-                }
-                _ => {}
-            }
-
-            debug_assert_ne!(
-                block.sync_service_best_block_report_id,
-                current_runtime_service_best_block_weight
-            );
-
-            if block.sync_service_best_block_report_id > current_runtime_service_best_block_weight {
-                guarded.best_block_index = Some(index);
-                // TODO: report new best block to subscribers
-            }
-        }
-
-        // Sanity check.
-        debug_assert_eq!(
-            guarded
-                .runtimes
-                .iter()
-                .map(|(_, r)| r.num_blocks.get())
-                .sum::<usize>(),
-            guarded.non_finalized_blocks.len() + 1
-        );
-    }
-
-    /// Injects into the state of `self` a failed runtime download.
-    async fn runtime_download_failure(&mut self, download_id: u64) {
-        let mut guarded = self.runtime_service.guarded.lock().await;
-        let guarded = &mut *guarded;
-
-        // Update the blocks that were downloading this runtime.
-        match guarded.finalized_block.runtime {
-            Ok(RuntimeDownloadState::Downloading {
-                download_id: id,
-                state_root,
-            }) if id == download_id => {
-                // Note: the value of `same_as_parent` is irrelevant for the finalized block.
-                guarded.finalized_block.runtime = Ok(RuntimeDownloadState::Unknown {
-                    state_root,
-                    same_as_parent: false,
-                });
-            }
-            _ => {}
-        }
-        for index in guarded
-            .non_finalized_blocks
-            .iter_unordered()
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>()
-        {
-            let block = guarded.non_finalized_blocks.get_mut(index).unwrap();
-            match block.runtime {
-                Ok(RuntimeDownloadState::Downloading {
-                    state_root,
-                    download_id: id,
-                }) if id == download_id => {
-                    block.runtime = Ok(RuntimeDownloadState::Unknown {
-                        same_as_parent: todo!(), // TODO: not implemented
-                        state_root,
-                    });
-                }
-                _ => {}
-            }
-        }
+        guarded
+            .tree
+            .runtime_download_finished(download_id, storage_code, storage_heap_pages);
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
     async fn start_necessary_downloads(&mut self) {
-        let runtime_service = self.runtime_service.clone(); // Solves borrow checking errors.
-        let mut guarded = runtime_service.guarded.lock().await;
-
-        self.start_necessary_download(&mut *guarded, None).await;
-        if let Some(idx) = guarded.sync_service_finalized_index {
-            self.start_necessary_download(&mut *guarded, Some(idx))
-                .await;
-        }
-
-        // TODO: sync service best block
-    }
-
-    /// Starts downloading the runtime of the block with the given index, if necessary.
-    async fn start_necessary_download(
-        &'_ mut self,
-        guarded: &'_ mut Guarded,
-        block_index: Option<fork_tree::NodeIndex>,
-    ) {
-        let runtime = match block_index {
-            None => &mut guarded.finalized_block.runtime,
-            Some(idx) => &mut guarded.non_finalized_blocks.get_mut(idx).unwrap().runtime,
-        };
-
-        if let Ok(runtime) = runtime {
-            if let RuntimeDownloadState::Unknown { state_root, .. } = *runtime {
-                let download_id = self.next_download_id;
-                self.next_download_id += 1;
-
-                self.runtime_downloads.push(Box::pin({
-                    let sync_service = self.runtime_service.sync_service.clone();
-                    let block_hash = guarded.finalized_block.hash;
-                    let log_target = self.runtime_service.log_target.clone();
-
-                    async move {
-                        let result = sync_service
-                            .storage_query(
-                                &block_hash,
-                                &state_root,
-                                iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-                            )
-                            .await;
-                        let result = match result {
-                            Ok(mut c) => {
-                                let heap_pages = c.pop().unwrap();
-                                let code = c.pop().unwrap();
-                                Ok((code, heap_pages))
-                            }
-                            Err(error) => {
-                                // TODO: log differently
-                                log::log!(
-                                    target: &log_target,
-                                    if error.is_network_problem() {
-                                        log::Level::Debug
-                                    } else {
-                                        log::Level::Warn
-                                    },
-                                    "Failed to download :code and :heappages of block: {}",
-                                    error
-                                );
-                                Err(error)
-                            }
-                        };
-
-                        (download_id, result)
-                    }
-                }));
-
-                *runtime = RuntimeDownloadState::Downloading {
-                    download_id,
-                    state_root,
-                };
-
-                // TODO: update all children that have same as parent to point to the same download
-            }
-        }
-    }
-
-    /// Updates `self` with a new block received from the sync service.
-    async fn insert_block(&mut self, new_block: sync_service::BlockNotification) {
         let mut guarded = self.runtime_service.guarded.lock().await;
         let guarded = &mut *guarded;
 
-        // Find the parent of the new block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the parent to have been
-        // reported before.
-        let parent_index = if new_block.parent_hash == guarded.finalized_block.hash {
-            None
-        } else {
-            Some(
-                guarded
-                    .non_finalized_blocks
-                    .find(|b| b.hash == new_block.parent_hash)
-                    .unwrap(),
-            )
-        };
+        while let Some(download_params) = guarded.tree.next_necessary_download() {
+            self.runtime_downloads.push(Box::pin({
+                let sync_service = self.runtime_service.sync_service.clone();
+                let log_target = self.runtime_service.log_target.clone();
 
-        // When this block is later inserted, value to use for `sync_service_best_block_report_id`.
-        let sync_service_best_block_report_id = if new_block.is_new_best {
-            let id = guarded.sync_service_best_block_next_report_id;
-            guarded.sync_service_best_block_next_report_id += 1;
-            id
-        } else {
-            0
-        };
+                async move {
+                    let result = sync_service
+                        .storage_query(
+                            &download_params.block_hash,
+                            &download_params.block_state_root,
+                            iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                        )
+                        .await;
+                    let result = match result {
+                        Ok(mut c) => {
+                            let heap_pages = c.pop().unwrap();
+                            let code = c.pop().unwrap();
+                            Ok((code, heap_pages))
+                        }
+                        Err(error) => {
+                            // TODO: log differently
+                            log::log!(
+                                target: &log_target,
+                                if error.is_network_problem() {
+                                    log::Level::Debug
+                                } else {
+                                    log::Level::Warn
+                                },
+                                "Failed to download :code and :heappages of block: {}",
+                                error
+                            );
+                            Err(error)
+                        }
+                    };
 
-        // In order to fetch the runtime code (below), we need to know the state trie
-        // root of the block, which is found in the block's header.
-        // Try to decode the new block's header. Failures are handled gracefully by
-        // inserting the block but not retrieving its runtime.
-        let decoded_header = match header::decode(&new_block.scale_encoded_header) {
-            Ok(h) => h,
-            Err(err) => {
-                guarded.non_finalized_blocks.insert(
-                    parent_index,
-                    Block {
-                        runtime: Err(BlockRuntimeErr::InvalidHeader),
-                        hash: header::hash_from_scale_encoded_header(
-                            &new_block.scale_encoded_header,
-                        ),
-                        header: new_block.scale_encoded_header,
-                        sync_service_best_block_report_id,
-                    },
-                );
-                return;
-            }
-        };
-
-        // Since https://github.com/paritytech/substrate/pull/9580 (Sept. 15th 2021),
-        // the header contains a digest item indicating that the runtime environment
-        // has changed since the parent.
-        // However, as this is a recent addition, the absence of this digest item does
-        // not necessarily mean that the runtime environment has not changed.
-        // For this reason, we add `&& false`. This `&& false` can be removed in the
-        // future.
-        // TODO: remove `&& false`
-        let runtime_environment_update =
-            decoded_header.digest.has_runtime_environment_updated() && false;
-        if !runtime_environment_update {
-            // Runtime of the new block is the same as the parent.
-            let parent_runtime = match parent_index {
-                None => &guarded.finalized_block.runtime,
-                Some(parent_index) => {
-                    &guarded
-                        .non_finalized_blocks
-                        .get(parent_index)
-                        .unwrap()
-                        .runtime
+                    (download_params.id, result)
                 }
-            };
-
-            // It is possible, however, that the parent's runtime is unknown, in
-            // which case we proceed with the rest of the function as if
-            // `runtime_environment_update` was `true`.
-            match *parent_runtime {
-                Ok(RuntimeDownloadState::Unknown { .. }) | Err(_) => {}
-
-                Ok(RuntimeDownloadState::Downloading { download_id, .. }) => {
-                    guarded.non_finalized_blocks.insert(
-                        parent_index,
-                        Block {
-                            runtime: Ok(RuntimeDownloadState::Downloading {
-                                download_id,
-                                state_root: *decoded_header.state_root,
-                            }),
-                            hash: header::hash_from_scale_encoded_header(
-                                &new_block.scale_encoded_header,
-                            ),
-                            header: new_block.scale_encoded_header,
-                            sync_service_best_block_report_id,
-                        },
-                    );
-                    return;
-                }
-
-                Ok(RuntimeDownloadState::Finished(runtime_index)) => {
-                    guarded.runtimes[runtime_index].num_blocks =
-                        NonZeroUsize::new(guarded.runtimes[runtime_index].num_blocks.get() + 1)
-                            .unwrap();
-                    let inserted_index = guarded.non_finalized_blocks.insert(
-                        parent_index,
-                        Block {
-                            runtime: Ok(RuntimeDownloadState::Finished(runtime_index)),
-                            hash: header::hash_from_scale_encoded_header(
-                                &new_block.scale_encoded_header,
-                            ),
-                            header: new_block.scale_encoded_header,
-                            sync_service_best_block_report_id,
-                        },
-                    );
-
-                    // Normally, the runtime service best block is updated to the sync service
-                    // best block once the runtime has finished being downloaded.
-                    // Since, in this situation, the runtime is "instantaneously downloaded", we
-                    // perform the update immediately.
-                    if new_block.is_new_best {
-                        guarded.best_block_index = Some(inserted_index);
-                        // TODO: report to subscribers
-                    }
-
-                    return;
-                }
-            }
+            }));
         }
-
-        // Insert the new runtime.
-        guarded.non_finalized_blocks.insert(
-            parent_index,
-            Block {
-                runtime: Ok(RuntimeDownloadState::Unknown {
-                    same_as_parent: !runtime_environment_update,
-                    state_root: *decoded_header.state_root,
-                }),
-                hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
-                header: new_block.scale_encoded_header,
-                sync_service_best_block_report_id,
-            },
-        );
     }
 
     /// Updates `self` to take into account that the sync service has finalized the given block.
-    async fn sync_service_finalize(
-        &mut self,
-        hash_to_finalize: [u8; 32],
-        new_best_block_hash: [u8; 32],
-    ) {
+    async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
         let mut guarded = self.runtime_service.guarded.lock().await;
-        let guarded = &mut *guarded;
-
-        // Find the finalized block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the block to have been
-        // reported before.
-        let finalized_node_index = guarded
-            .non_finalized_blocks
-            .find(|b| b.hash == hash_to_finalize)
-            .unwrap();
-        guarded.sync_service_finalized_index = Some(finalized_node_index);
-
-        // Find the new best block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the block to have been reported
-        // before.
-        // TODO: don't do that if best block didn't change
-        let best_block_report_id = guarded.sync_service_best_block_next_report_id;
-        guarded.sync_service_best_block_next_report_id += 1;
-
-        let new_best_block_index = guarded
-            .non_finalized_blocks
-            .find(|b| b.hash == new_best_block_hash)
-            .unwrap();
-
-        guarded
-            .non_finalized_blocks
-            .get_mut(new_best_block_index)
-            .unwrap()
-            .sync_service_best_block_report_id = best_block_report_id;
-    }
-
-    /// Updates `self` to finalize the given block.
-    // TODO: update
-    async fn runtime_service_finalize(
-        &mut self,
-        hash_to_finalize: [u8; 32],
-        new_best_block_hash: [u8; 32],
-    ) {
-        let mut guarded = self.runtime_service.guarded.lock().await;
-        let guarded = &mut *guarded;
-
-        // Find the finalized block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the block to have been
-        // reported before.
-        let finalized_node_index = guarded
-            .non_finalized_blocks
-            .find(|b| b.hash == hash_to_finalize)
-            .unwrap();
-
-        // Find the new best block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the block to have been reported
-        // before.
-        guarded.best_block_index = if new_best_block_hash == hash_to_finalize {
-            None
-        } else {
-            Some(
-                guarded
-                    .non_finalized_blocks
-                    .find(|b| b.hash == new_best_block_hash)
-                    .unwrap(),
-            )
-        };
-
-        // Remove from `non_finalized_blocks` the finalized block and all its ancestors.
-        for pruned_block in guarded
-            .non_finalized_blocks
-            .prune_ancestors(finalized_node_index)
-        {
-            match pruned_block.user_data.runtime {
-                Ok(RuntimeDownloadState::Finished(runtime_index)) => {
-                    match NonZeroUsize::new(guarded.runtimes[runtime_index].num_blocks.get() - 1) {
-                        Some(n) => guarded.runtimes[runtime_index].num_blocks = n,
-                        None => {
-                            guarded.runtimes.remove(runtime_index);
-                        }
-                    }
-                }
-                _ => {}
-            }
-
-            if pruned_block.index == finalized_node_index {
-                debug_assert_eq!(pruned_block.user_data.hash, hash_to_finalize);
-                debug_assert!(pruned_block.is_prune_target_ancestor);
-                guarded.finalized_block = pruned_block.user_data;
-            }
-        }
-
-        // Some sanity checks.
-        debug_assert!(guarded
-            .non_finalized_blocks
-            .get(finalized_node_index)
-            .is_none());
-        debug_assert_eq!(guarded.finalized_block.hash, hash_to_finalize);
-        debug_assert!(guarded.best_block_index.map_or(true, |idx| guarded
-            .non_finalized_blocks
-            .get(idx)
-            .unwrap()
-            .hash
-            == new_best_block_hash));
-        debug_assert_eq!(
-            guarded
-                .runtimes
-                .iter()
-                .map(|(_, r)| r.num_blocks.get())
-                .sum::<usize>(),
-            guarded.non_finalized_blocks.len() + 1
-        );
-
-        // TODO: need to report to subscribers
+        guarded.tree.finalize(hash_to_finalize, new_best_block_hash);
     }
 }
