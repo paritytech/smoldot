@@ -25,7 +25,7 @@
 
 use crate::sync_service;
 
-use core::{iter, num::NonZeroUsize};
+use core::{iter, mem, num::NonZeroUsize};
 use smoldot::{chain::fork_tree, executor, header, metadata};
 
 /// Error when analyzing the runtime.
@@ -166,16 +166,18 @@ impl Guarded {
 
     fn new_inner(
         finalized_block_scale_encoded_header: Vec<u8>,
-        genesis_runtime: Option<Runtime>,
+        finalized_runtime: Option<Runtime>,
     ) -> Self {
         let mut runtimes = slab::Slab::with_capacity(4); // Usual len is `1`, rarely `2`.
 
-        let finalized_runtime = match header::decode(&finalized_block_scale_encoded_header) {
+        // Note that `finalized_runtime` is intentionally silently discarded if the finalized
+        // block fails to parse.
+        let finalized_block_runtime = match header::decode(&finalized_block_scale_encoded_header) {
             Err(_) => Err(BlockRuntimeErr::InvalidHeader),
             Ok(header) => {
-                if let Some(genesis_runtime) = genesis_runtime {
+                if let Some(finalized_runtime) = finalized_runtime {
                     Ok(RuntimeDownloadState::Finished(
-                        runtimes.insert(genesis_runtime),
+                        runtimes.insert(finalized_runtime),
                     ))
                 } else {
                     Ok(RuntimeDownloadState::Unknown {
@@ -191,7 +193,7 @@ impl Guarded {
             best_block_index: None,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
             finalized_block: Block {
-                runtime: finalized_runtime,
+                runtime: finalized_block_runtime,
                 hash: header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header),
                 header: finalized_block_scale_encoded_header,
                 sync_service_best_block_report_id: 1,
@@ -250,6 +252,16 @@ impl Guarded {
         }
     }
 
+    /// Returns the SCALE-encoded header of the current "output" finalized block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::has_output`] isn't `true`.
+    ///
+    pub fn finalized_block_header(&self) -> &[u8] {
+        &self.finalized_block.header
+    }
+
     /// Returns the SCALE-encoded header of the current "output" best block.
     ///
     /// # Panic
@@ -297,6 +309,17 @@ impl Guarded {
             .runtime
             .as_ref()
             .map(|r| r.virtual_machine.as_ref().unwrap())
+    }
+
+    /// Extracts the runtime of the current "output" finalized block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::has_output`] isn't `true`.
+    ///
+    pub fn finalized_block_runtime_extract(self) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
+        let runtime_index = self.finalized_block_runtime_index();
+        self.runtime_extract_inner(runtime_index)
     }
 
     /// Extracts the runtime of the current "output" best block.
@@ -353,6 +376,7 @@ impl Guarded {
 
         // The download might concern only blocks that have now been pruned.
         if num_concerned_blocks == 0 {
+            debug_assert!(self.try_advance_output().is_noop());
             return OutputUpdate {
                 best_block_updated: false,
                 finalized_block_updated: false,
@@ -382,30 +406,11 @@ impl Guarded {
             })
         };
 
-        // Weight of the current runtime service best block, to check whether this successful
-        // download updates the runtime service best block.
-        let current_runtime_service_best_block_weight = match self.best_block_index {
-            None => self.finalized_block.sync_service_best_block_report_id,
-            Some(idx) => {
-                self.non_finalized_blocks
-                    .get(idx)
-                    .unwrap()
-                    .sync_service_best_block_report_id
-            }
-        };
-
-        // Final return value of the function. Updated below if relevant.
-        let mut output_update = OutputUpdate {
-            best_block_updated: false,
-            finalized_block_updated: false,
-        };
-
-        // Update the blocks that were downloading this runtime.
+        // Update the blocks that were downloading this runtime to become `Finished`.
         match self.finalized_block.runtime {
             Ok(RuntimeDownloadState::Downloading {
                 download_id: id, ..
             }) if id == download_id => {
-                output_update.finalized_block_updated = true;
                 self.finalized_block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
             }
             _ => {}
@@ -416,11 +421,6 @@ impl Guarded {
             .map(|(index, _)| index)
             .collect::<Vec<_>>()
         {
-            if Some(index) == self.sync_service_finalized_index {
-                // TODO: prune blocks
-                output_update.finalized_block_updated = true;
-            }
-
             let block = self.non_finalized_blocks.get_mut(index).unwrap();
             match block.runtime {
                 Ok(RuntimeDownloadState::Downloading {
@@ -429,21 +429,6 @@ impl Guarded {
                     block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
                 }
                 _ => {}
-            }
-
-            debug_assert_ne!(
-                block.sync_service_best_block_report_id,
-                current_runtime_service_best_block_weight
-            );
-
-            if block.sync_service_best_block_report_id > current_runtime_service_best_block_weight
-                && matches!(
-                    self.finalized_block.runtime,
-                    Ok(RuntimeDownloadState::Finished(_))
-                )
-            {
-                output_update.best_block_updated = true;
-                self.best_block_index = Some(index);
             }
         }
 
@@ -459,7 +444,7 @@ impl Guarded {
                 .count()
         );
 
-        output_update
+        self.try_advance_output()
     }
 
     /// Injects into the state of the state machine a failed runtime download.
@@ -471,7 +456,6 @@ impl Guarded {
                 state_root,
             }) if id == download_id => {
                 // Note: the value of `same_as_parent` is irrelevant for the finalized block.
-                // TODO: should prune blocks if input finalized isn't `None`
                 self.finalized_block.runtime = Ok(RuntimeDownloadState::Unknown {
                     state_root,
                     same_as_parent: false,
@@ -493,13 +477,16 @@ impl Guarded {
                     download_id: id,
                 }) if id == download_id => {
                     block.runtime = Ok(RuntimeDownloadState::Unknown {
-                        same_as_parent: todo!(), // TODO: not implemented
+                        same_as_parent: false, // TODO: not implemented properly; should check if parent had same download id
                         state_root,
                     });
                 }
                 _ => {}
             }
         }
+
+        // TODO: necessary? opens a question of whether to prune finalized blocks that are still downloading
+        self.try_advance_output();
     }
 
     /// Examines the state of `self` and, if a block's runtime should be downloaded, changes the
@@ -600,7 +587,7 @@ impl Guarded {
         // inserting the block but not retrieving its runtime.
         let decoded_header = match header::decode(&new_block.scale_encoded_header) {
             Ok(h) => h,
-            Err(err) => {
+            Err(_) => {
                 self.non_finalized_blocks.insert(
                     parent_index,
                     Block {
@@ -613,6 +600,7 @@ impl Guarded {
                     },
                 );
 
+                debug_assert!(self.try_advance_output().is_noop());
                 return OutputUpdate {
                     best_block_updated: false,
                     finalized_block_updated: false,
@@ -659,6 +647,7 @@ impl Guarded {
                         },
                     );
 
+                    debug_assert!(self.try_advance_output().is_noop());
                     return OutputUpdate {
                         best_block_updated: false,
                         finalized_block_updated: false,
@@ -669,7 +658,7 @@ impl Guarded {
                     self.runtimes[runtime_index].num_blocks =
                         NonZeroUsize::new(self.runtimes[runtime_index].num_blocks.get() + 1)
                             .unwrap();
-                    let inserted_index = self.non_finalized_blocks.insert(
+                    self.non_finalized_blocks.insert(
                         parent_index,
                         Block {
                             runtime: Ok(RuntimeDownloadState::Finished(runtime_index)),
@@ -681,19 +670,9 @@ impl Guarded {
                         },
                     );
 
-                    // Normally, the runtime service best block is updated to the sync service
-                    // best block once the runtime has finished being downloaded.
-                    // Since, in this situation, the runtime is "instantaneously downloaded", we
-                    // perform the update immediately.
-                    // TODO: is that actually correct? what if finalized block isn't in Finished state yet?
-                    if new_block.is_new_best {
-                        self.best_block_index = Some(inserted_index);
-                    }
-
-                    return OutputUpdate {
-                        best_block_updated: new_block.is_new_best,
-                        finalized_block_updated: false,
-                    };
+                    // Since the block is immediately ready to be output, it is possible that
+                    // we can advance the best and finalized output.
+                    return self.try_advance_output();
                 }
             }
         }
@@ -712,6 +691,7 @@ impl Guarded {
             },
         );
 
+        debug_assert!(self.try_advance_output().is_noop());
         OutputUpdate {
             best_block_updated: false,
             finalized_block_updated: false,
@@ -730,14 +710,16 @@ impl Guarded {
         hash_to_finalize: [u8; 32],
         new_best_block_hash: [u8; 32],
     ) -> OutputUpdate {
-        // Find the finalized block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the block to have been
-        // reported before.
-        let finalized_node_index = self
-            .non_finalized_blocks
-            .find(|b| b.hash == hash_to_finalize)
-            .unwrap();
-        self.sync_service_finalized_index = Some(finalized_node_index);
+        if hash_to_finalize != self.finalized_block.hash {
+            // Find the finalized block in the list of blocks that we know.
+            // It is guaranteed by the API of the sync service for the block to have been
+            // reported before.
+            let finalized_node_index = self
+                .non_finalized_blocks
+                .find(|b| b.hash == hash_to_finalize)
+                .unwrap();
+            self.sync_service_finalized_index = Some(finalized_node_index);
+        }
 
         // Find the new best block in the list of blocks that we know.
         // It is guaranteed by the API of the sync service for the block to have been reported
@@ -760,10 +742,7 @@ impl Guarded {
             .unwrap()
             .sync_service_best_block_report_id = best_block_report_id;
 
-        OutputUpdate {
-            best_block_updated: false,      // TODO:
-            finalized_block_updated: false, // TODO:
-        }
+        self.try_advance_output()
     }
 
     /// Returns the index of the runtime of the "output" best block, as an index within
@@ -802,12 +781,211 @@ impl Guarded {
             _ => unreachable!(),
         }
     }
+
+    /// Tries to update the output finalized and best blocks to follow the input.
+    fn try_advance_output(&mut self) -> OutputUpdate {
+        let mut output = OutputUpdate {
+            best_block_updated: false,
+            finalized_block_updated: false,
+        };
+
+        // Try to advance the output best block.
+        // This is done first, because an outdated output best block can prevent the finalization
+        // from advance as much as it could.
+        {
+            // Weight of the current runtime service best block.
+            let mut current_runtime_service_best_block_weight = match self.best_block_index {
+                None => self.finalized_block.sync_service_best_block_report_id,
+                Some(idx) => {
+                    self.non_finalized_blocks
+                        .get(idx)
+                        .unwrap()
+                        .sync_service_best_block_report_id
+                }
+            };
+
+            for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
+                if block.sync_service_best_block_report_id
+                    < current_runtime_service_best_block_weight
+                {
+                    continue;
+                }
+
+                if !matches!(block.runtime, Ok(RuntimeDownloadState::Finished(_))) {
+                    continue;
+                }
+
+                // Runtime service best can be updated to the block being iterated.
+                current_runtime_service_best_block_weight = block.sync_service_best_block_report_id;
+                self.best_block_index = Some(node_index);
+                output.best_block_updated = true;
+
+                // Continue looping, as there might be another block with an even higher weight.
+            }
+        }
+
+        // Try to advance the output finalized block.
+        // `sync_service_finalized_index` is `Some` if it is not already equal to the runtime
+        // service finalized.
+        if let Some(sync_service_finalized_index) = self.sync_service_finalized_index {
+            // Finding a new finalized block. This is done differently depending on whether the
+            // tree already has an output, in which case the best block should be preserved.
+            let new_finalized = if self.has_output() {
+                // Try to find the earliest ancestor of the sync service finalized block whose
+                // runtime is ready and that is also an ancestor of the current runtime service
+                // best block.
+                self.non_finalized_blocks
+                    .node_to_root_path(sync_service_finalized_index)
+                    .find(|node_index| {
+                        matches!(
+                            self.non_finalized_blocks.get(*node_index).unwrap().runtime,
+                            Ok(RuntimeDownloadState::Finished(_))
+                        ) && self.best_block_index.map_or(true, |idx| {
+                            self.non_finalized_blocks.is_ancestor(*node_index, idx)
+                        })
+                    })
+            } else {
+                // If there's no output anyway, try find a block that is ready, and if none is
+                // ready, simply jump to `sync_service_finalized_index`.
+                // We don't try to preserve the current output best block.
+                let new_finalized = self
+                    .non_finalized_blocks
+                    .node_to_root_path(sync_service_finalized_index)
+                    .find(|node_index| {
+                        matches!(
+                            self.non_finalized_blocks.get(*node_index).unwrap().runtime,
+                            Ok(RuntimeDownloadState::Finished(_))
+                        )
+                    })
+                    .unwrap_or(sync_service_finalized_index);
+
+                if !self.best_block_index.map_or(true, |idx| {
+                    self.non_finalized_blocks.is_ancestor(new_finalized, idx)
+                }) {
+                    self.best_block_index = None;
+                    output.best_block_updated = true;
+                }
+
+                Some(new_finalized)
+            };
+
+            if let Some(new_finalized) = new_finalized {
+                output.finalized_block_updated = true;
+
+                for pruned in self.non_finalized_blocks.prune_ancestors(new_finalized) {
+                    if Some(pruned.index) == self.best_block_index {
+                        debug_assert!(self.best_block_index.unwrap() == new_finalized);
+                        self.best_block_index = None;
+                        output.best_block_updated = true;
+                    }
+
+                    if Some(pruned.index) == self.sync_service_finalized_index {
+                        debug_assert!(self.sync_service_finalized_index.unwrap() == new_finalized);
+                        self.sync_service_finalized_index = None;
+                    }
+
+                    // If this is the new finalized block, replace `self.finalized_block`.
+                    let thrown_away_block = if pruned.index == new_finalized {
+                        mem::replace(&mut self.finalized_block, pruned.user_data)
+                    } else {
+                        pruned.user_data
+                    };
+
+                    // Update `self.runtimes` to account for the block that was just removed.
+                    // This block just removed can be either a non-finalized block, or the
+                    // previously-finalized block.
+                    if let Ok(RuntimeDownloadState::Finished(runtime_index)) =
+                        thrown_away_block.runtime
+                    {
+                        match NonZeroUsize::new(self.runtimes[runtime_index].num_blocks.get() - 1) {
+                            Some(nv) => self.runtimes[runtime_index].num_blocks = nv,
+                            None => {
+                                self.runtimes.remove(runtime_index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try again to advance the output best block, because the finalization update might have
+        // moved it to not the best block.
+        if output.best_block_updated {
+            // Weight of the current runtime service best block.
+            let mut current_runtime_service_best_block_weight = match self.best_block_index {
+                None => self.finalized_block.sync_service_best_block_report_id,
+                Some(idx) => {
+                    self.non_finalized_blocks
+                        .get(idx)
+                        .unwrap()
+                        .sync_service_best_block_report_id
+                }
+            };
+
+            for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
+                if block.sync_service_best_block_report_id
+                    < current_runtime_service_best_block_weight
+                {
+                    continue;
+                }
+
+                if !matches!(block.runtime, Ok(RuntimeDownloadState::Finished(_))) {
+                    continue;
+                }
+
+                // Runtime service best can be updated to the block being iterated.
+                current_runtime_service_best_block_weight = block.sync_service_best_block_report_id;
+                self.best_block_index = Some(node_index);
+                output.best_block_updated = true;
+
+                // Continue looping, as there might be another block with an even higher weight.
+            }
+        }
+
+        // The best and finalized blocks might have changed, but for API purposes we don't report
+        // any change before the first output.
+        if !self.has_output() {
+            output = OutputUpdate {
+                best_block_updated: false,
+                finalized_block_updated: false,
+            };
+        }
+
+        // Sanity checks.
+        debug_assert!(
+            !matches!(
+                self.finalized_block.runtime,
+                Ok(RuntimeDownloadState::Finished(_))
+            ) || self.best_block_index.map_or(true, |idx| matches!(
+                self.non_finalized_blocks.get(idx).unwrap().runtime,
+                Ok(RuntimeDownloadState::Finished(_))
+            ))
+        );
+        debug_assert_eq!(
+            self.runtimes
+                .iter()
+                .map(|(_, r)| r.num_blocks.get())
+                .sum::<usize>(),
+            iter::once(&self.finalized_block)
+                .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
+                .filter(|b| matches!(b.runtime, Ok(RuntimeDownloadState::Finished(_))))
+                .count()
+        );
+
+        output
+    }
 }
 
 #[must_use]
 pub struct OutputUpdate {
     pub finalized_block_updated: bool,
     pub best_block_updated: bool,
+}
+
+impl OutputUpdate {
+    fn is_noop(&self) -> bool {
+        !self.finalized_block_updated && !self.best_block_updated
+    }
 }
 
 pub struct ExtractedRuntime {

@@ -922,17 +922,17 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         "Background worker now in sync"
                     );
 
-                    let mut original_guarded = original_runtime_service.guarded.lock().await;
-                    original_guarded.best_near_head_of_chain =
-                        temporary_guarded.best_near_head_of_chain;
-                    original_guarded.tree = Some(temporary_guarded.tree.take().unwrap());
-
                     temporary_guarded
                         .notify_subscribers(download_tree::OutputUpdate {
                             finalized_block_updated: true,
                             best_block_updated: true,
                         })
                         .await;
+
+                    let mut original_guarded = original_runtime_service.guarded.lock().await;
+                    original_guarded.best_near_head_of_chain =
+                        temporary_guarded.best_near_head_of_chain;
+                    original_guarded.tree = Some(temporary_guarded.tree.take().unwrap());
 
                     drop(temporary_guarded);
                     background.runtime_service = original_runtime_service.clone();
