@@ -31,7 +31,7 @@ use smoldot::{chain::fork_tree, executor, header, metadata};
 /// Error when analyzing the runtime.
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum RuntimeError {
-    /// The `:code` key of the storage is empty..
+    /// The `:code` key of the storage is empty.
     CodeNotFound,
     /// Error while parsing the `:heappages` storage value.
     InvalidHeapPages(executor::InvalidHeapPagesError),
@@ -208,7 +208,7 @@ impl Guarded {
     /// finalized block and an "output" best block.
     ///
     /// Several methods panic if the state machine isn't in a ready state.
-    pub fn is_ready(&self) -> bool {
+    pub fn has_output(&self) -> bool {
         if matches!(
             self.finalized_block.runtime,
             Ok(RuntimeDownloadState::Finished(_))
@@ -224,12 +224,48 @@ impl Guarded {
         }
     }
 
-    /// Returns the specificiation of the current "output" best block. Returns an error if the
+    /// Returns the hash of the current "output" best block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::has_output`] isn't `true`.
+    ///
+    pub fn best_block_hash(&self) -> &[u8; 32] {
+        if let Some(best_block_index) = self.best_block_index {
+            &self
+                .non_finalized_blocks
+                .get(best_block_index)
+                .unwrap()
+                .hash
+        } else {
+            &self.finalized_block.hash
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the current "output" best block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::has_output`] isn't `true`.
+    ///
+    pub fn best_block_header(&self) -> &[u8] {
+        if let Some(best_block_index) = self.best_block_index {
+            &self
+                .non_finalized_blocks
+                .get(best_block_index)
+                .unwrap()
+                .header
+        } else {
+            &self.finalized_block.header
+        }
+    }
+
+    /// Returns the specification of the current "output" best block. Returns an error if the
     /// runtime had failed to compile.
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    /// Panics if [`Guarded::has_output`] isn't `true`.
     ///
     pub fn best_block_runtime_spec(&self) -> Result<&executor::CoreVersion, &RuntimeError> {
         let index = self.best_block_runtime_index();
@@ -239,11 +275,27 @@ impl Guarded {
             .map(|r| &r.runtime_spec)
     }
 
+    /// Returns the runtime of the current "output" best block. Returns an error if the runtime
+    /// had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::has_output`] isn't `true`.
+    ///
+    // TODO: is this method really useful?
+    pub fn best_block_runtime(&self) -> Result<&executor::host::HostVmPrototype, &RuntimeError> {
+        let index = self.best_block_runtime_index();
+        self.runtimes[index]
+            .runtime
+            .as_ref()
+            .map(|r| r.virtual_machine.as_ref().unwrap())
+    }
+
     /// Extracts the runtime of the current "output" best block.
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    /// Panics if [`Guarded::has_output`] isn't `true`.
     ///
     pub fn best_block_runtime_extract(self) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
         let runtime_index = self.best_block_runtime_index();
@@ -456,7 +508,7 @@ impl Guarded {
     ) -> Option<DownloadParams> {
         let block = match block_index {
             None => &mut self.finalized_block,
-            Some(idx) => &mut self.non_finalized_blocks.get_mut(idx).unwrap(),
+            Some(idx) => self.non_finalized_blocks.get_mut(idx).unwrap(),
         };
 
         if let Ok(runtime) = &mut block.runtime {
@@ -654,7 +706,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    /// Panics if [`Guarded::has_output`] isn't `true`.
     ///
     fn best_block_runtime_index(&self) -> usize {
         let best_block = if let Some(best_block_index) = self.best_block_index {
@@ -675,7 +727,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::is_ready`] isn't `true`.
+    /// Panics if [`Guarded::has_output`] isn't `true`.
     ///
     fn finalized_block_runtime_index(&self) -> usize {
         match self.finalized_block.runtime {

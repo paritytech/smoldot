@@ -318,18 +318,13 @@ impl RuntimeService {
                     let guarded = self.guarded.lock().await;
                     let tree = guarded.tree.as_ref().unwrap();
 
-                    let best_block = match guarded.best_block_index {
-                        Some(idx) => guarded.non_finalized_blocks.get(idx).unwrap(),
-                        None => &guarded.finalized_block,
-                    };
-
                     (
                         tree.best_block_runtime_spec()
                             .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
                             .decode()
                             .spec_version,
-                        best_block.hash,
-                        best_block.header.clone(),
+                        *tree.best_block_hash(),
+                        tree.best_block_header().to_vec(),
                     )
                 };
 
@@ -368,7 +363,7 @@ impl RuntimeService {
                 // just above.
                 let extracted_runtime = guarded
                     .tree
-                    .as_ref()
+                    .take()
                     .unwrap()
                     .best_block_runtime_extract()
                     .unwrap_or_else(|_| panic!());
@@ -390,7 +385,8 @@ impl RuntimeService {
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
     pub async fn metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
-        // First, try the cache.
+        /*// First, try the cache.
+        // TODO: restore this block
         {
             let guarded = self.guarded.lock().await;
             match guarded.best_block_runtime().runtime.as_ref() {
@@ -403,7 +399,7 @@ impl RuntimeService {
                     return Err(MetadataError::InvalidRuntime(err.clone()));
                 }
             }
-        }
+        }*/
 
         let (mut runtime_call_lock, virtual_machine) = self
             .recent_best_block_runtime_call("Metadata_metadata", iter::empty::<Vec<u8>>())
@@ -414,13 +410,14 @@ impl RuntimeService {
         let (metadata_result, virtual_machine) = loop {
             match query {
                 metadata::Query::Finished(Ok(metadata), virtual_machine) => {
-                    runtime_call_lock
-                        .guarded
-                        .best_block_runtime_mut()
-                        .runtime
-                        .as_mut()
-                        .unwrap()
-                        .metadata = Some(metadata.clone());
+                    // TODO: restore
+                    /*runtime_call_lock
+                    .guarded
+                    .best_block_runtime_mut()
+                    .runtime
+                    .as_mut()
+                    .unwrap()
+                    .metadata = Some(metadata.clone());*/
                     break (Ok(metadata), virtual_machine);
                 }
                 metadata::Query::StorageGet(storage_get) => {
@@ -480,29 +477,21 @@ impl<'a> RuntimeLock<'a> {
     ///
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
-        match self.guarded.best_block_index {
-            Some(idx) => &self.guarded.non_finalized_blocks.get(idx).unwrap().header,
-            None => &self.guarded.finalized_block.header,
-        }
+        self.guarded.tree.as_ref().unwrap().best_block_header()
     }
 
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
-        match self.guarded.best_block_index {
-            Some(idx) => &self.guarded.non_finalized_blocks.get(idx).unwrap().hash,
-            None => &self.guarded.finalized_block.hash,
-        }
+        self.guarded.tree.as_ref().unwrap().best_block_hash()
     }
 
     pub fn runtime(&self) -> &executor::host::HostVmPrototype {
         // TODO: don't unwrap?
         self.guarded
-            .best_block_runtime()
-            .runtime
+            .tree
             .as_ref()
             .unwrap()
-            .virtual_machine
-            .as_ref()
+            .best_block_runtime()
             .unwrap()
     }
 
@@ -537,23 +526,30 @@ impl<'a> RuntimeLock<'a> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
-        let runtime = self
+        let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
+
+        let runtime = match self
             .guarded
             .tree
-            .as_ref()
+            .take()
             .unwrap()
             .best_block_runtime_extract()
-            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
+        {
+            Ok(r) => r,
+            Err((tree, err)) => {
+                self.guarded.tree = Some(tree);
+                return Err(RuntimeCallError::InvalidRuntime(err));
+            }
+        };
 
-        let virtual_machine = runtime.virtual_machine.take().unwrap();
-        let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
         let lock = RuntimeCallLock {
             guarded: self.guarded,
             runtime_block_header,
             call_proof,
+            extracted: Some(runtime.tree),
         };
 
-        Ok((lock, virtual_machine))
+        Ok((lock, runtime.runtime))
     }
 }
 
@@ -976,7 +972,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 // The `Background` object is manipulating a temporary runtime service. Check if
                 // it is possible to write to the original runtime service.
                 let mut temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
-                if temporary_guarded.tree.as_ref().unwrap().is_ready() {
+                if temporary_guarded.tree.as_ref().unwrap().has_output() {
                     let mut original_guarded = original_runtime_service.guarded.lock().await;
                     original_guarded.best_near_head_of_chain =
                         temporary_guarded.best_near_head_of_chain;
