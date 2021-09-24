@@ -119,6 +119,7 @@ impl RuntimeService {
             log_target,
             sync_service: config.sync_service,
             guarded: Mutex::new(Guarded {
+                finalized_blocks_subscriptions: Vec::new(),
                 best_blocks_subscriptions: Vec::new(),
                 runtime_version_subscriptions: Vec::new(),
                 best_near_head_of_chain,
@@ -255,6 +256,32 @@ impl RuntimeService {
             .map_err(|err| err.clone())
     }
 
+    /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
+    /// that produces one item every time the finalized block is changed.
+    ///
+    /// This function is similar to [`sync_service::SyncService::subscribe_finalized`], except
+    /// that it is called less often. Additionally, it is guaranteed that when a notification is
+    /// sent out, calling [`RuntimeService::recent_finalized_block_runtime_call`] will operate on
+    /// this block or more recent. In other words, if you call
+    /// [`RuntimeService::recent_finalized_block_runtime_call`] and the stream of notifications is
+    /// empty, you are guaranteed that the call has been performed on the best block.
+    pub async fn subscribe_finalized(
+        self: &Arc<RuntimeService>,
+    ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
+        let (tx, rx) = lossy_channel::channel();
+        let mut guarded = self.guarded.lock().await;
+        guarded.finalized_blocks_subscriptions.push(tx);
+        (
+            guarded
+                .tree
+                .as_ref()
+                .unwrap()
+                .finalized_block_header()
+                .to_vec(),
+            rx,
+        )
+    }
+
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
     /// produces one item every time the best block is changed.
     ///
@@ -270,9 +297,24 @@ impl RuntimeService {
         let (tx, rx) = lossy_channel::channel();
         let mut guarded = self.guarded.lock().await;
         guarded.best_blocks_subscriptions.push(tx);
-        drop(guarded);
-        let (current, _) = self.sync_service.subscribe_best().await; // TODO: not correct; should load from guarded
-        (current, rx)
+        (
+            guarded.tree.as_ref().unwrap().best_block_header().to_vec(),
+            rx,
+        )
+    }
+
+    // TODO: doc
+    pub fn recent_finalized_block_runtime_lock<'a: 'b, 'b>(
+        self: &'a Arc<RuntimeService>,
+    ) -> impl Future<Output = RuntimeLock<'a>> + 'b {
+        async move {
+            let guarded = self.guarded.lock().await;
+            RuntimeLock {
+                service: self,
+                guarded,
+                is_best: false,
+            }
+        }
     }
 
     // TODO: doc
@@ -284,6 +326,7 @@ impl RuntimeService {
             RuntimeLock {
                 service: self,
                 guarded,
+                is_best: true,
             }
         }
     }
@@ -472,6 +515,8 @@ impl RuntimeService {
 pub struct RuntimeLock<'a> {
     service: &'a Arc<RuntimeService>,
     guarded: MutexGuard<'a, Guarded>,
+    /// `true` if calling the best block. `false` if calling the finalized block.
+    is_best: bool,
 }
 
 impl<'a> RuntimeLock<'a> {
@@ -479,22 +524,30 @@ impl<'a> RuntimeLock<'a> {
     ///
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
-        self.guarded.tree.as_ref().unwrap().best_block_header()
+        if self.is_best {
+            self.guarded.tree.as_ref().unwrap().best_block_header()
+        } else {
+            self.guarded.tree.as_ref().unwrap().finalized_block_header()
+        }
     }
 
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
-        self.guarded.tree.as_ref().unwrap().best_block_hash()
+        if self.is_best {
+            self.guarded.tree.as_ref().unwrap().best_block_hash()
+        } else {
+            self.guarded.tree.as_ref().unwrap().finalized_block_hash()
+        }
     }
 
     pub fn runtime(&self) -> &executor::host::HostVmPrototype {
+        let tree = self.guarded.tree.as_ref().unwrap();
         // TODO: don't unwrap?
-        self.guarded
-            .tree
-            .as_ref()
-            .unwrap()
-            .best_block_runtime()
-            .unwrap()
+        if self.is_best {
+            tree.best_block_runtime().unwrap()
+        } else {
+            tree.finalized_block_runtime().unwrap()
+        }
     }
 
     pub async fn start<'b>(
@@ -530,13 +583,12 @@ impl<'a> RuntimeLock<'a> {
 
         let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
 
-        let runtime = match self
-            .guarded
-            .tree
-            .take()
-            .unwrap()
-            .best_block_runtime_extract()
-        {
+        let tree = self.guarded.tree.take().unwrap();
+        let runtime = match if self.is_best {
+            tree.best_block_runtime_extract()
+        } else {
+            tree.finalized_block_runtime_extract()
+        } {
             Ok(r) => r,
             Err((tree, err)) => {
                 self.guarded.tree = Some(tree);
@@ -742,6 +794,10 @@ struct Guarded {
     runtime_version_subscriptions:
         Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,
 
+    /// List of senders that get notified when the finalized block is updated.
+    /// See [`RuntimeService::subscribe_finalized`].
+    finalized_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
+
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
     best_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
@@ -773,7 +829,19 @@ impl Guarded {
             }
         }
 
-        // TODO: finalized
+        if output_update.finalized_block_updated {
+            let finalized_block_header = self.tree.as_ref().unwrap().finalized_block_header();
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..self.finalized_blocks_subscriptions.len()).rev() {
+                let mut subscription = self.finalized_blocks_subscriptions.swap_remove(index);
+                if subscription.send(finalized_block_header.to_vec()).is_err() {
+                    continue;
+                }
+
+                self.finalized_blocks_subscriptions.push(subscription);
+            }
+        }
     }
 }
 
@@ -884,6 +952,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 sync_service: original_runtime_service.sync_service.clone(),
                 guarded: Mutex::new(Guarded {
                     best_blocks_subscriptions: Vec::new(),
+                    finalized_blocks_subscriptions: Vec::new(),
                     runtime_version_subscriptions: Vec::new(),
                     best_near_head_of_chain: false,
                     tree: Some(download_tree::Guarded::from_finalized_block(

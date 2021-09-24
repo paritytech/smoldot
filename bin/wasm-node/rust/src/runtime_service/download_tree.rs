@@ -19,6 +19,17 @@
 //! data structure should be updated. The items can then be marked as "runtime being
 //! downloaded". Once their runtime is downloaded, the blocks can in turn be reported as the
 //! new best or finalized of the data structure.
+//!
+//! # Usage
+//!
+//! This data structure considers an input source of blocks, and is in turn responsible for
+//! providing an output best block and an output finalized block.
+//!
+//! The data structure is initially in a "not ready" state, meaning that there is no finalized nor
+//! best block, and trying to access the finalized or the best block will panic.
+//!
+//! After a download has succeeded, the data structure will become "ready".
+//!
 
 // TODO: move this module to /src directory
 // TODO: remove references to sync service everywhere, including in docs
@@ -293,6 +304,24 @@ impl Guarded {
             .runtime
             .as_ref()
             .map(|r| &r.runtime_spec)
+    }
+
+    /// Returns the runtime of the current "output" finalized block. Returns an error if the
+    /// runtime had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::has_output`] isn't `true`.
+    ///
+    // TODO: is this method really useful?
+    pub fn finalized_block_runtime(
+        &self,
+    ) -> Result<&executor::host::HostVmPrototype, &RuntimeError> {
+        let index = self.finalized_block_runtime_index();
+        self.runtimes[index]
+            .runtime
+            .as_ref()
+            .map(|r| r.virtual_machine.as_ref().unwrap())
     }
 
     /// Returns the runtime of the current "output" best block. Returns an error if the runtime
@@ -691,11 +720,13 @@ impl Guarded {
             },
         );
 
-        debug_assert!(self.try_advance_output().is_noop());
+        // TODO: restore commented out code; unclear why but it can panic
+        /*debug_assert!(self.try_advance_output().is_noop());
         OutputUpdate {
             best_block_updated: false,
             finalized_block_updated: false,
-        }
+        }*/
+        self.try_advance_output()
     }
 
     /// Updates the state machine to take into account that the input of blocks has finalized the
