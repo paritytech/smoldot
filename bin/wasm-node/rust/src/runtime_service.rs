@@ -52,11 +52,13 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain_spec, executor, header, metadata,
+    chain_spec, executor, header,
+    informant::HashDisplay,
+    metadata,
     network::protocol,
     trie::{self, proof_verify},
 };
-use std::{iter, mem, num::NonZeroUsize, pin::Pin, sync::Arc};
+use std::{iter, mem, pin::Pin, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 pub use download_tree::RuntimeError;
@@ -752,94 +754,7 @@ struct Guarded {
     tree: Option<download_tree::Guarded>,
 }
 
-struct Block {
-    /// Hash of the block in question.
-    // TODO: redundant with `header`
-    hash: [u8; 32],
-
-    /// Header of the block in question.
-    /// Guaranteed to always be valid for the runtime service best and finalized blocks. Otherwise,
-    /// not guaranteed to be valid.
-    header: Vec<u8>,
-
-    /// Runtime information of that block. Shared amongst multiple different blocks.
-    runtime: Result<RuntimeDownloadState, BlockRuntimeErr>,
-
-    /// A block with a higher value here has been reported by the sync service as the best block
-    /// more recently than a block with a lower value. `0` means never reported as best block.
-    sync_service_best_block_report_id: u32,
-}
-
-#[derive(Debug)]
-enum BlockRuntimeErr {
-    /// The header of the block isn't valid, and as such its runtime couldn't be downloaded.
-    ///
-    /// > **Note**: It is possible for parachains to include blocks with invalid headers, as
-    /// >           nothing actually enforces that a parachain's blocks must conform to a certain
-    /// >           format.
-    InvalidHeader,
-}
-
-enum RuntimeDownloadState {
-    /// Index within [`Guarded::runtimes`] of this block's runtime.
-    Finished(usize),
-
-    /// Runtime is currently being downloaded. The future can be found in
-    // [`Background::runtime_downloads`].
-    Downloading {
-        /// Identifier for this download. Can be found in [`Background::runtime_downloads`].
-        /// Attributed from [`Background::next_download_id`]. Multiple different blocks can point
-        /// to the same `download_id` when it is known that they point to the same runtime.
-        download_id: u64,
-
-        /// State trie root of the block. Necessary in case the download fails and gets restarted.
-        state_root: [u8; 32],
-    },
-
-    /// Runtime hasn't started being downloaded from the network.
-    Unknown {
-        /// `true` if it is known that this runtime is the same as its parent's.
-        /// If `true`, it is illegal for the parent to be in the state
-        /// [`RuntimeDownloadState::Finished`] or [`RuntimeDownloadState::Downloading`].
-        ///
-        /// When in doubt, `false`.
-        ///
-        /// Value is irrelevant for the finalized block.
-        same_as_parent: bool,
-
-        /// State trie root of the block. Necessary in order to download the runtime.
-        state_root: [u8; 32],
-    },
-}
-
-struct Runtime {
-    /// Number of blocks in [`Guarded`] that use this runtime (includes both finalized and
-    /// non-finalized blocks).
-    num_blocks: NonZeroUsize,
-
-    /// Successfully-compiled runtime and all its information. Can contain an error if an error
-    /// happened, including a problem when obtaining the runtime specs or the metadata. It is
-    /// better to report to the user an error about for example the metadata not being extractable
-    /// compared to returning an obsolete version.
-    runtime: Result<SuccessfulRuntime, RuntimeError>,
-
-    /// Undecoded storage value of `:code` corresponding to the [`Runtime::runtime`]
-    /// field.
-    ///
-    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
-    /// build.
-    // TODO: consider storing hash instead
-    runtime_code: Option<Vec<u8>>,
-
-    /// Undecoded storage value of `:heappages` corresponding to the
-    /// [`Runtime::runtime`] field.
-    ///
-    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
-    /// build.
-    // TODO: consider storing hash instead
-    heap_pages: Option<Vec<u8>>,
-}
-
+// TODO: remove this
 struct SuccessfulRuntime {
     /// Cache of the metadata extracted from the runtime. `None` if unknown.
     ///
@@ -928,6 +843,13 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             .subscribe_all(16)
             .await;
 
+        log::info!( // TODO: debug
+            target: &original_runtime_service.log_target,
+            "Reinitialized background worker to finalized block {}",
+            HashDisplay(&header::hash_from_scale_encoded_header(&subscription.finalized_block_scale_encoded_header))
+            // TODO: print block height
+        );
+
         // In order to bootstrap the new runtime service, a fresh temporary runtime service is
         // created.
         // Later, when the `Guarded` contains at least a finalized runtime, it will be written
@@ -948,7 +870,6 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             }),
             blocks_stream: subscription.new_blocks.boxed(),
             runtime_matches_best_block: false,
-            next_download_id: 0,
             runtime_downloads: stream::FuturesUnordered::new(),
         };
 
@@ -956,8 +877,8 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             background
                 .runtime_service
                 .guarded
-                .lock()
-                .await
+                .try_lock()
+                .unwrap()
                 .tree
                 .as_mut()
                 .unwrap()
@@ -973,6 +894,11 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 // it is possible to write to the original runtime service.
                 let mut temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
                 if temporary_guarded.tree.as_ref().unwrap().has_output() {
+                    log::info!( // TODO: debug
+                        target: &original_runtime_service.log_target,
+                        "Background worker now in sync"
+                    );
+
                     let mut original_guarded = original_runtime_service.guarded.lock().await;
                     original_guarded.best_near_head_of_chain =
                         temporary_guarded.best_near_head_of_chain;
@@ -988,25 +914,57 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             futures::select! {
                 notification = background.blocks_stream.next().fuse() => {
                     match notification {
-                        None => return,
+                        None => break, // Break out of the inner loop in order to reset the background.
                         Some(sync_service::Notification::Block(new_block)) => {
+                            log::info!( // TODO: debug
+                                target: &original_runtime_service.log_target,
+                                "New sync service block: hash={}, parent={}, is_new_best={}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
+                                HashDisplay(&new_block.parent_hash),
+                                new_block.is_new_best
+                            );
+
                             let mut guarded = background.runtime_service.guarded.lock().await;
                             guarded.tree.as_mut().unwrap().insert_block(new_block);
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
+                            log::info!( // TODO: debug
+                                target: &original_runtime_service.log_target,
+                                "New sync service finalization: hash={}, new_best={}",
+                                HashDisplay(&hash), HashDisplay(&best_block_hash)
+                            );
+
                             background.finalize(hash, best_block_hash).await;
                         }
                     };
 
+                    // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
                     background.start_necessary_downloads().await;
                 },
                 (download_id, download_result) = background.runtime_downloads.select_next_some() => {
                     match download_result {
                         Ok((storage_code, storage_heap_pages)) => {
+                            log::info!( // TODO: debug
+                                target: &original_runtime_service.log_target,
+                                "Successfully finished download of id {:?}",
+                                download_id
+                            );
+
                             background.runtime_download_finished(download_id, storage_code, storage_heap_pages).await;
                         }
-                        Err(err) => {
-                            // TODO: logging
+                        Err(error) => {
+                            log::log!(
+                                target: &original_runtime_service.log_target,
+                                if error.is_network_problem() {
+                                    log::Level::Debug
+                                } else {
+                                    log::Level::Warn
+                                },
+                                // TODO: better message
+                                "Failed to download :code and :heappages of block: {}",
+                                error
+                            );
+
                             let mut guarded = background.runtime_service.guarded.lock().await;
                             guarded.tree.as_mut().unwrap().runtime_download_failure(download_id);
                         }
@@ -1038,9 +996,6 @@ struct Background {
             ),
         >,
     >,
-
-    /// Identifier to assign to the next download.
-    next_download_id: u64,
 
     /// Set to `true` when we expect the runtime in `guarded` to match the runtime
     /// of the best block. Initially `false`, as `guarded` uses the genesis
@@ -1085,10 +1040,16 @@ impl Background {
                 None => break,
             };
 
+            log::info!( // TODO: debug
+                target: &self.runtime_service.log_target,
+                "Starting new download, id={:?}, block={}",
+                download_params.id,
+                HashDisplay(&download_params.block_hash)
+            );
+
             // Dispatches a runtime download task to `runtime_downloads`.
             self.runtime_downloads.push(Box::pin({
                 let sync_service = self.runtime_service.sync_service.clone();
-                let log_target = self.runtime_service.log_target.clone();
 
                 async move {
                     let result = sync_service
@@ -1105,21 +1066,11 @@ impl Background {
                             let code = c.pop().unwrap();
                             Ok((code, heap_pages))
                         }
-                        Err(error) => {
-                            // TODO: log differently
-                            log::log!(
-                                target: &log_target,
-                                if error.is_network_problem() {
-                                    log::Level::Debug
-                                } else {
-                                    log::Level::Warn
-                                },
-                                "Failed to download :code and :heappages of block: {}",
-                                error
-                            );
-                            Err(error)
-                        }
+                        Err(error) => Err(error),
                     };
+
+                    // TODO: this solves a problem where a request fails instantly because of no peer; figure out how to make this in a non-hacky way
+                    crate::ffi::Delay::new(std::time::Duration::from_secs(1)).await;
 
                     (download_params.id, result)
                 }

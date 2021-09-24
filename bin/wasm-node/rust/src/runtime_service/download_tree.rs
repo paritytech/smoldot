@@ -170,10 +170,20 @@ impl Guarded {
     ) -> Self {
         let mut runtimes = slab::Slab::with_capacity(4); // Usual len is `1`, rarely `2`.
 
-        let genesis_runtime_index = if let Some(genesis_runtime) = genesis_runtime {
-            Some(runtimes.insert(genesis_runtime))
-        } else {
-            None
+        let finalized_runtime = match header::decode(&finalized_block_scale_encoded_header) {
+            Err(_) => Err(BlockRuntimeErr::InvalidHeader),
+            Ok(header) => {
+                if let Some(genesis_runtime) = genesis_runtime {
+                    Ok(RuntimeDownloadState::Finished(
+                        runtimes.insert(genesis_runtime),
+                    ))
+                } else {
+                    Ok(RuntimeDownloadState::Unknown {
+                        same_as_parent: false,
+                        state_root: *header.state_root,
+                    })
+                }
+            }
         };
 
         Guarded {
@@ -181,19 +191,7 @@ impl Guarded {
             best_block_index: None,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
             finalized_block: Block {
-                runtime: match header::decode(&finalized_block_scale_encoded_header) {
-                    Err(_) => Err(BlockRuntimeErr::InvalidHeader),
-                    Ok(header) => {
-                        if let Some(genesis_runtime_index) = genesis_runtime_index {
-                            Ok(RuntimeDownloadState::Finished(genesis_runtime_index))
-                        } else {
-                            Ok(RuntimeDownloadState::Unknown {
-                                same_as_parent: false,
-                                state_root: *header.state_root,
-                            })
-                        }
-                    }
-                },
+                runtime: finalized_runtime,
                 hash: header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header),
                 header: finalized_block_scale_encoded_header,
                 sync_service_best_block_report_id: 1,
@@ -384,11 +382,14 @@ impl Guarded {
         };
 
         // Update the blocks that were downloading this runtime.
-        debug_assert!(matches!(
-            // TODO: wrong
-            self.finalized_block.runtime,
-            Ok(RuntimeDownloadState::Finished(_))
-        ));
+        match self.finalized_block.runtime {
+            Ok(RuntimeDownloadState::Downloading {
+                download_id: id, ..
+            }) if id == download_id => {
+                self.finalized_block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
+            }
+            _ => {}
+        }
         for index in self
             .non_finalized_blocks
             .iter_unordered()
@@ -427,7 +428,10 @@ impl Guarded {
                 .iter()
                 .map(|(_, r)| r.num_blocks.get())
                 .sum::<usize>(),
-            self.non_finalized_blocks.len() + 1
+            iter::once(&self.finalized_block)
+                .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
+                .filter(|b| matches!(b.runtime, Ok(RuntimeDownloadState::Finished(_))))
+                .count()
         );
     }
 
@@ -440,6 +444,7 @@ impl Guarded {
                 state_root,
             }) if id == download_id => {
                 // Note: the value of `same_as_parent` is irrelevant for the finalized block.
+                // TODO: should prune blocks if input finalized isn't `None`
                 self.finalized_block.runtime = Ok(RuntimeDownloadState::Unknown {
                     state_root,
                     same_as_parent: false,
@@ -552,6 +557,10 @@ impl Guarded {
         // When this block is later inserted, value to use for `sync_service_best_block_report_id`.
         let sync_service_best_block_report_id = if new_block.is_new_best {
             let id = self.sync_service_best_block_next_report_id;
+            debug_assert!(self
+                .non_finalized_blocks
+                .iter_unordered()
+                .all(|(_, b)| b.sync_service_best_block_report_id < id));
             self.sync_service_best_block_next_report_id += 1;
             id
         } else {
@@ -585,11 +594,11 @@ impl Guarded {
         // has changed since the parent.
         // However, as this is a recent addition, the absence of this digest item does
         // not necessarily mean that the runtime environment has not changed.
-        // For this reason, we add `&& false`. This `&& false` can be removed in the
+        // For this reason, we add `|| true`. This `|| true` can be removed in the
         // future.
-        // TODO: remove `&& false`
+        // TODO: remove `|| true`
         let runtime_environment_update =
-            decoded_header.digest.has_runtime_environment_updated() && false;
+            decoded_header.digest.has_runtime_environment_updated() || true;
         if !runtime_environment_update {
             // Runtime of the new block is the same as the parent.
             let parent_runtime = match parent_index {
@@ -688,6 +697,10 @@ impl Guarded {
         // before.
         // TODO: don't do that if best block didn't change
         let best_block_report_id = self.sync_service_best_block_next_report_id;
+        debug_assert!(self
+            .non_finalized_blocks
+            .iter_unordered()
+            .all(|(_, b)| b.sync_service_best_block_report_id < best_block_report_id));
         self.sync_service_best_block_next_report_id += 1;
 
         let new_best_block_index = self
@@ -759,7 +772,7 @@ impl ExtractedGuarded {
     /// Note that no effort is made to ensure that the runtime being put back is the one that was
     /// extracted. It is a serious logic error to put back a different runtime.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) -> Guarded {
-        let mut vm_slot = &mut self.inner.runtimes[self.extracted_runtime_index]
+        let vm_slot = &mut self.inner.runtimes[self.extracted_runtime_index]
             .runtime
             .as_mut()
             .unwrap()
