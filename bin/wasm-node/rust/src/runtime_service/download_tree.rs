@@ -394,11 +394,18 @@ impl Guarded {
             }
         };
 
+        // Final return value of the function. Updated below if relevant.
+        let mut output_update = OutputUpdate {
+            best_block_updated: false,
+            finalized_block_updated: false,
+        };
+
         // Update the blocks that were downloading this runtime.
         match self.finalized_block.runtime {
             Ok(RuntimeDownloadState::Downloading {
                 download_id: id, ..
             }) if id == download_id => {
+                output_update.finalized_block_updated = true;
                 self.finalized_block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
             }
             _ => {}
@@ -411,7 +418,7 @@ impl Guarded {
         {
             if Some(index) == self.sync_service_finalized_index {
                 // TODO: prune blocks
-                // TODO: report new finalized block to subscribers
+                output_update.finalized_block_updated = true;
             }
 
             let block = self.non_finalized_blocks.get_mut(index).unwrap();
@@ -429,9 +436,14 @@ impl Guarded {
                 current_runtime_service_best_block_weight
             );
 
-            if block.sync_service_best_block_report_id > current_runtime_service_best_block_weight {
+            if block.sync_service_best_block_report_id > current_runtime_service_best_block_weight
+                && matches!(
+                    self.finalized_block.runtime,
+                    Ok(RuntimeDownloadState::Finished(_))
+                )
+            {
+                output_update.best_block_updated = true;
                 self.best_block_index = Some(index);
-                // TODO: report new best block to subscribers
             }
         }
 
@@ -447,10 +459,7 @@ impl Guarded {
                 .count()
         );
 
-        OutputUpdate {
-            best_block_updated: false,      // TODO:
-            finalized_block_updated: false, // TODO:
-        }
+        output_update
     }
 
     /// Injects into the state of the state machine a failed runtime download.
@@ -676,6 +685,7 @@ impl Guarded {
                     // best block once the runtime has finished being downloaded.
                     // Since, in this situation, the runtime is "instantaneously downloaded", we
                     // perform the update immediately.
+                    // TODO: is that actually correct? what if finalized block isn't in Finished state yet?
                     if new_block.is_new_best {
                         self.best_block_index = Some(inserted_index);
                     }
