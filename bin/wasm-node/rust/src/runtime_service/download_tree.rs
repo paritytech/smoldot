@@ -66,25 +66,25 @@ pub struct Guarded {
     /// State of the finalized block reported through the public API of the runtime service.
     /// This doesn't necessarily match the one of the sync service.
     ///
-    /// When not a temporary `Guarded`, The value of [`Block::runtime`] for this block is
-    /// guaranteed to be [`RuntimeDownloadState::Finished`].
+    /// When `Guarded` has output, The value of [`Block::runtime`] for this block is guaranteed to
+    /// be [`RuntimeDownloadState::Finished`].
     finalized_block: Block,
 
     /// State of all the non-finalized blocks.
     non_finalized_blocks: fork_tree::ForkTree<Block>,
 
-    /// Index within [`Guarded::non_finalized_blocks`] of the current best block. `None` if the
-    /// best block is the finalized block.
+    /// Index within [`Guarded::non_finalized_blocks`] of the current "output" best block. `None`
+    /// if the best block is the finalized block.
     ///
-    /// When not a temporary `Guarded`, the value of [`Block::runtime`] for this block is
-    /// guaranteed to be [`RuntimeDownloadState::Finished`].
+    /// When `Guarded` has output, the value of [`Block::runtime`] for this block is guaranteed
+    /// to be [`RuntimeDownloadState::Finished`].
     best_block_index: Option<fork_tree::NodeIndex>,
 
     /// Index within [`Guarded::non_finalized_blocks`] of the finalized block according to the
     /// sync service. `None` if the sync service finalized block is the same as the runtime
     /// service's finalized block.
     ///
-    /// If `Some` and when not a temporary `Guarded`, the value of [`Block::runtime`] for this
+    /// If `Some` and when `Guarded` has output, the value of [`Block::runtime`] for this
     /// block is guaranteed to **not** be [`RuntimeDownloadState::Finished`].
     sync_service_finalized_index: Option<fork_tree::NodeIndex>,
 
@@ -222,6 +222,16 @@ impl Guarded {
         }
     }
 
+    /// Returns the hash of the current "output" finalized block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`Guarded::has_output`] isn't `true`.
+    ///
+    pub fn finalized_block_hash(&self) -> &[u8; 32] {
+        &self.finalized_block.hash
+    }
+
     /// Returns the hash of the current "output" best block.
     ///
     /// # Panic
@@ -329,7 +339,7 @@ impl Guarded {
         download_id: DownloadId,
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
-    ) {
+    ) -> OutputUpdate {
         // Find the number of blocks that are bound to this download.
         let num_concerned_blocks = iter::once(&self.finalized_block)
             .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
@@ -343,7 +353,10 @@ impl Guarded {
 
         // The download might concern only blocks that have now been pruned.
         if num_concerned_blocks == 0 {
-            return;
+            return OutputUpdate {
+                best_block_updated: false,
+                finalized_block_updated: false,
+            };
         }
 
         // Try find the identifier of an existing runtime that has this code and heap pages. If
@@ -433,6 +446,11 @@ impl Guarded {
                 .filter(|b| matches!(b.runtime, Ok(RuntimeDownloadState::Finished(_))))
                 .count()
         );
+
+        OutputUpdate {
+            best_block_updated: false,      // TODO:
+            finalized_block_updated: false, // TODO:
+        }
     }
 
     /// Injects into the state of the state machine a failed runtime download.
@@ -539,7 +557,7 @@ impl Guarded {
     }
 
     /// Updates the state machine with a new block.
-    pub fn insert_block(&mut self, new_block: sync_service::BlockNotification) {
+    pub fn insert_block(&mut self, new_block: sync_service::BlockNotification) -> OutputUpdate {
         // TODO: remove sync_service and pass individual fields instead ^
         // Find the parent of the new block in the list of blocks that we know.
         // It is guaranteed by the API of the sync service for the parent to have been
@@ -585,7 +603,11 @@ impl Guarded {
                         sync_service_best_block_report_id,
                     },
                 );
-                return;
+
+                return OutputUpdate {
+                    best_block_updated: false,
+                    finalized_block_updated: false,
+                };
             }
         };
 
@@ -627,7 +649,11 @@ impl Guarded {
                             sync_service_best_block_report_id,
                         },
                     );
-                    return;
+
+                    return OutputUpdate {
+                        best_block_updated: false,
+                        finalized_block_updated: false,
+                    };
                 }
 
                 Ok(RuntimeDownloadState::Finished(runtime_index)) => {
@@ -652,10 +678,12 @@ impl Guarded {
                     // perform the update immediately.
                     if new_block.is_new_best {
                         self.best_block_index = Some(inserted_index);
-                        // TODO: report to subscribers
                     }
 
-                    return;
+                    return OutputUpdate {
+                        best_block_updated: new_block.is_new_best,
+                        finalized_block_updated: false,
+                    };
                 }
             }
         }
@@ -673,6 +701,11 @@ impl Guarded {
                 sync_service_best_block_report_id,
             },
         );
+
+        OutputUpdate {
+            best_block_updated: false,
+            finalized_block_updated: false,
+        }
     }
 
     /// Updates the state machine to take into account that the input of blocks has finalized the
@@ -682,7 +715,11 @@ impl Guarded {
     ///
     /// > **Note**: Finalizing a block might have to modify the current best block if the block
     /// >           being finalized isn't an ancestor of the current best block.
-    pub fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
+    pub fn finalize(
+        &mut self,
+        hash_to_finalize: [u8; 32],
+        new_best_block_hash: [u8; 32],
+    ) -> OutputUpdate {
         // Find the finalized block in the list of blocks that we know.
         // It is guaranteed by the API of the sync service for the block to have been
         // reported before.
@@ -712,6 +749,11 @@ impl Guarded {
             .get_mut(new_best_block_index)
             .unwrap()
             .sync_service_best_block_report_id = best_block_report_id;
+
+        OutputUpdate {
+            best_block_updated: false,      // TODO:
+            finalized_block_updated: false, // TODO:
+        }
     }
 
     /// Returns the index of the runtime of the "output" best block, as an index within
@@ -750,6 +792,12 @@ impl Guarded {
             _ => unreachable!(),
         }
     }
+}
+
+#[must_use]
+pub struct OutputUpdate {
+    pub finalized_block_updated: bool,
+    pub best_block_updated: bool,
 }
 
 pub struct ExtractedRuntime {

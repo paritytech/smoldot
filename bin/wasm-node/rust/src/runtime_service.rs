@@ -738,6 +738,7 @@ struct Guarded {
     /// Whenever [`Runtime::runtime`] is updated, one should emit an item on each
     /// sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
+    // TODO: not notified /!\
     runtime_version_subscriptions:
         Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,
 
@@ -752,6 +753,28 @@ struct Guarded {
     /// Tree of blocks. Holds the state of the download of everything. Always `true` when the
     /// `Mutex` is being locked. Switched to `None` during some operations.
     tree: Option<download_tree::Guarded>,
+}
+
+impl Guarded {
+    /// Notifies the subscribers about changes to the best and finalized blocks.
+    // TODO: doesn't need to be async?
+    async fn notify_subscribers(&mut self, output_update: download_tree::OutputUpdate) {
+        if output_update.best_block_updated {
+            let best_block_header = self.tree.as_ref().unwrap().best_block_header();
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..self.best_blocks_subscriptions.len()).rev() {
+                let mut subscription = self.best_blocks_subscriptions.swap_remove(index);
+                if subscription.send(best_block_header.to_vec()).is_err() {
+                    continue;
+                }
+
+                self.best_blocks_subscriptions.push(subscription);
+            }
+        }
+
+        // TODO: finalized
+    }
 }
 
 // TODO: remove this
@@ -874,7 +897,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
         };
 
         for block in subscription.non_finalized_blocks {
-            background
+            let _ = background
                 .runtime_service
                 .guarded
                 .try_lock()
@@ -904,10 +927,15 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         temporary_guarded.best_near_head_of_chain;
                     original_guarded.tree = Some(temporary_guarded.tree.take().unwrap());
 
+                    temporary_guarded
+                        .notify_subscribers(download_tree::OutputUpdate {
+                            finalized_block_updated: true,
+                            best_block_updated: true,
+                        })
+                        .await;
+
                     drop(temporary_guarded);
                     background.runtime_service = original_runtime_service.clone();
-
-                    // TODO: notify subscribers of the new best and finalized blocks
                 }
             }
 
@@ -925,7 +953,8 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                             );
 
                             let mut guarded = background.runtime_service.guarded.lock().await;
-                            guarded.tree.as_mut().unwrap().insert_block(new_block);
+                            let output_update = guarded.tree.as_mut().unwrap().insert_block(new_block);
+                            guarded.notify_subscribers(output_update).await;
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             log::info!( // TODO: debug
@@ -1012,15 +1041,14 @@ impl Background {
         storage_heap_pages: Option<Vec<u8>>,
     ) {
         let mut guarded = self.runtime_service.guarded.lock().await;
-        let guarded = &mut *guarded;
 
-        guarded.tree.as_mut().unwrap().runtime_download_finished(
+        let output_update = guarded.tree.as_mut().unwrap().runtime_download_finished(
             download_id,
             storage_code,
             storage_heap_pages,
         );
 
-        // TODO: must potentially notify best and finalized subscriptions
+        guarded.notify_subscribers(output_update).await;
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
@@ -1081,12 +1109,13 @@ impl Background {
     /// Updates `self` to take into account that the sync service has finalized the given block.
     async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
         let mut guarded = self.runtime_service.guarded.lock().await;
-        guarded
+
+        let output_update = guarded
             .tree
             .as_mut()
             .unwrap()
             .finalize(hash_to_finalize, new_best_block_hash);
 
-        // TODO: must potentially notify best and finalized subscriptions
+        guarded.notify_subscribers(output_update).await;
     }
 }
