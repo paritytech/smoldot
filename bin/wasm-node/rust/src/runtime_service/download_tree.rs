@@ -49,14 +49,14 @@ pub enum RuntimeError {
     CoreVersion(executor::CoreVersionError),
 }
 
-/// Identifier for a download in the [`Guarded`].
+/// Identifier for a download in the [`DownloadTree`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct DownloadId(u64);
 
 /// Information about a download that must be performed.
 pub struct DownloadParams {
-    /// Identifier to later provide when calling [`Guarded::runtime_download_finished`] or
-    /// [`Guarded::runtime_download_failure`].
+    /// Identifier to later provide when calling [`DownloadTree::runtime_download_finished`] or
+    /// [`DownloadTree::runtime_download_failure`].
     pub id: DownloadId,
 
     /// Hash of the block whose runtime to download.
@@ -66,32 +66,31 @@ pub struct DownloadParams {
     pub block_state_root: [u8; 32],
 }
 
-// TODO: rename
-pub struct Guarded {
+pub struct DownloadTree {
     /// List of all compiled runtime. Referenced by the various blocks below.
     runtimes: slab::Slab<Runtime>,
 
     /// State of the finalized block reported through the public API of the runtime service.
     /// This doesn't necessarily match the one of the input.
     ///
-    /// When `Guarded` has output, The value of [`Block::runtime`] for this block is guaranteed to
-    /// be [`RuntimeDownloadState::Finished`].
+    /// When `DownloadTree` has output, The value of [`Block::runtime`] for this block is
+    /// guaranteed to be [`RuntimeDownloadState::Finished`].
     finalized_block: Block,
 
     /// State of all the non-finalized blocks.
     non_finalized_blocks: fork_tree::ForkTree<Block>,
 
-    /// Index within [`Guarded::non_finalized_blocks`] of the current "output" best block. `None`
-    /// if the best block is the finalized block.
+    /// Index within [`DownloadTree::non_finalized_blocks`] of the current "output" best block.
+    /// `None` if the best block is the finalized block.
     ///
-    /// When `Guarded` has output, the value of [`Block::runtime`] for this block is guaranteed
-    /// to be [`RuntimeDownloadState::Finished`].
+    /// When `DownloadTree` has output, the value of [`Block::runtime`] for this block is
+    /// guaranteed to be [`RuntimeDownloadState::Finished`].
     best_block_index: Option<fork_tree::NodeIndex>,
 
-    /// Index within [`Guarded::non_finalized_blocks`] of the finalized block according to the
-    /// input. `None` if the input finalized block is the same as the output finalized block.
+    /// Index within [`DownloadTree::non_finalized_blocks`] of the finalized block according to
+    /// the input. `None` if the input finalized block is the same as the output finalized block.
     ///
-    /// If `Some` and when `Guarded` has output, the value of [`Block::runtime`] for this
+    /// If `Some` and when `DownloadTree` has output, the value of [`Block::runtime`] for this
     /// block is guaranteed to **not** be [`RuntimeDownloadState::Finished`].
     input_finalized_index: Option<fork_tree::NodeIndex>,
 
@@ -102,19 +101,19 @@ pub struct Guarded {
     next_download_id: DownloadId,
 }
 
-impl Guarded {
-    /// Returns a new [`Guarded`] containing one "input" finalized block.
+impl DownloadTree {
+    /// Returns a new [`DownloadTree`] containing one "input" finalized block.
     ///
-    /// This [`Guarded`] is in a non-ready state.
+    /// This [`DownloadTree`] is in a non-ready state.
     pub fn from_finalized_block(finalized_block_scale_encoded_header: Vec<u8>) -> Self {
-        Guarded::new_inner(finalized_block_scale_encoded_header, None)
+        DownloadTree::new_inner(finalized_block_scale_encoded_header, None)
     }
 
-    /// Returns a new [`Guarded`] containing one "input" finalized block. The runtime of this
+    /// Returns a new [`DownloadTree`] containing one "input" finalized block. The runtime of this
     /// finalized block will be compiled from the given storage, meaning that this block also
     /// becomes the "output" finalized block and the "output" best block.
     ///
-    /// This [`Guarded`] is immediately in a ready state.
+    /// This [`DownloadTree`] is immediately in a ready state.
     pub fn from_finalized_block_and_storage<'a>(
         finalized_block_scale_encoded_header: Vec<u8>,
         genesis_storage: impl ExactSizeIterator<Item = (&'a [u8], &'a [u8])> + Clone,
@@ -168,7 +167,7 @@ impl Guarded {
             }
         };
 
-        Guarded::new_inner(finalized_block_scale_encoded_header, Some(genesis_runtime))
+        DownloadTree::new_inner(finalized_block_scale_encoded_header, Some(genesis_runtime))
     }
 
     fn new_inner(
@@ -195,7 +194,7 @@ impl Guarded {
             }
         };
 
-        Guarded {
+        DownloadTree {
             runtimes,
             best_block_index: None,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
@@ -235,7 +234,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     pub fn finalized_block_hash(&self) -> &[u8; 32] {
         &self.finalized_block.hash
@@ -245,7 +244,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     pub fn best_block_hash(&self) -> &[u8; 32] {
         if let Some(best_block_index) = self.best_block_index {
@@ -263,7 +262,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     pub fn finalized_block_header(&self) -> &[u8] {
         &self.finalized_block.header
@@ -273,7 +272,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     pub fn best_block_header(&self) -> &[u8] {
         if let Some(best_block_index) = self.best_block_index {
@@ -292,7 +291,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     pub fn best_block_runtime_spec(&self) -> Result<&executor::CoreVersion, &RuntimeError> {
         let index = self.best_block_runtime_index();
@@ -307,7 +306,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     // TODO: is this method really useful?
     pub fn finalized_block_runtime(
@@ -325,7 +324,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     // TODO: is this method really useful?
     pub fn best_block_runtime(&self) -> Result<&executor::host::HostVmPrototype, &RuntimeError> {
@@ -340,7 +339,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     pub fn finalized_block_runtime_extract(self) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
         let runtime_index = self.finalized_block_runtime_index();
@@ -351,7 +350,7 @@ impl Guarded {
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     pub fn best_block_runtime_extract(self) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
         let runtime_index = self.best_block_runtime_index();
@@ -372,7 +371,7 @@ impl Guarded {
 
                 Ok(ExtractedRuntime {
                     runtime,
-                    tree: ExtractedGuarded {
+                    tree: ExtractedDownloadTree {
                         inner: self,
                         extracted_runtime_index: runtime_index,
                     },
@@ -808,11 +807,11 @@ impl Guarded {
     }
 
     /// Returns the index of the runtime of the "output" best block, as an index within
-    /// [`Guarded::runtimes`].
+    /// [`DownloadTree::runtimes`].
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     fn best_block_runtime_index(&self) -> usize {
         let best_block = if let Some(best_block_index) = self.best_block_index {
@@ -829,11 +828,11 @@ impl Guarded {
     }
 
     /// Returns the index of the runtime of the "output" finalized block, as an index within
-    /// [`Guarded::runtimes`].
+    /// [`DownloadTree::runtimes`].
     ///
     /// # Panic
     ///
-    /// Panics if [`Guarded::has_output`] isn't `true`.
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
     fn finalized_block_runtime_index(&self) -> usize {
         match self.finalized_block.runtime {
@@ -1047,25 +1046,24 @@ impl OutputUpdate {
 }
 
 pub struct ExtractedRuntime {
-    /// Equivalent to [`Guarded`] but with a runtime extracted.
-    pub tree: ExtractedGuarded,
+    /// Equivalent to [`DownloadTree`] but with a runtime extracted.
+    pub tree: ExtractedDownloadTree,
 
-    /// Runtime extracted from the [`Guarded`].
+    /// Runtime extracted from the [`DownloadTree`].
     pub runtime: executor::host::HostVmPrototype,
 }
 
-// TODO: rename
-pub struct ExtractedGuarded {
-    inner: Guarded,
+pub struct ExtractedDownloadTree {
+    inner: DownloadTree,
     extracted_runtime_index: usize,
 }
 
-impl ExtractedGuarded {
+impl ExtractedDownloadTree {
     /// Puts back the runtime that was extracted.
     ///
     /// Note that no effort is made to ensure that the runtime being put back is the one that was
     /// extracted. It is a serious logic error to put back a different runtime.
-    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) -> Guarded {
+    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) -> DownloadTree {
         let vm_slot = &mut self.inner.runtimes[self.extracted_runtime_index]
             .runtime
             .as_mut()
@@ -1106,7 +1104,7 @@ enum BlockRuntimeErr {
 }
 
 enum RuntimeDownloadState {
-    /// Index within [`Guarded::runtimes`] of this block's runtime.
+    /// Index within [`DownloadTree::runtimes`] of this block's runtime.
     Finished(usize),
 
     /// Runtime is currently being downloaded. The future can be found in
@@ -1140,7 +1138,7 @@ enum RuntimeDownloadState {
 }
 
 struct Runtime {
-    /// Number of blocks in [`Guarded`] that use this runtime (includes both finalized and
+    /// Number of blocks in [`DownloadTree`] that use this runtime (includes both finalized and
     /// non-finalized blocks).
     num_blocks: NonZeroUsize,
 
@@ -1226,3 +1224,5 @@ impl SuccessfulRuntime {
         })
     }
 }
+
+// TODO: really needs tests

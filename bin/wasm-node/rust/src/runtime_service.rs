@@ -123,7 +123,7 @@ impl RuntimeService {
                 best_blocks_subscriptions: Vec::new(),
                 runtime_version_subscriptions: Vec::new(),
                 best_near_head_of_chain,
-                tree: Some(download_tree::Guarded::from_finalized_block_and_storage(
+                tree: Some(download_tree::DownloadTree::from_finalized_block_and_storage(
                     config.genesis_block_scale_encoded_header,
                     config.chain_spec.genesis_storage(),
                 )),
@@ -611,7 +611,7 @@ impl<'a> RuntimeLock<'a> {
 #[must_use]
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Guarded>,
-    extracted: Option<download_tree::ExtractedGuarded>,
+    extracted: Option<download_tree::ExtractedDownloadTree>,
     runtime_block_header: Vec<u8>,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
@@ -808,7 +808,7 @@ struct Guarded {
 
     /// Tree of blocks. Holds the state of the download of everything. Always `true` when the
     /// `Mutex` is being locked. Switched to `None` during some operations.
-    tree: Option<download_tree::Guarded>,
+    tree: Option<download_tree::DownloadTree>,
 }
 
 impl Guarded {
@@ -955,7 +955,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                     finalized_blocks_subscriptions: Vec::new(),
                     runtime_version_subscriptions: Vec::new(),
                     best_near_head_of_chain: false,
-                    tree: Some(download_tree::Guarded::from_finalized_block(
+                    tree: Some(download_tree::DownloadTree::from_finalized_block(
                         subscription.finalized_block_scale_encoded_header,
                     )),
                 }),
