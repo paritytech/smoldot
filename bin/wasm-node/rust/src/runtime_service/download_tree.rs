@@ -737,6 +737,8 @@ impl Guarded {
     /// # Panic
     ///
     /// Panics if `hash_to_finalize` or `new_best_block_hash` weren't inserted before.
+    /// Panics if trying to finalize the parent of a block that is already finalized.
+    /// Panics if `new_best_block_hash` is not a descendant of `hash_to_finalize`.
     ///
     pub fn finalize(
         &mut self,
@@ -750,27 +752,58 @@ impl Guarded {
                 .find(|b| b.hash == hash_to_finalize)
                 .unwrap();
             self.input_finalized_index = Some(finalized_node_index);
+        } else {
+            debug_assert_eq!(self.input_finalized_index, None);
         }
 
-        // Find the new best block in the list of blocks that we know.
-        // TODO: don't do that if best block didn't change
-        let best_block_report_id = self.input_best_block_next_weight;
+        // Find the new best block in the list of blocks that we know and make sure that its
+        // weight is the maximum.
+        if new_best_block_hash == self.finalized_block.hash {
+            if self.finalized_block.input_best_block_weight != self.input_best_block_next_weight {
+                self.finalized_block.input_best_block_weight = self.input_best_block_next_weight;
+                self.input_best_block_next_weight += 1;
+            }
+        } else {
+            let new_best_block_index = self
+                .non_finalized_blocks
+                .find(|b| b.hash == new_best_block_hash)
+                .unwrap();
+
+            // Make sure that `new_best_block_hash` is a descendant of `hash_to_finalize`,
+            // otherwise the state of the tree will be corrupted.
+            // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
+            // is part of the public API of this method.
+            assert!(self
+                .input_finalized_index
+                .map_or(true, |finalized_index| self
+                    .non_finalized_blocks
+                    .is_ancestor(finalized_index, new_best_block_index)));
+
+            // If necessary, update the weight of the block.
+            match &mut self
+                .non_finalized_blocks
+                .get_mut(new_best_block_index)
+                .unwrap()
+                .input_best_block_weight
+            {
+                w if *w == self.input_best_block_next_weight => {}
+                w => {
+                    *w = self.input_best_block_next_weight;
+                    self.input_best_block_next_weight += 1;
+                }
+            }
+        }
+
+        // Minor sanity checks.
+        debug_assert!(
+            self.finalized_block.input_best_block_weight < self.input_best_block_next_weight
+        );
         debug_assert!(self
             .non_finalized_blocks
             .iter_unordered()
-            .all(|(_, b)| b.input_best_block_weight < best_block_report_id));
-        self.input_best_block_next_weight += 1;
+            .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight));
 
-        let new_best_block_index = self
-            .non_finalized_blocks
-            .find(|b| b.hash == new_best_block_hash)
-            .unwrap();
-
-        self.non_finalized_blocks
-            .get_mut(new_best_block_index)
-            .unwrap()
-            .input_best_block_weight = best_block_report_id;
-
+        // Try see if we can update the output blocks.
         self.try_advance_output()
     }
 
@@ -857,6 +890,7 @@ impl Guarded {
         if let Some(input_finalized_index) = self.input_finalized_index {
             // Finding a new finalized block. This is done differently depending on whether the
             // tree already has an output, in which case the best block should be preserved.
+            // TODO: can this accidentally revert output finality, in case of reorg in the best block?
             let new_finalized = if self.has_output() {
                 // Try to find the earliest ancestor of the input finalized block whose runtime
                 // is ready and that is also an ancestor of the current output best block.

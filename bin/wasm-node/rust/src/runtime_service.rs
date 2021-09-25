@@ -934,7 +934,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             .subscribe_all(16)
             .await;
 
-        log::info!( // TODO: debug
+        log::debug!(
             target: &original_runtime_service.log_target,
             "Reinitialized background worker to finalized block {}",
             HashDisplay(&header::hash_from_scale_encoded_header(&subscription.finalized_block_scale_encoded_header))
@@ -990,7 +990,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 // it is possible to write to the original runtime service.
                 let mut temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
                 if temporary_guarded.tree.as_ref().unwrap().has_output() {
-                    log::info!( // TODO: debug
+                    log::debug!(
                         target: &original_runtime_service.log_target,
                         "Background worker now in sync"
                     );
@@ -1017,7 +1017,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                     match notification {
                         None => break, // Break out of the inner loop in order to reset the background.
                         Some(sync_service::Notification::Block(new_block)) => {
-                            log::info!( // TODO: debug
+                            log::debug!(
                                 target: &original_runtime_service.log_target,
                                 "New sync service block: hash={}, parent={}, is_new_best={}",
                                 HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
@@ -1030,7 +1030,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                             guarded.notify_subscribers(output_update).await;
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
-                            log::info!( // TODO: debug
+                            log::debug!(
                                 target: &original_runtime_service.log_target,
                                 "New sync service finalization: hash={}, new_best={}",
                                 HashDisplay(&hash), HashDisplay(&best_block_hash)
@@ -1046,7 +1046,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 (download_id, download_result) = background.runtime_downloads.select_next_some() => {
                     match download_result {
                         Ok((storage_code, storage_heap_pages)) => {
-                            log::info!( // TODO: debug
+                            log::debug!(
                                 target: &original_runtime_service.log_target,
                                 "Successfully finished download of id {:?}",
                                 download_id
@@ -1141,7 +1141,7 @@ impl Background {
                 None => break,
             };
 
-            log::info!( // TODO: debug
+            log::debug!(
                 target: &self.runtime_service.log_target,
                 "Starting new download, id={:?}, block={}",
                 download_params.id,
