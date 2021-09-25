@@ -974,7 +974,11 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 .tree
                 .as_mut()
                 .unwrap()
-                .insert_block(block);
+                .insert_block(
+                    block.scale_encoded_header,
+                    &block.parent_hash,
+                    block.is_new_best,
+                );
         }
 
         background.start_necessary_downloads().await;
@@ -1022,7 +1026,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                             );
 
                             let mut guarded = background.runtime_service.guarded.lock().await;
-                            let output_update = guarded.tree.as_mut().unwrap().insert_block(new_block);
+                            let output_update = guarded.tree.as_mut().unwrap().insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
                             guarded.notify_subscribers(output_update).await;
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {

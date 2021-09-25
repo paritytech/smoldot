@@ -32,9 +32,6 @@
 //!
 
 // TODO: move this module to /src directory
-// TODO: remove references to sync service everywhere, including in docs
-
-use crate::sync_service;
 
 use core::{iter, mem, num::NonZeroUsize};
 use smoldot::{chain::fork_tree, executor, header, metadata};
@@ -75,7 +72,7 @@ pub struct Guarded {
     runtimes: slab::Slab<Runtime>,
 
     /// State of the finalized block reported through the public API of the runtime service.
-    /// This doesn't necessarily match the one of the sync service.
+    /// This doesn't necessarily match the one of the input.
     ///
     /// When `Guarded` has output, The value of [`Block::runtime`] for this block is guaranteed to
     /// be [`RuntimeDownloadState::Finished`].
@@ -92,15 +89,14 @@ pub struct Guarded {
     best_block_index: Option<fork_tree::NodeIndex>,
 
     /// Index within [`Guarded::non_finalized_blocks`] of the finalized block according to the
-    /// sync service. `None` if the sync service finalized block is the same as the runtime
-    /// service's finalized block.
+    /// input. `None` if the input finalized block is the same as the output finalized block.
     ///
     /// If `Some` and when `Guarded` has output, the value of [`Block::runtime`] for this
     /// block is guaranteed to **not** be [`RuntimeDownloadState::Finished`].
-    sync_service_finalized_index: Option<fork_tree::NodeIndex>,
+    input_finalized_index: Option<fork_tree::NodeIndex>,
 
-    /// Incremented by one and stored within [`Block::sync_service_best_block_report_id`].
-    sync_service_best_block_next_report_id: u32,
+    /// Incremented by one and stored within [`Block::input_best_block_weight`].
+    input_best_block_next_weight: u32,
 
     /// Identifier to assign to the next download.
     next_download_id: DownloadId,
@@ -207,10 +203,10 @@ impl Guarded {
                 runtime: finalized_block_runtime,
                 hash: header::hash_from_scale_encoded_header(&finalized_block_scale_encoded_header),
                 header: finalized_block_scale_encoded_header,
-                sync_service_best_block_report_id: 1,
+                input_best_block_weight: 1,
             },
-            sync_service_finalized_index: None,
-            sync_service_best_block_next_report_id: 2,
+            input_finalized_index: None,
+            input_best_block_next_weight: 2,
             next_download_id: DownloadId(0),
         }
     }
@@ -527,7 +523,7 @@ impl Guarded {
         }
 
         // Finalized block according to the blocks input.
-        if let Some(idx) = self.sync_service_finalized_index {
+        if let Some(idx) = self.input_finalized_index {
             if let Some(download) = self.start_necessary_download(Some(idx)) {
                 return Some(download);
             }
@@ -537,7 +533,7 @@ impl Guarded {
         if let Some((idx, _)) = self
             .non_finalized_blocks
             .iter_unordered()
-            .max_by_key(|(_, b)| b.sync_service_best_block_report_id)
+            .max_by_key(|(_, b)| b.input_best_block_weight)
         {
             if let Some(download) = self.start_necessary_download(Some(idx)) {
                 return Some(download);
@@ -582,29 +578,36 @@ impl Guarded {
     }
 
     /// Updates the state machine with a new block.
-    pub fn insert_block(&mut self, new_block: sync_service::BlockNotification) -> OutputUpdate {
-        // TODO: remove sync_service and pass individual fields instead ^
+    ///
+    /// # Panic
+    ///
+    /// Panics if `parent_hash` wasn't inserted before.
+    ///
+    pub fn insert_block(
+        &mut self,
+        scale_encoded_header: Vec<u8>,
+        parent_hash: &[u8; 32],
+        is_new_best: bool,
+    ) -> OutputUpdate {
         // Find the parent of the new block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the parent to have been
-        // reported before.
-        let parent_index = if new_block.parent_hash == self.finalized_block.hash {
+        let parent_index = if *parent_hash == self.finalized_block.hash {
             None
         } else {
             Some(
                 self.non_finalized_blocks
-                    .find(|b| b.hash == new_block.parent_hash)
+                    .find(|b| b.hash == *parent_hash)
                     .unwrap(),
             )
         };
 
-        // When this block is later inserted, value to use for `sync_service_best_block_report_id`.
-        let sync_service_best_block_report_id = if new_block.is_new_best {
-            let id = self.sync_service_best_block_next_report_id;
+        // When this block is later inserted, value to use for `input_best_block_weight`.
+        let input_best_block_weight = if is_new_best {
+            let id = self.input_best_block_next_weight;
             debug_assert!(self
                 .non_finalized_blocks
                 .iter_unordered()
-                .all(|(_, b)| b.sync_service_best_block_report_id < id));
-            self.sync_service_best_block_next_report_id += 1;
+                .all(|(_, b)| b.input_best_block_weight < id));
+            self.input_best_block_next_weight += 1;
             id
         } else {
             0
@@ -614,18 +617,16 @@ impl Guarded {
         // root of the block, which is found in the block's header.
         // Try to decode the new block's header. Failures are handled gracefully by
         // inserting the block but not retrieving its runtime.
-        let decoded_header = match header::decode(&new_block.scale_encoded_header) {
+        let decoded_header = match header::decode(&scale_encoded_header) {
             Ok(h) => h,
             Err(_) => {
                 self.non_finalized_blocks.insert(
                     parent_index,
                     Block {
                         runtime: Err(BlockRuntimeErr::InvalidHeader),
-                        hash: header::hash_from_scale_encoded_header(
-                            &new_block.scale_encoded_header,
-                        ),
-                        header: new_block.scale_encoded_header,
-                        sync_service_best_block_report_id,
+                        hash: header::hash_from_scale_encoded_header(&scale_encoded_header),
+                        header: scale_encoded_header,
+                        input_best_block_weight,
                     },
                 );
 
@@ -668,11 +669,9 @@ impl Guarded {
                                 download_id,
                                 state_root: *decoded_header.state_root,
                             }),
-                            hash: header::hash_from_scale_encoded_header(
-                                &new_block.scale_encoded_header,
-                            ),
-                            header: new_block.scale_encoded_header,
-                            sync_service_best_block_report_id,
+                            hash: header::hash_from_scale_encoded_header(&scale_encoded_header),
+                            header: scale_encoded_header,
+                            input_best_block_weight,
                         },
                     );
 
@@ -691,11 +690,9 @@ impl Guarded {
                         parent_index,
                         Block {
                             runtime: Ok(RuntimeDownloadState::Finished(runtime_index)),
-                            hash: header::hash_from_scale_encoded_header(
-                                &new_block.scale_encoded_header,
-                            ),
-                            header: new_block.scale_encoded_header,
-                            sync_service_best_block_report_id,
+                            hash: header::hash_from_scale_encoded_header(&scale_encoded_header),
+                            header: scale_encoded_header,
+                            input_best_block_weight,
                         },
                     );
 
@@ -714,9 +711,9 @@ impl Guarded {
                     same_as_parent: !runtime_environment_update,
                     state_root: *decoded_header.state_root,
                 }),
-                hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
-                header: new_block.scale_encoded_header,
-                sync_service_best_block_report_id,
+                hash: header::hash_from_scale_encoded_header(&scale_encoded_header),
+                header: scale_encoded_header,
+                input_best_block_weight,
             },
         );
 
@@ -736,6 +733,11 @@ impl Guarded {
     ///
     /// > **Note**: Finalizing a block might have to modify the current best block if the block
     /// >           being finalized isn't an ancestor of the current best block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `hash_to_finalize` or `new_best_block_hash` weren't inserted before.
+    ///
     pub fn finalize(
         &mut self,
         hash_to_finalize: [u8; 32],
@@ -743,25 +745,21 @@ impl Guarded {
     ) -> OutputUpdate {
         if hash_to_finalize != self.finalized_block.hash {
             // Find the finalized block in the list of blocks that we know.
-            // It is guaranteed by the API of the sync service for the block to have been
-            // reported before.
             let finalized_node_index = self
                 .non_finalized_blocks
                 .find(|b| b.hash == hash_to_finalize)
                 .unwrap();
-            self.sync_service_finalized_index = Some(finalized_node_index);
+            self.input_finalized_index = Some(finalized_node_index);
         }
 
         // Find the new best block in the list of blocks that we know.
-        // It is guaranteed by the API of the sync service for the block to have been reported
-        // before.
         // TODO: don't do that if best block didn't change
-        let best_block_report_id = self.sync_service_best_block_next_report_id;
+        let best_block_report_id = self.input_best_block_next_weight;
         debug_assert!(self
             .non_finalized_blocks
             .iter_unordered()
-            .all(|(_, b)| b.sync_service_best_block_report_id < best_block_report_id));
-        self.sync_service_best_block_next_report_id += 1;
+            .all(|(_, b)| b.input_best_block_weight < best_block_report_id));
+        self.input_best_block_next_weight += 1;
 
         let new_best_block_index = self
             .non_finalized_blocks
@@ -771,7 +769,7 @@ impl Guarded {
         self.non_finalized_blocks
             .get_mut(new_best_block_index)
             .unwrap()
-            .sync_service_best_block_report_id = best_block_report_id;
+            .input_best_block_weight = best_block_report_id;
 
         self.try_advance_output()
     }
@@ -826,19 +824,17 @@ impl Guarded {
         {
             // Weight of the current runtime service best block.
             let mut current_runtime_service_best_block_weight = match self.best_block_index {
-                None => self.finalized_block.sync_service_best_block_report_id,
+                None => self.finalized_block.input_best_block_weight,
                 Some(idx) => {
                     self.non_finalized_blocks
                         .get(idx)
                         .unwrap()
-                        .sync_service_best_block_report_id
+                        .input_best_block_weight
                 }
             };
 
             for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
-                if block.sync_service_best_block_report_id
-                    < current_runtime_service_best_block_weight
-                {
+                if block.input_best_block_weight < current_runtime_service_best_block_weight {
                     continue;
                 }
 
@@ -847,7 +843,7 @@ impl Guarded {
                 }
 
                 // Runtime service best can be updated to the block being iterated.
-                current_runtime_service_best_block_weight = block.sync_service_best_block_report_id;
+                current_runtime_service_best_block_weight = block.input_best_block_weight;
                 self.best_block_index = Some(node_index);
                 output.best_block_updated = true;
 
@@ -856,17 +852,16 @@ impl Guarded {
         }
 
         // Try to advance the output finalized block.
-        // `sync_service_finalized_index` is `Some` if it is not already equal to the runtime
+        // `input_finalized_index` is `Some` if it is not already equal to the runtime
         // service finalized.
-        if let Some(sync_service_finalized_index) = self.sync_service_finalized_index {
+        if let Some(input_finalized_index) = self.input_finalized_index {
             // Finding a new finalized block. This is done differently depending on whether the
             // tree already has an output, in which case the best block should be preserved.
             let new_finalized = if self.has_output() {
-                // Try to find the earliest ancestor of the sync service finalized block whose
-                // runtime is ready and that is also an ancestor of the current runtime service
-                // best block.
+                // Try to find the earliest ancestor of the input finalized block whose runtime
+                // is ready and that is also an ancestor of the current output best block.
                 self.non_finalized_blocks
-                    .node_to_root_path(sync_service_finalized_index)
+                    .node_to_root_path(input_finalized_index)
                     .find(|node_index| {
                         matches!(
                             self.non_finalized_blocks.get(*node_index).unwrap().runtime,
@@ -877,18 +872,18 @@ impl Guarded {
                     })
             } else {
                 // If there's no output anyway, try find a block that is ready, and if none is
-                // ready, simply jump to `sync_service_finalized_index`.
+                // ready, simply jump to `input_finalized_index`.
                 // We don't try to preserve the current output best block.
                 let new_finalized = self
                     .non_finalized_blocks
-                    .node_to_root_path(sync_service_finalized_index)
+                    .node_to_root_path(input_finalized_index)
                     .find(|node_index| {
                         matches!(
                             self.non_finalized_blocks.get(*node_index).unwrap().runtime,
                             Ok(RuntimeDownloadState::Finished(_))
                         )
                     })
-                    .unwrap_or(sync_service_finalized_index);
+                    .unwrap_or(input_finalized_index);
 
                 if !self.best_block_index.map_or(true, |idx| {
                     self.non_finalized_blocks.is_ancestor(new_finalized, idx)
@@ -910,9 +905,9 @@ impl Guarded {
                         output.best_block_updated = true;
                     }
 
-                    if Some(pruned.index) == self.sync_service_finalized_index {
-                        debug_assert!(self.sync_service_finalized_index.unwrap() == new_finalized);
-                        self.sync_service_finalized_index = None;
+                    if Some(pruned.index) == self.input_finalized_index {
+                        debug_assert!(self.input_finalized_index.unwrap() == new_finalized);
+                        self.input_finalized_index = None;
                     }
 
                     // If this is the new finalized block, replace `self.finalized_block`.
@@ -944,19 +939,17 @@ impl Guarded {
         if output.best_block_updated {
             // Weight of the current runtime service best block.
             let mut current_runtime_service_best_block_weight = match self.best_block_index {
-                None => self.finalized_block.sync_service_best_block_report_id,
+                None => self.finalized_block.input_best_block_weight,
                 Some(idx) => {
                     self.non_finalized_blocks
                         .get(idx)
                         .unwrap()
-                        .sync_service_best_block_report_id
+                        .input_best_block_weight
                 }
             };
 
             for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
-                if block.sync_service_best_block_report_id
-                    < current_runtime_service_best_block_weight
-                {
+                if block.input_best_block_weight < current_runtime_service_best_block_weight {
                     continue;
                 }
 
@@ -965,7 +958,7 @@ impl Guarded {
                 }
 
                 // Runtime service best can be updated to the block being iterated.
-                current_runtime_service_best_block_weight = block.sync_service_best_block_report_id;
+                current_runtime_service_best_block_weight = block.input_best_block_weight;
                 self.best_block_index = Some(node_index);
                 output.best_block_updated = true;
 
@@ -1063,9 +1056,9 @@ struct Block {
     /// Runtime information of that block. Shared amongst multiple different blocks.
     runtime: Result<RuntimeDownloadState, BlockRuntimeErr>,
 
-    /// A block with a higher value here has been reported by the sync service as the best block
+    /// A block with a higher value here has been reported by the input as the best block
     /// more recently than a block with a lower value. `0` means never reported as best block.
-    sync_service_best_block_report_id: u32,
+    input_best_block_weight: u32,
 }
 
 #[derive(Debug)]
