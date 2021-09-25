@@ -31,10 +31,8 @@
 //! After a download has succeeded, the data structure will become "ready".
 //!
 
-// TODO: move this module to /src directory
-
+use crate::{chain::fork_tree, executor, header, metadata};
 use core::{iter, mem, num::NonZeroUsize};
-use smoldot::{chain::fork_tree, executor, header, metadata};
 
 /// Error when analyzing the runtime.
 #[derive(Debug, derive_more::Display, Clone)]
@@ -1076,8 +1074,8 @@ impl ExtractedDownloadTree {
 }
 
 struct Block {
-    /// Hash of the block in question.
-    // TODO: redundant with `header`
+    /// Hash of the block in question. Redundant with `header`, but the hash is so often needed
+    /// that it makes sense to cache it.
     hash: [u8; 32],
 
     /// Header of the block in question.

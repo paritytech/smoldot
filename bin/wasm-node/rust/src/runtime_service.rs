@@ -56,14 +56,13 @@ use smoldot::{
     informant::HashDisplay,
     metadata,
     network::protocol,
+    sync::download_tree,
     trie::{self, proof_verify},
 };
 use std::{iter, mem, pin::Pin, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
-pub use download_tree::RuntimeError;
-
-mod download_tree;
+pub use smoldot::sync::download_tree::RuntimeError;
 
 /// Configuration for a runtime service.
 pub struct Config<'a> {
@@ -123,10 +122,12 @@ impl RuntimeService {
                 best_blocks_subscriptions: Vec::new(),
                 runtime_version_subscriptions: Vec::new(),
                 best_near_head_of_chain,
-                tree: Some(download_tree::DownloadTree::from_finalized_block_and_storage(
-                    config.genesis_block_scale_encoded_header,
-                    config.chain_spec.genesis_storage(),
-                )),
+                tree: Some(
+                    download_tree::DownloadTree::from_finalized_block_and_storage(
+                        config.genesis_block_scale_encoded_header,
+                        config.chain_spec.genesis_storage(),
+                    ),
+                ),
             }),
         });
 
