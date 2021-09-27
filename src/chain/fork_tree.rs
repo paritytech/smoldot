@@ -306,9 +306,16 @@ impl<T> ForkTree<T> {
         let iter1 = self
             .node_to_root_path(node1)
             .take_while(move |v| Some(*v) != common_ancestor);
-        let iter2 = self
-            .root_to_node_path(node2)
-            .skip_while(move |v| Some(*v) != common_ancestor);
+
+        let iter2 = if let Some(common_ancestor) = common_ancestor {
+            either::Left(
+                self.root_to_node_path(node2)
+                    .skip_while(move |v| *v != common_ancestor)
+                    .skip(1),
+            )
+        } else {
+            either::Right(self.root_to_node_path(node2))
+        };
 
         (iter1, iter2)
     }

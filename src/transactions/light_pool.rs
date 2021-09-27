@@ -68,6 +68,8 @@ use alloc::{
 };
 use core::{convert::TryFrom as _, fmt, iter};
 
+mod tests;
+
 /// Configuration for [`LightPool::new`].
 pub struct Config {
     /// Number of transactions to initially allocate memory for.
@@ -136,7 +138,8 @@ pub struct LightPool<TTx, TBl> {
     /// Contains all blocks in [`LightPool::blocks_tree`], indexed by their hash.
     blocks_by_id: hashbrown::HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
 
-    /// Index of the best block in [`LightPool::blocks_tree`]. `None` iff the tree is empty.
+    /// Index of the best block in [`LightPool::blocks_tree`]. `None` iff the tree is empty
+    /// or if the best block is [`LightPool::blocks_tree_root_hash`].
     best_block_index: Option<fork_tree::NodeIndex>,
 
     /// Index of the finalized block in [`LightPool::blocks_tree`]. `None` if the tree is empty
@@ -300,7 +303,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         Some(&self.transactions.get(id.0)?.double_scale_encoded)
     }
 
-    /// Tries to find a transaction in the pool whose bytes are `double_scale_encoded`.
+    /// Tries to find the transactions in the pool whose bytes are `double_scale_encoded`.
     pub fn find_transaction(
         &'_ self,
         double_scale_encoded: &[u8],
@@ -459,13 +462,12 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     .ascend_and_descend(old_best_index, new_best_block_index);
                 (either::Left(ascend), either::Left(descend))
             } else {
-                let ascend = self.blocks_tree.node_to_root_path(new_best_block_index);
-                let descend = iter::empty::<fork_tree::NodeIndex>();
+                let ascend = iter::empty::<fork_tree::NodeIndex>();
+                let descend = self.blocks_tree.root_to_node_path(new_best_block_index);
                 (either::Right(ascend), either::Right(descend))
             };
 
         let mut retracted_transactions = Vec::new();
-
         for to_retract_index in old_best_to_common_ancestor {
             let retracted = self.blocks_tree.get(to_retract_index).unwrap();
             for (_, tx_id) in self.transactions_by_inclusion.range(
@@ -542,9 +544,9 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         ));
         self.blocks_tree.get_mut(block_index).unwrap().body = BodyState::Known;
 
-        let is_in_best_chain = self
-            .blocks_tree
-            .is_ancestor(block_index, self.best_block_index.unwrap());
+        let is_in_best_chain = self.best_block_index.map_or(false, |best_block_index| {
+            self.blocks_tree.is_ancestor(block_index, best_block_index)
+        });
 
         // Value returned from the function.
         // TODO: optimize by not having Vec
@@ -605,10 +607,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
                         // If `existing_included_block_idx` is in the best chain, set
                         // `now_included` to false.
-                        if self.blocks_tree.is_ancestor(
-                            existing_included_block_idx,
-                            self.best_block_index.unwrap(),
-                        ) {
+                        if self.best_block_index.map_or(false, |best_block_index| {
+                            self.blocks_tree
+                                .is_ancestor(existing_included_block_idx, best_block_index)
+                        }) {
                             now_included = false;
                         }
                     }
@@ -912,5 +914,3 @@ enum BodyState {
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }
-
-// TODO: needs tests
