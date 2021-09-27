@@ -766,7 +766,8 @@ struct Worker {
 }
 
 impl Worker {
-    /// Update the best block. Must have been previously inserted with [`Worker::new_block`].
+    /// Update the best block. Must have been previously inserted with
+    /// [`light_pool::LightPool::new_block`].
     fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) {
         let updates = self
             .pending_transactions
