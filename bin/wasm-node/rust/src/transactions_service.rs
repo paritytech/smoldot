@@ -280,39 +280,37 @@ async fn background_task(
         // after a Grandpa warp sync) or because the transactions service was too busy to process
         // the new blocks.
 
-        // Note that the new blocks subscription must be aquired before the finalized blocks
-        // subscription. Otherwise, a block could be finalized between the moment we subscribe
-        // to finalized blocks and the moment we subscribe to all blocks, which would lead to
-        // trying to finalize a block that is unknown to us, which would be a state inconsistency.
-        let (current_finalized_block_header, mut new_blocks_receiver) = {
-            let subscribe_all = worker.sync_service.subscribe_all(32).await;
-            (
-                subscribe_all.finalized_block_scale_encoded_header,
-                stream::iter(subscribe_all.non_finalized_blocks).chain(
-                    subscribe_all.new_blocks.filter_map(|notif| {
-                        future::ready(match notif {
-                            sync_service::Notification::Block(b) => Some(b),
-                            _ => None,
-                        })
-                    }),
-                ),
-            )
-        };
-        // TODO: use the new_blocks_receiver instead of subscribing separately to these
-        let (_, mut best_block_receiver) = worker.sync_service.subscribe_best().await;
-        let (_, mut finalized_block_receiver) = worker.sync_service.subscribe_finalized().await;
-        let current_finalized_block_hash =
-            header::hash_from_scale_encoded_header(&current_finalized_block_header);
+        let mut subscribe_all = worker.sync_service.subscribe_all(32).await;
+        let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
+            &subscribe_all.finalized_block_scale_encoded_header,
+        );
 
         // Drop all pending transactions of the pool.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             pending.update_status(TransactionStatus::Dropped);
         }
+
+        // Reset the blocks tracking state machine.
         worker.pending_transactions = light_pool::LightPool::new(light_pool::Config {
             transactions_capacity,
             blocks_capacity,
-            finalized_block_hash: current_finalized_block_hash,
+            finalized_block_hash: initial_finalized_block_hash,
         });
+
+        for block in subscribe_all.non_finalized_blocks {
+            let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+            worker.pending_transactions.add_block(
+                hash,
+                &block.parent_hash,
+                Block {
+                    failed_downloads: 0,
+                    downloading: false,
+                },
+            );
+            if block.is_new_best {
+                worker.set_best_block(&hash);
+            }
+        }
 
         // Reset the other fields.
         worker.block_downloads.clear();
@@ -322,7 +320,7 @@ async fn background_task(
         log::debug!(
             target: &log_target,
             "Transactions watcher moved to finalized block {}.",
-            HashDisplay(&current_finalized_block_hash),
+            HashDisplay(&initial_finalized_block_hash),
         );
 
         loop {
@@ -357,6 +355,7 @@ async fn background_task(
                 // Create the `Future` of the validation process.
                 let validation_future = {
                     let runtime_service = worker.runtime_service.clone();
+                    let log_target = log_target.clone();
                     let scale_encoded_transaction = worker
                         .pending_transactions
                         .double_scale_encoding(to_start_validate)
@@ -364,6 +363,7 @@ async fn background_task(
                         .to_owned();
                     async move {
                         validate_transaction(
+                            &log_target,
                             &runtime_service,
                             scale_encoded_transaction,
                             validate::TransactionSource::External,
@@ -384,17 +384,6 @@ async fn background_task(
                     .unwrap();
                 debug_assert!(tx.validation_in_progress.is_none());
                 tx.validation_in_progress = Some(result_rx);
-
-                log::debug!(
-                    target: &log_target,
-                    "Starting for {}",
-                    HashDisplay(&blake2_hash(
-                        worker
-                            .pending_transactions
-                            .double_scale_encoding(to_start_validate)
-                            .unwrap()
-                    ))
-                );
             }
 
             // Start block bodies downloads that need to be started.
@@ -462,48 +451,34 @@ async fn background_task(
             }
 
             futures::select! {
-                new_block = new_blocks_receiver.next().fuse() => {
-                    if let Some(new_block) = new_block {
-                        let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
-                        worker.new_block(&new_block.scale_encoded_header, &new_block.parent_hash);
-                        if new_block.is_new_best {
-                            worker.set_best_block(&hash).await;
-                        }
-                    } else {
-                        continue 'channels_rebuild;
-                    }
-                },
-
-                finalized_block_header = finalized_block_receiver.next().fuse() => {
-                    // It is possible that a block has been pushed to both the new blocks channel
-                    // and the finalized block channel at the same time, but the finalized block
-                    // channel is notified first. In order to fulfill the guarantee that all finalized
-                    // blocks must have earlier been reported as new blocks, we first empty the new
-                    // blocks receiver.
-                    // TODO: really rethink the order of polling here in order to simplify it
-                    while let Some(new_best_block) = best_block_receiver.next().now_or_never() {
-                        let new_best_block = new_best_block.unwrap();
-                        let hash = header::hash_from_scale_encoded_header(&new_best_block);
-                        worker.set_best_block(&hash).await;
-                    }
-                    // TODO: DRY
-                    while let Some(new_block) = new_blocks_receiver.next().now_or_never() {
-                        if let Some(new_block) = new_block {
-                            worker.new_block(&new_block.scale_encoded_header, &new_block.parent_hash);
-                        } else {
-                            continue 'channels_rebuild;
-                        }
-                    }
-
-                    let finalized_hash =
-                        header::hash_from_scale_encoded_header(&finalized_block_header.unwrap());
-                    for _ in worker
-                        .pending_transactions
-                        .set_finalized_block(&finalized_hash)
-                    {
-                        // Nothing to do here.
-                        // We could in principle interrupt any on-going download of that block,
-                        // but it is not worth the effort.
+                notification = subscribe_all.new_blocks.next() => {
+                    match notification {
+                        Some(sync_service::Notification::Block(new_block)) => {
+                            let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
+                            worker.pending_transactions.add_block(
+                                header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
+                                &new_block.parent_hash,
+                                Block {
+                                    failed_downloads: 0,
+                                    downloading: false,
+                                },
+                            );
+                            if new_block.is_new_best {
+                                worker.set_best_block(&hash);
+                            }
+                        },
+                        Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
+                            worker.set_best_block(&best_block_hash);
+                            for _ in worker
+                                .pending_transactions
+                                .set_finalized_block(&hash)
+                            {
+                                // Nothing to do here.
+                                // We could in principle interrupt any on-going download of that block,
+                                // but it is not worth the effort.
+                            }
+                        },
+                        None => continue 'channels_rebuild
                     }
                 },
 
@@ -621,7 +596,7 @@ async fn background_task(
                     };
 
                     match validation_result {
-                        Ok((block_hash, result)) => {
+                        Ok((block_hash, Ok(result))) => {
                             // The validation is made using the runtime service, while the state
                             // of the chain is tracked using the sync service. As such, it is
                             // possible for the validation to have been performed against a block
@@ -643,17 +618,31 @@ async fn background_task(
                                 result
                             );
 
-                            worker.pending_transactions.set_validation_result(maybe_validated_tx_id, &block_hash, result);
+                            worker.pending_transactions
+                                .set_validation_result(maybe_validated_tx_id, &block_hash, Ok(result));
 
                             // Schedule this transaction for announcement.
                             worker.next_reannounce.push(async move {
                                 maybe_validated_tx_id
                             }.boxed());
                         }
-                        Err(error) => {
-                            log::debug!(
+                        Ok((_, Err(error))) => {
+                            log::warn!(
                                 target: &log_target,
-                                "Failed for {}: {}",
+                                "Discarding invalid transaction {}: {:?}",
+                                HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
+                                error,
+                            );
+
+                            // The validation itself has completed, but the runtime indicated
+                            // that the transaction was invalid. Drop the transaction.
+                            let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
+                            tx.update_status(TransactionStatus::Dropped);
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                target: &log_target,
+                                "Failed to validate transaction {}: {}",
                                 HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
                                 error
                             );
@@ -661,7 +650,6 @@ async fn background_task(
                             // Transaction couldn't be validated because of an error while
                             // executing the runtime. This most likely indicates a compatibility
                             // problem between smoldot and the runtime code. Drop the transaction.
-                            log::warn!(target: &log_target, "Failed to validate transaction: {}", error);
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
                             tx.update_status(TransactionStatus::Dropped);
                         }
@@ -782,20 +770,9 @@ struct Worker {
 }
 
 impl Worker {
-    /// Insert a new block in the worker when the sync service hears about it.
-    fn new_block(&mut self, new_block_header: &Vec<u8>, parent_hash: &[u8; 32]) {
-        self.pending_transactions.add_block(
-            header::hash_from_scale_encoded_header(&new_block_header),
-            parent_hash,
-            Block {
-                failed_downloads: 0,
-                downloading: false,
-            },
-        );
-    }
-
-    /// Update the best block. Must have been previously inserted with [`Worker::new_block`].
-    async fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) {
+    /// Update the best block. Must have been previously inserted with
+    /// [`light_pool::LightPool::add_block`].
+    fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) {
         let updates = self
             .pending_transactions
             .set_best_block(new_best_block_hash);
@@ -891,6 +868,7 @@ impl PendingTransaction {
 ///
 /// Returns the result of the validation, and the hash of the block it was validated against.
 async fn validate_transaction(
+    log_target: &str,
     relay_chain_sync: &Arc<runtime_service::RuntimeService>,
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
@@ -902,6 +880,16 @@ async fn validate_transaction(
     ValidateTransactionError,
 > {
     let runtime_lock = relay_chain_sync.recent_best_block_runtime_lock().await;
+
+    log::debug!(
+        target: log_target,
+        "Starting validation of {} against block {} (height: {:?})",
+        HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
+        HashDisplay(runtime_lock.block_hash()),
+        header::decode(runtime_lock.block_scale_encoded_header())
+            .ok()
+            .map(|h| h.number)
+    );
 
     let block_hash = *runtime_lock.block_hash();
     let (runtime_call_lock, runtime) = runtime_lock
