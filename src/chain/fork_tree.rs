@@ -636,5 +636,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn correct_ascend_descend_when_common_ancestor_is_root() {
+        let mut tree = ForkTree::new();
+
+        let node0 = tree.insert(None, ());
+        let node1 = tree.insert(None, ());
+
+        let (ascend, descend) = tree.ascend_and_descend(node0, node1);
+        assert_eq!(ascend.collect::<Vec<_>>(), vec![node0]);
+        assert_eq!(descend.collect::<Vec<_>>(), vec![node1]);
+    }
+
     // TODO: add more testing for the order of elements returned by `prune_ancestors`
 }
