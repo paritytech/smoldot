@@ -237,10 +237,43 @@ impl RuntimeService {
             (code, heap_pages)
         };
 
-        SuccessfulRuntime::from_params(&self.log_target, &code, &heap_pages)
-            .await
-            .map(|r| r.runtime_spec)
-            .map_err(RuntimeVersionOfBlockError::InvalidRuntime)
+        let vm = match executor::host::HostVmPrototype::new(
+            code.as_ref()
+                .ok_or(RuntimeError::CodeNotFound)
+                .map_err(RuntimeVersionOfBlockError::InvalidRuntime)?,
+            executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                .map_err(RuntimeError::InvalidHeapPages)
+                .map_err(RuntimeVersionOfBlockError::InvalidRuntime)?,
+            executor::vm::ExecHint::CompileAheadOfTime,
+        ) {
+            Ok(vm) => vm,
+            Err(error) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Failed to compile best block runtime: {}",
+                    error
+                );
+                return Err(RuntimeVersionOfBlockError::InvalidRuntime(
+                    RuntimeError::Build(error),
+                ));
+            }
+        };
+
+        let (runtime_spec, _) = match executor::core_version(vm) {
+            (Ok(spec), vm) => (spec, vm),
+            (Err(error), _) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Failed to call Core_version on runtime: {}",
+                    error
+                );
+                return Err(RuntimeVersionOfBlockError::InvalidRuntime(
+                    RuntimeError::CoreVersion(error),
+                ));
+            }
+        };
+
+        Ok(runtime_spec)
     }
 
     /// Returns the runtime version of the current best block.
@@ -843,86 +876,6 @@ impl Guarded {
                 self.finalized_blocks_subscriptions.push(subscription);
             }
         }
-    }
-}
-
-// TODO: remove this
-struct SuccessfulRuntime {
-    /// Cache of the metadata extracted from the runtime. `None` if unknown.
-    ///
-    /// This cache is filled lazily whenever it is requested through the public API.
-    ///
-    /// Note that building the metadata might require access to the storage, just like obtaining
-    /// the runtime code. if the runtime code gets an update, we can reasonably assume that the
-    /// network is able to serve us the storage of recent blocks, and thus the changes of being
-    /// able to build the metadata are very high.
-    ///
-    /// If the runtime is the one found in the genesis storage, the metadata must have been been
-    /// filled using the genesis storage as well. If we build the metadata of the genesis runtime
-    /// lazily, chances are that the network wouldn't be able to serve the storage of blocks near
-    /// the genesis.
-    ///
-    /// As documented in the smoldot metadata module, the metadata might access the storage, but
-    /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
-    metadata: Option<Vec<u8>>,
-
-    /// Runtime specs extracted from the runtime.
-    runtime_spec: executor::CoreVersion,
-
-    /// Virtual machine itself, to perform additional calls.
-    ///
-    /// Always `Some`, except for temporary extractions necessary to execute the VM.
-    virtual_machine: Option<executor::host::HostVmPrototype>,
-}
-
-impl SuccessfulRuntime {
-    async fn from_params(
-        log_target: &str,
-        code: &Option<Vec<u8>>,
-        heap_pages: &Option<Vec<u8>>,
-    ) -> Result<Self, RuntimeError> {
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
-        // once after.
-        super::yield_once().await;
-
-        let vm = match executor::host::HostVmPrototype::new(
-            code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
-            executor::storage_heap_pages_to_value(heap_pages.as_deref())
-                .map_err(RuntimeError::InvalidHeapPages)?,
-            executor::vm::ExecHint::CompileAheadOfTime,
-        ) {
-            Ok(vm) => vm,
-            Err(error) => {
-                log::warn!(
-                    target: &log_target,
-                    "Failed to compile best block runtime: {}",
-                    error
-                );
-                return Err(RuntimeError::Build(error));
-            }
-        };
-
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
-        // once after.
-        super::yield_once().await;
-
-        let (runtime_spec, vm) = match executor::core_version(vm) {
-            (Ok(spec), vm) => (spec, vm),
-            (Err(error), _) => {
-                log::warn!(
-                    target: &log_target,
-                    "Failed to call Core_version on runtime: {}",
-                    error
-                );
-                return Err(RuntimeError::CoreVersion(error));
-            }
-        };
-
-        Ok(SuccessfulRuntime {
-            metadata: None,
-            runtime_spec,
-            virtual_machine: Some(vm),
-        })
     }
 }
 
