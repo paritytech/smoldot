@@ -15,23 +15,30 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Data structure. Whenever the syncing mechanism reports a new best or finalized block, this
-//! data structure should be updated. The items can then be marked as "runtime being
-//! downloaded". Once their runtime is downloaded, the blocks can in turn be reported as the
-//! new best or finalized of the data structure.
+//! Data structure. Inputs blocks, tries to fetch their runtime, and outputs blocks whose runtime
+//! is known.
 //!
 //! # Usage
 //!
-//! This data structure considers an input source of blocks, and is in turn responsible for
-//! providing an output best block and an output finalized block.
+//! This data structure holds a tree of blocks whose runtime is either known, or not. This tree
+//! can be updated by using [`DownloadTree::insert_block`] and [`DownloadTree::finalize`].
 //!
-//! The data structure is initially in a "not ready" state, meaning that there is no finalized nor
-//! best block, and trying to access the finalized or the best block will panic.
+//! The data structure also holds a list of on-going runtime parameter downloads. Use
+//! [`DownloadTree::next_necessary_download`] to insert an ongoing download in the data structure.
+//! It is the responsibility of the API user to actually perform the download and use
+//! [`DownloadTree::runtime_download_finished`] or [`DownloadTree::runtime_download_failure`] when
+//! this download is finished.
 //!
-//! After a download has succeeded, the data structure will become "ready".
+//! Whenever it is updated, the [`DownloadTree`] can also update the block that it considers as
+//! the "output best block" and the block that it considers as the "output finalized block". These
+//! blocks are guaranteed to have their runtime known.
+//! At initialization, the data structure is initially in a "not ready" state, in which case
+//! it doesn't have any output best or finalized block. Use [`DownloadTree::has_output`] to
+//! determine whether the data structure is ready.
 //!
 
 use crate::{chain::fork_tree, executor, header, metadata};
+use alloc::vec::Vec;
 use core::{iter, mem, num::NonZeroUsize};
 
 /// Error when analyzing the runtime.
@@ -1031,9 +1038,16 @@ impl DownloadTree {
     }
 }
 
+/// Informs about whether the call to the method that returned this [`OutputUpdate`] resulted in
+/// a change in the output best or finalized block.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct OutputUpdate {
+    /// If `true`, the call to the method that returned this [`OutputUpdate`] resulted in a change
+    /// in the output finalized block of the [`DownloadTree`].
     pub finalized_block_updated: bool,
+    /// If `true`, the call to the method that returned this [`OutputUpdate`] resulted in a change
+    /// in the output best block of the [`DownloadTree`].
     pub best_block_updated: bool,
 }
 
