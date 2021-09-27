@@ -637,7 +637,22 @@ mod tests {
     }
 
     #[test]
-    fn correct_ascend_descend_when_common_ancestor_is_root() {
+    fn ascend_descend_when_common_ancestor_is_not_root() {
+        let mut tree = ForkTree::new();
+
+        let node0 = tree.insert(None, ());
+        let node1 = tree.insert(Some(node0), ());
+        let node2 = tree.insert(Some(node0), ());
+
+        let (ascend, descend) = tree.ascend_and_descend(node1, node2);
+        assert_eq!(ascend.collect::<Vec<_>>(), vec![node1]);
+        assert_eq!(descend.collect::<Vec<_>>(), vec![node2]);
+
+        assert_eq!(tree.common_ancestor(node1, node2), Some(node0));
+    }
+
+    #[test]
+    fn ascend_descend_when_common_ancestor_is_root() {
         let mut tree = ForkTree::new();
 
         let node0 = tree.insert(None, ());
@@ -646,6 +661,8 @@ mod tests {
         let (ascend, descend) = tree.ascend_and_descend(node0, node1);
         assert_eq!(ascend.collect::<Vec<_>>(), vec![node0]);
         assert_eq!(descend.collect::<Vec<_>>(), vec![node1]);
+
+        assert_eq!(tree.common_ancestor(node0, node1), None);
     }
 
     // TODO: add more testing for the order of elements returned by `prune_ancestors`
