@@ -355,6 +355,7 @@ async fn background_task(
                 // Create the `Future` of the validation process.
                 let validation_future = {
                     let runtime_service = worker.runtime_service.clone();
+                    let log_target = log_target.clone();
                     let scale_encoded_transaction = worker
                         .pending_transactions
                         .double_scale_encoding(to_start_validate)
@@ -362,6 +363,7 @@ async fn background_task(
                         .to_owned();
                     async move {
                         validate_transaction(
+                            &log_target,
                             &runtime_service,
                             scale_encoded_transaction,
                             validate::TransactionSource::External,
@@ -382,17 +384,6 @@ async fn background_task(
                     .unwrap();
                 debug_assert!(tx.validation_in_progress.is_none());
                 tx.validation_in_progress = Some(result_rx);
-
-                log::debug!(
-                    target: &log_target,
-                    "Starting for {}",
-                    HashDisplay(&blake2_hash(
-                        worker
-                            .pending_transactions
-                            .double_scale_encoding(to_start_validate)
-                            .unwrap()
-                    ))
-                );
             }
 
             // Start block bodies downloads that need to be started.
@@ -877,6 +868,7 @@ impl PendingTransaction {
 ///
 /// Returns the result of the validation, and the hash of the block it was validated against.
 async fn validate_transaction(
+    log_target: &str,
     relay_chain_sync: &Arc<runtime_service::RuntimeService>,
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
@@ -888,6 +880,16 @@ async fn validate_transaction(
     ValidateTransactionError,
 > {
     let runtime_lock = relay_chain_sync.recent_best_block_runtime_lock().await;
+
+    log::debug!(
+        target: log_target,
+        "Starting validation of {} against block {} (height: {:?})",
+        HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
+        HashDisplay(runtime_lock.block_hash()),
+        header::decode(runtime_lock.block_scale_encoded_header())
+            .ok()
+            .map(|h| h.number)
+    );
 
     let block_hash = *runtime_lock.block_hash();
     let (runtime_call_lock, runtime) = runtime_lock
