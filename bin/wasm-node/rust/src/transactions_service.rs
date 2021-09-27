@@ -621,7 +621,7 @@ async fn background_task(
                     };
 
                     match validation_result {
-                        Ok((block_hash, result)) => {
+                        Ok((block_hash, Ok(result))) => {
                             // The validation is made using the runtime service, while the state
                             // of the chain is tracked using the sync service. As such, it is
                             // possible for the validation to have been performed against a block
@@ -643,17 +643,31 @@ async fn background_task(
                                 result
                             );
 
-                            worker.pending_transactions.set_validation_result(maybe_validated_tx_id, &block_hash, result);
+                            worker.pending_transactions
+                                .set_validation_result(maybe_validated_tx_id, &block_hash, Ok(result));
 
                             // Schedule this transaction for announcement.
                             worker.next_reannounce.push(async move {
                                 maybe_validated_tx_id
                             }.boxed());
                         }
-                        Err(error) => {
-                            log::debug!(
+                        Ok((_, Err(error))) => {
+                            log::warn!(
                                 target: &log_target,
-                                "Failed for {}: {}",
+                                "Discarding invalid transaction {}: {:?}",
+                                HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
+                                error,
+                            );
+
+                            // The validation itself has completed, but the runtime indicated
+                            // that the transaction was invalid. Drop the transaction.
+                            let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
+                            tx.update_status(TransactionStatus::Dropped);
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                target: &log_target,
+                                "Failed to validate transaction {}: {}",
                                 HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
                                 error
                             );
@@ -661,7 +675,6 @@ async fn background_task(
                             // Transaction couldn't be validated because of an error while
                             // executing the runtime. This most likely indicates a compatibility
                             // problem between smoldot and the runtime code. Drop the transaction.
-                            log::warn!(target: &log_target, "Failed to validate transaction: {}", error);
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
                             tx.update_status(TransactionStatus::Dropped);
                         }

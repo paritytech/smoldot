@@ -370,6 +370,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the transaction with the given id is invalid.
     /// Panics if no block with that hash has been inserted before.
     ///
+    // TODO: is it correct to pass a `Result`, instead of just a `ValidTransaction`?
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
