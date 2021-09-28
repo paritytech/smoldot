@@ -43,7 +43,7 @@
 //! reported best block or more recent.
 
 use crate::{
-    lossy_channel,
+    ffi, lossy_channel,
     sync_service::{self, StorageQueryError},
 };
 
@@ -645,7 +645,7 @@ impl<'a> RuntimeLock<'a> {
 #[must_use]
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Guarded>,
-    extracted: Option<download_tree::ExtractedDownloadTree>,
+    extracted: Option<download_tree::ExtractedDownloadTree<ffi::Instant>>,
     runtime_block_header: Vec<u8>,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
@@ -842,7 +842,7 @@ struct Guarded {
 
     /// Tree of blocks. Holds the state of the download of everything. Always `true` when the
     /// `Mutex` is being locked. Switched to `None` during some operations.
-    tree: Option<download_tree::DownloadTree>,
+    tree: Option<download_tree::DownloadTree<ffi::Instant>>,
 }
 
 impl Guarded {
@@ -915,6 +915,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 }),
             }),
             blocks_stream: subscription.new_blocks.boxed(),
+            wake_up_new_necessary_download: future::pending().boxed().fuse(),
             runtime_matches_best_block: false,
             runtime_downloads: stream::FuturesUnordered::new(),
         };
@@ -967,6 +968,9 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             }
 
             futures::select! {
+                _ = &mut background.wake_up_new_necessary_download => {
+                    background.start_necessary_downloads().await;
+                },
                 notification = background.blocks_stream.next().fuse() => {
                     match notification {
                         None => break, // Break out of the inner loop in order to reset the background.
@@ -1022,7 +1026,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                             );
 
                             let mut guarded = background.runtime_service.guarded.lock().await;
-                            guarded.tree.as_mut().unwrap().runtime_download_failure(download_id);
+                            guarded.tree.as_mut().unwrap().runtime_download_failure(download_id, &ffi::Instant::now());
                         }
                     }
 
@@ -1052,6 +1056,9 @@ struct Background {
             ),
         >,
     >,
+
+    /// Future that wakes up when a new download to start is potentially ready.
+    wake_up_new_necessary_download: future::Fuse<future::BoxFuture<'static, ()>>,
 
     /// Set to `true` when we expect the runtime in `guarded` to match the runtime
     /// of the best block. Initially `false`, as `guarded` uses the genesis
@@ -1090,9 +1097,22 @@ impl Background {
             }
 
             // If there's nothing more to download, break out of the loop.
-            let download_params = match guarded.tree.as_mut().unwrap().next_necessary_download() {
-                Some(dl) => dl,
-                None => break,
+            let download_params = match guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .next_necessary_download(&ffi::Instant::now())
+            {
+                download_tree::NextNecessaryDownload::Ready(dl) => dl,
+                download_tree::NextNecessaryDownload::NotReady { when } => {
+                    self.wake_up_new_necessary_download = if let Some(when) = when {
+                        ffi::Delay::new_at(when).boxed()
+                    } else {
+                        future::pending().boxed()
+                    }
+                    .fuse();
+                    break; // TODO:
+                }
             };
 
             log::debug!(
@@ -1123,9 +1143,6 @@ impl Background {
                         }
                         Err(error) => Err(error),
                     };
-
-                    // TODO: this solves a problem where a request fails instantly because of no peer; figure out how to make this in a non-hacky way
-                    crate::ffi::Delay::new(std::time::Duration::from_secs(1)).await;
 
                     (download_params.id, result)
                 }

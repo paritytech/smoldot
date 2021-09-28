@@ -39,7 +39,7 @@
 
 use crate::{chain::fork_tree, executor, header, metadata};
 use alloc::vec::Vec;
-use core::{iter, mem, num::NonZeroUsize};
+use core::{cmp, iter, mem, num::NonZeroUsize, time::Duration};
 
 mod tests;
 
@@ -60,7 +60,14 @@ pub enum RuntimeError {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct DownloadId(u64);
 
+#[derive(Debug)]
+pub enum NextNecessaryDownload<TNow> {
+    Ready(DownloadParams),
+    NotReady { when: Option<TNow> },
+}
+
 /// Information about a download that must be performed.
+#[derive(Debug)]
 pub struct DownloadParams {
     /// Identifier to later provide when calling [`DownloadTree::runtime_download_finished`] or
     /// [`DownloadTree::runtime_download_failure`].
@@ -73,7 +80,7 @@ pub struct DownloadParams {
     pub block_state_root: [u8; 32],
 }
 
-pub struct DownloadTree {
+pub struct DownloadTree<TNow> {
     /// List of all compiled runtime. Referenced by the various blocks below.
     runtimes: slab::Slab<Runtime>,
 
@@ -82,10 +89,10 @@ pub struct DownloadTree {
     ///
     /// When `DownloadTree` has output, The value of [`Block::runtime`] for this block is
     /// guaranteed to be [`RuntimeDownloadState::Finished`].
-    finalized_block: Block,
+    finalized_block: Block<TNow>,
 
     /// State of all the non-finalized blocks.
-    non_finalized_blocks: fork_tree::ForkTree<Block>,
+    non_finalized_blocks: fork_tree::ForkTree<Block<TNow>>,
 
     /// Index within [`DownloadTree::non_finalized_blocks`] of the current "output" best block.
     /// `None` if the best block is the finalized block.
@@ -108,7 +115,10 @@ pub struct DownloadTree {
     next_download_id: DownloadId,
 }
 
-impl DownloadTree {
+impl<TNow> DownloadTree<TNow>
+where
+    TNow: Clone + core::ops::Add<Duration, Output = TNow> + Ord,
+{
     /// Returns a new [`DownloadTree`] containing one "input" finalized block.
     ///
     /// This [`DownloadTree`] is in a non-ready state.
@@ -196,6 +206,7 @@ impl DownloadTree {
                     Ok(RuntimeDownloadState::Unknown {
                         same_as_parent: false,
                         state_root: *header.state_root,
+                        timeout: None,
                     })
                 }
             }
@@ -348,7 +359,9 @@ impl DownloadTree {
     ///
     /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
-    pub fn finalized_block_runtime_extract(self) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
+    pub fn finalized_block_runtime_extract(
+        self,
+    ) -> Result<ExtractedRuntime<TNow>, (Self, RuntimeError)> {
         let runtime_index = self.finalized_block_runtime_index();
         self.runtime_extract_inner(runtime_index)
     }
@@ -359,7 +372,9 @@ impl DownloadTree {
     ///
     /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
-    pub fn best_block_runtime_extract(self) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
+    pub fn best_block_runtime_extract(
+        self,
+    ) -> Result<ExtractedRuntime<TNow>, (Self, RuntimeError)> {
         let runtime_index = self.best_block_runtime_index();
         self.runtime_extract_inner(runtime_index)
     }
@@ -367,7 +382,7 @@ impl DownloadTree {
     fn runtime_extract_inner(
         mut self,
         runtime_index: usize,
-    ) -> Result<ExtractedRuntime, (Self, RuntimeError)> {
+    ) -> Result<ExtractedRuntime<TNow>, (Self, RuntimeError)> {
         match self.runtimes[runtime_index].runtime.as_mut() {
             Err(err) => {
                 let err = err.clone();
@@ -479,17 +494,26 @@ impl DownloadTree {
     }
 
     /// Injects into the state of the state machine a failed runtime download.
-    pub fn runtime_download_failure(&mut self, download_id: DownloadId) {
+    pub fn runtime_download_failure(&mut self, download_id: DownloadId, now: &TNow) {
+        let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded
+
         // Update the blocks that were downloading this runtime.
         match self.finalized_block.runtime {
             Ok(RuntimeDownloadState::Downloading {
                 download_id: id,
                 state_root,
+                ref timeout,
             }) if id == download_id => {
+                let timeout = match timeout {
+                    Some(a) => Some(cmp::min(a.clone(), new_timeout.clone())),
+                    None => Some(new_timeout.clone()),
+                };
+
                 // Note: the value of `same_as_parent` is irrelevant for the finalized block.
                 self.finalized_block.runtime = Ok(RuntimeDownloadState::Unknown {
                     state_root,
                     same_as_parent: false,
+                    timeout,
                 });
             }
             _ => {}
@@ -506,10 +530,17 @@ impl DownloadTree {
                 Ok(RuntimeDownloadState::Downloading {
                     state_root,
                     download_id: id,
+                    ref timeout,
                 }) if id == download_id => {
+                    let timeout = match timeout {
+                        Some(a) => Some(cmp::min(a.clone(), new_timeout.clone())),
+                        None => Some(new_timeout.clone()),
+                    };
+
                     block.runtime = Ok(RuntimeDownloadState::Unknown {
                         same_as_parent: false, // TODO: not implemented properly; should check if parent had same download id
                         state_root,
+                        timeout,
                     });
                 }
                 _ => {}
@@ -522,16 +553,36 @@ impl DownloadTree {
 
     /// Examines the state of `self` and, if a block's runtime should be downloaded, changes the
     /// state of the block to "downloading" and returns the parameters of the download.
-    pub fn next_necessary_download(&mut self) -> Option<DownloadParams> {
+    pub fn next_necessary_download(&mut self, now: &TNow) -> NextNecessaryDownload<TNow> {
+        let mut when_not_ready = None;
+
         // Local finalized block, in case the state machine isn't in a ready state.
-        if let Some(download) = self.start_necessary_download(None) {
-            return Some(download);
+        match self.start_necessary_download(None, now) {
+            NextNecessaryDownload::Ready(params) => return NextNecessaryDownload::Ready(params),
+            NextNecessaryDownload::NotReady { when } => {
+                when_not_ready = match (when, when_not_ready.take()) {
+                    (None, None) => None,
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (Some(a), Some(b)) => Some(cmp::min(a, b)),
+                };
+            }
         }
 
         // Finalized block according to the blocks input.
         if let Some(idx) = self.input_finalized_index {
-            if let Some(download) = self.start_necessary_download(Some(idx)) {
-                return Some(download);
+            match self.start_necessary_download(Some(idx), now) {
+                NextNecessaryDownload::Ready(params) => {
+                    return NextNecessaryDownload::Ready(params)
+                }
+                NextNecessaryDownload::NotReady { when } => {
+                    when_not_ready = match (when, when_not_ready.take()) {
+                        (None, None) => None,
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (Some(a), Some(b)) => Some(cmp::min(a, b)),
+                    };
+                }
             }
         }
 
@@ -541,46 +592,71 @@ impl DownloadTree {
             .iter_unordered()
             .max_by_key(|(_, b)| b.input_best_block_weight)
         {
-            if let Some(download) = self.start_necessary_download(Some(idx)) {
-                return Some(download);
+            match self.start_necessary_download(Some(idx), now) {
+                NextNecessaryDownload::Ready(params) => {
+                    return NextNecessaryDownload::Ready(params)
+                }
+                NextNecessaryDownload::NotReady { when } => {
+                    when_not_ready = match (when, when_not_ready.take()) {
+                        (None, None) => None,
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (Some(a), Some(b)) => Some(cmp::min(a, b)),
+                    };
+                }
             }
         }
 
         // TODO: consider also downloading the forks' runtimes, but only once the `RuntimeEnvironmentUpdated` digest item is deployed everywhere, otherwise too much bandwidth is used
 
-        None
+        NextNecessaryDownload::NotReady {
+            when: when_not_ready,
+        }
     }
 
     /// Starts downloading the runtime of the block with the given index, if necessary.
     fn start_necessary_download(
         &mut self,
         block_index: Option<fork_tree::NodeIndex>,
-    ) -> Option<DownloadParams> {
+        now: &TNow,
+    ) -> NextNecessaryDownload<TNow> {
         let block = match block_index {
             None => &mut self.finalized_block,
             Some(idx) => self.non_finalized_blocks.get_mut(idx).unwrap(),
         };
 
         if let Ok(runtime) = &mut block.runtime {
-            if let RuntimeDownloadState::Unknown { state_root, .. } = *runtime {
-                let download_id = self.next_download_id;
-                self.next_download_id.0 += 1;
-                *runtime = RuntimeDownloadState::Downloading {
-                    download_id,
-                    state_root,
-                };
+            if let RuntimeDownloadState::Unknown {
+                state_root,
+                ref timeout,
+                ..
+            } = *runtime
+            {
+                if timeout.as_ref().map_or(true, |t| t <= now) {
+                    let download_id = self.next_download_id;
+                    self.next_download_id.0 += 1;
+                    *runtime = RuntimeDownloadState::Downloading {
+                        download_id,
+                        state_root,
+                        timeout: None,
+                    };
 
-                // TODO: update all children that have same as parent to point to the same download
+                    // TODO: update all children that have same as parent to point to the same download
 
-                return Some(DownloadParams {
-                    id: download_id,
-                    block_hash: block.hash,
-                    block_state_root: state_root,
-                });
+                    return NextNecessaryDownload::Ready(DownloadParams {
+                        id: download_id,
+                        block_hash: block.hash,
+                        block_state_root: state_root,
+                    });
+                } else {
+                    return NextNecessaryDownload::NotReady {
+                        when: timeout.clone(),
+                    };
+                }
             }
         }
 
-        None
+        NextNecessaryDownload::NotReady { when: None }
     }
 
     /// Updates the state machine with a new block.
@@ -674,6 +750,7 @@ impl DownloadTree {
                             runtime: Ok(RuntimeDownloadState::Downloading {
                                 download_id,
                                 state_root: *decoded_header.state_root,
+                                timeout: None,
                             }),
                             hash: header::hash_from_scale_encoded_header(&scale_encoded_header),
                             header: scale_encoded_header,
@@ -716,6 +793,7 @@ impl DownloadTree {
                 runtime: Ok(RuntimeDownloadState::Unknown {
                     same_as_parent: !runtime_environment_update,
                     state_root: *decoded_header.state_root,
+                    timeout: None,
                 }),
                 hash: header::hash_from_scale_encoded_header(&scale_encoded_header),
                 header: scale_encoded_header,
@@ -1032,25 +1110,25 @@ impl OutputUpdate {
     }
 }
 
-pub struct ExtractedRuntime {
+pub struct ExtractedRuntime<TNow> {
     /// Equivalent to [`DownloadTree`] but with a runtime extracted.
-    pub tree: ExtractedDownloadTree,
+    pub tree: ExtractedDownloadTree<TNow>,
 
     /// Runtime extracted from the [`DownloadTree`].
     pub runtime: executor::host::HostVmPrototype,
 }
 
-pub struct ExtractedDownloadTree {
-    inner: DownloadTree,
+pub struct ExtractedDownloadTree<TNow> {
+    inner: DownloadTree<TNow>,
     extracted_runtime_index: usize,
 }
 
-impl ExtractedDownloadTree {
+impl<TNow> ExtractedDownloadTree<TNow> {
     /// Puts back the runtime that was extracted.
     ///
     /// Note that no effort is made to ensure that the runtime being put back is the one that was
     /// extracted. It is a serious logic error to put back a different runtime.
-    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) -> DownloadTree {
+    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) -> DownloadTree<TNow> {
         let vm_slot = &mut self.inner.runtimes[self.extracted_runtime_index]
             .runtime
             .as_mut()
@@ -1062,7 +1140,7 @@ impl ExtractedDownloadTree {
     }
 }
 
-struct Block {
+struct Block<TNow> {
     /// Hash of the block in question. Redundant with `header`, but the hash is so often needed
     /// that it makes sense to cache it.
     hash: [u8; 32],
@@ -1073,7 +1151,7 @@ struct Block {
     header: Vec<u8>,
 
     /// Runtime information of that block. Shared amongst multiple different blocks.
-    runtime: Result<RuntimeDownloadState, BlockRuntimeErr>,
+    runtime: Result<RuntimeDownloadState<TNow>, BlockRuntimeErr>,
 
     /// A block with a higher value here has been reported by the input as the best block
     /// more recently than a block with a lower value. `0` means never reported as best block.
@@ -1090,7 +1168,7 @@ enum BlockRuntimeErr {
     InvalidHeader,
 }
 
-enum RuntimeDownloadState {
+enum RuntimeDownloadState<TNow> {
     /// Index within [`DownloadTree::runtimes`] of this block's runtime.
     Finished(usize),
 
@@ -1105,6 +1183,10 @@ enum RuntimeDownloadState {
         /// State trie root of the block. Necessary in case the download fails and gets restarted.
         // TODO: redundant with header
         state_root: [u8; 32],
+
+        /// Do not start any download before `TNow`. Used to avoid repeatedly trying to download
+        /// the same block over and over again when it's constantly failing.
+        timeout: Option<TNow>,
     },
 
     /// Runtime hasn't started being downloaded from the network.
@@ -1121,6 +1203,10 @@ enum RuntimeDownloadState {
         /// State trie root of the block. Necessary in order to download the runtime.
         // TODO: redundant with header
         state_root: [u8; 32],
+
+        /// Do not start any download before `TNow`. Used to avoid repeatedly trying to download
+        /// the same block over and over again when it's constantly failing.
+        timeout: Option<TNow>,
     },
 }
 
