@@ -357,7 +357,7 @@ impl DatabaseEmpty {
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
                     statement
-                        .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                        .bind(1, i64::try_from(index).unwrap())
                         .unwrap();
                     statement.bind(2, &item.public_key[..]).unwrap();
                     statement
@@ -377,7 +377,7 @@ impl DatabaseEmpty {
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
                         statement
-                            .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                            .bind(1, i64::try_from(index).unwrap())
                             .unwrap();
                         statement.bind(2, &item.public_key[..]).unwrap();
                         statement
@@ -405,7 +405,7 @@ impl DatabaseEmpty {
                     .unwrap();
                 for (index, item) in finalized_authorities_list.clone().enumerate() {
                     statement
-                        .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
+                        .bind(1, i64::try_from(index).unwrap())
                         .unwrap();
                     statement.bind(2, &item.public_key[..]).unwrap();
                     statement.next().unwrap();
