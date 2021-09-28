@@ -356,9 +356,7 @@ impl DatabaseEmpty {
                     .prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                     .unwrap();
                 for (index, item) in finalized_triggered_authorities.iter().enumerate() {
-                    statement
-                        .bind(1, i64::try_from(index).unwrap())
-                        .unwrap();
+                    statement.bind(1, i64::try_from(index).unwrap()).unwrap();
                     statement.bind(2, &item.public_key[..]).unwrap();
                     statement
                         .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
@@ -376,9 +374,7 @@ impl DatabaseEmpty {
                         .prepare("INSERT INTO grandpa_scheduled_authorities(idx, public_key, weight) VALUES(?, ?, ?)")
                         .unwrap();
                     for (index, item) in list.iter().enumerate() {
-                        statement
-                            .bind(1, i64::try_from(index).unwrap())
-                            .unwrap();
+                        statement.bind(1, i64::try_from(index).unwrap()).unwrap();
                         statement.bind(2, &item.public_key[..]).unwrap();
                         statement
                             .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
@@ -404,9 +400,7 @@ impl DatabaseEmpty {
                     .prepare("INSERT INTO aura_finalized_authorities(idx, public_key) VALUES(?, ?)")
                     .unwrap();
                 for (index, item) in finalized_authorities_list.clone().enumerate() {
-                    statement
-                        .bind(1, i64::try_from(index).unwrap())
-                        .unwrap();
+                    statement.bind(1, i64::try_from(index).unwrap()).unwrap();
                     statement.bind(2, &item.public_key[..]).unwrap();
                     statement.next().unwrap();
                     statement.reset().unwrap();
