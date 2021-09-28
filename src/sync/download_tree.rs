@@ -41,6 +41,8 @@ use crate::{chain::fork_tree, executor, header, metadata};
 use alloc::vec::Vec;
 use core::{iter, mem, num::NonZeroUsize};
 
+mod tests;
+
 /// Error when analyzing the runtime.
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum RuntimeError {
@@ -75,7 +77,7 @@ pub struct DownloadTree {
     /// List of all compiled runtime. Referenced by the various blocks below.
     runtimes: slab::Slab<Runtime>,
 
-    /// State of the finalized block reported through the public API of the runtime service.
+    /// State of the finalized block reported through the public API of the output.
     /// This doesn't necessarily match the one of the input.
     ///
     /// When `DownloadTree` has output, The value of [`Block::runtime`] for this block is
@@ -721,13 +723,11 @@ impl DownloadTree {
             },
         );
 
-        // TODO: restore commented out code; unclear why but it can panic
-        /*debug_assert!(self.try_advance_output().is_noop());
+        debug_assert!(self.try_advance_output().is_noop());
         OutputUpdate {
             best_block_updated: false,
             finalized_block_updated: false,
-        }*/
-        self.try_advance_output()
+        }
     }
 
     /// Updates the state machine to take into account that the input of blocks has finalized the
@@ -850,69 +850,48 @@ impl DownloadTree {
 
     /// Tries to update the output finalized and best blocks to follow the input.
     fn try_advance_output(&mut self) -> OutputUpdate {
+        let output = self.try_advance_output_inner();
+
+        // Sanity checks.
+        debug_assert!(
+            !matches!(
+                self.finalized_block.runtime,
+                Ok(RuntimeDownloadState::Finished(_))
+            ) || self.best_block_index.map_or(true, |idx| matches!(
+                self.non_finalized_blocks.get(idx).unwrap().runtime,
+                Ok(RuntimeDownloadState::Finished(_))
+            ))
+        );
+        debug_assert_eq!(
+            self.runtimes
+                .iter()
+                .map(|(_, r)| r.num_blocks.get())
+                .sum::<usize>(),
+            iter::once(&self.finalized_block)
+                .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
+                .filter(|b| matches!(b.runtime, Ok(RuntimeDownloadState::Finished(_))))
+                .count()
+        );
+
+        // Make sure that advancing the output has advanced to the best possible best/finalized.
+        debug_assert!(self.try_advance_output_inner().is_noop());
+
+        output
+    }
+
+    fn try_advance_output_inner(&mut self) -> OutputUpdate {
         let mut output = OutputUpdate {
             best_block_updated: false,
             finalized_block_updated: false,
         };
 
-        // Try to advance the output best block.
-        // This is done first, because an outdated output best block can prevent the finalization
-        // from advance as much as it could.
-        {
-            // Weight of the current runtime service best block.
-            let mut current_runtime_service_best_block_weight = match self.best_block_index {
-                None => self.finalized_block.input_best_block_weight,
-                Some(idx) => {
-                    self.non_finalized_blocks
-                        .get(idx)
-                        .unwrap()
-                        .input_best_block_weight
-                }
-            };
-
-            for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
-                if block.input_best_block_weight < current_runtime_service_best_block_weight {
-                    continue;
-                }
-
-                if !matches!(block.runtime, Ok(RuntimeDownloadState::Finished(_))) {
-                    continue;
-                }
-
-                // Runtime service best can be updated to the block being iterated.
-                current_runtime_service_best_block_weight = block.input_best_block_weight;
-                self.best_block_index = Some(node_index);
-                output.best_block_updated = true;
-
-                // Continue looping, as there might be another block with an even higher weight.
-            }
-        }
-
         // Try to advance the output finalized block.
-        // `input_finalized_index` is `Some` if it is not already equal to the runtime
-        // service finalized.
+        // `input_finalized_index` is `Some` if the input finalized is not already equal to the
+        // output finalized.
         if let Some(input_finalized_index) = self.input_finalized_index {
-            // Finding a new finalized block. This is done differently depending on whether the
-            // tree already has an output, in which case the best block should be preserved.
-            // TODO: can this accidentally revert output finality, in case of reorg in the best block?
-            let new_finalized = if self.has_output() {
-                // Try to find the earliest ancestor of the input finalized block whose runtime
-                // is ready and that is also an ancestor of the current output best block.
-                self.non_finalized_blocks
-                    .node_to_root_path(input_finalized_index)
-                    .find(|node_index| {
-                        matches!(
-                            self.non_finalized_blocks.get(*node_index).unwrap().runtime,
-                            Ok(RuntimeDownloadState::Finished(_))
-                        ) && self.best_block_index.map_or(true, |idx| {
-                            self.non_finalized_blocks.is_ancestor(*node_index, idx)
-                        })
-                    })
-            } else {
-                // If there's no output anyway, try find a block that is ready, and if none is
-                // ready, simply jump to `input_finalized_index`.
-                // We don't try to preserve the current output best block.
-                let new_finalized = self
+            // Finding a new finalized block.
+            let new_finalized = {
+                let mut new_finalized = self
                     .non_finalized_blocks
                     .node_to_root_path(input_finalized_index)
                     .find(|node_index| {
@@ -920,33 +899,42 @@ impl DownloadTree {
                             self.non_finalized_blocks.get(*node_index).unwrap().runtime,
                             Ok(RuntimeDownloadState::Finished(_))
                         )
-                    })
-                    .unwrap_or(input_finalized_index);
+                    });
 
-                if !self.best_block_index.map_or(true, |idx| {
-                    self.non_finalized_blocks.is_ancestor(new_finalized, idx)
-                }) {
-                    self.best_block_index = None;
-                    output.best_block_updated = true;
+                if !self.has_output() && new_finalized.is_none() {
+                    new_finalized = Some(input_finalized_index);
                 }
 
-                Some(new_finalized)
+                new_finalized
             };
 
             if let Some(new_finalized) = new_finalized {
                 output.finalized_block_updated = true;
 
-                for pruned in self.non_finalized_blocks.prune_ancestors(new_finalized) {
-                    if Some(pruned.index) == self.best_block_index {
-                        debug_assert!(self.best_block_index.unwrap() == new_finalized);
-                        self.best_block_index = None;
+                // Make sure that the output best block is an descendant of `new_finalized` by
+                // setting its to the new finalized block if it is not. Its actual value is
+                // updated below.
+                // This is only done conditionally in order to avoid setting
+                // `output.best_block_updated` to `true` if not necessary.
+                if !self.best_block_index.map_or(false, |b| {
+                    self.non_finalized_blocks.is_ancestor(new_finalized, b)
+                }) {
+                    // If `best_block_index == new_finalized`, then the best block actually stays
+                    // the same, but `self.best_block_index` still has to be updated because we
+                    // prune `new_finalized` below.
+                    if self.best_block_index != Some(new_finalized) {
                         output.best_block_updated = true;
                     }
+                    self.best_block_index = None;
+                }
 
-                    if Some(pruned.index) == self.input_finalized_index {
-                        debug_assert!(self.input_finalized_index.unwrap() == new_finalized);
-                        self.input_finalized_index = None;
-                    }
+                if self.input_finalized_index == Some(new_finalized) {
+                    self.input_finalized_index = None;
+                }
+
+                for pruned in self.non_finalized_blocks.prune_ancestors(new_finalized) {
+                    debug_assert_ne!(Some(pruned.index), self.input_finalized_index);
+                    debug_assert!(self.best_block_index.map_or(true, |b| b != pruned.index));
 
                     // If this is the new finalized block, replace `self.finalized_block`.
                     let thrown_away_block = if pruned.index == new_finalized {
@@ -972,10 +960,11 @@ impl DownloadTree {
             }
         }
 
-        // Try again to advance the output best block, because the finalization update might have
-        // moved it to not the best block.
-        if output.best_block_updated {
-            // Weight of the current runtime service best block.
+        // Try to advance the output best block to the `Finished` block with the highest weight.
+        // This is done at the end in order to not accidentally pick a blocked that is pruned
+        // when advancing finality.
+        {
+            // Weight of the current output best block.
             let mut current_runtime_service_best_block_weight = match self.best_block_index {
                 None => self.finalized_block.input_best_block_weight,
                 Some(idx) => {
@@ -987,7 +976,13 @@ impl DownloadTree {
             };
 
             for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
-                if block.input_best_block_weight < current_runtime_service_best_block_weight {
+                // Check uniqueness of weights.
+                debug_assert!(
+                    block.input_best_block_weight != current_runtime_service_best_block_weight
+                        || self.best_block_index == Some(node_index)
+                );
+
+                if block.input_best_block_weight <= current_runtime_service_best_block_weight {
                     continue;
                 }
 
@@ -1012,27 +1007,6 @@ impl DownloadTree {
                 finalized_block_updated: false,
             };
         }
-
-        // Sanity checks.
-        debug_assert!(
-            !matches!(
-                self.finalized_block.runtime,
-                Ok(RuntimeDownloadState::Finished(_))
-            ) || self.best_block_index.map_or(true, |idx| matches!(
-                self.non_finalized_blocks.get(idx).unwrap().runtime,
-                Ok(RuntimeDownloadState::Finished(_))
-            ))
-        );
-        debug_assert_eq!(
-            self.runtimes
-                .iter()
-                .map(|(_, r)| r.num_blocks.get())
-                .sum::<usize>(),
-            iter::once(&self.finalized_block)
-                .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
-                .filter(|b| matches!(b.runtime, Ok(RuntimeDownloadState::Finished(_))))
-                .count()
-        );
 
         output
     }
@@ -1093,7 +1067,7 @@ struct Block {
     hash: [u8; 32],
 
     /// Header of the block in question.
-    /// Guaranteed to always be valid for the runtime service best and finalized blocks. Otherwise,
+    /// Guaranteed to always be valid for the output best and finalized blocks. Otherwise,
     /// not guaranteed to be valid.
     header: Vec<u8>,
 
@@ -1236,5 +1210,3 @@ impl SuccessfulRuntime {
         })
     }
 }
-
-// TODO: really needs tests
