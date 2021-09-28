@@ -824,7 +824,6 @@ struct Guarded {
     /// Whenever [`Runtime::runtime`] is updated, one should emit an item on each
     /// sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
-    // TODO: not notified /!\
     runtime_version_subscriptions:
         Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,
 
@@ -874,6 +873,23 @@ impl Guarded {
                 }
 
                 self.finalized_blocks_subscriptions.push(subscription);
+            }
+        }
+
+        if output_update.best_block_runtime_changed {
+            let runtime_version = self.tree.as_ref().unwrap().best_block_runtime_spec();
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..self.runtime_version_subscriptions.len()).rev() {
+                let mut subscription = self.runtime_version_subscriptions.swap_remove(index);
+                if subscription
+                    .send(runtime_version.map(|v| v.clone()).map_err(|e| e.clone()))
+                    .is_err()
+                {
+                    continue;
+                }
+
+                self.runtime_version_subscriptions.push(subscription);
             }
         }
     }
@@ -954,6 +970,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         .notify_subscribers(download_tree::OutputUpdate {
                             finalized_block_updated: true,
                             best_block_updated: true,
+                            best_block_runtime_changed: true, // TODO: correct?
                         })
                         .await;
 

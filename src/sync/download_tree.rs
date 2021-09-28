@@ -425,6 +425,7 @@ where
             debug_assert!(self.try_advance_output().is_noop());
             return OutputUpdate {
                 best_block_updated: false,
+                best_block_runtime_changed: false,
                 finalized_block_updated: false,
             };
         }
@@ -718,6 +719,7 @@ where
                 debug_assert!(self.try_advance_output().is_noop());
                 return OutputUpdate {
                     best_block_updated: false,
+                    best_block_runtime_changed: false,
                     finalized_block_updated: false,
                 };
             }
@@ -764,6 +766,7 @@ where
                     debug_assert!(self.try_advance_output().is_noop());
                     return OutputUpdate {
                         best_block_updated: false,
+                        best_block_runtime_changed: false,
                         finalized_block_updated: false,
                     };
                 }
@@ -807,6 +810,7 @@ where
         debug_assert!(self.try_advance_output().is_noop());
         OutputUpdate {
             best_block_updated: false,
+            best_block_runtime_changed: false,
             finalized_block_updated: false,
         }
     }
@@ -934,6 +938,7 @@ where
         let output = self.try_advance_output_inner();
 
         // Sanity checks.
+        debug_assert!(!output.best_block_runtime_changed || output.best_block_updated);
         debug_assert!(
             !matches!(
                 self.finalized_block.runtime,
@@ -963,7 +968,23 @@ where
     fn try_advance_output_inner(&mut self) -> OutputUpdate {
         let mut output = OutputUpdate {
             best_block_updated: false,
+            best_block_runtime_changed: false,
             finalized_block_updated: false,
+        };
+
+        // Runtime index of the best block at the start. `None` if not available, meaning no
+        // output yet.
+        let best_block_runtime_index_start = {
+            let best_block = if let Some(best_block_index) = self.best_block_index {
+                self.non_finalized_blocks.get(best_block_index).unwrap()
+            } else {
+                &self.finalized_block
+            };
+
+            match best_block.runtime {
+                Ok(RuntimeDownloadState::Finished(index)) => Some(index),
+                _ => None,
+            }
         };
 
         // Try to advance the output finalized block.
@@ -1081,11 +1102,29 @@ where
             }
         }
 
+        // Now check if the runtime index of the best block has changed since the start.
+        let best_block_runtime_index_end = {
+            let best_block = if let Some(best_block_index) = self.best_block_index {
+                self.non_finalized_blocks.get(best_block_index).unwrap()
+            } else {
+                &self.finalized_block
+            };
+
+            match best_block.runtime {
+                Ok(RuntimeDownloadState::Finished(index)) => Some(index),
+                _ => None,
+            }
+        };
+        if best_block_runtime_index_end != best_block_runtime_index_start {
+            output.best_block_runtime_changed = true;
+        }
+
         // The best and finalized blocks might have changed, but for API purposes we don't report
         // any change before the first output.
         if !self.has_output() {
             output = OutputUpdate {
                 best_block_updated: false,
+                best_block_runtime_changed: false,
                 finalized_block_updated: false,
             };
         }
@@ -1102,6 +1141,9 @@ pub struct OutputUpdate {
     /// If `true`, the call to the method that returned this [`OutputUpdate`] resulted in a change
     /// in the output finalized block of the [`DownloadTree`].
     pub finalized_block_updated: bool,
+    /// If `true`, the change in new block has already resulted in a change in the version of the
+    /// runtime.
+    pub best_block_runtime_changed: bool,
     /// If `true`, the call to the method that returned this [`OutputUpdate`] resulted in a change
     /// in the output best block of the [`DownloadTree`].
     pub best_block_updated: bool,
