@@ -32,6 +32,18 @@ jobs:
     - name: Run tests, with all features
       run: cargo test --locked --workspace --all-features
 
+  test-32bits:
+    name: Build and test on 32bits platforms
+    runs-on: ubuntu-latest
+    container:
+      image: rust
+    steps:
+    - uses: actions/checkout@v2.3.4
+    - uses: Swatinem/rust-cache@v1
+    - run: rustup target add i686-unknown-linux-gnu
+    - name: Run tests, with all features
+      run: cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
+
   wasm-node-check:
     name: Check javascript node
     runs-on: ubuntu-latest
