@@ -911,13 +911,14 @@ impl DownloadTree {
             if let Some(new_finalized) = new_finalized {
                 output.finalized_block_updated = true;
 
-                // Make sure that the output best block is an descendant of `new_finalized` by
-                // setting its to the new finalized block if it is not. Its actual value is
-                // updated below.
+                // Make sure that the output best block will still be in the tree after the
+                // pruning below, or setting its to the new finalized block if not. Its actual
+                // value is updated later down this function.
                 // This is only done conditionally in order to avoid setting
                 // `output.best_block_updated` to `true` if not necessary.
                 if !self.best_block_index.map_or(false, |b| {
                     self.non_finalized_blocks.is_ancestor(new_finalized, b)
+                        && self.best_block_index != Some(new_finalized)
                 }) {
                     // If `best_block_index == new_finalized`, then the best block actually stays
                     // the same, but `self.best_block_index` still has to be updated because we
