@@ -608,9 +608,7 @@ impl SqliteFullDatabase {
 
                             let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
                             for (index, item) in change.next_authorities.enumerate() {
-                                statement
-                                    .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
-                                    .unwrap();
+                                statement.bind(1, i64::try_from(index).unwrap()).unwrap();
                                 statement.bind(2, &item.public_key[..]).unwrap();
                                 statement
                                     .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
