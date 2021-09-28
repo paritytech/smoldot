@@ -1111,7 +1111,7 @@ impl Background {
                         future::pending().boxed()
                     }
                     .fuse();
-                    break; // TODO:
+                    break;
                 }
             };
 

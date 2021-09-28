@@ -494,6 +494,9 @@ where
     }
 
     /// Injects into the state of the state machine a failed runtime download.
+    ///
+    /// This same download will not be repeated for the next few seconds. Thanks to this, it is
+    /// possible to immediately call this function in response to a new necessary download.
     pub fn runtime_download_failure(&mut self, download_id: DownloadId, now: &TNow) {
         let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded
 
