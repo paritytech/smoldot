@@ -499,7 +499,7 @@ where
     /// This same download will not be repeated for the next few seconds. Thanks to this, it is
     /// possible to immediately call this function in response to a new necessary download.
     pub fn runtime_download_failure(&mut self, download_id: DownloadId, now: &TNow) {
-        let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded
+        let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded value
 
         // Update the blocks that were downloading this runtime.
         match self.finalized_block.runtime {
@@ -551,8 +551,7 @@ where
             }
         }
 
-        // TODO: necessary? opens a question of whether to prune finalized blocks that are still downloading
-        self.try_advance_output();
+        debug_assert!(self.try_advance_output().is_noop());
     }
 
     /// Examines the state of `self` and, if a block's runtime should be downloaded, changes the
@@ -1003,8 +1002,22 @@ where
                         )
                     });
 
+                // If there's no finalized block that is ready, jump to the lowest block that is
+                // downloading.
+                // If we can't find any block that is downloading, simply jump to the input
+                // finalized block.
                 if !self.has_output() && new_finalized.is_none() {
-                    new_finalized = Some(input_finalized_index);
+                    new_finalized = Some(
+                        self.non_finalized_blocks
+                            .root_to_node_path(input_finalized_index)
+                            .find(|node_index| {
+                                matches!(
+                                    self.non_finalized_blocks.get(*node_index).unwrap().runtime,
+                                    Ok(RuntimeDownloadState::Downloading { .. })
+                                )
+                            })
+                            .unwrap_or(input_finalized_index),
+                    );
                 }
 
                 new_finalized

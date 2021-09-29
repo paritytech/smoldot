@@ -932,7 +932,6 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             }),
             blocks_stream: subscription.new_blocks.boxed(),
             wake_up_new_necessary_download: future::pending().boxed().fuse(),
-            runtime_matches_best_block: false,
             runtime_downloads: stream::FuturesUnordered::new(),
         };
 
@@ -1076,11 +1075,6 @@ struct Background {
 
     /// Future that wakes up when a new download to start is potentially ready.
     wake_up_new_necessary_download: future::Fuse<future::BoxFuture<'static, ()>>,
-
-    /// Set to `true` when we expect the runtime in `guarded` to match the runtime
-    /// of the best block. Initially `false`, as `guarded` uses the genesis
-    /// runtime.
-    runtime_matches_best_block: bool,
 }
 
 impl Background {
