@@ -598,11 +598,17 @@ impl RuntimeService {
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
     pub async fn metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
-        /*// First, try the cache.
-        // TODO: restore this block
+        // First, try the cache.
         {
             let guarded = self.guarded.lock().await;
-            match guarded.best_block_runtime().runtime.as_ref() {
+            match guarded
+                .tree
+                .as_ref()
+                .unwrap()
+                .best_block_runtime()
+                .runtime
+                .as_ref()
+            {
                 Ok(runtime) => {
                     if let Some(metadata) = runtime.metadata.as_ref() {
                         return Ok(metadata.clone());
@@ -612,7 +618,7 @@ impl RuntimeService {
                     return Err(MetadataError::InvalidRuntime(err.clone()));
                 }
             }
-        }*/
+        }
 
         let (mut runtime_call_lock, virtual_machine) = self
             .recent_best_block_runtime_call("Metadata_metadata", iter::empty::<Vec<u8>>())
@@ -623,14 +629,16 @@ impl RuntimeService {
         let (metadata_result, virtual_machine) = loop {
             match query {
                 metadata::Query::Finished(Ok(metadata), virtual_machine) => {
-                    // TODO: restore
-                    /*runtime_call_lock
-                    .guarded
-                    .best_block_runtime_mut()
-                    .runtime
-                    .as_mut()
-                    .unwrap()
-                    .metadata = Some(metadata.clone());*/
+                    runtime_call_lock
+                        .guarded
+                        .tree
+                        .as_mut()
+                        .unwrap()
+                        .best_block_runtime_mut()
+                        .runtime
+                        .as_mut()
+                        .unwrap()
+                        .metadata = Some(metadata.clone());
                     break (Ok(metadata), virtual_machine);
                 }
                 metadata::Query::StorageGet(storage_get) => {
