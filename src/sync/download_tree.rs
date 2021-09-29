@@ -423,11 +423,7 @@ where
         // The download might concern only blocks that have now been pruned.
         if num_concerned_blocks == 0 {
             debug_assert!(self.try_advance_output().is_noop());
-            return OutputUpdate {
-                best_block_updated: false,
-                best_block_runtime_changed: false,
-                finalized_block_updated: false,
-            };
+            return OutputUpdate::noop();
         }
 
         // Try find the identifier of an existing runtime that has this code and heap pages. If
@@ -716,11 +712,7 @@ where
                 );
 
                 debug_assert!(self.try_advance_output().is_noop());
-                return OutputUpdate {
-                    best_block_updated: false,
-                    best_block_runtime_changed: false,
-                    finalized_block_updated: false,
-                };
+                return OutputUpdate::noop();
             }
         };
 
@@ -763,11 +755,7 @@ where
                     );
 
                     debug_assert!(self.try_advance_output().is_noop());
-                    return OutputUpdate {
-                        best_block_updated: false,
-                        best_block_runtime_changed: false,
-                        finalized_block_updated: false,
-                    };
+                    return OutputUpdate::noop();
                 }
 
                 Ok(RuntimeDownloadState::Finished(runtime_index)) => {
@@ -807,11 +795,7 @@ where
         );
 
         debug_assert!(self.try_advance_output().is_noop());
-        OutputUpdate {
-            best_block_updated: false,
-            best_block_runtime_changed: false,
-            finalized_block_updated: false,
-        }
+        OutputUpdate::noop()
     }
 
     /// Updates the state machine to take into account that the input of blocks has finalized the
@@ -965,11 +949,7 @@ where
     }
 
     fn try_advance_output_inner(&mut self) -> OutputUpdate {
-        let mut output = OutputUpdate {
-            best_block_updated: false,
-            best_block_runtime_changed: false,
-            finalized_block_updated: false,
-        };
+        let mut output = OutputUpdate::noop();
 
         // Runtime index of the best block at the start. `None` if not available, meaning no
         // output yet.
@@ -1135,11 +1115,7 @@ where
         // The best and finalized blocks might have changed, but for API purposes we don't report
         // any change before the first output.
         if !self.has_output() {
-            output = OutputUpdate {
-                best_block_updated: false,
-                best_block_runtime_changed: false,
-                finalized_block_updated: false,
-            };
+            output = OutputUpdate::noop();
         }
 
         output
@@ -1163,6 +1139,14 @@ pub struct OutputUpdate {
 }
 
 impl OutputUpdate {
+    fn noop() -> Self {
+        OutputUpdate {
+            best_block_runtime_changed: false,
+            best_block_updated: false,
+            finalized_block_updated: false,
+        }
+    }
+
     fn is_noop(&self) -> bool {
         !self.finalized_block_updated && !self.best_block_updated
     }
@@ -1274,9 +1258,7 @@ struct Runtime {
     num_blocks: NonZeroUsize,
 
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
-    /// happened, including a problem when obtaining the runtime specs or the metadata. It is
-    /// better to report to the user an error about for example the metadata not being extractable
-    /// compared to returning an obsolete version.
+    /// happened, including a problem when obtaining the runtime specs.
     runtime: Result<SuccessfulRuntime, RuntimeError>,
 
     /// Undecoded storage value of `:code` corresponding to the [`Runtime::runtime`]
