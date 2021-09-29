@@ -79,7 +79,8 @@ pub enum NextNecessaryDownload<TNow> {
 /// Information about a download that must be performed.
 #[derive(Debug)]
 pub struct DownloadParams {
-    /// Identifier to later provide when calling [`DownloadTree::runtime_download_finished`] or
+    /// Identifier to later provide when calling [`DownloadTree::runtime_download_finished_new`],
+    /// [`DownloadTree::runtime_download_finished_existing`], or
     /// [`DownloadTree::runtime_download_failure`].
     pub id: DownloadId,
 
