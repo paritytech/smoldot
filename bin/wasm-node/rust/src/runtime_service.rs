@@ -537,12 +537,20 @@ impl RuntimeService {
                         .tree
                         .as_ref()
                         .unwrap()
-                        .finalized_block_runtime_spec()
+                        .finalized_block_runtime()
+                        .runtime
+                        .as_ref()
                 } else {
-                    guarded.tree.as_ref().unwrap().best_block_runtime_spec()
+                    guarded
+                        .tree
+                        .as_ref()
+                        .unwrap()
+                        .best_block_runtime()
+                        .runtime
+                        .as_ref()
                 }
                 .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
-                if runtime_spec.decode().spec_version != spec_version {
+                if runtime_spec.runtime_spec.decode().spec_version != spec_version {
                     continue;
                 }
 
@@ -551,21 +559,35 @@ impl RuntimeService {
                 let extracted_runtime = if finalized_block {
                     guarded
                         .tree
-                        .take()
+                        .as_mut()
                         .unwrap()
-                        .finalized_block_runtime_extract()
+                        .best_block_runtime_mut()
+                        .runtime
+                        .as_mut()
+                        .unwrap()
+                        .virtual_machine
+                        .take()
                 } else {
-                    guarded.tree.take().unwrap().best_block_runtime_extract()
+                    guarded
+                        .tree
+                        .as_mut()
+                        .unwrap()
+                        .finalized_block_runtime_mut()
+                        .runtime
+                        .as_mut()
+                        .unwrap()
+                        .virtual_machine
+                        .take()
                 }
-                .unwrap_or_else(|_| panic!());
+                .unwrap_or_else(|| panic!());
                 let lock = RuntimeCallLock {
                     guarded,
-                    extracted: Some(extracted_runtime.tree),
+                    finalized_block,
                     runtime_block_header,
                     call_proof,
                 };
 
-                break Ok((lock, extracted_runtime.runtime));
+                break Ok((lock, extracted_runtime));
             }
         }
     }
@@ -749,6 +771,7 @@ impl<'a> RuntimeLock<'a> {
 
         let lock = RuntimeCallLock {
             guarded: self.guarded,
+            finalized_block: !self.is_best,
             runtime_block_header,
             call_proof,
         };
@@ -762,6 +785,7 @@ impl<'a> RuntimeLock<'a> {
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Guarded>,
     runtime_block_header: Vec<u8>,
+    finalized_block: bool,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
@@ -862,17 +886,60 @@ impl<'a> RuntimeCallLock<'a> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        self.guarded.tree = Some(self.extracted.take().unwrap().unlock(vm));
+        if self.finalized_block {
+            self.guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .finalized_block_runtime_mut()
+                .runtime
+                .as_mut()
+                .unwrap()
+                .virtual_machine = Some(vm);
+        } else {
+            self.guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .best_block_runtime_mut()
+                .runtime
+                .as_mut()
+                .unwrap()
+                .virtual_machine = Some(vm);
+        }
     }
 }
 
 impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        // TODO: ?!
-        /*if self.extracted.is_some() {
+        let vm = if self.finalized_block {
+            &mut self
+                .guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .finalized_block_runtime_mut()
+                .runtime
+                .as_mut()
+                .unwrap()
+                .virtual_machine
+        } else {
+            &mut self
+                .guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .best_block_runtime_mut()
+                .runtime
+                .as_mut()
+                .unwrap()
+                .virtual_machine
+        };
+
+        if vm.is_none() {
             // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
             panic!()
-        }*/
+        }
     }
 }
 
