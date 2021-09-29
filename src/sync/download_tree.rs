@@ -1093,6 +1093,7 @@ where
                 // Check uniqueness of weights.
                 debug_assert!(
                     block.input_best_block_weight != current_runtime_service_best_block_weight
+                        || block.input_best_block_weight == 0
                         || self.best_block_index == Some(node_index)
                 );
 
