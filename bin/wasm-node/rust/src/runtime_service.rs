@@ -229,19 +229,22 @@ impl RuntimeService {
         self: &Arc<RuntimeService>,
         block_hash: &[u8; 32],
     ) -> Result<executor::CoreVersion, RuntimeVersionOfBlockError> {
-        // TODO: restore
-        /*// If the requested block is the best known block, optimize by
+        // If the requested block is the best known block, optimize by
         // immediately returning the cached spec.
         {
             let guarded = self.guarded.lock().await;
-            if guarded.runtime_block_hash == *block_hash {
+            if guarded.tree.as_ref().unwrap().best_block_hash() == block_hash {
                 return guarded
+                    .tree
+                    .as_ref()
+                    .unwrap()
+                    .best_block_runtime()
                     .runtime
                     .as_ref()
                     .map(|r| r.runtime_spec.clone())
                     .map_err(|err| RuntimeVersionOfBlockError::InvalidRuntime(err.clone()));
             }
-        }*/
+        }
 
         // Ask the network for the header of this block, as we need to know the state root.
         let state_root = {
