@@ -1390,6 +1390,9 @@ impl Background {
             .unwrap()
             .input_finalize(hash_to_finalize, new_best_block_hash);
 
+        // Clean up unused runtimes to free up resources.
+        for _ in guarded.tree.as_mut().unwrap().drain_unused_runtimes() {}
+
         guarded.notify_subscribers(output_update).await;
     }
 }
