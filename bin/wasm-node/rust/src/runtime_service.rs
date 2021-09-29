@@ -1036,8 +1036,7 @@ struct Guarded {
 
 impl Guarded {
     /// Notifies the subscribers about changes to the best and finalized blocks.
-    // TODO: doesn't need to be async?
-    async fn notify_subscribers(&mut self, output_update: download_tree::OutputUpdate) {
+    fn notify_subscribers(&mut self, output_update: download_tree::OutputUpdate) {
         if output_update.best_block_updated {
             let best_block_header = self.tree.as_ref().unwrap().best_block_header();
 
@@ -1172,13 +1171,11 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
 
                     drop(temporary_guarded);
 
-                    original_guarded
-                        .notify_subscribers(download_tree::OutputUpdate {
-                            finalized_block_updated: true,
-                            best_block_updated: true,
-                            best_block_runtime_changed: true, // TODO: correct?
-                        })
-                        .await;
+                    original_guarded.notify_subscribers(download_tree::OutputUpdate {
+                        finalized_block_updated: true,
+                        best_block_updated: true,
+                        best_block_runtime_changed: true, // TODO: correct?
+                    });
 
                     background.runtime_service = original_runtime_service.clone();
                 }
@@ -1202,7 +1199,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
 
                             let mut guarded = background.runtime_service.guarded.lock().await;
                             let output_update = guarded.tree.as_mut().unwrap().input_insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
-                            guarded.notify_subscribers(output_update).await;
+                            guarded.notify_subscribers(output_update);
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             log::debug!(
@@ -1320,7 +1317,7 @@ impl Background {
                 .1
         };
 
-        guarded.notify_subscribers(output_update).await;
+        guarded.notify_subscribers(output_update);
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
@@ -1401,7 +1398,7 @@ impl Background {
         // Clean up unused runtimes to free up resources.
         for _ in guarded.tree.as_mut().unwrap().drain_unused_runtimes() {}
 
-        guarded.notify_subscribers(output_update).await;
+        guarded.notify_subscribers(output_update);
     }
 }
 
