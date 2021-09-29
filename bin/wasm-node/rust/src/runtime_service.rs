@@ -130,7 +130,7 @@ impl RuntimeService {
             // Note that in the absolute we don't need to panic in case of a problem, and could
             // simply store an `Err` and continue running.
             // However, in practice, it seems more sane to detect problems in the genesis block.
-            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages);
+            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages).await;
 
             // As documented in the `metadata` field, we must fill it using the genesis storage.
             if let Ok(runtime) = runtime.as_mut() {
@@ -1136,7 +1136,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 .tree
                 .as_mut()
                 .unwrap()
-                .insert_block(
+                .input_insert_block(
                     block.scale_encoded_header,
                     &block.parent_hash,
                     block.is_new_best,
@@ -1193,7 +1193,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                             );
 
                             let mut guarded = background.runtime_service.guarded.lock().await;
-                            let output_update = guarded.tree.as_mut().unwrap().insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
+                            let output_update = guarded.tree.as_mut().unwrap().input_insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
                             guarded.notify_subscribers(output_update).await;
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
@@ -1295,7 +1295,7 @@ impl Background {
                 .unwrap()
                 .runtime_download_finished_existing(download_id, existing_runtime)
         } else {
-            let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages);
+            let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages).await;
 
             guarded
                 .tree
@@ -1388,7 +1388,7 @@ impl Background {
             .tree
             .as_mut()
             .unwrap()
-            .finalize(hash_to_finalize, new_best_block_hash);
+            .input_finalize(hash_to_finalize, new_best_block_hash);
 
         guarded.notify_subscribers(output_update).await;
     }
@@ -1445,10 +1445,14 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    fn from_params(
+    async fn from_params(
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
+        // once after.
+        super::yield_once().await;
+
         let vm = match executor::host::HostVmPrototype::new(
             code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
             executor::storage_heap_pages_to_value(heap_pages.as_deref())
@@ -1460,6 +1464,10 @@ impl SuccessfulRuntime {
                 return Err(RuntimeError::Build(error));
             }
         };
+
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
+        // once after.
+        super::yield_once().await;
 
         let (runtime_spec, vm) = match executor::core_version(vm) {
             (Ok(spec), vm) => (spec, vm),

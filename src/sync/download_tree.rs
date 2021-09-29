@@ -21,7 +21,8 @@
 //! # Usage
 //!
 //! This data structure holds a tree of blocks whose runtime is either known, or not. This tree
-//! can be updated by using [`DownloadTree::insert_block`] and [`DownloadTree::finalize`].
+//! can be updated by using [`DownloadTree::input_insert_block`] and
+//! [`DownloadTree::input_finalize`].
 //!
 //! The data structure also holds a list of on-going runtime parameter downloads. Use
 //! [`DownloadTree::next_necessary_download`] to insert an ongoing download in the data structure.
@@ -724,7 +725,7 @@ where
     ///
     /// Panics if `parent_hash` wasn't inserted before.
     ///
-    pub fn insert_block(
+    pub fn input_insert_block(
         &mut self,
         scale_encoded_header: Vec<u8>,
         parent_hash: &[u8; 32],
@@ -870,7 +871,7 @@ where
     /// Panics if trying to finalize the parent of a block that is already finalized.
     /// Panics if `new_best_block_hash` is not a descendant of `hash_to_finalize`.
     ///
-    pub fn finalize(
+    pub fn input_finalize(
         &mut self,
         hash_to_finalize: [u8; 32],
         new_best_block_hash: [u8; 32],
