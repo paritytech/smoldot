@@ -118,14 +118,27 @@ impl SyncService {
 
         if let Some(config_parachain) = config.parachain {
             let (send_new_best, para_new_best) = mpsc::channel(0);
+            let (send_new_finalized, para_new_finalized) = mpsc::channel(0);
 
             (config.tasks_executor)(
-                "sync-para-fetch".into(),
+                "sync-para-fetch-best".into(),
+                Box::pin(fetch_paraheads(
+                    config.log_name.clone(),
+                    config_parachain.relay_chain_sync.clone(),
+                    config_parachain.parachain_id,
+                    send_new_best,
+                    false,
+                )),
+            );
+
+            (config.tasks_executor)(
+                "sync-para-fetch-finalized".into(),
                 Box::pin(fetch_paraheads(
                     config.log_name,
                     config_parachain.relay_chain_sync.clone(),
                     config_parachain.parachain_id,
-                    send_new_best,
+                    send_new_finalized,
+                    true,
                 )),
             );
 
@@ -137,6 +150,7 @@ impl SyncService {
                     config.network_service.1,
                     config.network_events_receiver,
                     para_new_best,
+                    para_new_finalized,
                 )),
             );
         } else {
@@ -1396,18 +1410,20 @@ async fn start_parachain(
     network_chain_index: usize,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
     mut para_new_best: mpsc::Receiver<(header::Header, bool)>,
+    mut para_new_finalized: mpsc::Receiver<(header::Header, bool)>,
 ) {
-    // TODO: handle finality as well; this is semi-complicated because the runtime service needs to provide a way to call a function on the finalized block's runtime
+    // TODO: instead of handling finality in a separate task, track the blocks that get finalized
 
-    let current_finalized_block: header::Header =
-        chain_information.as_ref().finalized_block_header.into(); // TODO: finality not implemented
+    let mut current_finalized_block: header::Header =
+        chain_information.as_ref().finalized_block_header.into();
     let mut current_best_block = current_finalized_block.clone();
 
     // List of senders that get notified when the best block is modified.
     let mut best_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
+    // List of senders that get notified when the finalized block is modified
+    let mut finalized_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
 
     // State machine that tracks the list of sources and their blocks.
-    // TODO: need to call sync_sources.set_finalized_block_height once finalization is implemented
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
         40,
         current_finalized_block.number,
@@ -1439,7 +1455,7 @@ async fn start_parachain(
                     },
                     ToBackground::SubscribeFinalized { send_back } => {
                         let (tx, rx) = lossy_channel::channel();
-                        core::mem::forget(tx); // TODO:
+                        finalized_subscriptions.push(tx);
                         let _ = send_back.send((current_finalized_block.scale_encoding_vec(), rx));
                     }
                     ToBackground::SubscribeBest { send_back } => {
@@ -1547,6 +1563,22 @@ async fn start_parachain(
                     }
                 }
             }
+
+            para_new_finalized = para_new_finalized.next().fuse() => {
+                let (para_new_finalized, _) = para_new_finalized.unwrap();
+                current_finalized_block = para_new_finalized.clone();
+
+                sync_sources.set_finalized_block_height(current_finalized_block.number);
+
+                // Elements in `finalized_subscriptions` are removed one by one and inserted
+                // back if the channel is still open.
+                for index in (0..finalized_subscriptions.len()).rev() {
+                    let mut sender = finalized_subscriptions.swap_remove(index);
+                    if sender.send(para_new_finalized.scale_encoding_vec()).is_ok() {
+                        finalized_subscriptions.push(sender);
+                    }
+                }
+            }
         }
     }
 }
@@ -1555,12 +1587,16 @@ async fn fetch_paraheads(
     log_target: String,
     relay_chain_sync: Arc<runtime_service::RuntimeService>,
     parachain_id: u32,
-    mut send_new_best: mpsc::Sender<(header::Header, bool)>,
+    mut send_output: mpsc::Sender<(header::Header, bool)>,
+    track_finalized: bool,
 ) {
     // Stream of new best blocks of the relay chain this parachain is registered on.
     let relay_best_blocks = {
-        let (relay_best_block_header, relay_best_blocks_subscription) =
-            relay_chain_sync.subscribe_best().await;
+        let (relay_best_block_header, relay_best_blocks_subscription) = if track_finalized {
+            relay_chain_sync.subscribe_finalized().await
+        } else {
+            relay_chain_sync.subscribe_best().await
+        };
         stream::once(future::ready(relay_best_block_header)).chain(relay_best_blocks_subscription)
     };
     futures::pin_mut!(relay_best_blocks);
@@ -1663,7 +1699,7 @@ async fn fetch_paraheads(
         // The meaning of `head_data` depends on the parachain. It can represent
         // anything. In practice, however, it is most of the time a block header.
         match header::decode(&head_data) {
-            Ok(header) => match send_new_best
+            Ok(header) => match send_output
                 .send((header.into(), relay_sync_near_head_of_chain))
                 .await
             {
