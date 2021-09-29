@@ -304,6 +304,21 @@ where
         }
     }
 
+    /// Returns the specification of the current "output" finalized block. Returns an error if the
+    /// runtime had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    pub fn finalized_block_runtime_spec(&self) -> Result<&executor::CoreVersion, &RuntimeError> {
+        let index = self.finalized_block_runtime_index();
+        self.runtimes[index]
+            .runtime
+            .as_ref()
+            .map(|r| &r.runtime_spec)
+    }
+
     /// Returns the specification of the current "output" best block. Returns an error if the
     /// runtime had failed to compile.
     ///

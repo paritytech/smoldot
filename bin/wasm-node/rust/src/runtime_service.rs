@@ -365,6 +365,16 @@ impl RuntimeService {
         }
     }
 
+    pub fn recent_finalized_block_runtime_call<'a: 'b, 'b>(
+        self: &'a Arc<RuntimeService>,
+        method: &'b str,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]> + 'b> + Clone + 'b,
+    ) -> impl Future<
+        Output = Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError>,
+    > + 'b {
+        self.runtime_call_inner(method, parameter_vectored, true)
+    }
+
     /// Start performing a runtime call using the best block, or a recent best block.
     ///
     /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,
@@ -379,7 +389,29 @@ impl RuntimeService {
     pub fn recent_best_block_runtime_call<'a: 'b, 'b>(
         self: &'a Arc<RuntimeService>,
         method: &'b str,
-        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]> + 'b> + Clone + 'b,
+    ) -> impl Future<
+        Output = Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError>,
+    > + 'b {
+        self.runtime_call_inner(method, parameter_vectored, false)
+    }
+
+    /// Start performing a runtime call using the best block, or a recent best block.
+    ///
+    /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,
+    /// but doesn't know anything about the storage, which the runtime might have to access. In
+    /// order to make this work, a "call proof" is performed on the network in order to obtain
+    /// the storage values corresponding to this call.
+    ///
+    /// This method merely starts the runtime call process and returns a lock. While the lock is
+    /// alive, the entire [`RuntimeService`] is frozen. **You are strongly encouraged to not
+    /// perform any asynchronous operation while the lock is active.** The call must be driven
+    /// forward using the methods on the [`RuntimeCallLock`].
+    fn runtime_call_inner<'a: 'b, 'b>(
+        self: &'a Arc<RuntimeService>,
+        method: &'b str,
+        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]> + 'b> + Clone + 'b,
+        finalized_block: bool,
     ) -> impl Future<
         Output = Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError>,
     > + 'b {
@@ -397,14 +429,25 @@ impl RuntimeService {
                     let guarded = self.guarded.lock().await;
                     let tree = guarded.tree.as_ref().unwrap();
 
-                    (
-                        tree.best_block_runtime_spec()
-                            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
-                            .decode()
-                            .spec_version,
-                        *tree.best_block_hash(),
-                        tree.best_block_header().to_vec(),
-                    )
+                    if finalized_block {
+                        (
+                            tree.finalized_block_runtime_spec()
+                                .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
+                                .decode()
+                                .spec_version,
+                            *tree.finalized_block_hash(),
+                            tree.finalized_block_header().to_vec(),
+                        )
+                    } else {
+                        (
+                            tree.best_block_runtime_spec()
+                                .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
+                                .decode()
+                                .spec_version,
+                            *tree.best_block_hash(),
+                            tree.best_block_header().to_vec(),
+                        )
+                    }
                 };
 
                 // Perform the call proof request.
@@ -428,24 +471,32 @@ impl RuntimeService {
                 // Lock `guarded_lock` again. `continue` if the runtime has changed
                 // in-between.
                 let mut guarded = self.guarded.lock().await;
-                let runtime_spec = guarded
-                    .tree
-                    .as_ref()
-                    .unwrap()
-                    .best_block_runtime_spec()
-                    .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
+                let runtime_spec = if finalized_block {
+                    guarded
+                        .tree
+                        .as_ref()
+                        .unwrap()
+                        .finalized_block_runtime_spec()
+                } else {
+                    guarded.tree.as_ref().unwrap().best_block_runtime_spec()
+                }
+                .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
                 if runtime_spec.decode().spec_version != spec_version {
                     continue;
                 }
 
                 // Extraction is guaranteed to success because we successfully loaded the spec
                 // just above.
-                let extracted_runtime = guarded
-                    .tree
-                    .take()
-                    .unwrap()
-                    .best_block_runtime_extract()
-                    .unwrap_or_else(|_| panic!());
+                let extracted_runtime = if finalized_block {
+                    guarded
+                        .tree
+                        .take()
+                        .unwrap()
+                        .finalized_block_runtime_extract()
+                } else {
+                    guarded.tree.take().unwrap().best_block_runtime_extract()
+                }
+                .unwrap_or_else(|_| panic!());
                 let lock = RuntimeCallLock {
                     guarded,
                     extracted: Some(extracted_runtime.tree),
