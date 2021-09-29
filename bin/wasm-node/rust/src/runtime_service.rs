@@ -821,8 +821,7 @@ pub enum RuntimeVersionOfBlockError {
 
 struct Guarded {
     /// List of senders that get notified when the runtime specs of the best block changes.
-    /// Whenever [`Runtime::runtime`] is updated, one should emit an item on each
-    /// sender.
+    /// Whenever the best block runtime is updated, one should emit an item on each sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
     runtime_version_subscriptions:
         Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,

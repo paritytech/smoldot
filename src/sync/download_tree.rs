@@ -1233,7 +1233,7 @@ enum RuntimeDownloadState<TNow> {
     /// Runtime is currently being downloaded. The future can be found in
     // [`Background::runtime_downloads`].
     Downloading {
-        /// Identifier for this download. Can be found in [`Background::runtime_downloads`].
+        /// Identifier for this download in the public API.
         /// Attributed from [`Background::next_download_id`]. Multiple different blocks can point
         /// to the same `download_id` when it is known that they point to the same runtime.
         download_id: DownloadId,
