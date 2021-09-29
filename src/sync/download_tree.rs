@@ -26,8 +26,9 @@
 //! The data structure also holds a list of on-going runtime parameter downloads. Use
 //! [`DownloadTree::next_necessary_download`] to insert an ongoing download in the data structure.
 //! It is the responsibility of the API user to actually perform the download and use
-//! [`DownloadTree::runtime_download_finished`] or [`DownloadTree::runtime_download_failure`] when
-//! this download is finished.
+//! [`DownloadTree::runtime_download_finished_existing`],
+//! [`DownloadTree::runtime_download_finished_new`], or [`DownloadTree::runtime_download_failure`]
+//! when this download is finished.
 //!
 //! Whenever it is updated, the [`DownloadTree`] can also update the block that it considers as
 //! the "output best block" and the block that it considers as the "output finalized block". These
@@ -36,10 +37,14 @@
 //! it doesn't have any output best or finalized block. Use [`DownloadTree::has_output`] to
 //! determine whether the data structure is ready.
 //!
+//! Finally, the data structure also holds a list of runtimes injected through
+//! [`DownloadTree::runtime_download_finished_new`]. You are strongly encouraged to periodically
+//! call [`DownloadTree::drain_unused_runtimes`] in order to free up resources.
+//!
 
-use crate::{chain::fork_tree, executor, header, metadata};
+use crate::{chain::fork_tree, executor, header};
 use alloc::vec::Vec;
-use core::{cmp, iter, mem, num::NonZeroUsize, time::Duration};
+use core::{cmp, iter, mem, time::Duration};
 
 mod tests;
 
@@ -59,6 +64,10 @@ pub enum RuntimeError {
 /// Identifier for a download in the [`DownloadTree`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct DownloadId(u64);
+
+/// Identifier for a runtime in the [`DownloadTree`].
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct RuntimeId(usize);
 
 #[derive(Debug)]
 pub enum NextNecessaryDownload<TNow> {
@@ -80,9 +89,9 @@ pub struct DownloadParams {
     pub block_state_root: [u8; 32],
 }
 
-pub struct DownloadTree<TNow> {
+pub struct DownloadTree<TNow, TRt> {
     /// List of all compiled runtime. Referenced by the various blocks below.
-    runtimes: slab::Slab<Runtime>,
+    runtimes: slab::Slab<Runtime<TRt>>,
 
     /// State of the finalized block reported through the public API of the output.
     /// This doesn't necessarily match the one of the input.
@@ -115,7 +124,7 @@ pub struct DownloadTree<TNow> {
     next_download_id: DownloadId,
 }
 
-impl<TNow> DownloadTree<TNow>
+impl<TNow, TRt> DownloadTree<TNow, TRt>
 where
     TNow: Clone + core::ops::Add<Duration, Output = TNow> + Ord,
 {
@@ -127,69 +136,26 @@ where
     }
 
     /// Returns a new [`DownloadTree`] containing one "input" finalized block. The runtime of this
-    /// finalized block will be compiled from the given storage, meaning that this block also
-    /// becomes the "output" finalized block and the "output" best block.
+    /// finalized block will be the one passed as parameter, meaning that this block also becomes
+    /// the "output" finalized block and the "output" best block.
     ///
     /// This [`DownloadTree`] is immediately in a ready state.
-    pub fn from_finalized_block_and_storage<'a>(
+    pub fn from_finalized_block_and_runtime<'a>(
         finalized_block_scale_encoded_header: Vec<u8>,
-        genesis_storage: impl ExactSizeIterator<Item = (&'a [u8], &'a [u8])> + Clone,
+        finalized_runtime: TRt,
     ) -> Self {
-        // Build the runtime of the genesis block.
-        let genesis_runtime = {
-            let code = genesis_storage
-                .clone()
-                .find(|(k, _)| k == b":code")
-                .map(|(_, v)| v.to_vec());
-            let heap_pages = genesis_storage
-                .clone()
-                .find(|(k, _)| k == b":heappages")
-                .map(|(_, v)| v.to_vec());
-
-            // Note that in the absolute we don't need to panic in case of a problem, and could
-            // simply store an `Err` and continue running.
-            // However, in practice, it seems more sane to detect problems in the genesis block.
-            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages);
-
-            // As documented in the `metadata` field, we must fill it using the genesis storage.
-            if let Ok(runtime) = runtime.as_mut() {
-                let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
-                loop {
-                    match query {
-                        metadata::Query::Finished(Ok(metadata), vm) => {
-                            runtime.virtual_machine = Some(vm);
-                            runtime.metadata = Some(metadata);
-                            break;
-                        }
-                        metadata::Query::StorageGet(get) => {
-                            let key = get.key_as_vec();
-                            let value = genesis_storage
-                                .clone()
-                                .find(|(k, _)| &**k == key)
-                                .map(|(_, v)| v);
-                            query = get.inject_value(value.map(iter::once));
-                        }
-                        metadata::Query::Finished(Err(err), _) => {
-                            panic!("Unable to generate genesis metadata: {}", err)
-                        }
-                    }
-                }
-            }
-
-            Runtime {
-                runtime,
-                runtime_code: code,
-                heap_pages,
-                num_blocks: NonZeroUsize::new(1).unwrap(),
-            }
-        };
-
-        DownloadTree::new_inner(finalized_block_scale_encoded_header, Some(genesis_runtime))
+        DownloadTree::new_inner(
+            finalized_block_scale_encoded_header,
+            Some(Runtime {
+                num_blocks: 1,
+                user_data: finalized_runtime,
+            }),
+        )
     }
 
     fn new_inner(
         finalized_block_scale_encoded_header: Vec<u8>,
-        finalized_runtime: Option<Runtime>,
+        finalized_runtime: Option<Runtime<TRt>>,
     ) -> Self {
         let mut runtimes = slab::Slab::with_capacity(4); // Usual len is `1`, rarely `2`.
 
@@ -304,36 +270,6 @@ where
         }
     }
 
-    /// Returns the specification of the current "output" finalized block. Returns an error if the
-    /// runtime had failed to compile.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`DownloadTree::has_output`] isn't `true`.
-    ///
-    pub fn finalized_block_runtime_spec(&self) -> Result<&executor::CoreVersion, &RuntimeError> {
-        let index = self.finalized_block_runtime_index();
-        self.runtimes[index]
-            .runtime
-            .as_ref()
-            .map(|r| &r.runtime_spec)
-    }
-
-    /// Returns the specification of the current "output" best block. Returns an error if the
-    /// runtime had failed to compile.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`DownloadTree::has_output`] isn't `true`.
-    ///
-    pub fn best_block_runtime_spec(&self) -> Result<&executor::CoreVersion, &RuntimeError> {
-        let index = self.best_block_runtime_index();
-        self.runtimes[index]
-            .runtime
-            .as_ref()
-            .map(|r| &r.runtime_spec)
-    }
-
     /// Returns the runtime of the current "output" finalized block. Returns an error if the
     /// runtime had failed to compile.
     ///
@@ -341,15 +277,13 @@ where
     ///
     /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
-    // TODO: is this method really useful?
-    pub fn finalized_block_runtime(
-        &self,
-    ) -> Result<&executor::host::HostVmPrototype, &RuntimeError> {
-        let index = self.finalized_block_runtime_index();
-        self.runtimes[index]
-            .runtime
-            .as_ref()
-            .map(|r| r.virtual_machine.as_ref().unwrap())
+    pub fn finalized_block_runtime_id(&self) -> RuntimeId {
+        match self.finalized_block.runtime {
+            Ok(RuntimeDownloadState::Finished(index)) => RuntimeId(index),
+            // It is guaranteed that the finalized block's runtime is always in the `Finished`
+            // state, unless there is no output, which the function disallows.
+            _ => panic!(),
+        }
     }
 
     /// Returns the runtime of the current "output" best block. Returns an error if the runtime
@@ -359,70 +293,131 @@ where
     ///
     /// Panics if [`DownloadTree::has_output`] isn't `true`.
     ///
-    // TODO: is this method really useful?
-    pub fn best_block_runtime(&self) -> Result<&executor::host::HostVmPrototype, &RuntimeError> {
-        let index = self.best_block_runtime_index();
-        self.runtimes[index]
-            .runtime
-            .as_ref()
-            .map(|r| r.virtual_machine.as_ref().unwrap())
-    }
+    pub fn best_block_runtime_id(&self) -> RuntimeId {
+        let best_block = if let Some(best_block_index) = self.best_block_index {
+            self.non_finalized_blocks.get(best_block_index).unwrap()
+        } else {
+            &self.finalized_block
+        };
 
-    /// Extracts the runtime of the current "output" finalized block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`DownloadTree::has_output`] isn't `true`.
-    ///
-    pub fn finalized_block_runtime_extract(
-        self,
-    ) -> Result<ExtractedRuntime<TNow>, (Self, RuntimeError)> {
-        let runtime_index = self.finalized_block_runtime_index();
-        self.runtime_extract_inner(runtime_index)
-    }
-
-    /// Extracts the runtime of the current "output" best block.
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`DownloadTree::has_output`] isn't `true`.
-    ///
-    pub fn best_block_runtime_extract(
-        self,
-    ) -> Result<ExtractedRuntime<TNow>, (Self, RuntimeError)> {
-        let runtime_index = self.best_block_runtime_index();
-        self.runtime_extract_inner(runtime_index)
-    }
-
-    fn runtime_extract_inner(
-        mut self,
-        runtime_index: usize,
-    ) -> Result<ExtractedRuntime<TNow>, (Self, RuntimeError)> {
-        match self.runtimes[runtime_index].runtime.as_mut() {
-            Err(err) => {
-                let err = err.clone();
-                Err((self, err))
-            }
-            Ok(runtime) => {
-                let runtime = runtime.virtual_machine.take().unwrap();
-
-                Ok(ExtractedRuntime {
-                    runtime,
-                    tree: ExtractedDownloadTree {
-                        inner: self,
-                        extracted_runtime_index: runtime_index,
-                    },
-                })
-            }
+        match best_block.runtime {
+            Ok(RuntimeDownloadState::Finished(index)) => RuntimeId(index),
+            // It is guaranteed that the best block's runtime is always in the `Finished`
+            // state, unless there is no output, which the function disallows.
+            _ => unreachable!(),
         }
     }
 
-    /// Injects into the state of the data structure a completed runtime download.
-    pub fn runtime_download_finished(
+    /// Returns the runtime of the current "output" finalized block. Returns an error if the
+    /// runtime had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    pub fn finalized_block_runtime(&self) -> &TRt {
+        let index = self.finalized_block_runtime_id().0;
+        &self.runtimes[index].user_data
+    }
+
+    /// Returns the runtime of the current "output" best block. Returns an error if the runtime
+    /// had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    pub fn best_block_runtime(&self) -> &TRt {
+        let index = self.best_block_runtime_id().0;
+        &self.runtimes[index].user_data
+    }
+
+    /// Returns the runtime of the current "output" finalized block. Returns an error if the
+    /// runtime had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    pub fn finalized_block_runtime_mut(&mut self) -> &mut TRt {
+        let index = self.finalized_block_runtime_id().0;
+        &mut self.runtimes[index].user_data
+    }
+
+    /// Returns the runtime of the current "output" best block. Returns an error if the runtime
+    /// had failed to compile.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    pub fn best_block_runtime_mut(&mut self) -> &mut TRt {
+        let index = self.best_block_runtime_id().0;
+        &mut self.runtimes[index].user_data
+    }
+
+    /// Iterates over all the runtimes stored in this data structure.
+    pub fn runtimes_iter(&'_ self) -> impl Iterator<Item = (RuntimeId, &'_ TRt)> + '_ {
+        self.runtimes
+            .iter()
+            .map(|(id, rt)| (RuntimeId(id), &rt.user_data))
+    }
+
+    /// Returns the user data associated to the runtime with the given identifier.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RuntimeId`] is invalid.
+    ///
+    pub fn runtime_user_data(&self, id: RuntimeId) -> &TRt {
+        &self.runtimes[id.0].user_data
+    }
+
+    /// Returns the user data associated to the runtime with the given identifier.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RuntimeId`] is invalid.
+    ///
+    pub fn runtime_user_data_mut(&mut self, id: RuntimeId) -> &mut TRt {
+        &mut self.runtimes[id.0].user_data
+    }
+
+    /// Removes from the data structure the runtimes that aren't used by any block.
+    pub fn drain_unused_runtimes(&mut self) -> impl Iterator<Item = (RuntimeId, TRt)> {
+        let unused_ids = self
+            .runtimes
+            .iter()
+            .filter(|(_, r)| r.num_blocks == 0)
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+
+        let mut unused = Vec::with_capacity(unused_ids.len());
+        for id in unused_ids {
+            let runtime = self.runtimes.remove(id);
+            debug_assert_eq!(runtime.num_blocks, 0);
+            unused.push((RuntimeId(id), runtime.user_data));
+        }
+
+        if !unused.is_empty() {
+            self.runtimes.shrink_to_fit();
+        }
+
+        unused.into_iter()
+    }
+
+    /// Injects into the state of the data structure a completed runtime download, and that the
+    /// downloaded runtime is the same as one that already exists in the data structure.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`DownloadId`] is invalid.
+    /// Panics if the [`RuntimeId`] is invalid.
+    ///
+    pub fn runtime_download_finished_existing(
         &mut self,
         download_id: DownloadId,
-        storage_code: Option<Vec<u8>>,
-        storage_heap_pages: Option<Vec<u8>>,
+        runtime_id: RuntimeId,
     ) -> OutputUpdate {
         // Find the number of blocks that are bound to this download.
         let num_concerned_blocks = iter::once(&self.finalized_block)
@@ -435,41 +430,15 @@ where
             })
             .count();
 
-        // The download might concern only blocks that have now been pruned.
-        if num_concerned_blocks == 0 {
-            debug_assert!(self.try_advance_output().is_noop());
-            return OutputUpdate::noop();
-        }
-
-        // Try find the identifier of an existing runtime that has this code and heap pages. If
-        // none is found, compile the runtime.
-        // This search is `O(n)`, but considering the very low number of runtimes (most of the
-        // time one, occasionally two), this shouldn't be a problem.
-        // The runtime's `num_blocks` is also increased by `num_concerned_blocks` here.
-        let runtime_index = if let Some((runtime_index, runtime)) = self
-            .runtimes
-            .iter_mut()
-            .find(|(_, r)| r.runtime_code == storage_code && r.heap_pages == storage_heap_pages)
-        {
-            runtime.num_blocks =
-                NonZeroUsize::new(runtime.num_blocks.get() + num_concerned_blocks).unwrap();
-            runtime_index
-        } else {
-            let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages);
-            self.runtimes.insert(Runtime {
-                num_blocks: NonZeroUsize::new(num_concerned_blocks).unwrap(),
-                runtime,
-                runtime_code: storage_code,
-                heap_pages: storage_heap_pages,
-            })
-        };
+        // Update `num_blocks`.
+        self.runtimes.get_mut(runtime_id.0).unwrap().num_blocks += num_concerned_blocks;
 
         // Update the blocks that were downloading this runtime to become `Finished`.
         match self.finalized_block.runtime {
             Ok(RuntimeDownloadState::Downloading {
                 download_id: id, ..
             }) if id == download_id => {
-                self.finalized_block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
+                self.finalized_block.runtime = Ok(RuntimeDownloadState::Finished(runtime_id.0));
             }
             _ => {}
         }
@@ -484,7 +453,7 @@ where
                 Ok(RuntimeDownloadState::Downloading {
                     download_id: id, ..
                 }) if id == download_id => {
-                    block.runtime = Ok(RuntimeDownloadState::Finished(runtime_index));
+                    block.runtime = Ok(RuntimeDownloadState::Finished(runtime_id.0));
                 }
                 _ => {}
             }
@@ -494,7 +463,7 @@ where
         debug_assert_eq!(
             self.runtimes
                 .iter()
-                .map(|(_, r)| r.num_blocks.get())
+                .map(|(_, r)| r.num_blocks)
                 .sum::<usize>(),
             iter::once(&self.finalized_block)
                 .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
@@ -505,10 +474,86 @@ where
         self.try_advance_output()
     }
 
+    /// Injects into the state of the data structure a completed runtime download, and that the
+    /// downloaded runtime is new.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`DownloadId`] is invalid.
+    ///
+    pub fn runtime_download_finished_new(
+        &mut self,
+        download_id: DownloadId,
+        user_data: TRt,
+    ) -> (RuntimeId, OutputUpdate) {
+        // Find the number of blocks that are bound to this download.
+        let num_concerned_blocks = iter::once(&self.finalized_block)
+            .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
+            .filter(|b| match b.runtime {
+                Ok(RuntimeDownloadState::Downloading {
+                    download_id: id, ..
+                }) if id == download_id => true,
+                _ => false,
+            })
+            .count();
+
+        // Insert the new runtime.
+        let runtime_id = RuntimeId(self.runtimes.insert(Runtime {
+            num_blocks: num_concerned_blocks,
+            user_data,
+        }));
+
+        // Update the blocks that were downloading this runtime to become `Finished`.
+        match self.finalized_block.runtime {
+            Ok(RuntimeDownloadState::Downloading {
+                download_id: id, ..
+            }) if id == download_id => {
+                self.finalized_block.runtime = Ok(RuntimeDownloadState::Finished(runtime_id.0));
+            }
+            _ => {}
+        }
+        for index in self
+            .non_finalized_blocks
+            .iter_unordered()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+        {
+            let block = self.non_finalized_blocks.get_mut(index).unwrap();
+            match block.runtime {
+                Ok(RuntimeDownloadState::Downloading {
+                    download_id: id, ..
+                }) if id == download_id => {
+                    block.runtime = Ok(RuntimeDownloadState::Finished(runtime_id.0));
+                }
+                _ => {}
+            }
+        }
+
+        // Sanity check.
+        debug_assert_eq!(
+            self.runtimes
+                .iter()
+                .map(|(_, r)| r.num_blocks)
+                .sum::<usize>(),
+            iter::once(&self.finalized_block)
+                .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
+                .filter(|b| matches!(b.runtime, Ok(RuntimeDownloadState::Finished(_))))
+                .count()
+        );
+
+        let output = self.try_advance_output();
+        (runtime_id, output)
+    }
+
     /// Injects into the state of the state machine a failed runtime download.
     ///
     /// This same download will not be repeated for the next few seconds. Thanks to this, it is
     /// possible to immediately call this function in response to a new necessary download.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`DownloadId`] is invalid.
+    ///
     pub fn runtime_download_failure(&mut self, download_id: DownloadId, now: &TNow) {
         let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded value
 
@@ -774,9 +819,7 @@ where
                 }
 
                 Ok(RuntimeDownloadState::Finished(runtime_index)) => {
-                    self.runtimes[runtime_index].num_blocks =
-                        NonZeroUsize::new(self.runtimes[runtime_index].num_blocks.get() + 1)
-                            .unwrap();
+                    self.runtimes[runtime_index].num_blocks += 1;
                     self.non_finalized_blocks.insert(
                         parent_index,
                         Block {
@@ -894,43 +937,6 @@ where
         self.try_advance_output()
     }
 
-    /// Returns the index of the runtime of the "output" best block, as an index within
-    /// [`DownloadTree::runtimes`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`DownloadTree::has_output`] isn't `true`.
-    ///
-    fn best_block_runtime_index(&self) -> usize {
-        let best_block = if let Some(best_block_index) = self.best_block_index {
-            self.non_finalized_blocks.get(best_block_index).unwrap()
-        } else {
-            &self.finalized_block
-        };
-
-        match best_block.runtime {
-            Ok(RuntimeDownloadState::Finished(index)) => index,
-            // It is guaranteed that the best block's runtime is always in the `Finished` state.
-            _ => unreachable!(),
-        }
-    }
-
-    /// Returns the index of the runtime of the "output" finalized block, as an index within
-    /// [`DownloadTree::runtimes`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if [`DownloadTree::has_output`] isn't `true`.
-    ///
-    fn finalized_block_runtime_index(&self) -> usize {
-        match self.finalized_block.runtime {
-            Ok(RuntimeDownloadState::Finished(index)) => index,
-            // It is guaranteed that the finalized block's runtime is always in the `Finished`
-            // state.
-            _ => unreachable!(),
-        }
-    }
-
     /// Tries to update the output finalized and best blocks to follow the input.
     fn try_advance_output(&mut self) -> OutputUpdate {
         let output = self.try_advance_output_inner();
@@ -949,7 +955,7 @@ where
         debug_assert_eq!(
             self.runtimes
                 .iter()
-                .map(|(_, r)| r.num_blocks.get())
+                .map(|(_, r)| r.num_blocks)
                 .sum::<usize>(),
             iter::once(&self.finalized_block)
                 .chain(self.non_finalized_blocks.iter_unordered().map(|(_, b)| b))
@@ -1060,12 +1066,7 @@ where
                     if let Ok(RuntimeDownloadState::Finished(runtime_index)) =
                         thrown_away_block.runtime
                     {
-                        match NonZeroUsize::new(self.runtimes[runtime_index].num_blocks.get() - 1) {
-                            Some(nv) => self.runtimes[runtime_index].num_blocks = nv,
-                            None => {
-                                self.runtimes.remove(runtime_index);
-                            }
-                        }
+                        self.runtimes[runtime_index].num_blocks -= 1;
                     }
                 }
             }
@@ -1167,36 +1168,6 @@ impl OutputUpdate {
     }
 }
 
-pub struct ExtractedRuntime<TNow> {
-    /// Equivalent to [`DownloadTree`] but with a runtime extracted.
-    pub tree: ExtractedDownloadTree<TNow>,
-
-    /// Runtime extracted from the [`DownloadTree`].
-    pub runtime: executor::host::HostVmPrototype,
-}
-
-pub struct ExtractedDownloadTree<TNow> {
-    inner: DownloadTree<TNow>,
-    extracted_runtime_index: usize,
-}
-
-impl<TNow> ExtractedDownloadTree<TNow> {
-    /// Puts back the runtime that was extracted.
-    ///
-    /// Note that no effort is made to ensure that the runtime being put back is the one that was
-    /// extracted. It is a serious logic error to put back a different runtime.
-    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) -> DownloadTree<TNow> {
-        let vm_slot = &mut self.inner.runtimes[self.extracted_runtime_index]
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine;
-        debug_assert!(vm_slot.is_none());
-        *vm_slot = Some(vm);
-        self.inner
-    }
-}
-
 struct Block<TNow> {
     /// Hash of the block in question. Redundant with `header`, but the hash is so often needed
     /// that it makes sense to cache it.
@@ -1267,88 +1238,11 @@ enum RuntimeDownloadState<TNow> {
     },
 }
 
-struct Runtime {
+struct Runtime<TRt> {
     /// Number of blocks in [`DownloadTree`] that use this runtime (includes both finalized and
     /// non-finalized blocks).
-    num_blocks: NonZeroUsize,
+    num_blocks: usize,
 
-    /// Successfully-compiled runtime and all its information. Can contain an error if an error
-    /// happened, including a problem when obtaining the runtime specs.
-    runtime: Result<SuccessfulRuntime, RuntimeError>,
-
-    /// Undecoded storage value of `:code` corresponding to the [`Runtime::runtime`]
-    /// field.
-    ///
-    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
-    /// build.
-    // TODO: consider storing hash instead
-    runtime_code: Option<Vec<u8>>,
-
-    /// Undecoded storage value of `:heappages` corresponding to the
-    /// [`Runtime::runtime`] field.
-    ///
-    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
-    /// build.
-    // TODO: consider storing hash instead
-    heap_pages: Option<Vec<u8>>,
-}
-
-struct SuccessfulRuntime {
-    /// Cache of the metadata extracted from the runtime. `None` if unknown.
-    ///
-    /// This cache is filled lazily whenever it is requested through the public API.
-    ///
-    /// Note that building the metadata might require access to the storage, just like obtaining
-    /// the runtime code. if the runtime code gets an update, we can reasonably assume that the
-    /// network is able to serve us the storage of recent blocks, and thus the changes of being
-    /// able to build the metadata are very high.
-    ///
-    /// If the runtime is the one found in the genesis storage, the metadata must have been been
-    /// filled using the genesis storage as well. If we build the metadata of the genesis runtime
-    /// lazily, chances are that the network wouldn't be able to serve the storage of blocks near
-    /// the genesis.
-    ///
-    /// As documented in the smoldot metadata module, the metadata might access the storage, but
-    /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
-    metadata: Option<Vec<u8>>,
-
-    /// Runtime specs extracted from the runtime.
-    runtime_spec: executor::CoreVersion,
-
-    /// Virtual machine itself, to perform additional calls.
-    ///
-    /// Always `Some`, except for temporary extractions necessary to execute the VM.
-    virtual_machine: Option<executor::host::HostVmPrototype>,
-}
-
-impl SuccessfulRuntime {
-    fn from_params(
-        code: &Option<Vec<u8>>,
-        heap_pages: &Option<Vec<u8>>,
-    ) -> Result<Self, RuntimeError> {
-        let vm = match executor::host::HostVmPrototype::new(
-            code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
-            executor::storage_heap_pages_to_value(heap_pages.as_deref())
-                .map_err(RuntimeError::InvalidHeapPages)?,
-            executor::vm::ExecHint::CompileAheadOfTime,
-        ) {
-            Ok(vm) => vm,
-            Err(error) => {
-                return Err(RuntimeError::Build(error));
-            }
-        };
-
-        let (runtime_spec, vm) = match executor::core_version(vm) {
-            (Ok(spec), vm) => (spec, vm),
-            (Err(error), _) => {
-                return Err(RuntimeError::CoreVersion(error));
-            }
-        };
-
-        Ok(SuccessfulRuntime {
-            metadata: None,
-            runtime_spec,
-            virtual_machine: Some(vm),
-        })
-    }
+    /// User data associated to that runtime.
+    user_data: TRt,
 }

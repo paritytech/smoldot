@@ -34,12 +34,12 @@ fn basic() {
     }
     .scale_encoding_vec();
 
-    let _tree = DownloadTree::<Duration>::from_finalized_block(finalized_header);
+    let _tree = DownloadTree::<Duration, ()>::from_finalized_block(finalized_header);
 }
 
 #[test]
 fn invalid_header_accepted() {
-    let mut tree = DownloadTree::from_finalized_block(vec![0xde, 0xad, 0xde, 0xad]);
+    let mut tree = DownloadTree::<_, ()>::from_finalized_block(vec![0xde, 0xad, 0xde, 0xad]);
     assert!(matches!(
         tree.next_necessary_download(&Duration::from_secs(0)),
         NextNecessaryDownload::NotReady { .. }

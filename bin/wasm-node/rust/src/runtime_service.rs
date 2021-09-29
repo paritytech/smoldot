@@ -114,6 +114,57 @@ impl RuntimeService {
 
         let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
+        // Build the runtime of the genesis block.
+        let genesis_runtime = {
+            let code = config
+                .chain_spec
+                .genesis_storage()
+                .find(|(k, _)| k == b":code")
+                .map(|(_, v)| v.to_vec());
+            let heap_pages = config
+                .chain_spec
+                .genesis_storage()
+                .find(|(k, _)| k == b":heappages")
+                .map(|(_, v)| v.to_vec());
+
+            // Note that in the absolute we don't need to panic in case of a problem, and could
+            // simply store an `Err` and continue running.
+            // However, in practice, it seems more sane to detect problems in the genesis block.
+            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages);
+
+            // As documented in the `metadata` field, we must fill it using the genesis storage.
+            if let Ok(runtime) = runtime.as_mut() {
+                let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
+                loop {
+                    match query {
+                        metadata::Query::Finished(Ok(metadata), vm) => {
+                            runtime.virtual_machine = Some(vm);
+                            runtime.metadata = Some(metadata);
+                            break;
+                        }
+                        metadata::Query::StorageGet(get) => {
+                            let key = get.key_as_vec();
+                            let value = config
+                                .chain_spec
+                                .genesis_storage()
+                                .find(|(k, _)| &**k == key)
+                                .map(|(_, v)| v);
+                            query = get.inject_value(value.map(iter::once));
+                        }
+                        metadata::Query::Finished(Err(err), _) => {
+                            panic!("Unable to generate genesis metadata: {}", err)
+                        }
+                    }
+                }
+            }
+
+            Runtime {
+                runtime,
+                runtime_code: code,
+                heap_pages,
+            }
+        };
+
         let runtime_service = Arc::new(RuntimeService {
             log_target,
             sync_service: config.sync_service,
@@ -123,9 +174,9 @@ impl RuntimeService {
                 runtime_version_subscriptions: Vec::new(),
                 best_near_head_of_chain,
                 tree: Some(
-                    download_tree::DownloadTree::from_finalized_block_and_storage(
+                    download_tree::DownloadTree::from_finalized_block_and_runtime(
                         config.genesis_block_scale_encoded_header,
-                        config.chain_spec.genesis_storage(),
+                        genesis_runtime,
                     ),
                 ),
             }),
@@ -165,8 +216,10 @@ impl RuntimeService {
             .tree
             .as_ref()
             .unwrap()
-            .best_block_runtime_spec()
-            .map(|spec| spec.clone())
+            .best_block_runtime()
+            .runtime
+            .as_ref()
+            .map(|spec| spec.runtime_spec.clone())
             .map_err(|err| err.clone());
         (current_version, rx)
     }
@@ -285,8 +338,10 @@ impl RuntimeService {
             .tree
             .as_ref()
             .unwrap()
-            .best_block_runtime_spec()
-            .map(|spec| spec.clone())
+            .best_block_runtime()
+            .runtime
+            .as_ref()
+            .map(|spec| spec.runtime_spec.clone())
             .map_err(|err| err.clone())
     }
 
@@ -431,8 +486,11 @@ impl RuntimeService {
 
                     if finalized_block {
                         (
-                            tree.finalized_block_runtime_spec()
+                            tree.finalized_block_runtime()
+                                .runtime
+                                .as_ref()
                                 .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
+                                .runtime_spec
                                 .decode()
                                 .spec_version,
                             *tree.finalized_block_hash(),
@@ -440,8 +498,11 @@ impl RuntimeService {
                         )
                     } else {
                         (
-                            tree.best_block_runtime_spec()
+                            tree.best_block_runtime()
+                                .runtime
+                                .as_ref()
                                 .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
+                                .runtime_spec
                                 .decode()
                                 .spec_version,
                             *tree.best_block_hash(),
@@ -629,10 +690,16 @@ impl<'a> RuntimeLock<'a> {
         let tree = self.guarded.tree.as_ref().unwrap();
         // TODO: don't unwrap?
         if self.is_best {
-            tree.best_block_runtime().unwrap()
+            tree.best_block_runtime()
         } else {
-            tree.finalized_block_runtime().unwrap()
+            tree.finalized_block_runtime()
         }
+        .runtime
+        .as_ref()
+        .unwrap()
+        .virtual_machine
+        .as_ref()
+        .unwrap()
     }
 
     pub async fn start<'b>(
@@ -668,16 +735,15 @@ impl<'a> RuntimeLock<'a> {
 
         let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
 
-        let tree = self.guarded.tree.take().unwrap();
+        let tree = self.guarded.tree.as_mut().unwrap();
         let runtime = match if self.is_best {
-            tree.best_block_runtime_extract()
+            tree.best_block_runtime_mut().runtime.as_mut()
         } else {
-            tree.finalized_block_runtime_extract()
+            tree.finalized_block_runtime_mut().runtime.as_mut()
         } {
-            Ok(r) => r,
-            Err((tree, err)) => {
-                self.guarded.tree = Some(tree);
-                return Err(RuntimeCallError::InvalidRuntime(err));
+            Ok(r) => r.virtual_machine.take().unwrap(),
+            Err(err) => {
+                return Err(RuntimeCallError::InvalidRuntime(err.clone()));
             }
         };
 
@@ -685,10 +751,9 @@ impl<'a> RuntimeLock<'a> {
             guarded: self.guarded,
             runtime_block_header,
             call_proof,
-            extracted: Some(runtime.tree),
         };
 
-        Ok((lock, runtime.runtime))
+        Ok((lock, runtime))
     }
 }
 
@@ -696,7 +761,6 @@ impl<'a> RuntimeLock<'a> {
 #[must_use]
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Guarded>,
-    extracted: Option<download_tree::ExtractedDownloadTree<ffi::Instant>>,
     runtime_block_header: Vec<u8>,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
@@ -804,10 +868,11 @@ impl<'a> RuntimeCallLock<'a> {
 
 impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        if self.extracted.is_some() {
+        // TODO: ?!
+        /*if self.extracted.is_some() {
             // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
             panic!()
-        }
+        }*/
     }
 }
 
@@ -891,7 +956,7 @@ struct Guarded {
 
     /// Tree of blocks. Holds the state of the download of everything. Always `true` when the
     /// `Mutex` is being locked. Switched to `None` during some operations.
-    tree: Option<download_tree::DownloadTree<ffi::Instant>>,
+    tree: Option<download_tree::DownloadTree<ffi::Instant, Runtime>>,
 }
 
 impl Guarded {
@@ -927,13 +992,23 @@ impl Guarded {
         }
 
         if output_update.best_block_runtime_changed {
-            let runtime_version = self.tree.as_ref().unwrap().best_block_runtime_spec();
+            let runtime_version = &self
+                .tree
+                .as_ref()
+                .unwrap()
+                .best_block_runtime()
+                .runtime
+                .as_ref();
 
             // Elements are removed one by one and inserted back if the channel is still open.
             for index in (0..self.runtime_version_subscriptions.len()).rev() {
                 let mut subscription = self.runtime_version_subscriptions.swap_remove(index);
                 if subscription
-                    .send(runtime_version.map(|v| v.clone()).map_err(|e| e.clone()))
+                    .send(
+                        runtime_version
+                            .map(|v| v.runtime_spec.clone())
+                            .map_err(|e| e.clone()),
+                    )
                     .is_err()
                 {
                     continue;
@@ -1138,11 +1213,37 @@ impl Background {
     ) {
         let mut guarded = self.runtime_service.guarded.lock().await;
 
-        let output_update = guarded.tree.as_mut().unwrap().runtime_download_finished(
-            download_id,
-            storage_code,
-            storage_heap_pages,
-        );
+        let existing_runtime = guarded
+            .tree
+            .as_ref()
+            .unwrap()
+            .runtimes_iter()
+            .find(|(_, rt)| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages)
+            .map(|(id, _)| id);
+
+        let output_update = if let Some(existing_runtime) = existing_runtime {
+            guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .runtime_download_finished_existing(download_id, existing_runtime)
+        } else {
+            let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages);
+
+            guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .runtime_download_finished_new(
+                    download_id,
+                    Runtime {
+                        heap_pages: storage_heap_pages,
+                        runtime_code: storage_code,
+                        runtime,
+                    },
+                )
+                .1
+        };
 
         guarded.notify_subscribers(output_update).await;
     }
@@ -1223,5 +1324,87 @@ impl Background {
             .finalize(hash_to_finalize, new_best_block_hash);
 
         guarded.notify_subscribers(output_update).await;
+    }
+}
+
+struct Runtime {
+    /// Successfully-compiled runtime and all its information. Can contain an error if an error
+    /// happened, including a problem when obtaining the runtime specs.
+    runtime: Result<SuccessfulRuntime, RuntimeError>,
+
+    /// Undecoded storage value of `:code` corresponding to the [`Runtime::runtime`]
+    /// field.
+    ///
+    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
+    /// build.
+    // TODO: consider storing hash instead
+    runtime_code: Option<Vec<u8>>,
+
+    /// Undecoded storage value of `:heappages` corresponding to the
+    /// [`Runtime::runtime`] field.
+    ///
+    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
+    /// build.
+    // TODO: consider storing hash instead
+    heap_pages: Option<Vec<u8>>,
+}
+
+struct SuccessfulRuntime {
+    /// Cache of the metadata extracted from the runtime. `None` if unknown.
+    ///
+    /// This cache is filled lazily whenever it is requested through the public API.
+    ///
+    /// Note that building the metadata might require access to the storage, just like obtaining
+    /// the runtime code. if the runtime code gets an update, we can reasonably assume that the
+    /// network is able to serve us the storage of recent blocks, and thus the changes of being
+    /// able to build the metadata are very high.
+    ///
+    /// If the runtime is the one found in the genesis storage, the metadata must have been been
+    /// filled using the genesis storage as well. If we build the metadata of the genesis runtime
+    /// lazily, chances are that the network wouldn't be able to serve the storage of blocks near
+    /// the genesis.
+    ///
+    /// As documented in the smoldot metadata module, the metadata might access the storage, but
+    /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
+    metadata: Option<Vec<u8>>,
+
+    /// Runtime specs extracted from the runtime.
+    runtime_spec: executor::CoreVersion,
+
+    /// Virtual machine itself, to perform additional calls.
+    ///
+    /// Always `Some`, except for temporary extractions necessary to execute the VM.
+    virtual_machine: Option<executor::host::HostVmPrototype>,
+}
+
+impl SuccessfulRuntime {
+    fn from_params(
+        code: &Option<Vec<u8>>,
+        heap_pages: &Option<Vec<u8>>,
+    ) -> Result<Self, RuntimeError> {
+        let vm = match executor::host::HostVmPrototype::new(
+            code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
+            executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                .map_err(RuntimeError::InvalidHeapPages)?,
+            executor::vm::ExecHint::CompileAheadOfTime,
+        ) {
+            Ok(vm) => vm,
+            Err(error) => {
+                return Err(RuntimeError::Build(error));
+            }
+        };
+
+        let (runtime_spec, vm) = match executor::core_version(vm) {
+            (Ok(spec), vm) => (spec, vm),
+            (Err(error), _) => {
+                return Err(RuntimeError::CoreVersion(error));
+            }
+        };
+
+        Ok(SuccessfulRuntime {
+            metadata: None,
+            runtime_spec,
+            virtual_machine: Some(vm),
+        })
     }
 }
