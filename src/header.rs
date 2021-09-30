@@ -627,7 +627,9 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItem::ChangesTrieSignal(_) | DigestItem::Beefy { .. } => {}
+                DigestItem::ChangesTrieSignal(_)
+                | DigestItem::Beefy { .. }
+                | DigestItem::PolkadotParachain { .. } => {}
             }
         }
 
@@ -718,7 +720,9 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItemRef::ChangesTrieSignal(_) | DigestItemRef::Beefy { .. } => {}
+                DigestItemRef::ChangesTrieSignal(_)
+                | DigestItemRef::Beefy { .. }
+                | DigestItemRef::PolkadotParachain { .. } => {}
             }
         }
 
@@ -954,6 +958,12 @@ pub enum DigestItemRef<'a> {
         opaque: &'a [u8],
     },
 
+    /// Item related to parachains consensus. Contains information about a parachain.
+    PolkadotParachain {
+        /// Smoldot doesn't interpret the content of the log item at the moment.
+        opaque: &'a [u8],
+    },
+
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
     /// the heap pages.
     RuntimeEnvironmentUpdated,
@@ -1090,6 +1100,13 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
             }
+            DigestItemRef::PolkadotParachain { opaque } => {
+                let mut ret = vec![4];
+                ret.extend_from_slice(b"POL1");
+                ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
+                ret.extend_from_slice(opaque);
+                iter::once(ret)
+            }
             DigestItemRef::RuntimeEnvironmentUpdated => iter::once(vec![8]),
         }
     }
@@ -1108,6 +1125,9 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
             DigestItem::ChangesTrieRoot(v) => DigestItemRef::ChangesTrieRoot(v),
             DigestItem::ChangesTrieSignal(v) => DigestItemRef::ChangesTrieSignal(v.clone()),
             DigestItem::Beefy { opaque } => DigestItemRef::Beefy { opaque: &*opaque },
+            DigestItem::PolkadotParachain { opaque } => {
+                DigestItemRef::PolkadotParachain { opaque: &*opaque }
+            }
             DigestItem::RuntimeEnvironmentUpdated => DigestItemRef::RuntimeEnvironmentUpdated,
         }
     }
@@ -1133,6 +1153,12 @@ pub enum DigestItem {
 
     /// See [`DigestItemRef::Beefy`].
     Beefy {
+        /// Smoldot doesn't interpret the content of the log item at the moment.
+        opaque: Vec<u8>,
+    },
+
+    /// See [`DigestItemRef::PolkadotParachain`].
+    PolkadotParachain {
         /// Smoldot doesn't interpret the content of the log item at the moment.
         opaque: Vec<u8>,
     },
@@ -1163,6 +1189,9 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
             DigestItemRef::ChangesTrieRoot(v) => DigestItem::ChangesTrieRoot(*v),
             DigestItemRef::ChangesTrieSignal(v) => DigestItem::ChangesTrieSignal(v),
             DigestItemRef::Beefy { opaque } => DigestItem::Beefy {
+                opaque: opaque.to_vec(),
+            },
+            DigestItemRef::PolkadotParachain { opaque } => DigestItem::PolkadotParachain {
                 opaque: opaque.to_vec(),
             },
             DigestItemRef::RuntimeEnvironmentUpdated => DigestItem::RuntimeEnvironmentUpdated,
