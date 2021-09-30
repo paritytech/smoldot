@@ -46,7 +46,7 @@ use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
-    peers::{ConnectionId, InboundError, NotificationsOutErr},
+    peers::{ConnectionId, InboundError},
 };
 
 /// Configuration for a [`ChainNetwork`].
@@ -939,7 +939,49 @@ where
                         )
                         .await;
 
-                    // TODO: compare genesis hash with ours
+                    {
+                        let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                        let local_genesis = ephemeral_guarded.chains[chain_index]
+                            .chain_config
+                            .genesis_hash;
+                        let remote_genesis = *remote_handshake.genesis_hash;
+
+                        if remote_genesis != local_genesis {
+                            // TODO: DRY
+                            // Unassign the out and in slots of the remote, if any.
+                            self.inner
+                                .set_peer_notifications_out_desired(
+                                    peer_id,
+                                    chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+                                    peers::DesiredState::NotDesired,
+                                )
+                                .await;
+                            {
+                                let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                                let _was_in_out = ephemeral_guarded.chains[chain_index]
+                                    .out_peers
+                                    .remove(peer_id);
+                                let _was_in_in = ephemeral_guarded.chains[chain_index]
+                                    .in_peers
+                                    .remove(peer_id);
+                                debug_assert!(!_was_in_out || !_was_in_in);
+                            }
+
+                            return match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::NotificationsOutResult { peer_id, .. } => {
+                                    Event::ChainConnectAttemptFailed {
+                                        peer_id,
+                                        chain_index,
+                                        error: NotificationsOutErr::GenesisMismatch {
+                                            local_genesis,
+                                            remote_genesis,
+                                        },
+                                    }
+                                }
+                                _ => unreachable!(),
+                            };
+                        }
+                    }
 
                     let _was_inserted = guarded.open_chains.insert((peer_id.clone(), chain_index));
                     debug_assert!(_was_inserted);
@@ -1108,7 +1150,7 @@ where
                             return Event::ChainConnectAttemptFailed {
                                 peer_id,
                                 chain_index,
-                                error,
+                                error: NotificationsOutErr::Substream(error),
                             };
                         }
                         _ => unreachable!(),
@@ -1767,6 +1809,21 @@ pub enum Event<'a, TNow> {
         peer_id: peer_id::PeerId,
         transactions: EncodedTransactions,
     }*/
+}
+
+/// Error that can happen when trying to open an outbound notifications substream.
+#[derive(Debug, Clone, derive_more::Display)]
+pub enum NotificationsOutErr {
+    /// Error in the underlying protocol.
+    Substream(peers::NotificationsOutErr),
+    /// Mismatch between the genesis hash of the remote and the local genesis hash.
+    #[display(fmt = "Mismatch between the genesis hash of the remote and the local genesis hash")]
+    GenesisMismatch {
+        /// Hash of the genesis block of the chain according to the local node.
+        local_genesis: [u8; 32],
+        /// Hash of the genesis block of the chain according to the remote node.
+        remote_genesis: [u8; 32],
+    },
 }
 
 /// Undecoded but valid block announce handshake.
