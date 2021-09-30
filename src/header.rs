@@ -1293,13 +1293,16 @@ fn decode_item_from_parts<'a>(
 ) -> Result<DigestItemRef<'a>, Error> {
     Ok(match (index, engine_id) {
         (_, b"pow_") => return Err(Error::PowIdeologicallyNotSupported),
+        // 4 = Consensus
         (4, b"aura") => DigestItemRef::AuraConsensus(AuraConsensusLogRef::from_slice(content)?),
         (4, b"BABE") => DigestItemRef::BabeConsensus(BabeConsensusLogRef::from_slice(content)?),
         (4, b"FRNK") => {
             DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(content)?)
         }
         (4, b"BEEF") => DigestItemRef::Beefy { opaque: content },
+        (4, b"POL1") => DigestItemRef::PolkadotParachain { opaque: content },
         (4, e) => return Err(Error::UnknownConsensusEngine(*e)),
+        // 5 = Seal
         (5, b"aura") => DigestItemRef::AuraSeal({
             TryFrom::try_from(content).map_err(|_| Error::BadAuraSealLength)?
         }),
@@ -1307,6 +1310,7 @@ fn decode_item_from_parts<'a>(
             TryFrom::try_from(content).map_err(|_| Error::BadBabeSealLength)?
         }),
         (5, e) => return Err(Error::UnknownConsensusEngine(*e)),
+        // 6 = PreRuntime
         (6, b"aura") => DigestItemRef::AuraPreDigest(AuraPreDigest::from_slice(content)?),
         (6, b"BABE") => DigestItemRef::BabePreDigest(BabePreDigestRef::from_slice(content)?),
         (6, e) => return Err(Error::UnknownConsensusEngine(*e)),
