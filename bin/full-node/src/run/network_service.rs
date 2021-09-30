@@ -498,7 +498,13 @@ async fn connection_task(
 ) {
     // Finishing ongoing connection process.
     let tcp_socket = {
-        let mut timeout = Delay::new(timeout - Instant::now()).fuse();
+        let now = Instant::now();
+        let mut timeout = Delay::new(if timeout >= now {
+            timeout - now
+        } else {
+            Duration::new(0, 0)
+        })
+        .fuse();
         let tcp_socket = tcp_socket.fuse();
         futures::pin_mut!(tcp_socket);
         futures::select! {
