@@ -502,6 +502,7 @@ async fn connection_task(
         let mut timeout = Delay::new(if timeout >= now {
             timeout - now
         } else {
+            // `timeout - now` would panic
             Duration::new(0, 0)
         })
         .fuse();
