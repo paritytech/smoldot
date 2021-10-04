@@ -44,7 +44,7 @@
 //!
 //! # About the runtime environment upgrade log item
 //!
-//! The code in this state machine parses block headers, and checks whether th "runtime
+//! The code in this state machine parses block headers, and checks whether the "runtime
 //! enviroment changed" log item is present in its digests. This log item has only been added to
 //! Substrate on September 15th 2021. At the time of the writing of this comment, this change is
 //! planned to be released as part of Polkadot v0.9.11. Consquently, blocks older than this
