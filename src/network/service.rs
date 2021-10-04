@@ -813,13 +813,13 @@ where
             // asynchronous operations are finished.
             match inner_event {
                 peers::Event::Connected {
-                    peer_id,
                     num_peer_connections,
                     ..
                 } if num_peer_connections.get() == 1 => {
-                    let peer_id = peer_id.clone(); // TODO: cloning :-/
-                    guarded.to_process_pre_event = None;
-                    return Event::Connected(peer_id);
+                    return match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::Connected { peer_id, .. } => Event::Connected(peer_id),
+                        _ => unreachable!(),
+                    };
                 }
                 peers::Event::Connected { .. } => {
                     guarded.to_process_pre_event = None;
@@ -827,7 +827,6 @@ where
 
                 peers::Event::Disconnected {
                     num_peer_connections,
-                    peer_id,
                     peer_is_desired,
                     ..
                 } if *num_peer_connections == 0 => {
@@ -835,12 +834,12 @@ where
                         self.next_start_connect_waker.wake();
                     }
 
-                    let peer_id = peer_id.clone(); // TODO: cloning :-/
-                    guarded.to_process_pre_event = None;
-
-                    return Event::Disconnected {
-                        peer_id,
-                        chain_indices: Vec::new(), // TODO: ?
+                    return match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::Disconnected { peer_id, .. } => Event::Disconnected {
+                            peer_id,
+                            chain_indices: Vec::new(), // TODO: ?
+                        },
+                        _ => unreachable!(),
                     };
                 }
                 peers::Event::Disconnected { .. } => {
@@ -862,25 +861,24 @@ where
 
                 // Incoming requests of the "identify" protocol.
                 peers::Event::RequestIn {
-                    request_id,
-                    peer_id,
-                    connection_user_data: observed_addr,
-                    protocol_index: 0,
-                    ..
+                    protocol_index: 0, ..
                 } => {
-                    let peer_id = peer_id.clone(); // TODO: cloning :-/
-                    let observed_addr = observed_addr.clone(); // TODO: cloning :-/
-                    let request_id = *request_id;
-                    guarded.to_process_pre_event = None;
-
                     // TODO: check that request_payload is empty
-                    return Event::IdentifyRequestIn {
-                        peer_id,
-                        request: IdentifyRequestIn {
-                            service: self,
+                    return match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::RequestIn {
+                            peer_id,
                             request_id,
-                            observed_addr,
+                            connection_user_data: observed_addr,
+                            ..
+                        } => Event::IdentifyRequestIn {
+                            peer_id,
+                            request: IdentifyRequestIn {
+                                service: self,
+                                request_id,
+                                observed_addr,
+                            },
                         },
+                        _ => unreachable!(),
                     };
                 }
                 // Only protocol 0 (identify) can receive requests at the moment.
