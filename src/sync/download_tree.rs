@@ -42,6 +42,17 @@
 //! [`DownloadTree::runtime_download_finished_new`]. You are strongly encouraged to periodically
 //! call [`DownloadTree::drain_unused_runtimes`] in order to free up resources.
 //!
+//! # About the runtime environment upgrade log item
+//!
+//! The code in this state machine parses block headers, and checks whether the "runtime
+//! enviroment changed" log item is present in its digests. This log item has only been added to
+//! Substrate on September 15th 2021. At the time of the writing of this comment, this change is
+//! planned to be released as part of Polkadot v0.9.11. Consquently, blocks older than this
+//! version never have this log item.
+//!
+//! This means that, for older blocks, this state machine isn't able to detect changes in the
+//! runtime. Please be aware of this and do not use this state machine on old blocks.
+//!
 
 use crate::{chain::fork_tree, executor, header};
 use alloc::vec::Vec;
@@ -780,14 +791,15 @@ where
 
         // Since https://github.com/paritytech/substrate/pull/9580 (Sept. 15th 2021),
         // the header contains a digest item indicating that the runtime environment
-        // has changed since the parent.
-        // However, as this is a recent addition, the absence of this digest item does
-        // not necessarily mean that the runtime environment has not changed.
-        // For this reason, we add `|| true`. This `|| true` can be removed in the
-        // future.
-        // TODO: remove `|| true`
-        let runtime_environment_update =
-            decoded_header.digest.has_runtime_environment_updated() || true;
+        // has changed since the parent. At the time of writing of this comment, this change is
+        // planned to be included in runtime v0.9.11, not yet released.
+        // As this is a recent addition, the absence of this digest item does
+        // not yet necessarily mean that the runtime environment has not changed. Consequently,
+        // this code will, at the moment, not detect "live" runtime upgrades. This significantly
+        // reduces the number of required downloads, and is an acceptable trade-off considering
+        // that runtime upgrades are very uncommon and that this problem will automatically fix
+        // itself in the future.
+        let runtime_environment_update = decoded_header.digest.has_runtime_environment_updated();
         if !runtime_environment_update {
             // Runtime of the new block is the same as the parent.
             let parent_runtime = match parent_index {
