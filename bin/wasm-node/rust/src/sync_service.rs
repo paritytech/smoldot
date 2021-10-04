@@ -1620,6 +1620,7 @@ async fn fetch_paraheads(
 
         // Determine if the call to `recent_best_block_runtime_call` in the `parahead`
         // function applies to a block that is near the head of the chain.
+        // TODO: kind of confusing and hacky, as this value is grabbed unconditionally but only ever used for the best block
         let relay_sync_near_head_of_chain =
             relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
@@ -1628,22 +1629,23 @@ async fn fetch_paraheads(
         // has already been pruned from the network, or if we haven't fully synced the relay chain
         // yet and are still at a stage where the runtime doesn't support parachains or the
         // parachain in question hasn't been registered. These aren't severe errors.
-        let encoded_head_data = match parahead(&relay_chain_sync, parachain_id).await {
-            Ok(v) => v,
-            Err(err) => {
-                previous_best_head_data_hash = None;
-                if err.is_network_problem() || !relay_sync_near_head_of_chain {
-                    log::debug!(
-                        target: &log_target,
-                        "Failed to get chain heads: {} (most likely benign)",
-                        err
-                    );
-                } else {
-                    log::warn!(target: &log_target, "Failed to get chain heads: {}", err);
+        let encoded_head_data =
+            match parahead(&relay_chain_sync, parachain_id, track_finalized).await {
+                Ok(v) => v,
+                Err(err) => {
+                    previous_best_head_data_hash = None;
+                    if err.is_network_problem() || !relay_sync_near_head_of_chain {
+                        log::debug!(
+                            target: &log_target,
+                            "Failed to get chain heads: {} (most likely benign)",
+                            err
+                        );
+                    } else {
+                        log::warn!(target: &log_target, "Failed to get chain heads: {}", err);
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
 
         // Try decode the result of the runtime call.
         // If this fails, it indicates an incompatibility between smoldot and the relay
@@ -1719,19 +1721,33 @@ async fn fetch_paraheads(
 async fn parahead(
     relay_chain_sync: &Arc<runtime_service::RuntimeService>,
     parachain_id: u32,
+    track_finalized: bool,
 ) -> Result<Vec<u8>, ParaheadError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
-    let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .recent_best_block_runtime_call(
-            para::PERSISTED_VALIDATION_FUNCTION_NAME,
-            para::persisted_validation_data_parameters(
-                parachain_id,
-                para::OccupiedCoreAssumption::TimedOut,
-            ),
-        )
-        .await
-        .map_err(ParaheadError::Call)?;
+    let (runtime_call_lock, virtual_machine) = if track_finalized {
+        relay_chain_sync
+            .recent_finalized_block_runtime_call(
+                para::PERSISTED_VALIDATION_FUNCTION_NAME,
+                para::persisted_validation_data_parameters(
+                    parachain_id,
+                    para::OccupiedCoreAssumption::TimedOut,
+                ),
+            )
+            .await
+            .map_err(ParaheadError::Call)?
+    } else {
+        relay_chain_sync
+            .recent_best_block_runtime_call(
+                para::PERSISTED_VALIDATION_FUNCTION_NAME,
+                para::persisted_validation_data_parameters(
+                    parachain_id,
+                    para::OccupiedCoreAssumption::TimedOut,
+                ),
+            )
+            .await
+            .map_err(ParaheadError::Call)?
+    };
 
     // TODO: move the logic below in the `para` module
 
