@@ -799,8 +799,7 @@ where
         // reduces the number of required downloads, and is an acceptable trade-off considering
         // that runtime upgrades are very uncommon and that this problem will automatically fix
         // itself in the future.
-        let runtime_environment_update =
-            decoded_header.digest.has_runtime_environment_updated();
+        let runtime_environment_update = decoded_header.digest.has_runtime_environment_updated();
         if !runtime_environment_update {
             // Runtime of the new block is the same as the parent.
             let parent_runtime = match parent_index {
