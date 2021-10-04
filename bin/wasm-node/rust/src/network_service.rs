@@ -221,6 +221,13 @@ impl NetworkService {
                                     if !chain_indices.is_empty() {
                                         // TODO: properly implement when multiple chains
                                         if chain_indices.len() == 1 {
+                                            log::debug!(
+                                                target: "network",
+                                                "Connection({}, {}) => ChainDisconnected",
+                                                peer_id,
+                                                &network_service.log_chain_names[chain_indices[0]],
+                                            );
+
                                             break Event::Disconnected {
                                                 peer_id,
                                                 chain_index: chain_indices[0],

@@ -826,6 +826,7 @@ where
                 }
 
                 peers::Event::Disconnected {
+                    peer_id,
                     num_peer_connections,
                     peer_is_desired,
                     ..
@@ -834,10 +835,23 @@ where
                         self.next_start_connect_waker.wake();
                     }
 
+                    // TODO: O(n)
+                    let chain_indices = guarded
+                        .open_chains
+                        .iter()
+                        .filter(|(pid, _)| pid == peer_id)
+                        .map(|(_, c)| *c)
+                        .collect::<Vec<_>>();
+                    for idx in &chain_indices {
+                        guarded.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
+                    }
+
+                    // TODO: unassign peer slots?
+
                     return match guarded.to_process_pre_event.take().unwrap() {
                         peers::Event::Disconnected { peer_id, .. } => Event::Disconnected {
                             peer_id,
-                            chain_indices: Vec::new(), // TODO: ?
+                            chain_indices,
                         },
                         _ => unreachable!(),
                     };
