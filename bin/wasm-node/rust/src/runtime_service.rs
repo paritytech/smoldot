@@ -1039,8 +1039,13 @@ struct Guarded {
 
 impl Guarded {
     /// Notifies the subscribers about changes to the best and finalized blocks.
-    fn notify_subscribers(&mut self, output_update: download_tree::OutputUpdate) {
-        if output_update.best_block_updated {
+    fn notify_subscribers(
+        &mut self,
+        best_block_updated: bool,
+        best_block_runtime_changed: bool,
+        finalized_block_updated: bool,
+    ) {
+        if best_block_updated {
             let best_block_header = self.tree.as_ref().unwrap().best_block_header();
 
             // Elements are removed one by one and inserted back if the channel is still open.
@@ -1054,7 +1059,7 @@ impl Guarded {
             }
         }
 
-        if output_update.finalized_block_updated {
+        if finalized_block_updated {
             let finalized_block_header = self.tree.as_ref().unwrap().finalized_block_header();
 
             // Elements are removed one by one and inserted back if the channel is still open.
@@ -1068,7 +1073,7 @@ impl Guarded {
             }
         }
 
-        if output_update.best_block_runtime_changed {
+        if best_block_runtime_changed {
             let runtime_version = &self
                 .tree
                 .as_ref()
@@ -1176,11 +1181,8 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
 
                     drop(temporary_guarded);
 
-                    original_guarded.notify_subscribers(download_tree::OutputUpdate {
-                        finalized_block_updated: true,
-                        best_block_updated: true,
-                        best_block_runtime_changed: true, // TODO: correct?
-                    });
+                    // TODO: correct? especially for the runtime?
+                    original_guarded.notify_subscribers(true, true, true);
 
                     background.runtime_service = original_runtime_service.clone();
                 }
@@ -1209,8 +1211,8 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                             if new_block.is_new_best {
                                 guarded.best_near_head_of_chain = near_head_of_chain;
                             }
-                            let output_update = guarded.tree.as_mut().unwrap().input_insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
-                            guarded.notify_subscribers(output_update);
+                            guarded.tree.as_mut().unwrap().input_insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
+                            background.advance_and_notify_subscribers(&mut guarded);
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             log::debug!(
@@ -1307,7 +1309,7 @@ impl Background {
             .find(|(_, rt)| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages)
             .map(|(id, _)| id);
 
-        let output_update = if let Some(existing_runtime) = existing_runtime {
+        if let Some(existing_runtime) = existing_runtime {
             guarded
                 .tree
                 .as_mut()
@@ -1327,11 +1329,50 @@ impl Background {
                         runtime_code: storage_code,
                         runtime,
                     },
-                )
-                .1
-        };
+                );
 
-        guarded.notify_subscribers(output_update);
+            self.advance_and_notify_subscribers(&mut guarded);
+        }
+    }
+
+    fn advance_and_notify_subscribers(&self, guarded: &mut Guarded) {
+        let tree = guarded.tree.as_mut().unwrap();
+
+        let mut best_block_updated = false;
+        let mut best_block_runtime_changed = false;
+        let mut finalized_block_updated = false;
+
+        loop {
+            match tree.try_advance_output() {
+                None | Some(download_tree::OutputUpdate::None) => break,
+                Some(download_tree::OutputUpdate::FirstFinalized { .. })
+                | Some(download_tree::OutputUpdate::Finalized { .. }) => {
+                    best_block_updated = true;
+                    finalized_block_updated = true;
+                    best_block_runtime_changed = true; // TODO: ?!
+                }
+                Some(download_tree::OutputUpdate::Block(download_tree::OutputUpdateBlock {
+                    is_new_best: download_tree::OutputUpdateBlockBest::NewBest,
+                    ..
+                })) => {
+                    best_block_updated = true;
+                }
+                Some(download_tree::OutputUpdate::Block(download_tree::OutputUpdateBlock {
+                    is_new_best: download_tree::OutputUpdateBlockBest::NewBestAndRuntimeUpgrade,
+                    ..
+                })) => {
+                    best_block_updated = true;
+                    best_block_runtime_changed = true;
+                }
+                Some(download_tree::OutputUpdate::Block(_)) => {}
+            }
+        }
+
+        guarded.notify_subscribers(
+            best_block_updated,
+            best_block_runtime_changed,
+            finalized_block_updated,
+        );
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
@@ -1403,16 +1444,16 @@ impl Background {
     async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
         let mut guarded = self.runtime_service.guarded.lock().await;
 
-        let output_update = guarded
+        guarded
             .tree
             .as_mut()
             .unwrap()
             .input_finalize(hash_to_finalize, new_best_block_hash);
 
+        self.advance_and_notify_subscribers(&mut guarded);
+
         // Clean up unused runtimes to free up resources.
         for _ in guarded.tree.as_mut().unwrap().drain_unused_runtimes() {}
-
-        guarded.notify_subscribers(output_update);
     }
 }
 
