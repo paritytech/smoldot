@@ -678,6 +678,10 @@ pub enum Notification {
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
         /// [`Notification::Block`].
+        ///
+        /// It is, however, not guaranteed that this block is a child of the previously-finalized
+        /// block. In other words, if multiple blocks are finalized at the same time, only one
+        /// [`Notification::Finalized`] is generated and contains the highest finalized block.
         hash: [u8; 32],
 
         /// Hash of the best block after the finalization.
