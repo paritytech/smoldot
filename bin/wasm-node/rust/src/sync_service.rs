@@ -1420,8 +1420,11 @@ async fn start_parachain(
 
     // List of senders that get notified when the best block is modified.
     let mut best_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
-    // List of senders that get notified when the finalized block is modified
+    // List of senders that get notified when the finalized block is modified.
     let mut finalized_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
+    // List of senders that get notified when the tree of blocks is modified.
+    // TODO: not actually notified
+    let mut all_subscriptions = Vec::<mpsc::Sender<_>>::new();
 
     // State machine that tracks the list of sources and their blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
@@ -1464,16 +1467,14 @@ async fn start_parachain(
                         let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
                     }
                     ToBackground::SubscribeAll { send_back, buffer_size } => {
-                        let (_tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                        let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                         let _ = send_back.send(SubscribeAll {
                             finalized_block_scale_encoded_header: current_finalized_block.scale_encoding_vec(),
                             non_finalized_blocks: Vec::new(),  // TODO: wrong /!\
                             new_blocks,
                         });
 
-                        // TODO: `_tx` is immediately discarded; the feature isn't actually fully implemented
-                        // TODO: a `mem::forget` is used in order to avoid issues in other parts of the code, but is a complete hack
-                        core::mem::forget(_tx);
+                        all_subscriptions.push(tx);
                     }
                     ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
                         // If `block_number` is over the finalized block, then which source
@@ -1550,6 +1551,11 @@ async fn start_parachain(
             }
 
             para_new_best = para_new_best.next().fuse() => {
+                // TODO: this is a complete hack; since all_subscriptions aren't notified, we close all channels in order to force users of subscribe_all to fetch the finalized block again after the warp sync
+                if !is_near_head_of_chain {
+                    all_subscriptions.clear();
+                }
+
                 let (para_new_best, relay_sync_near_head_of_chain) = para_new_best.unwrap();
                 is_near_head_of_chain = relay_sync_near_head_of_chain;
                 current_best_block = para_new_best.clone();
