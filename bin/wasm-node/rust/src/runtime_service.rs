@@ -1126,7 +1126,9 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                     best_blocks_subscriptions: Vec::new(),
                     finalized_blocks_subscriptions: Vec::new(),
                     runtime_version_subscriptions: Vec::new(),
-                    best_near_head_of_chain: false,
+                    best_near_head_of_chain: original_runtime_service
+                        .is_near_head_of_chain_heuristic()
+                        .await,
                     tree: Some(download_tree::DownloadTree::from_finalized_block(
                         subscription.finalized_block_scale_encoded_header,
                     )),
@@ -1200,7 +1202,13 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                                 new_block.is_new_best
                             );
 
+                            let near_head_of_chain = background.runtime_service.sync_service.is_near_head_of_chain_heuristic().await;
+
                             let mut guarded = background.runtime_service.guarded.lock().await;
+                            // TODO: note that this code is never reached for parachains
+                            if new_block.is_new_best {
+                                guarded.best_near_head_of_chain = near_head_of_chain;
+                            }
                             let output_update = guarded.tree.as_mut().unwrap().input_insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
                             guarded.notify_subscribers(output_update);
                         },
@@ -1226,6 +1234,9 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                                 "Successfully finished download of id {:?}",
                                 download_id
                             );
+
+                            // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
+                            background.runtime_service.guarded.lock().await.best_near_head_of_chain = true;
 
                             background.runtime_download_finished(download_id, storage_code, storage_heap_pages).await;
                         }
