@@ -1134,7 +1134,12 @@ where
 
                 for pruned in self.non_finalized_blocks.prune_ancestors(new_finalized) {
                     debug_assert_ne!(Some(pruned.index), self.input_finalized_index);
-                    debug_assert!(self.best_block_index.map_or(true, |b| b != pruned.index));
+
+                    // If the best block would be pruned, reset it to the finalized block. The
+                    // best block is updated later down this function.
+                    if self.best_block_index.map_or(false, |b| b == pruned.index) {
+                        self.best_block_index = None;
+                    }
 
                     // If this is the new finalized block, replace `self.finalized_block`.
                     let thrown_away_block = if pruned.index == new_finalized {
