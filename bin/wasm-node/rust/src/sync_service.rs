@@ -226,6 +226,9 @@ impl SyncService {
     /// `buffer_size` block notifications are buffered in the channel. If the channel is full
     /// when a new notification is attempted to be pushed, the channel gets closed.
     ///
+    /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
+    /// warp syncing.
+    ///
     /// See [`SubscribeAll`] for information about the return value.
     pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
@@ -669,7 +672,7 @@ pub struct SubscribeAll {
 /// Notification about a new block or a new finalized block.
 ///
 /// See [`SyncService::subscribe_all`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
@@ -703,7 +706,7 @@ pub enum Notification {
 /// Notification about a new block.
 ///
 /// See [`SyncService::subscribe_all`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockNotification {
     /// True if this block is considered as the best block of the chain.
     pub is_new_best: bool,
