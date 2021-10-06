@@ -218,12 +218,12 @@ where
     pub fn has_output(&self) -> bool {
         if matches!(
             self.finalized_block.runtime,
-            Ok(RuntimeDownloadState::Finished { .. })
+            Ok(RuntimeDownloadState::Finished { reported: true, .. })
         ) {
             debug_assert!(!self.runtimes.is_empty());
             debug_assert!(self.best_block_index.map_or(true, |idx| matches!(
                 self.non_finalized_blocks.get(idx).unwrap().runtime,
-                Ok(RuntimeDownloadState::Finished { .. })
+                Ok(RuntimeDownloadState::Finished { reported: true, .. })
             )));
             true
         } else {
@@ -249,11 +249,12 @@ where
     ///
     pub fn best_block_hash(&self) -> &[u8; 32] {
         if let Some(best_block_index) = self.best_block_index {
-            &self
-                .non_finalized_blocks
-                .get(best_block_index)
-                .unwrap()
-                .hash
+            let block = self.non_finalized_blocks.get(best_block_index).unwrap();
+            debug_assert!(matches!(
+                block.runtime,
+                Ok(RuntimeDownloadState::Finished { reported: true, .. })
+            ));
+            &block.hash
         } else {
             &self.finalized_block.hash
         }
@@ -277,11 +278,12 @@ where
     ///
     pub fn best_block_header(&self) -> &[u8] {
         if let Some(best_block_index) = self.best_block_index {
-            &self
-                .non_finalized_blocks
-                .get(best_block_index)
-                .unwrap()
-                .header
+            let block = self.non_finalized_blocks.get(best_block_index).unwrap();
+            debug_assert!(matches!(
+                block.runtime,
+                Ok(RuntimeDownloadState::Finished { reported: true, .. })
+            ));
+            &block.header
         } else {
             &self.finalized_block.header
         }
@@ -371,6 +373,86 @@ where
     pub fn best_block_runtime_mut(&mut self) -> &mut TRt {
         let index = self.best_block_runtime_id().0;
         &mut self.runtimes[index].user_data
+    }
+
+    /// Returns the SCALE-encoded header of the block with the given hash. Returns `None` if no
+    /// block with that hash is part of the output.
+    ///
+    /// The returned header is guaranteed to be valid, as otherwise the block wouldn't be part
+    /// of the output.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    // TODO: O(n)
+    pub fn block_header(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        let block = if self.finalized_block.hash == *hash {
+            &self.finalized_block
+        } else {
+            let idx = self.non_finalized_blocks.find(|h| h.hash == *hash)?;
+            self.non_finalized_blocks.get(idx).unwrap()
+        };
+
+        if let Ok(RuntimeDownloadState::Finished { reported: true, .. }) = block.runtime {
+            Some(&block.header)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the runtime of the block with the given hash. Returns `None` if no block with
+    /// that hash is part of the output.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    // TODO: O(n)
+    pub fn block_runtime(&self, hash: &[u8; 32]) -> Option<&TRt> {
+        let block = if self.finalized_block.hash == *hash {
+            &self.finalized_block
+        } else {
+            let idx = self.non_finalized_blocks.find(|h| h.hash == *hash)?;
+            self.non_finalized_blocks.get(idx).unwrap()
+        };
+
+        if let Ok(RuntimeDownloadState::Finished {
+            runtime_index,
+            reported: true,
+        }) = block.runtime
+        {
+            Some(&self.runtimes[runtime_index].user_data)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the runtime of the block with the given hash. Returns `None` if no block with
+    /// that hash is part of the output.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    // TODO: O(n)
+    pub fn block_runtime_mut(&mut self, hash: &[u8; 32]) -> Option<&mut TRt> {
+        let block = if self.finalized_block.hash == *hash {
+            &self.finalized_block
+        } else {
+            let idx = self.non_finalized_blocks.find(|h| h.hash == *hash)?;
+            self.non_finalized_blocks.get(idx).unwrap()
+        };
+
+        if let Ok(RuntimeDownloadState::Finished {
+            runtime_index,
+            reported: true,
+        }) = block.runtime
+        {
+            Some(&mut self.runtimes[runtime_index].user_data)
+        } else {
+            None
+        }
     }
 
     /// Returns the list of all SCALE-encoded headers of non-finalized blocks, plus a boolean
@@ -1071,9 +1153,10 @@ where
                     }
                 }
 
-                // Since `self` has been updated, calling `self.has_output()` now detects whether
-                // we have an output after the update.
-                if self.has_output() {
+                if matches!(
+                    self.finalized_block.runtime,
+                    Ok(RuntimeDownloadState::Finished { .. })
+                ) {
                     return Some(if self_has_output_before_update {
                         debug_assert!(matches!(
                             self.finalized_block.runtime,

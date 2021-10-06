@@ -44,7 +44,7 @@
 
 use crate::{
     ffi, lossy_channel,
-    sync_service::{self, BlockNotification, StorageQueryError},
+    sync_service::{self, StorageQueryError},
 };
 
 use futures::{
@@ -434,31 +434,53 @@ impl RuntimeService {
     }
 
     // TODO: doc
-    pub fn recent_finalized_block_runtime_lock<'a: 'b, 'b>(
+    pub async fn recent_finalized_block_runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
-    ) -> impl Future<Output = RuntimeLock<'a>> + 'b {
-        async move {
-            let guarded = self.guarded.lock().await;
-            RuntimeLock {
-                service: self,
-                guarded,
-                is_best: false,
-            }
+    ) -> RuntimeLock<'a> {
+        let guarded = self.guarded.lock().await;
+        let block_hash = *guarded.tree.as_ref().unwrap().finalized_block_hash();
+        RuntimeLock {
+            service: self,
+            guarded,
+            block_hash,
         }
     }
 
     // TODO: doc
-    pub fn recent_best_block_runtime_lock<'a: 'b, 'b>(
+    pub async fn recent_best_block_runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
-    ) -> impl Future<Output = RuntimeLock<'a>> + 'b {
-        async move {
-            let guarded = self.guarded.lock().await;
-            RuntimeLock {
-                service: self,
-                guarded,
-                is_best: true,
-            }
+    ) -> RuntimeLock<'a> {
+        let guarded = self.guarded.lock().await;
+        let block_hash = *guarded.tree.as_ref().unwrap().best_block_hash();
+        RuntimeLock {
+            service: self,
+            guarded,
+            block_hash,
         }
+    }
+
+    // TODO: should be callable with a slightly older finalized block
+    // TODO: doc
+    pub async fn runtime_lock<'a>(
+        self: &'a Arc<RuntimeService>,
+        block_hash: &[u8; 32],
+    ) -> Option<RuntimeLock<'a>> {
+        let guarded = self.guarded.lock().await;
+        if guarded
+            .tree
+            .as_ref()
+            .unwrap()
+            .block_runtime(block_hash)
+            .is_none()
+        {
+            return None;
+        }
+
+        Some(RuntimeLock {
+            service: self,
+            guarded,
+            block_hash: *block_hash,
+        })
     }
 
     /// Obtain the metadata of the runtime of the current best block.
@@ -562,8 +584,8 @@ impl RuntimeService {
 pub struct RuntimeLock<'a> {
     service: &'a Arc<RuntimeService>,
     guarded: MutexGuard<'a, Guarded>,
-    /// `true` if calling the best block. `false` if calling the finalized block.
-    is_best: bool,
+    /// Hash of the block to make the call against.
+    block_hash: [u8; 32],
 }
 
 impl<'a> RuntimeLock<'a> {
@@ -571,36 +593,29 @@ impl<'a> RuntimeLock<'a> {
     ///
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
-        if self.is_best {
-            self.guarded.tree.as_ref().unwrap().best_block_header()
-        } else {
-            self.guarded.tree.as_ref().unwrap().finalized_block_header()
-        }
+        self.guarded
+            .tree
+            .as_ref()
+            .unwrap()
+            .block_header(&self.block_hash)
+            .unwrap()
     }
 
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
-        if self.is_best {
-            self.guarded.tree.as_ref().unwrap().best_block_hash()
-        } else {
-            self.guarded.tree.as_ref().unwrap().finalized_block_hash()
-        }
+        &self.block_hash
     }
 
     pub fn runtime(&self) -> &executor::host::HostVmPrototype {
         let tree = self.guarded.tree.as_ref().unwrap();
-        // TODO: don't unwrap?
-        if self.is_best {
-            tree.best_block_runtime()
-        } else {
-            tree.finalized_block_runtime()
-        }
-        .runtime
-        .as_ref()
-        .unwrap()
-        .virtual_machine
-        .as_ref()
-        .unwrap()
+        tree.block_runtime(&self.block_hash)
+            .unwrap()
+            .runtime
+            .as_ref()
+            .unwrap()
+            .virtual_machine
+            .as_ref()
+            .unwrap()
     }
 
     pub async fn start<'b>(
@@ -637,11 +652,12 @@ impl<'a> RuntimeLock<'a> {
         let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
 
         let tree = self.guarded.tree.as_mut().unwrap();
-        let runtime = match if self.is_best {
-            tree.best_block_runtime_mut().runtime.as_mut()
-        } else {
-            tree.finalized_block_runtime_mut().runtime.as_mut()
-        } {
+        let runtime = match tree
+            .block_runtime_mut(&self.block_hash)
+            .unwrap()
+            .runtime
+            .as_mut()
+        {
             Ok(r) => r.virtual_machine.take().unwrap(),
             Err(err) => {
                 return Err(RuntimeCallError::InvalidRuntime(err.clone()));
@@ -650,7 +666,7 @@ impl<'a> RuntimeLock<'a> {
 
         let lock = RuntimeCallLock {
             guarded: self.guarded,
-            finalized_block: !self.is_best,
+            block_hash: self.block_hash,
             runtime_block_header,
             call_proof,
         };
@@ -664,7 +680,7 @@ impl<'a> RuntimeLock<'a> {
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Guarded>,
     runtime_block_header: Vec<u8>,
-    finalized_block: bool,
+    block_hash: [u8; 32],
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
@@ -765,55 +781,32 @@ impl<'a> RuntimeCallLock<'a> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        if self.finalized_block {
-            self.guarded
-                .tree
-                .as_mut()
-                .unwrap()
-                .finalized_block_runtime_mut()
-                .runtime
-                .as_mut()
-                .unwrap()
-                .virtual_machine = Some(vm);
-        } else {
-            self.guarded
-                .tree
-                .as_mut()
-                .unwrap()
-                .best_block_runtime_mut()
-                .runtime
-                .as_mut()
-                .unwrap()
-                .virtual_machine = Some(vm);
-        }
+        self.guarded
+            .tree
+            .as_mut()
+            .unwrap()
+            .block_runtime_mut(&self.block_hash)
+            .unwrap()
+            .runtime
+            .as_mut()
+            .unwrap()
+            .virtual_machine = Some(vm);
     }
 }
 
 impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        let vm = if self.finalized_block {
-            &mut self
-                .guarded
-                .tree
-                .as_mut()
-                .unwrap()
-                .finalized_block_runtime_mut()
-                .runtime
-                .as_mut()
-                .unwrap()
-                .virtual_machine
-        } else {
-            &mut self
-                .guarded
-                .tree
-                .as_mut()
-                .unwrap()
-                .best_block_runtime_mut()
-                .runtime
-                .as_mut()
-                .unwrap()
-                .virtual_machine
-        };
+        let vm = &mut self
+            .guarded
+            .tree
+            .as_mut()
+            .unwrap()
+            .block_runtime_mut(&self.block_hash)
+            .unwrap()
+            .runtime
+            .as_mut()
+            .unwrap()
+            .virtual_machine;
 
         if vm.is_none() {
             // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
