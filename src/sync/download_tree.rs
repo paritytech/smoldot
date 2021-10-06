@@ -373,6 +373,16 @@ where
         &mut self.runtimes[index].user_data
     }
 
+    /// Returns the list of all SCALE-encoded headers of non-finalized blocks, plus a boolean
+    /// indicating whether this is the best block.
+    pub fn non_finalized_blocks_headers_unordered(
+        &'_ self,
+    ) -> impl Iterator<Item = (&'_ [u8], bool)> + '_ {
+        self.non_finalized_blocks
+            .iter_unordered()
+            .map(move |(idx, b)| (&b.header[..], self.best_block_index == Some(idx)))
+    }
+
     /// Iterates over all the runtimes stored in this data structure.
     pub fn runtimes_iter(&'_ self) -> impl Iterator<Item = (RuntimeId, &'_ TRt)> + '_ {
         self.runtimes

@@ -44,10 +44,11 @@
 
 use crate::{
     ffi, lossy_channel,
-    sync_service::{self, StorageQueryError},
+    sync_service::{self, BlockNotification, StorageQueryError},
 };
 
 use futures::{
+    channel::mpsc,
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
@@ -169,6 +170,7 @@ impl RuntimeService {
             log_target,
             sync_service: config.sync_service,
             guarded: Mutex::new(Guarded {
+                all_blocks_subscriptions: Vec::new(),
                 finalized_blocks_subscriptions: Vec::new(),
                 best_blocks_subscriptions: Vec::new(),
                 runtime_version_subscriptions: Vec::new(),
@@ -393,6 +395,42 @@ impl RuntimeService {
             guarded.tree.as_ref().unwrap().best_block_header().to_vec(),
             rx,
         )
+    }
+
+    /// Subscribes to the state of the chain: the current state and the new blocks.
+    ///
+    /// Contrary to [`RuntimeService::subscribe_best`], *all* new blocks are reported. Only up to
+    /// `buffer_size` block notifications are buffered in the channel. If the channel is full
+    /// when a new notification is attempted to be pushed, the channel gets closed.
+    ///
+    /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
+    /// warp syncing.
+    ///
+    /// See [`sync_service::SubscribeAll`] for information about the return value.
+    pub async fn subscribe_all(
+        self: &Arc<RuntimeService>,
+        buffer_size: usize,
+    ) -> sync_service::SubscribeAll {
+        let (tx, new_blocks) = mpsc::channel(buffer_size);
+        let mut guarded = self.guarded.lock().await;
+        debug_assert!(guarded.tree.as_ref().unwrap().has_output());
+        guarded.all_blocks_subscriptions.push(tx);
+
+        let tree = guarded.tree.as_ref().unwrap();
+        sync_service::SubscribeAll {
+            finalized_block_scale_encoded_header: tree.finalized_block_header().to_vec(),
+            new_blocks,
+            non_finalized_blocks: tree
+                .non_finalized_blocks_headers_unordered()
+                .map(
+                    |(scale_encoded_header, is_new_best)| sync_service::BlockNotification {
+                        is_new_best,
+                        parent_hash: *header::decode(scale_encoded_header).unwrap().parent_hash, // TODO: correct? if yes, document
+                        scale_encoded_header: scale_encoded_header.to_vec(),
+                    },
+                )
+                .collect(),
+        }
     }
 
     // TODO: doc
@@ -1020,6 +1058,10 @@ struct Guarded {
     runtime_version_subscriptions:
         Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,
 
+    /// List of senders that get notified when new blocks arrive.
+    /// See [`RuntimeService::subscribe_all`].
+    all_blocks_subscriptions: Vec<mpsc::Sender<sync_service::Notification>>,
+
     /// List of senders that get notified when the finalized block is updated.
     /// See [`RuntimeService::subscribe_finalized`].
     finalized_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
@@ -1128,6 +1170,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                 log_target: original_runtime_service.log_target.clone(),
                 sync_service: original_runtime_service.sync_service.clone(),
                 guarded: Mutex::new(Guarded {
+                    all_blocks_subscriptions: Vec::new(),
                     best_blocks_subscriptions: Vec::new(),
                     finalized_blocks_subscriptions: Vec::new(),
                     runtime_version_subscriptions: Vec::new(),
@@ -1181,6 +1224,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
 
                     drop(temporary_guarded);
 
+                    original_guarded.all_blocks_subscriptions.clear();
                     // TODO: correct? especially for the runtime?
                     original_guarded.notify_subscribers(true, true, true);
 
@@ -1343,28 +1387,69 @@ impl Background {
         let mut finalized_block_updated = false;
 
         loop {
-            match tree.try_advance_output() {
+            let notif = match tree.try_advance_output() {
                 None | Some(download_tree::OutputUpdate::None) => break,
-                Some(download_tree::OutputUpdate::FirstFinalized { .. })
-                | Some(download_tree::OutputUpdate::Finalized { .. }) => {
+                Some(notif) => notif,
+            };
+
+            let all_blocks_notif = match notif {
+                download_tree::OutputUpdate::None => unreachable!(),
+                download_tree::OutputUpdate::FirstFinalized { .. } => {
                     best_block_updated = true;
                     finalized_block_updated = true;
                     best_block_runtime_changed = true; // TODO: ?!
+                    continue;
                 }
-                Some(download_tree::OutputUpdate::Block(download_tree::OutputUpdateBlock {
-                    is_new_best: download_tree::OutputUpdateBlockBest::NewBest,
-                    ..
-                })) => {
+                download_tree::OutputUpdate::Finalized {
+                    hash,
+                    best_block_hash,
+                } => {
                     best_block_updated = true;
+                    finalized_block_updated = true;
+                    best_block_runtime_changed = true; // TODO: ?!
+
+                    sync_service::Notification::Finalized {
+                        best_block_hash: *best_block_hash,
+                        hash: *hash,
+                    }
                 }
-                Some(download_tree::OutputUpdate::Block(download_tree::OutputUpdateBlock {
-                    is_new_best: download_tree::OutputUpdateBlockBest::NewBestAndRuntimeUpgrade,
-                    ..
-                })) => {
+                download_tree::OutputUpdate::Block(download_tree::OutputUpdateBlock {
+                    is_new_best:
+                        is_new_best @ download_tree::OutputUpdateBlockBest::NewBest
+                        | is_new_best @ download_tree::OutputUpdateBlockBest::NewBestAndRuntimeUpgrade,
+                    parent_hash,
+                    scale_encoded_header,
+                }) => {
                     best_block_updated = true;
-                    best_block_runtime_changed = true;
+                    if let download_tree::OutputUpdateBlockBest::NewBestAndRuntimeUpgrade =
+                        is_new_best
+                    {
+                        best_block_runtime_changed = true;
+                    }
+
+                    sync_service::Notification::Block(sync_service::BlockNotification {
+                        parent_hash: *parent_hash,
+                        is_new_best: true,
+                        scale_encoded_header: scale_encoded_header.to_vec(),
+                    })
                 }
-                Some(download_tree::OutputUpdate::Block(_)) => {}
+                download_tree::OutputUpdate::Block(block) => {
+                    sync_service::Notification::Block(sync_service::BlockNotification {
+                        parent_hash: *block.parent_hash,
+                        is_new_best: false,
+                        scale_encoded_header: block.scale_encoded_header.to_vec(),
+                    })
+                }
+            };
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..guarded.all_blocks_subscriptions.len()).rev() {
+                let mut subscription = guarded.all_blocks_subscriptions.swap_remove(index);
+                if subscription.try_send(all_blocks_notif.clone()).is_err() {
+                    continue;
+                }
+
+                guarded.all_blocks_subscriptions.push(subscription);
             }
         }
 
