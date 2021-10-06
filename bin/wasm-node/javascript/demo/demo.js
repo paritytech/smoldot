@@ -26,6 +26,7 @@ import * as fs from 'fs';
 // Adjust these chain specs for the chain you want to connect to.
 const westend = fs.readFileSync('../../westend.json', 'utf8');
 const westmint = fs.readFileSync('../../westend-westmint.json', 'utf8');
+const adz = fs.readFileSync('../../westend-adz.json', 'utf8');
 const polkadot = fs.readFileSync('../../polkadot.json', 'utf8');
 const kusama = fs.readFileSync('../../kusama.json', 'utf8');
 const statemine = fs.readFileSync('../../kusama-statemine.json', 'utf8');
@@ -60,6 +61,7 @@ server.listen(9944, function () {
     console.log('Visit one of:');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestmint');
+    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fadz');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fkusama');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fstatemine');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
@@ -97,6 +99,22 @@ wsServer.on('request', function (request) {
 
             const para = await client.addChain({
                 chainSpec: westmint,
+                jsonRpcCallback: (resp) => {
+                    connection.sendUTF(resp);
+                },
+                potentialRelayChains: [relay]
+            });
+
+            return { relay, para };
+        });
+    } else if (request.resource == '/adz') {
+        chain = client.then(async client => {
+            const relay = await client.addChain({
+                chainSpec: westend,
+            });
+
+            const para = await client.addChain({
+                chainSpec: adz,
                 jsonRpcCallback: (resp) => {
                     connection.sendUTF(resp);
                 },
