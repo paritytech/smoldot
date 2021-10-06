@@ -355,9 +355,9 @@ impl RuntimeService {
     ///
     /// This function is similar to [`sync_service::SyncService::subscribe_finalized`], except
     /// that it is called less often. Additionally, it is guaranteed that when a notification is
-    /// sent out, calling [`RuntimeService::recent_finalized_block_runtime_call`] will operate on
+    /// sent out, calling [`RuntimeService::recent_finalized_block_runtime_lock`] will operate on
     /// this block or more recent. In other words, if you call
-    /// [`RuntimeService::recent_finalized_block_runtime_call`] and the stream of notifications is
+    /// [`RuntimeService::recent_finalized_block_runtime_lock`] and the stream of notifications is
     /// empty, you are guaranteed that the call has been performed on the best block.
     pub async fn subscribe_finalized(
         self: &Arc<RuntimeService>,
