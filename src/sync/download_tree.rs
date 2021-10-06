@@ -1110,11 +1110,6 @@ where
                 // If we can't find any block that is downloading, simply jump to the input
                 // finalized block.
                 if !self_has_output_before_update && new_finalized.is_none() {
-                    // We don't care about the value of `best_block_index` as long as self has no
-                    // output. Reset it to `None` to make sure that it's not refering to a block
-                    // that is going to be pruned later.
-                    self.best_block_index = None;
-
                     new_finalized = Some(
                         self.non_finalized_blocks
                             .root_to_node_path(input_finalized_index)
@@ -1139,7 +1134,12 @@ where
 
                 for pruned in self.non_finalized_blocks.prune_ancestors(new_finalized) {
                     debug_assert_ne!(Some(pruned.index), self.input_finalized_index);
-                    debug_assert!(self.best_block_index.map_or(true, |b| b != pruned.index));
+
+                    // If the best block would be pruned, reset it to the finalized block. The
+                    // best block is updated later down this function.
+                    if self.best_block_index.map_or(false, |b| b == pruned.index) {
+                        self.best_block_index = None;
+                    }
 
                     // If this is the new finalized block, replace `self.finalized_block`.
                     let thrown_away_block = if pruned.index == new_finalized {
