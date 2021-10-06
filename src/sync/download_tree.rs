@@ -218,12 +218,12 @@ where
     pub fn has_output(&self) -> bool {
         if matches!(
             self.finalized_block.runtime,
-            Ok(RuntimeDownloadState::Finished { .. })
+            Ok(RuntimeDownloadState::Finished { reported: true, .. })
         ) {
             debug_assert!(!self.runtimes.is_empty());
             debug_assert!(self.best_block_index.map_or(true, |idx| matches!(
                 self.non_finalized_blocks.get(idx).unwrap().runtime,
-                Ok(RuntimeDownloadState::Finished { .. })
+                Ok(RuntimeDownloadState::Finished { reported: true, .. })
             )));
             true
         } else {
@@ -1153,9 +1153,10 @@ where
                     }
                 }
 
-                // Since `self` has been updated, calling `self.has_output()` now detects whether
-                // we have an output after the update.
-                if self.has_output() {
+                if matches!(
+                    self.finalized_block.runtime,
+                    Ok(RuntimeDownloadState::Finished { .. })
+                ) {
                     return Some(if self_has_output_before_update {
                         debug_assert!(matches!(
                             self.finalized_block.runtime,
