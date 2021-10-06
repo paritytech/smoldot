@@ -249,11 +249,12 @@ where
     ///
     pub fn best_block_hash(&self) -> &[u8; 32] {
         if let Some(best_block_index) = self.best_block_index {
-            &self
-                .non_finalized_blocks
-                .get(best_block_index)
-                .unwrap()
-                .hash
+            let block = self.non_finalized_blocks.get(best_block_index).unwrap();
+            debug_assert!(matches!(
+                block.runtime,
+                Ok(RuntimeDownloadState::Finished { reported: true, .. })
+            ));
+            &block.hash
         } else {
             &self.finalized_block.hash
         }
@@ -277,11 +278,12 @@ where
     ///
     pub fn best_block_header(&self) -> &[u8] {
         if let Some(best_block_index) = self.best_block_index {
-            &self
-                .non_finalized_blocks
-                .get(best_block_index)
-                .unwrap()
-                .header
+            let block = self.non_finalized_blocks.get(best_block_index).unwrap();
+            debug_assert!(matches!(
+                block.runtime,
+                Ok(RuntimeDownloadState::Finished { reported: true, .. })
+            ));
+            &block.header
         } else {
             &self.finalized_block.header
         }
