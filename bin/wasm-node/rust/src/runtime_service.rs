@@ -406,7 +406,7 @@ impl RuntimeService {
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
     ///
-    /// See [`SubscribeAll`] for information about the return value.
+    /// See [`sync_service::SubscribeAll`] for information about the return value.
     pub async fn subscribe_all(
         self: &Arc<RuntimeService>,
         buffer_size: usize,
