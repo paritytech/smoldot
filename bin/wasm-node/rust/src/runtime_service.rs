@@ -39,7 +39,7 @@
 //! this view isn't necessarily the same on both services.
 //!
 //! The main service offered by the runtime service is
-//! [`RuntimeService::recent_best_block_runtime_call`], that performs a runtime call on the latest
+//! [`RuntimeService::recent_best_block_runtime_lock`], that performs a runtime call on the latest
 //! reported best block or more recent.
 
 use crate::{
