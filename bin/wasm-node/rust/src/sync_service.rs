@@ -1740,7 +1740,9 @@ async fn parahead(
     // order to know where the parachains are.
     let (runtime_call_lock, virtual_machine) = if track_finalized {
         relay_chain_sync
-            .recent_finalized_block_runtime_call(
+            .recent_finalized_block_runtime_lock()
+            .await
+            .start(
                 para::PERSISTED_VALIDATION_FUNCTION_NAME,
                 para::persisted_validation_data_parameters(
                     parachain_id,
@@ -1751,7 +1753,9 @@ async fn parahead(
             .map_err(ParaheadError::Call)?
     } else {
         relay_chain_sync
-            .recent_best_block_runtime_call(
+            .recent_best_block_runtime_lock()
+            .await
+            .start(
                 para::PERSISTED_VALIDATION_FUNCTION_NAME,
                 para::persisted_validation_data_parameters(
                     parachain_id,

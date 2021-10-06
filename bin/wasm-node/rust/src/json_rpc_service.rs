@@ -1909,7 +1909,9 @@ async fn account_nonce(
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
     let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .recent_best_block_runtime_call("AccountNonceApi_account_nonce", iter::once(&account.0))
+        .recent_best_block_runtime_lock()
+        .await
+        .start("AccountNonceApi_account_nonce", iter::once(&account.0))
         .await
         .map_err(AnnounceNonceError::Call)?;
 
@@ -1974,7 +1976,9 @@ async fn payment_query_info(
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
     let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .recent_best_block_runtime_call(
+        .recent_best_block_runtime_lock()
+        .await
+        .start(
             json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
             json_rpc::payment_info::payment_info_parameters(extrinsic),
         )
