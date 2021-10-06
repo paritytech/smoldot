@@ -373,6 +373,32 @@ where
         &mut self.runtimes[index].user_data
     }
 
+    /// Returns the SCALE-encoded header of the block with the given hash. Returns `None` if no
+    /// block with that hash is part of the output.
+    ///
+    /// The returned header is guaranteed to be valid, as otherwise the block wouldn't be part
+    /// of the output.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`DownloadTree::has_output`] isn't `true`.
+    ///
+    // TODO: O(n)
+    pub fn block_header(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        let block = if self.finalized_block.hash == *hash {
+            &self.finalized_block
+        } else {
+            let idx = self.non_finalized_blocks.find(|h| h.hash == *hash)?;
+            self.non_finalized_blocks.get(idx).unwrap()
+        };
+
+        if let Ok(RuntimeDownloadState::Finished { reported: true, .. }) = block.runtime {
+            Some(&block.header)
+        } else {
+            None
+        }
+    }
+
     /// Returns the runtime of the block with the given hash. Returns `None` if no block with
     /// that hash is part of the output.
     ///

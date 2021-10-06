@@ -593,12 +593,12 @@ impl<'a> RuntimeLock<'a> {
     ///
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
-        todo!() // TODO:
-                /*if self.is_best {
-                    self.guarded.tree.as_ref().unwrap().best_block_header()
-                } else {
-                    self.guarded.tree.as_ref().unwrap().finalized_block_header()
-                }*/
+        self.guarded
+            .tree
+            .as_ref()
+            .unwrap()
+            .block_header(&self.block_hash)
+            .unwrap()
     }
 
     /// Returns the hash of the block the call is being made against.
