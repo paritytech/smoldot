@@ -46,7 +46,7 @@ pub(super) struct ClientSpec {
     ///
     /// This can be used in order to substitute faulty runtimes with functioning ones.
     ///
-    /// See also https://github.com/paritytech/substrate/pull/8898.
+    /// See also <https://github.com/paritytech/substrate/pull/8898>.
     #[serde(default)]
     // TODO: make use of this
     pub(super) code_substitutes: HashMap<HexString, HexString, fnv::FnvBuildHasher>,
