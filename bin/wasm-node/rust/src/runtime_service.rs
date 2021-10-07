@@ -460,7 +460,7 @@ impl RuntimeService {
     }
 
     // TODO: should be callable with a slightly older finalized block
-    // TODO: doc
+    // TODO: doc, especially about which blocks are available
     pub async fn runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
         block_hash: &[u8; 32],

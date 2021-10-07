@@ -46,7 +46,7 @@ pub enum NextNecessaryAsyncOp<'a, TNow, TBl> {
 /// Information about an operation that must be started.
 #[derive(Debug)]
 pub struct AsyncOpParams<'a, TBl> {
-    /// Identifier to later provide when calling [`AsyncTree::async_operation_finished`] or
+    /// Identifier to later provide when calling [`AsyncTree::async_op_finished`] or
     /// [`AsyncTree::async_op_failure`].
     pub id: AsyncOpId,
 
@@ -105,8 +105,26 @@ where
     ///
     /// Returns `None` if there is no best block. In terms of logic, this means that the best block
     /// is the finalized block, which is out of scope of this data structure.
-    pub fn best_block_index(&self) -> Option<NodeIndex> {
-        self.best_block_index
+    pub fn best_block_index(&self) -> Option<(NodeIndex, &'_ TAsync)> {
+        if let Some(best_block_index) = self.best_block_index {
+            Some((
+                best_block_index,
+                match &self
+                    .non_finalized_blocks
+                    .get(best_block_index)
+                    .unwrap()
+                    .async_op
+                {
+                    AsyncOpState::Finished {
+                        reported: true,
+                        user_data,
+                    } => user_data,
+                    _ => unreachable!(),
+                },
+            ))
+        } else {
+            None
+        }
     }
 
     /// Returns the user data associated to the given block.
@@ -133,14 +151,81 @@ where
             .user_data
     }
 
-    /// Returns the list of all non-finalized blocks, plus a boolean indicating whether this is
-    /// the best block.
-    pub fn non_finalized_blocks_unordered(
+    /// Returns the asynchronous operation user data associated to the given block.
+    ///
+    /// Returns `None` if the asynchronous operation isn't complete for this block yet.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn block_async_user_data(&self, node_index: NodeIndex) -> Option<&TAsync> {
+        match &self.non_finalized_blocks.get(node_index).unwrap().async_op {
+            AsyncOpState::Finished { user_data, .. } => Some(user_data),
+            _ => None,
+        }
+    }
+
+    /// Returns the asynchronous operation user data associated to the given block.
+    ///
+    /// Returns `None` if the asynchronous operation isn't complete for this block yet.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn block_async_user_data_mut(&mut self, node_index: NodeIndex) -> Option<&mut TAsync> {
+        match &mut self
+            .non_finalized_blocks
+            .get_mut(node_index)
+            .unwrap()
+            .async_op
+        {
+            AsyncOpState::Finished { user_data, .. } => Some(user_data),
+            _ => None,
+        }
+    }
+
+    /// Returns the parent of the given node. Returns `None` if the node doesn't have any parent,
+    /// meaning that its parent is the finalized node.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn parent(&self, node: NodeIndex) -> Option<NodeIndex> {
+        self.non_finalized_blocks.parent(node)
+    }
+
+    /// Returns the list of all non-finalized blocks that have been inserted, plus a boolean
+    /// indicating whether this is the output best block.
+    ///
+    /// Either 0 or 1 blocks will have the "is output best" boolean set to true. If no blocks have
+    /// this boolean set, then the best block is the finalized block.
+    ///
+    /// The `Option<&'_ TAsync>` is `Some` if and only if the block has been reported in a
+    /// [`OutputUpdate`] before.
+    pub fn input_iter_unordered(
         &'_ self,
-    ) -> impl Iterator<Item = (NodeIndex, &'_ TBl, bool)> + '_ {
+    ) -> impl Iterator<Item = (NodeIndex, &'_ TBl, Option<&'_ TAsync>, bool)> + '_ {
         self.non_finalized_blocks
             .iter_unordered()
-            .map(move |(idx, b)| (idx, &b.user_data, self.best_block_index == Some(idx)))
+            .map(move |(idx, b)| {
+                let async_ud = match &b.async_op {
+                    AsyncOpState::Finished {
+                        reported: true,
+                        user_data,
+                    } => Some(user_data),
+                    _ => None,
+                };
+
+                (
+                    idx,
+                    &b.user_data,
+                    async_ud,
+                    self.best_block_index == Some(idx),
+                )
+            })
     }
 
     /// Injects into the state of the data structure a completed operation.
@@ -153,7 +238,7 @@ where
     ///
     /// Panics if the [`AsyncOpId`] is invalid.
     ///
-    pub fn async_operation_finished(&mut self, async_op_id: AsyncOpId, user_data: TAsync) -> usize
+    pub fn async_op_finished(&mut self, async_op_id: AsyncOpId, user_data: TAsync) -> usize
     where
         TAsync: Clone,
     {
