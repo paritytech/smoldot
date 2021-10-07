@@ -54,6 +54,8 @@
 //! runtime. Please be aware of this and do not use this state machine on old blocks.
 //!
 
+// TODO: should be re-written to use chain::async_tree as the underlying data structure
+
 use crate::{chain::fork_tree, executor, header};
 use alloc::vec::Vec;
 use core::{cmp, iter, mem, time::Duration};
