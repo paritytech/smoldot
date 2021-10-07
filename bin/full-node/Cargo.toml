@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 async-std = "1.10.0"
 atty = "0.2.14"
-ctrlc = "3.2.0"
+ctrlc = "3.2.1"
 derive_more = "0.99.16"
 directories = "4.0.1"
 ed25519-zebra = { version = "2.2.0", default-features = false }
