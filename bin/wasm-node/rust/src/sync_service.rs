@@ -1461,7 +1461,6 @@ async fn start_parachain(
         // List of senders that get notified when the tree of blocks is modified.
         // Note that this list is created in the inner loop, as to be cleared if the relay chain
         // blocks stream has a gap.
-        // TODO: not actually notified
         let mut all_subscriptions = Vec::<mpsc::Sender<_>>::new();
 
         // List of in-progress parahead fetching operations.
