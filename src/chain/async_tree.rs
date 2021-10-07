@@ -37,7 +37,6 @@ pub use fork_tree::NodeIndex;
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct AsyncOpId(u64);
 
-
 #[derive(Debug)]
 pub enum NextNecessaryAsyncOp<'a, TNow, TBl> {
     Ready(AsyncOpParams<'a, TBl>),
