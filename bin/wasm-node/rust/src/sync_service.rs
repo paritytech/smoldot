@@ -29,14 +29,13 @@
 
 use crate::{ffi, lossy_channel, network_service, runtime_service};
 
-use blake2_rfc::blake2b::blake2b;
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
     prelude::*,
 };
 use smoldot::{
-    chain,
+    chain::{self, async_tree},
     executor::{host, read_only_runtime_host},
     header,
     informant::HashDisplay,
@@ -117,40 +116,16 @@ impl SyncService {
         let (to_background, from_foreground) = mpsc::channel(16);
 
         if let Some(config_parachain) = config.parachain {
-            let (send_new_best, para_new_best) = mpsc::channel(0);
-            let (send_new_finalized, para_new_finalized) = mpsc::channel(0);
-
-            (config.tasks_executor)(
-                "sync-para-fetch-best".into(),
-                Box::pin(fetch_paraheads(
-                    config.log_name.clone(),
-                    config_parachain.relay_chain_sync.clone(),
-                    config_parachain.parachain_id,
-                    send_new_best,
-                    false,
-                )),
-            );
-
-            (config.tasks_executor)(
-                "sync-para-fetch-finalized".into(),
-                Box::pin(fetch_paraheads(
-                    config.log_name,
-                    config_parachain.relay_chain_sync.clone(),
-                    config_parachain.parachain_id,
-                    send_new_finalized,
-                    true,
-                )),
-            );
-
             (config.tasks_executor)(
                 "sync-para".into(),
                 Box::pin(start_parachain(
+                    config.log_name.clone(),
                     config.chain_information,
+                    config_parachain.relay_chain_sync.clone(),
+                    config_parachain.parachain_id,
                     from_foreground,
                     config.network_service.1,
                     config.network_events_receiver,
-                    para_new_best,
-                    para_new_finalized,
                 )),
             );
         } else {
@@ -1412,31 +1387,29 @@ async fn start_relay_chain(
 }
 
 async fn start_parachain(
+    log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
+    relay_chain_sync: Arc<runtime_service::RuntimeService>,
+    parachain_id: u32,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_chain_index: usize,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
-    mut para_new_best: mpsc::Receiver<(header::Header, bool)>,
-    mut para_new_finalized: mpsc::Receiver<(header::Header, bool)>,
 ) {
-    // TODO: instead of handling finality in a separate task, track the blocks that get finalized
-
-    let mut current_finalized_block: header::Header =
-        chain_information.as_ref().finalized_block_header.into();
-    let mut current_best_block = current_finalized_block.clone();
+    // Latest finalized parahead.
+    let mut finalized_parahead = chain_information
+        .as_ref()
+        .finalized_block_header
+        .scale_encoding_vec();
 
     // List of senders that get notified when the best block is modified.
     let mut best_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
     // List of senders that get notified when the finalized block is modified.
     let mut finalized_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
-    // List of senders that get notified when the tree of blocks is modified.
-    // TODO: not actually notified
-    let mut all_subscriptions = Vec::<mpsc::Sender<_>>::new();
 
-    // State machine that tracks the list of sources and their blocks.
+    // State machine that tracks the list of parachain network sources and their known blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
         40,
-        current_finalized_block.number,
+        header::decode(&finalized_parahead).unwrap().number,
     );
     // Maps `PeerId`s to their indices within `sync_sources`.
     let mut sync_sources_map = HashMap::new();
@@ -1446,286 +1419,295 @@ async fn start_parachain(
     let mut is_near_head_of_chain = false;
 
     loop {
-        futures::select! {
-            message = from_foreground.next().fuse() => {
-                // Terminating the parachain sync task if the foreground has closed.
-                let message = match message {
-                    Some(m) => m,
-                    None => return,
-                };
+        // Stream of blocks of the relay chain this parachain is registered on.
+        let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32).await;
 
-                // Note that the rest of this `select!` statement can block for a long time,
-                // which means that there might be a big delay for processing the messages here.
-                // At the time of writing, the nature of the messages makes this a non-issue,
-                // but care should be taken about this.
-
-                match message {
-                    ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                        let _ = send_back.send(is_near_head_of_chain);
-                    },
-                    ToBackground::SubscribeFinalized { send_back } => {
-                        let (tx, rx) = lossy_channel::channel();
-                        finalized_subscriptions.push(tx);
-                        let _ = send_back.send((current_finalized_block.scale_encoding_vec(), rx));
-                    }
-                    ToBackground::SubscribeBest { send_back } => {
-                        let (tx, rx) = lossy_channel::channel();
-                        best_subscriptions.push(tx);
-                        let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
-                    }
-                    ToBackground::SubscribeAll { send_back, buffer_size } => {
-                        let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
-                        let _ = send_back.send(SubscribeAll {
-                            finalized_block_scale_encoded_header: current_finalized_block.scale_encoding_vec(),
-                            non_finalized_blocks: Vec::new(),  // TODO: wrong /!\
-                            new_blocks,
-                        });
-
-                        all_subscriptions.push(tx);
-                    }
-                    ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
-                        // If `block_number` is over the finalized block, then which source
-                        // knows which block is precisely tracked. Otherwise, it is assumed that
-                        // all sources are on the finalized chain and thus that all sources whose
-                        // best block is superior to `block_number` have it.
-                        let list = if block_number > current_finalized_block.number {
-                            sync_sources.knows_non_finalized_block(block_number, &block_hash)
-                                .map(|local_id| sync_sources.user_data(local_id).0.clone())
-                                .collect()
-                        } else {
-                            sync_sources
-                                .keys()
-                                .filter(|local_id| {
-                                    sync_sources.best_block(*local_id).0 >= block_number
-                                })
-                                .map(|local_id| sync_sources.user_data(local_id).0.clone())
-                                .collect()
-                        };
-
-                        let _ = send_back.send(list);
-                    }
-                    ToBackground::SyncingPeers { send_back } => {
-                        let _ = send_back.send(sync_sources.keys().map(|local_id| {
-                            let (height, hash) = sync_sources.best_block(local_id);
-                            let (peer_id, role) = sync_sources.user_data(local_id).clone();
-                            (peer_id, role, height, *hash)
-                        }).collect());
-                    }
-                }
-            },
-
-            network_event = from_network_service.next() => {
-                // Something happened on the network.
-
-                let network_event = match network_event {
-                    Some(m) => m,
-                    None => {
-                        // The channel from the network service has been closed. Closing the
-                        // sync background task as well.
-                        return
-                    },
-                };
-
-                match network_event {
-                    network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
-                        if chain_index == network_chain_index =>
-                    {
-                        let local_id = sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
-                        sync_sources_map.insert(peer_id, local_id);
-                    },
-                    network_service::Event::Disconnected { peer_id, chain_index }
-                        if chain_index == network_chain_index =>
-                    {
-                        let local_id = sync_sources_map.remove(&peer_id).unwrap();
-                        let (_peer_id, _role) = sync_sources.remove(local_id);
-                        debug_assert_eq!(peer_id, _peer_id);
-                    },
-                    network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
-                        if chain_index == network_chain_index =>
-                    {
-                        let local_id = *sync_sources_map.get(&peer_id).unwrap();
-                        let decoded = announce.decode();
-                        let decoded_header_hash = decoded.header.hash();
-                        sync_sources.add_known_block(local_id, decoded.header.number, decoded_header_hash);
-                        if decoded.is_best {
-                            sync_sources.set_best_block(local_id, decoded.header.number, decoded_header_hash);
-                        }
-                    },
-                    _ => {
-                        // Uninteresting message or irrelevant chain index.
-                    }
+        // Block the rest of the syncing before we could determine the parahead of the relay
+        // chain finalized block.
+        if let Ok(finalized) = parahead(
+            &relay_chain_sync,
+            parachain_id,
+            &header::hash_from_scale_encoded_header(
+                &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
+            ),
+        )
+        .await
+        {
+            // Elements in `finalized_subscriptions` are removed one by one
+            // and inserted back if the channel is still open.
+            for index in (0..finalized_subscriptions.len()).rev() {
+                let mut sender = finalized_subscriptions.swap_remove(index);
+                if sender.send(finalized.clone()).is_ok() {
+                    finalized_subscriptions.push(sender);
                 }
             }
 
-            para_new_best = para_new_best.next().fuse() => {
-                // TODO: this is a complete hack; since all_subscriptions aren't notified, we close all channels in order to force users of subscribe_all to fetch the finalized block again after the warp sync
-                if !is_near_head_of_chain {
-                    all_subscriptions.clear();
-                }
-
-                let (para_new_best, relay_sync_near_head_of_chain) = para_new_best.unwrap();
-                is_near_head_of_chain = relay_sync_near_head_of_chain;
-                current_best_block = para_new_best.clone();
-
-                // Elements in `best_subscriptions` are removed one by one and inserted
-                // back if the channel is still open.
-                for index in (0..best_subscriptions.len()).rev() {
-                    let mut sender = best_subscriptions.swap_remove(index);
-                    if sender.send(para_new_best.scale_encoding_vec()).is_ok() {
-                        best_subscriptions.push(sender);
-                    }
-                }
-            }
-
-            para_new_finalized = para_new_finalized.next().fuse() => {
-                let (para_new_finalized, _) = para_new_finalized.unwrap();
-                current_finalized_block = para_new_finalized.clone();
-
-                sync_sources.set_finalized_block_height(current_finalized_block.number);
-
-                // Elements in `finalized_subscriptions` are removed one by one and inserted
-                // back if the channel is still open.
-                for index in (0..finalized_subscriptions.len()).rev() {
-                    let mut sender = finalized_subscriptions.swap_remove(index);
-                    if sender.send(para_new_finalized.scale_encoding_vec()).is_ok() {
-                        finalized_subscriptions.push(sender);
-                    }
-                }
-            }
+            finalized_parahead = finalized;
         }
-    }
-}
 
-async fn fetch_paraheads(
-    log_target: String,
-    relay_chain_sync: Arc<runtime_service::RuntimeService>,
-    parachain_id: u32,
-    mut send_output: mpsc::Sender<(header::Header, bool)>,
-    track_finalized: bool,
-) {
-    // Stream of new best blocks of the relay chain this parachain is registered on.
-    let relay_best_blocks = {
-        let (relay_best_block_header, relay_best_blocks_subscription) = if track_finalized {
-            relay_chain_sync.subscribe_finalized().await
-        } else {
-            relay_chain_sync.subscribe_best().await
-        };
-        stream::once(future::ready(relay_best_block_header)).chain(relay_best_blocks_subscription)
-    };
-    futures::pin_mut!(relay_best_blocks);
+        // Tree of relay chain blocks. Blocks are inserted when received from the relay chain
+        // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
+        // is fetched, this parahead is reported to our subscriptions.
+        let mut async_tree = async_tree::AsyncTree::<ffi::Instant, [u8; 32], Vec<u8>>::new();
+        for block in relay_chain_subscribe_all.non_finalized_blocks {
+            let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+            let parent = async_tree
+                .input_iter_unordered()
+                .find(|(_, b, _, _)| **b == block.parent_hash)
+                .map(|b| b.0); // TODO: check if finalized
+            async_tree.input_insert_block(hash, parent, false, block.is_new_best);
+        }
 
-    // Hash of the head data of the best block of the parachain. `None` if no head data obtained
-    // yet. Used to avoid sending out notifications if the head data hasn't changed.
-    let mut previous_best_head_data_hash = None::<[u8; 32]>;
+        // List of senders that get notified when the tree of blocks is modified.
+        // Note that this list is created in the inner loop, as to be cleared if the relay chain
+        // blocks stream has a gap.
+        let mut all_subscriptions = Vec::<mpsc::Sender<_>>::new();
 
-    loop {
-        // Wait for a new best block before continuing.
-        match relay_best_blocks.next().await {
-            Some(_) => {}
-            None => break,
-        };
+        // List of in-progress parahead fetching operations.
+        let mut in_progress_paraheads = stream::FuturesUnordered::new();
 
-        // This block is triggered on a new best block, but it is only used to detect when
-        // to refresh the local state, and the content of the block itself isn't important.
-        // Purging any other pending block from the best block subscription so as to not
-        // accidentally call this block multiple times.
-        while let Some(_) = relay_best_blocks.next().now_or_never() {}
-
-        // Determine if the call to `recent_best_block_runtime_call` in the `parahead`
-        // function applies to a block that is near the head of the chain.
-        // TODO: kind of confusing and hacky, as this value is grabbed unconditionally but only ever used for the best block
-        let relay_sync_near_head_of_chain =
-            relay_chain_sync.is_near_head_of_chain_heuristic().await;
-
-        // Do the actual runtime call to obtain the parahead.
-        // Even if there isn't any bug, the runtime call can fail because the relay chain block
-        // has already been pruned from the network, or if we haven't fully synced the relay chain
-        // yet and are still at a stage where the runtime doesn't support parachains or the
-        // parachain in question hasn't been registered. These aren't severe errors.
-        let encoded_head_data =
-            match parahead(&relay_chain_sync, parachain_id, track_finalized).await {
-                Ok(v) => v,
-                Err(err) => {
-                    previous_best_head_data_hash = None;
-                    if err.is_network_problem() || !relay_sync_near_head_of_chain {
-                        log::debug!(
-                            target: &log_target,
-                            "Failed to get chain heads: {} (most likely benign)",
-                            err
-                        );
-                    } else {
-                        log::warn!(target: &log_target, "Failed to get chain heads: {}", err);
+        loop {
+            // Start fetching paraheads of new blocks whose parahead needs to be fetched.
+            loop {
+                match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
+                    async_tree::NextNecessaryAsyncOp::NotReady { when } => {
+                        // TODO: register when
+                        break;
                     }
-                    continue;
+                    async_tree::NextNecessaryAsyncOp::Ready(op) => {
+                        let relay_chain_sync = relay_chain_sync.clone();
+                        let block_hash = *op.block_user_data;
+                        let async_op_id = op.id;
+                        in_progress_paraheads.push(Box::pin(async move {
+                            (
+                                async_op_id,
+                                parahead(&relay_chain_sync, parachain_id, &block_hash).await,
+                            )
+                        }));
+                    }
                 }
-            };
+            }
 
-        // Try decode the result of the runtime call.
-        // If this fails, it indicates an incompatibility between smoldot and the relay
-        // chain.
-        let head_data =
-            match para::decode_persisted_validation_data_return_value(&encoded_head_data) {
-                Ok(Some(pvd)) => pvd.parent_head,
-                Ok(None) => {
-                    // `Ok(None)` indicates that the parachain doesn't occupy any core
-                    // on the relay chain at the latest block that the relay chain syncing
-                    // has synced. It might have occupied a core before, or might occupy
-                    // a core in the future, and as such this is not a fatal error.
-                    log::log!(
-                        target: &log_target,
-                        if relay_sync_near_head_of_chain {
-                            log::Level::Warn
-                        } else {
-                            log::Level::Debug
+            futures::select! {
+                relay_chain_notif = relay_chain_subscribe_all.new_blocks.next() => {
+                    let relay_chain_notif = match relay_chain_notif {
+                        Some(n) => n,
+                        None => break, // Jumps to the outer loop to recreate the channel.
+                    };
+
+                    match relay_chain_notif {
+                        Notification::Finalized { hash, best_block_hash } => {
+                            let finalized = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == hash).unwrap().0;
+                            let best = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == best_block_hash).unwrap().0;
+                            async_tree.input_finalize(finalized, best);
+                        }
+                        Notification::Block(block) => {
+                            let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                            let parent = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == block.parent_hash).map(|b| b.0); // TODO: check if finalized
+                            async_tree.input_insert_block(hash, parent, false, block.is_new_best);
+                        }
+                    };
+
+                    while let Some(update) = async_tree.try_advance_output() {
+                        match update {
+                            async_tree::OutputUpdate::Finalized { async_op_user_data: parahead, .. } => {
+                                finalized_parahead = parahead;
+
+                                // Elements in `finalized_subscriptions` are removed one by one
+                                // and inserted back if the channel is still open.
+                                for index in (0..finalized_subscriptions.len()).rev() {
+                                    let mut sender = finalized_subscriptions.swap_remove(index);
+                                    if sender.send(finalized_parahead.clone()).is_ok() {
+                                        finalized_subscriptions.push(sender);
+                                    }
+                                }
+
+                                // Elements in `all_subscriptions` are removed one by one and
+                                // inserted back if the channel is still open.
+                                let hash = header::hash_from_scale_encoded_header(&finalized_parahead);
+                                let best_block_hash = async_tree.best_block_index()
+                                    .map(|(_, parahead)| header::hash_from_scale_encoded_header(parahead))
+                                    .unwrap_or(hash);
+                                for index in (0..all_subscriptions.len()).rev() {
+                                    let mut sender = all_subscriptions.swap_remove(index);
+                                    let notif = Notification::Finalized {
+                                        hash,
+                                        best_block_hash,
+                                    };
+                                    if sender.try_send(notif).is_ok() {
+                                        all_subscriptions.push(sender);
+                                    }
+                                }
+                            }
+                            async_tree::OutputUpdate::Block(block) => {
+                                if block.is_new_best {
+                                    // Elements in `best_subscriptions` are removed one by one
+                                    // and inserted back if the channel is still open.
+                                    for index in (0..best_subscriptions.len()).rev() {
+                                        let mut sender = best_subscriptions.swap_remove(index);
+                                        if sender.send(block.async_op_user_data.clone()).is_ok() {
+                                            best_subscriptions.push(sender);
+                                        }
+                                    }
+                                }
+
+                                // Elements in `all_subscriptions` are removed one by one and
+                                // inserted back if the channel is still open.
+                                let is_new_best = block.is_new_best;
+                                let scale_encoded_header = block.async_op_user_data.clone();
+                                let block_index = block.index;
+                                let parent_hash = async_tree.parent(block_index)
+                                    .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap()))
+                                    .unwrap_or_else(|| header::hash_from_scale_encoded_header(&finalized_parahead));
+                                for index in (0..all_subscriptions.len()).rev() {
+                                    let mut sender = all_subscriptions.swap_remove(index);
+                                    let notif = Notification::Block(BlockNotification {
+                                        is_new_best,
+                                        parent_hash,
+                                        scale_encoded_header: scale_encoded_header.clone(),
+                                    });
+                                    if sender.try_send(notif).is_ok() {
+                                        all_subscriptions.push(sender);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+
+                (async_op_id, parahead_result) = in_progress_paraheads.select_next_some() => {
+                    match parahead_result {
+                        Ok(parahead) => {
+                            async_tree.async_op_finished(async_op_id, parahead);
                         },
-                        "Couldn't find the parachain head from relay chain. \
-                        The parachain likely doesn't occupy a core."
-                    );
-                    continue;
+                        Err(_error) => {
+                            // TODO: log here?
+                            async_tree.async_op_failure(async_op_id, &ffi::Instant::now());
+                        }
+                    }
                 }
-                Err(error) => {
-                    // Only a debug line is printed if not near the head of the chain,
-                    // to handle chains that have been upgraded later on to support
-                    // parachains later.
-                    log::log!(
-                        target: &log_target,
-                        if relay_sync_near_head_of_chain {
-                            log::Level::Error
-                        } else {
-                            log::Level::Debug
+
+                foreground_message = from_foreground.next().fuse() => {
+                    // Terminating the parachain sync task if the foreground has closed.
+                    let foreground_message = match foreground_message {
+                        Some(m) => m,
+                        None => return,
+                    };
+
+                    // Note that the rest of this `select!` statement can block for a long time,
+                    // which means that there might be a big delay for processing the messages here.
+                    // At the time of writing, the nature of the messages makes this a non-issue,
+                    // but care should be taken about this.
+
+                    match foreground_message {
+                        ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
+                            let _ = send_back.send(is_near_head_of_chain);
                         },
-                        "Failed to fetch the parachain head from relay chain: {}",
-                        error
-                    );
-                    continue;
+                        ToBackground::SubscribeFinalized { send_back } => {
+                            let (tx, rx) = lossy_channel::channel();
+                            finalized_subscriptions.push(tx);
+                            let _ = send_back.send((finalized_parahead.clone(), rx));
+                        }
+                        ToBackground::SubscribeBest { send_back } => {
+                            let (tx, rx) = lossy_channel::channel();
+                            best_subscriptions.push(tx);
+                            let best_parahead = async_tree.best_block_index().map(|(_, h)| h.clone()).unwrap_or_else(|| finalized_parahead.clone());
+                            let _ = send_back.send((best_parahead, rx));
+                        }
+                        ToBackground::SubscribeAll { send_back, buffer_size } => {
+                            let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+                            let _ = send_back.send(SubscribeAll {
+                                finalized_block_scale_encoded_header: finalized_parahead.clone(),
+                                non_finalized_blocks: async_tree.input_iter_unordered().filter_map(|(node_index, _, parahead, is_best)| {
+                                    let parahead = parahead?;
+                                    let parent_hash = async_tree.parent(node_index)
+                                        .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap()))
+                                        .unwrap_or_else(|| header::hash_from_scale_encoded_header(&finalized_parahead));
+
+                                    Some(BlockNotification {
+                                        is_new_best: is_best,
+                                        scale_encoded_header: parahead.clone(),
+                                        parent_hash,
+                                    })
+                                }).collect(),
+                                new_blocks,
+                            });
+
+                            all_subscriptions.push(tx);
+                        }
+                        ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
+                            // If `block_number` is over the finalized block, then which source
+                            // knows which block is precisely tracked. Otherwise, it is assumed
+                            // that all sources are on the finalized chain and thus that all
+                            // sources whose best block is superior to `block_number` have it.
+                            let list = if block_number > sync_sources.finalized_block_height() {
+                                sync_sources.knows_non_finalized_block(block_number, &block_hash)
+                                    .map(|local_id| sync_sources.user_data(local_id).0.clone())
+                                    .collect()
+                            } else {
+                                sync_sources
+                                    .keys()
+                                    .filter(|local_id| {
+                                        sync_sources.best_block(*local_id).0 >= block_number
+                                    })
+                                    .map(|local_id| sync_sources.user_data(local_id).0.clone())
+                                    .collect()
+                            };
+
+                            let _ = send_back.send(list);
+                        }
+                        ToBackground::SyncingPeers { send_back } => {
+                            let _ = send_back.send(sync_sources.keys().map(|local_id| {
+                                let (height, hash) = sync_sources.best_block(local_id);
+                                let (peer_id, role) = sync_sources.user_data(local_id).clone();
+                                (peer_id, role, height, *hash)
+                            }).collect());
+                        }
+                    }
+                },
+
+                network_event = from_network_service.next() => {
+                    // Something happened on the network.
+
+                    let network_event = match network_event {
+                        Some(m) => m,
+                        None => {
+                            // The channel from the network service has been closed. Closing the
+                            // sync background task as well.
+                            return
+                        },
+                    };
+
+                    match network_event {
+                        network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
+                            if chain_index == network_chain_index =>
+                        {
+                            let local_id = sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
+                            sync_sources_map.insert(peer_id, local_id);
+                        },
+                        network_service::Event::Disconnected { peer_id, chain_index }
+                            if chain_index == network_chain_index =>
+                        {
+                            let local_id = sync_sources_map.remove(&peer_id).unwrap();
+                            let (_peer_id, _role) = sync_sources.remove(local_id);
+                            debug_assert_eq!(peer_id, _peer_id);
+                        },
+                        network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
+                            if chain_index == network_chain_index =>
+                        {
+                            let local_id = *sync_sources_map.get(&peer_id).unwrap();
+                            let decoded = announce.decode();
+                            let decoded_header_hash = decoded.header.hash();
+                            sync_sources.add_known_block(local_id, decoded.header.number, decoded_header_hash);
+                            if decoded.is_best {
+                                sync_sources.set_best_block(local_id, decoded.header.number, decoded_header_hash);
+                            }
+                        },
+                        _ => {
+                            // Uninteresting message or irrelevant chain index.
+                        }
+                    }
                 }
-            };
-
-        // Don't do anything more if the head data matches
-        // `previous_best_head_data_hash`.
-        match (
-            &mut previous_best_head_data_hash,
-            blake2b(32, &[], &head_data),
-        ) {
-            (&mut Some(ref mut h1), h2) if *h1 == h2.as_bytes() => continue,
-            (h1 @ _, h2) => *h1 = Some(<[u8; 32]>::try_from(h2.as_bytes()).unwrap()),
-        };
-
-        // The meaning of `head_data` depends on the parachain. It can represent
-        // anything. In practice, however, it is most of the time a block header.
-        match header::decode(&head_data) {
-            Ok(header) => match send_output
-                .send((header.into(), relay_sync_near_head_of_chain))
-                .await
-            {
-                Ok(()) => {}
-                Err(_) => return,
-            },
-            Err(_) => {
-                log::warn!(
-                    target: &log_target,
-                    "Head data is not a block header. This isn't supported by smoldot."
-                );
             }
         }
     }
@@ -1734,37 +1716,23 @@ async fn fetch_paraheads(
 async fn parahead(
     relay_chain_sync: &Arc<runtime_service::RuntimeService>,
     parachain_id: u32,
-    track_finalized: bool,
+    block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
-    let (runtime_call_lock, virtual_machine) = if track_finalized {
-        relay_chain_sync
-            .recent_finalized_block_runtime_lock()
-            .await
-            .start(
-                para::PERSISTED_VALIDATION_FUNCTION_NAME,
-                para::persisted_validation_data_parameters(
-                    parachain_id,
-                    para::OccupiedCoreAssumption::TimedOut,
-                ),
-            )
-            .await
-            .map_err(ParaheadError::Call)?
-    } else {
-        relay_chain_sync
-            .recent_best_block_runtime_lock()
-            .await
-            .start(
-                para::PERSISTED_VALIDATION_FUNCTION_NAME,
-                para::persisted_validation_data_parameters(
-                    parachain_id,
-                    para::OccupiedCoreAssumption::TimedOut,
-                ),
-            )
-            .await
-            .map_err(ParaheadError::Call)?
-    };
+    let (runtime_call_lock, virtual_machine) = relay_chain_sync
+        .runtime_lock(block_hash)
+        .await
+        .unwrap() // TODO: /!\ wrong, racy, because finalized blocks are pruned from the relay chain sync
+        .start(
+            para::PERSISTED_VALIDATION_FUNCTION_NAME,
+            para::persisted_validation_data_parameters(
+                parachain_id,
+                para::OccupiedCoreAssumption::TimedOut,
+            ),
+        )
+        .await
+        .map_err(ParaheadError::Call)?;
 
     // TODO: move the logic below in the `para` module
 
@@ -1783,16 +1751,16 @@ async fn parahead(
         }
     };
 
-    loop {
+    let output = loop {
         match runtime_call {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                 let output = success.virtual_machine.value().as_ref().to_owned();
                 runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                break Ok(output);
+                break output;
             }
             read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                 runtime_call_lock.unlock(error.prototype);
-                break Err(ParaheadError::ReadOnlyRuntime(error.detail));
+                return Err(ParaheadError::ReadOnlyRuntime(error.detail));
             }
             read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
                 let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
@@ -1813,6 +1781,48 @@ async fn parahead(
                 runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
             }
         }
+    };
+
+    // Try decode the result of the runtime call.
+    // If this fails, it indicates an incompatibility between smoldot and the relay
+    // chain.
+    match para::decode_persisted_validation_data_return_value(&output) {
+        Ok(Some(pvd)) => Ok(pvd.parent_head.to_vec()),
+        Ok(None) => {
+            // TODO:
+            /*// `Ok(None)` indicates that the parachain doesn't occupy any core
+            // on the relay chain at the latest block that the relay chain syncing
+            // has synced. It might have occupied a core before, or might occupy
+            // a core in the future, and as such this is not a fatal error.
+            log::log!(
+                target: &log_target,
+                if relay_sync_near_head_of_chain {
+                    log::Level::Warn
+                } else {
+                    log::Level::Debug
+                },
+                "Couldn't find the parachain head from relay chain. \
+                    The parachain likely doesn't occupy a core."
+            );*/
+            Err(ParaheadError::NoCore)
+        }
+        Err(error) => {
+            // TODO:
+            /*// Only a debug line is printed if not near the head of the chain,
+            // to handle chains that have been upgraded later on to support
+            // parachains later.
+            log::log!(
+                target: &log_target,
+                if relay_sync_near_head_of_chain {
+                    log::Level::Error
+                } else {
+                    log::Level::Debug
+                },
+                "Failed to fetch the parachain head from relay chain: {}",
+                error
+            );*/
+            Err(ParaheadError::InvalidRuntimeOutput(error))
+        }
     }
 }
 
@@ -1821,6 +1831,8 @@ enum ParaheadError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    NoCore,
+    InvalidRuntimeOutput(para::Error),
 }
 
 impl ParaheadError {
@@ -1831,6 +1843,8 @@ impl ParaheadError {
             ParaheadError::Call(err) => err.is_network_problem(),
             ParaheadError::StartError(_) => false,
             ParaheadError::ReadOnlyRuntime(_) => false,
+            ParaheadError::NoCore => false,
+            ParaheadError::InvalidRuntimeOutput(_) => false,
         }
     }
 }
