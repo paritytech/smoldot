@@ -33,13 +33,10 @@ use core::{cmp, time::Duration};
 
 pub use fork_tree::NodeIndex;
 
-/// Identifier for a download in the [`AsyncTree`].
+/// Identifier for an asynchronous operation in the [`AsyncTree`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct AsyncOpId(u64);
 
-/// Identifier for a runtime in the [`AsyncTree`].
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct RuntimeId(usize);
 
 #[derive(Debug)]
 pub enum NextNecessaryAsyncOp<'a, TNow, TBl> {
@@ -68,15 +65,15 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
     /// Index within [`AsyncTree::non_finalized_blocks`] of the current "output" best block.
     /// `None` if the best block is the finalized block.
     ///
-    /// When `AsyncTree` has output, the value of [`Block::runtime`] for this block is
-    /// guaranteed to be [`AsyncOpState::Finished`].
+    /// The value of [`Block::async_op`] for this block is guaranteed to be
+    /// [`AsyncOpState::Finished`].
     best_block_index: Option<fork_tree::NodeIndex>,
 
     /// Index within [`AsyncTree::non_finalized_blocks`] of the finalized block according to
     /// the input. `None` if the input finalized block is the same as the output finalized block.
     ///
-    /// If `Some` and when `AsyncTree` has output, the value of [`Block::runtime`] for this
-    /// block is guaranteed to **not** be [`AsyncOpState::Finished`].
+    /// The value of [`Block::async_op`] for this block is guaranteed to **not** be
+    /// [`AsyncOpState::Finished`].
     input_finalized_index: Option<fork_tree::NodeIndex>,
 
     /// Incremented by one and stored within [`Block::input_best_block_weight`].
@@ -85,7 +82,7 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
     /// Weight that would be stored in [`Block::input_best_block_weight`] of the finalized block.
     finalized_block_weight: u32,
 
-    /// Identifier to assign to the next download.
+    /// Identifier to assign to the next asynchronous operation.
     next_async_op_id: AsyncOpId,
 }
 
@@ -117,7 +114,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if [`node_index`] is invalid.
+    /// Panics if the [`NodeIndex`] is invalid.
     ///
     pub fn block_user_data(&self, node_index: NodeIndex) -> &TBl {
         &self.non_finalized_blocks.get(node_index).unwrap().user_data
@@ -127,7 +124,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if [`node_index`] is invalid.
+    /// Panics if the [`NodeIndex`] is invalid.
     ///
     pub fn block_user_data_mut(&mut self, node_index: NodeIndex) -> &mut TBl {
         &mut self
@@ -151,7 +148,7 @@ where
     ///
     /// This "destroys" the [`AsyncOpId`].
     ///
-    /// Returns the number of blocks whose state was affected by this download.
+    /// Returns the number of blocks whose state was affected by this asynchronous operation.
     ///
     /// # Panic
     ///
@@ -161,7 +158,7 @@ where
     where
         TAsync: Clone,
     {
-        // Find the number of blocks that are bound to this download.
+        // Find the number of blocks that are bound to this operation.
         let num_concerned_blocks = self
             .non_finalized_blocks
             .iter_unordered()
@@ -174,7 +171,7 @@ where
             })
             .count();
 
-        // Update the blocks that were downloading this runtime to become `Finished`.
+        // Update the blocks that were performing this operation to become `Finished`.
         // TODO: O(n) and allocation
         for index in self
             .non_finalized_blocks
@@ -346,7 +343,7 @@ where
         }
     }
 
-    /// Starts downloading the runtime of the block with the given index, if necessary.
+    /// Starts the operation of the block with the given index, if necessary.
     fn start_necessary_async_op(
         &mut self,
         block_index: NodeIndex,
@@ -402,7 +399,7 @@ where
             0
         };
 
-        // Insert the new runtime.
+        // Insert the new block.
         self.non_finalized_blocks.insert(
             parent_index,
             Block {
@@ -571,7 +568,7 @@ where
                         continue;
                     }
 
-                    // Runtime service best can be updated to the block being iterated.
+                    // Input best can be updated to the block being iterated.
                     current_runtime_service_best_block_weight = block.input_best_block_weight;
                     self.best_block_index = Some(node_index);
 
@@ -720,7 +717,7 @@ struct Block<TNow, TBl, TAsync> {
     /// User data associated with that block.
     user_data: TBl,
 
-    /// Runtime information of that block. Shared amongst multiple different blocks.
+    /// Operation information of that block. Shared amongst multiple different blocks.
     async_op: AsyncOpState<TNow, TAsync>,
 
     /// A block with a higher value here has been reported by the input as the best block
@@ -740,13 +737,13 @@ enum AsyncOpState<TNow, TAsync> {
 
     /// Operation is currently in progress.
     InProgress {
-        /// Identifier for this download in the public API.
+        /// Identifier for this operation in the public API.
         /// Attributed from [`AsyncTree::next_async_op_id`]. Multiple different blocks can
-        /// point to the same `async_op_id` when it is known that they point to the same runtime.
+        /// point to the same `async_op_id` when it is known that they point to the same operation.
         async_op_id: AsyncOpId,
 
-        /// Do not start any download before `TNow`. Used to avoid repeatedly trying to download
-        /// the same block over and over again when it's constantly failing.
+        /// Do not start any operation before `TNow`. Used to avoid repeatedly trying to perform
+        /// the operation on the same block over and over again when it's constantly failing.
         timeout: Option<TNow>,
     },
 
