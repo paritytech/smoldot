@@ -70,22 +70,25 @@ impl OccupiedCoreAssumption {
     }
 }
 
-/// Attempt to decode the return value of the  `ParachainHost_persisted_validation_data` runtime
+/// Attempt to decode the return value of the `ParachainHost_persisted_validation_data` runtime
 /// call.
 pub fn decode_persisted_validation_data_return_value(
     scale_encoded: &[u8],
 ) -> Result<Option<PersistedValidationDataRef>, Error> {
-    match nom::combinator::all_consuming(crate::util::nom_option_decode(persisted_validation_data))(
-        scale_encoded,
-    ) {
+    let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::combinator::all_consuming(
+        crate::util::nom_option_decode(persisted_validation_data),
+    )(scale_encoded);
+    match res {
         Ok((_, data)) => Ok(data),
-        Err(err) => Err(Error(err)),
+        Err(nom::Err::Error(err)) | Err(nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(_) => unreachable!(),
     }
 }
 
 /// Error that can happen during the decoding.
 #[derive(Debug, derive_more::Display)]
-pub struct Error<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+#[display(fmt = "Error during the persisted validation data decoding")]
+pub struct Error(nom::error::ErrorKind);
 
 /// Decoded persisted validation data.
 // TODO: document and explain

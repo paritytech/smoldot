@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 async-std = "1.10.0"
 atty = "0.2.14"
-ctrlc = "3.2.0"
+ctrlc = "3.2.1"
 derive_more = "0.99.16"
 directories = "4.0.1"
 ed25519-zebra = { version = "2.2.0", default-features = false }
@@ -30,5 +30,5 @@ rand = "0.8.4"
 smoldot = { version = "0.1.0", path = "../..", default-features = false, features = ["database-sqlite", "std"] }
 structopt = { version = "0.3.23", default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = "0.1.17"
-tracing = { version = "0.1.28", features = ["attributes"] }
+tracing = { version = "0.1.29", features = ["attributes"] }
 tracing-subscriber = { version = "0.2.25", default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "smallvec"] }

@@ -54,6 +54,8 @@
 //! runtime. Please be aware of this and do not use this state machine on old blocks.
 //!
 
+// TODO: should be re-written to use chain::async_tree as the underlying data structure
+
 use crate::{chain::fork_tree, executor, header};
 use alloc::vec::Vec;
 use core::{cmp, iter, mem, time::Duration};
@@ -457,11 +459,14 @@ where
 
     /// Returns the list of all SCALE-encoded headers of non-finalized blocks, plus a boolean
     /// indicating whether this is the best block.
-    pub fn non_finalized_blocks_headers_unordered(
+    ///
+    /// The returned items are guaranteed to be in an order in which the parents are found before
+    /// their children.
+    pub fn non_finalized_blocks_headers_ancestry_order(
         &'_ self,
     ) -> impl Iterator<Item = (&'_ [u8], bool)> + '_ {
         self.non_finalized_blocks
-            .iter_unordered()
+            .iter_ancestry_order()
             .map(move |(idx, b)| (&b.header[..], self.best_block_index == Some(idx)))
     }
 

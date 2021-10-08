@@ -51,6 +51,7 @@
 //! assert!(tree.get(node2).is_some());
 //! ```
 
+use alloc::vec::Vec;
 use core::{fmt, iter};
 
 /// Tree of nodes. Each node contains a value of type `T`.
@@ -124,6 +125,31 @@ impl<T> ForkTree<T> {
     /// Returns an iterator to all the node values without any specific order.
     pub fn iter_unordered(&self) -> impl Iterator<Item = (NodeIndex, &T)> {
         self.nodes.iter().map(|n| (NodeIndex(n.0), &n.1.data))
+    }
+
+    /// Returns an iterator to all the node values. The returned items are guaranteed to be in an
+    /// order in which the parents are found before their children.
+    pub fn iter_ancestry_order(&self) -> impl Iterator<Item = (NodeIndex, &T)> {
+        // TODO: consider using a custom iterator in order to not allocate? really needs a test first because it's tricky
+        let mut list = Vec::with_capacity(self.nodes.len());
+        if let Some(first_root) = self.first_root {
+            list.push(first_root);
+        }
+
+        let mut index = 0;
+        while index < list.len() {
+            let node = &self.nodes[list[index]];
+            if let Some(first_child) = node.first_child {
+                list.push(first_child);
+            }
+            if let Some(next_sibling) = node.next_sibling {
+                list.push(next_sibling);
+            }
+            index += 1;
+        }
+
+        list.into_iter()
+            .map(move |idx| (NodeIndex(idx), &self.nodes[idx].data))
     }
 
     /// Returns the value of the node with the given index.

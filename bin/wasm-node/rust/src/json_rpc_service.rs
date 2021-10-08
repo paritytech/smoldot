@@ -191,18 +191,23 @@ impl JsonRpcService {
         (config.tasks_executor)(
             "json-rpc-service".into(),
             async move {
-                let (_finalized_block_header, mut finalized_blocks_subscription) =
-                    background.sync_service.subscribe_best().await;
+                // TODO: use subscribe_all?
+                let (finalized_block_header, mut finalized_blocks_subscription) =
+                    background.runtime_service.subscribe_finalized().await;
+                let finalized_block_hash =
+                    header::hash_from_scale_encoded_header(&finalized_block_header);
                 let (best_block_header, mut best_blocks_subscription) =
-                    background.sync_service.subscribe_best().await;
-                debug_assert_eq!(_finalized_block_header, best_block_header);
+                    background.runtime_service.subscribe_best().await;
                 let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
 
                 {
                     let mut blocks = background.blocks.try_lock().unwrap();
+                    blocks
+                        .known_blocks
+                        .put(finalized_block_hash, finalized_block_header);
                     blocks.known_blocks.put(best_block_hash, best_block_header);
+                    blocks.finalized_block = finalized_block_hash;
                     blocks.best_block = best_block_hash;
-                    blocks.finalized_block = best_block_hash;
                 }
 
                 let mut tasks = stream::FuturesUnordered::new();
@@ -1466,9 +1471,9 @@ impl Background {
             };
 
         let mut blocks_list = {
-            let subscribe_all = self.sync_service.subscribe_all(16).await;
+            let subscribe_all = self.runtime_service.subscribe_all(16).await;
             // TODO: is it correct to return all non-finalized blocks first? have to compare with PolkadotJS
-            stream::iter(subscribe_all.non_finalized_blocks)
+            stream::iter(subscribe_all.non_finalized_blocks_ancestry_order)
                 .chain(subscribe_all.new_blocks.filter_map(|notif| {
                     future::ready(match notif {
                         sync_service::Notification::Block(b) => Some(b),
@@ -1546,7 +1551,7 @@ impl Background {
             };
 
         let mut blocks_list = {
-            let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
+            let (block_header, blocks_subscription) = self.runtime_service.subscribe_best().await;
             stream::once(future::ready(block_header)).chain(blocks_subscription)
         };
 
@@ -1620,7 +1625,7 @@ impl Background {
 
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
-                self.sync_service.subscribe_finalized().await;
+                self.runtime_service.subscribe_finalized().await;
             stream::once(future::ready(finalized_block_header)).chain(finalized_blocks_subscription)
         };
 
@@ -1694,7 +1699,7 @@ impl Background {
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {
             let known_values = (0..list.len()).map(|_| None).collect::<Vec<_>>();
-            let (block_header, blocks_subscription) = self.sync_service.subscribe_best().await;
+            let (block_header, blocks_subscription) = self.runtime_service.subscribe_best().await;
             let blocks_stream =
                 stream::once(future::ready(block_header)).chain(blocks_subscription);
             let sync_service = self.sync_service.clone();
