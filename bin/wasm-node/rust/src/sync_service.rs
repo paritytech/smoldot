@@ -1418,8 +1418,8 @@ async fn start_parachain(
     let mut sync_sources_map = HashMap::new();
 
     // `true` after a parachain block has been fetched from the parachain.
-    // TODO: logic not really correct, as need to check whether relay chain is near head of chain too
-    let mut is_near_head_of_chain = false;
+    // TODO: handled in a hacky way; unclear how to handle properly
+    let mut is_near_head_of_chain;
 
     loop {
         // Stream of blocks of the relay chain this parachain is registered on.
@@ -1431,6 +1431,8 @@ async fn start_parachain(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header
             ))
         );
+
+        is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
         // Block the rest of the syncing before we could determine the parahead of the relay
         // chain finalized block.
@@ -1518,6 +1520,8 @@ async fn start_parachain(
                         Some(n) => n,
                         None => break, // Jumps to the outer loop to recreate the channel.
                     };
+
+                    is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
                     match relay_chain_notif {
                         Notification::Finalized { hash, best_block_hash } => {
