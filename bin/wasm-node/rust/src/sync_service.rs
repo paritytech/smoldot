@@ -1403,6 +1403,9 @@ async fn start_parachain(
         .as_ref()
         .finalized_block_header
         .scale_encoding_vec();
+    // Whether `finalized_parahead` corresponds to the parahead of the finalized relay chain
+    // block. `false` if it is older.
+    let mut finalized_parahead_up_to_date;
 
     // List of senders that get notified when the best block is modified.
     let mut best_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
@@ -1455,6 +1458,9 @@ async fn start_parachain(
             }
 
             finalized_parahead = finalized;
+            finalized_parahead_up_to_date = true;
+        } else {
+            finalized_parahead_up_to_date = false;
         }
 
         // Tree of relay chain blocks. Blocks are inserted when received from the relay chain
@@ -1487,29 +1493,31 @@ async fn start_parachain(
 
         loop {
             // Start fetching paraheads of new blocks whose parahead needs to be fetched.
-            loop {
-                match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
-                    async_tree::NextNecessaryAsyncOp::NotReady { when } => {
-                        // TODO: register when
-                        break;
-                    }
-                    async_tree::NextNecessaryAsyncOp::Ready(op) => {
-                        log::debug!(
-                            target: &log_target,
-                            "Fetching parahead for relay chain block 0x{} (operation id: {:?})",
-                            HashDisplay(op.block_user_data),
-                            op.id
-                        );
+            if finalized_parahead_up_to_date {
+                loop {
+                    match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
+                        async_tree::NextNecessaryAsyncOp::NotReady { when } => {
+                            // TODO: register when
+                            break;
+                        }
+                        async_tree::NextNecessaryAsyncOp::Ready(op) => {
+                            log::debug!(
+                                target: &log_target,
+                                "Fetching parahead for relay chain block 0x{} (operation id: {:?})",
+                                HashDisplay(op.block_user_data),
+                                op.id
+                            );
 
-                        let relay_chain_sync = relay_chain_sync.clone();
-                        let block_hash = *op.block_user_data;
-                        let async_op_id = op.id;
-                        in_progress_paraheads.push(Box::pin(async move {
-                            (
-                                async_op_id,
-                                parahead(&relay_chain_sync, parachain_id, &block_hash).await,
-                            )
-                        }));
+                            let relay_chain_sync = relay_chain_sync.clone();
+                            let block_hash = *op.block_user_data;
+                            let async_op_id = op.id;
+                            in_progress_paraheads.push(Box::pin(async move {
+                                (
+                                    async_op_id,
+                                    parahead(&relay_chain_sync, parachain_id, &block_hash).await,
+                                )
+                            }));
+                        }
                     }
                 }
             }
@@ -1530,6 +1538,13 @@ async fn start_parachain(
                                 "Relay chain has finalized block 0x{}",
                                 HashDisplay(&hash)
                             );
+
+                            // If finalized parahead is outdated, it would be a logic error to
+                            // notify any new block. Instead, reset the syncing in order to try
+                            // fetching the parahead of the relay finalized block again.
+                            if !finalized_parahead_up_to_date {
+                                break;
+                            }
 
                             let finalized = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == hash).unwrap().0;
                             let best = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == best_block_hash).unwrap().0;
@@ -1554,6 +1569,8 @@ async fn start_parachain(
                             async_tree::OutputUpdate::Finalized { async_op_user_data: parahead, .. }
                                 if parahead != finalized_parahead =>
                             {
+                                debug_assert!(finalized_parahead_up_to_date);
+
                                 finalized_parahead = parahead;
                                 let hash = header::hash_from_scale_encoded_header(&finalized_parahead);
 
@@ -1646,6 +1663,8 @@ async fn start_parachain(
                 },
 
                 (async_op_id, parahead_result) = in_progress_paraheads.select_next_some() => {
+                    debug_assert!(finalized_parahead_up_to_date);
+
                     match parahead_result {
                         Ok(parahead) => {
                             // TODO: print more info
@@ -1690,7 +1709,7 @@ async fn start_parachain(
 
                     match foreground_message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            let _ = send_back.send(is_near_head_of_chain);
+                            let _ = send_back.send(is_near_head_of_chain && finalized_parahead_up_to_date);
                         },
                         ToBackground::SubscribeFinalized { send_back } => {
                             let (tx, rx) = lossy_channel::channel();
@@ -1812,7 +1831,7 @@ async fn parahead(
     let (runtime_call_lock, virtual_machine) = relay_chain_sync
         .runtime_lock(block_hash)
         .await
-        .unwrap() // TODO: /!\ wrong, racy, because finalized blocks are pruned from the relay chain sync
+        .ok_or(ParaheadError::BlockPruned)?
         .start(
             para::PERSISTED_VALIDATION_FUNCTION_NAME,
             para::persisted_validation_data_parameters(
@@ -1889,6 +1908,7 @@ enum ParaheadError {
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
     NoCore,
     InvalidRuntimeOutput(para::Error),
+    BlockPruned,
 }
 
 impl ParaheadError {
@@ -1901,6 +1921,7 @@ impl ParaheadError {
             ParaheadError::ReadOnlyRuntime(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
+            ParaheadError::BlockPruned => false,
         }
     }
 }
