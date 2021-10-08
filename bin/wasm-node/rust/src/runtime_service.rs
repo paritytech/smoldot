@@ -417,19 +417,37 @@ impl RuntimeService {
         guarded.all_blocks_subscriptions.push(tx);
 
         let tree = guarded.tree.as_ref().unwrap();
+
+        let non_finalized_blocks: Vec<_> = tree
+            .non_finalized_blocks_headers_unordered()
+            .map(|(scale_encoded_header, is_new_best)| {
+                let parent_hash = *header::decode(scale_encoded_header).unwrap().parent_hash; // TODO: correct? if yes, document
+                debug_assert!(
+                    parent_hash == *tree.finalized_block_hash()
+                        || tree
+                            .non_finalized_blocks_headers_unordered()
+                            .any(|(h, _)| parent_hash == header::hash_from_scale_encoded_header(h))
+                );
+                sync_service::BlockNotification {
+                    is_new_best,
+                    parent_hash,
+                    scale_encoded_header: scale_encoded_header.to_vec(),
+                }
+            })
+            .collect();
+
+        debug_assert!(matches!(
+            non_finalized_blocks
+                .iter()
+                .filter(|b| b.is_new_best)
+                .count(),
+            0 | 1
+        ));
+
         sync_service::SubscribeAll {
             finalized_block_scale_encoded_header: tree.finalized_block_header().to_vec(),
             new_blocks,
-            non_finalized_blocks: tree
-                .non_finalized_blocks_headers_unordered()
-                .map(
-                    |(scale_encoded_header, is_new_best)| sync_service::BlockNotification {
-                        is_new_best,
-                        parent_hash: *header::decode(scale_encoded_header).unwrap().parent_hash, // TODO: correct? if yes, document
-                        scale_encoded_header: scale_encoded_header.to_vec(),
-                    },
-                )
-                .collect(),
+            non_finalized_blocks,
         }
     }
 
