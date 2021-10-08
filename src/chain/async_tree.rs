@@ -197,6 +197,31 @@ where
         self.non_finalized_blocks.parent(node)
     }
 
+    /// Similar to [`AsyncTree::input_iter_unordered`], except that the returned items are
+    /// guaranteed to be in an order in which the parents are found before their children.
+    pub fn input_iter_ancestry_order(
+        &'_ self,
+    ) -> impl Iterator<Item = (NodeIndex, &'_ TBl, Option<&'_ TAsync>, bool)> + '_ {
+        self.non_finalized_blocks
+            .iter_ancestry_order()
+            .map(move |(idx, b)| {
+                let async_ud = match &b.async_op {
+                    AsyncOpState::Finished {
+                        reported: true,
+                        user_data,
+                    } => Some(user_data),
+                    _ => None,
+                };
+
+                (
+                    idx,
+                    &b.user_data,
+                    async_ud,
+                    self.best_block_index == Some(idx),
+                )
+            })
+    }
+
     /// Returns the list of all non-finalized blocks that have been inserted, plus a boolean
     /// indicating whether this is the output best block.
     ///
@@ -205,6 +230,9 @@ where
     ///
     /// The `Option<&'_ TAsync>` is `Some` if and only if the block has been reported in a
     /// [`OutputUpdate`] before.
+    ///
+    /// The returned items are guaranteed to be in an order in which the parents are found before
+    /// their children.
     pub fn input_iter_unordered(
         &'_ self,
     ) -> impl Iterator<Item = (NodeIndex, &'_ TBl, Option<&'_ TAsync>, bool)> + '_ {

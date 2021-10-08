@@ -169,13 +169,14 @@ impl<T> NonFinalizedTree<T> {
 
     /// Returns the header of all known non-finalized blocks in the chain.
     ///
-    /// The order of the blocks is unspecified.
-    pub fn iter(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+    /// The returned items are guaranteed to be in an order in which the parents are found before
+    /// their children.
+    pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
         self.inner
             .as_ref()
             .unwrap()
             .blocks
-            .iter_unordered()
+            .iter_ancestry_order()
             .map(|(_, b)| (&b.header).into())
     }
 

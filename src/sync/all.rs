@@ -216,15 +216,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Returns the header of all known non-finalized blocks in the chain.
     ///
-    /// The order of the blocks is unspecified.
-    pub fn non_finalized_blocks(&self) -> impl Iterator<Item = header::HeaderRef> {
+    /// The returned items are guaranteed to be in an order in which the parents are found before
+    /// their children.
+    pub fn non_finalized_blocks_ancestry_order(&self) -> impl Iterator<Item = header::HeaderRef> {
         match &self.inner {
             AllSyncInner::AllForks(sync) => {
-                let iter = sync.non_finalized_blocks();
+                let iter = sync.non_finalized_blocks_ancestry_order();
                 either::Left(iter)
             }
             AllSyncInner::Optimistic { inner } => {
-                let iter = inner.non_finalized_blocks();
+                let iter = inner.non_finalized_blocks_ancestry_order();
                 either::Right(either::Left(iter))
             }
             AllSyncInner::GrandpaWarpSync { .. } => either::Right(either::Right(iter::empty())),
