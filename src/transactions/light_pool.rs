@@ -814,9 +814,17 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 .map(|(_, tx_id)| *tx_id)
                 .collect::<Vec<_>>();
 
-            for _tx_id in included_transactions {
+            for tx_id in included_transactions {
+                let _was_removed = self
+                    .transactions_by_inclusion
+                    .remove(&(pruned.user_data.hash, tx_id));
+                debug_assert!(_was_removed);
+                let _was_removed = self
+                    .included_transactions
+                    .remove(&(tx_id, pruned.user_data.hash));
+                debug_assert!(_was_removed);
+
                 // TODO: finish here
-                //self.remove_transaction();
             }
 
             // TODO: handle transactions validated against that block /!\ /!\
