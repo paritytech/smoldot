@@ -511,17 +511,15 @@ where
     /// Panics if `new_best_block` is not a descendant of `node_to_finalize`.
     ///
     pub fn input_finalize(&mut self, node_to_finalize: NodeIndex, new_best_block: NodeIndex) {
-        self.input_finalized_index = Some(node_to_finalize);
-
         // Make sure that `new_best_block` is a descendant of `node_to_finalize`,
         // otherwise the state of the tree will be corrupted.
         // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
         // is part of the public API of this method.
         assert!(self
-            .input_finalized_index
-            .map_or(true, |finalized_index| self
-                .non_finalized_blocks
-                .is_ancestor(finalized_index, new_best_block)));
+            .non_finalized_blocks
+            .is_ancestor(node_to_finalize, new_best_block));
+
+        self.input_finalized_index = Some(node_to_finalize);
 
         // If necessary, update the weight of the block.
         match &mut self
