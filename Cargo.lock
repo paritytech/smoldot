@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "0.4.15"
+version = "0.4.16"
 dependencies = [
  "blake2-rfc",
  "derive_more",
