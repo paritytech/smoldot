@@ -115,11 +115,13 @@ impl SyncService {
     pub async fn new(mut config: Config) -> Self {
         let (to_background, from_foreground) = mpsc::channel(16);
 
+        let log_target = format!("sync-service-{}", config.log_name);
+
         if let Some(config_parachain) = config.parachain {
             (config.tasks_executor)(
                 "sync-para".into(),
                 Box::pin(start_parachain(
-                    config.log_name.clone(),
+                    log_target,
                     config.chain_information,
                     config_parachain.relay_chain_sync.clone(),
                     config_parachain.parachain_id,
@@ -133,7 +135,7 @@ impl SyncService {
                 "sync-relay".into(),
                 Box::pin(
                     start_relay_chain(
-                        config.log_name,
+                        log_target,
                         config.chain_information,
                         from_foreground,
                         config.network_service.0.clone(),
@@ -712,15 +714,13 @@ pub struct BlockNotification {
 }
 
 async fn start_relay_chain(
-    log_name: String,
+    log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService>,
     network_chain_index: usize,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
-    let log_target = format!("sync-service-{}", log_name);
-
     // TODO: implicit generics
     let mut sync = all::AllSync::<_, (libp2p::PeerId, protocol::Role), ()>::new(all::Config {
         chain_information,
