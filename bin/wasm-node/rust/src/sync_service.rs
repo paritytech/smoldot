@@ -1421,6 +1421,13 @@ async fn start_parachain(
     loop {
         // Stream of blocks of the relay chain this parachain is registered on.
         let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32).await;
+        log::debug!(
+            target: &log_target,
+            "Resetting parachain syncing to relay chain block 0x{}",
+            HashDisplay(&header::hash_from_scale_encoded_header(
+                &relay_chain_subscribe_all.finalized_block_scale_encoded_header
+            ))
+        );
 
         // Block the rest of the syncing before we could determine the parahead of the relay
         // chain finalized block.
@@ -1475,6 +1482,13 @@ async fn start_parachain(
                         break;
                     }
                     async_tree::NextNecessaryAsyncOp::Ready(op) => {
+                        log::debug!(
+                            target: &log_target,
+                            "Fetching parahead for relay chain block 0x{} (operation id: {:?})",
+                            HashDisplay(op.block_user_data),
+                            op.id
+                        );
+
                         let relay_chain_sync = relay_chain_sync.clone();
                         let block_hash = *op.block_user_data;
                         let async_op_id = op.id;
@@ -1497,12 +1511,25 @@ async fn start_parachain(
 
                     match relay_chain_notif {
                         Notification::Finalized { hash, best_block_hash } => {
+                            log::debug!(
+                                target: &log_target,
+                                "Relay chain has finalized block 0x{}",
+                                HashDisplay(&hash)
+                            );
+
                             let finalized = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == hash).unwrap().0;
                             let best = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == best_block_hash).unwrap().0;
                             async_tree.input_finalize(finalized, best);
                         }
                         Notification::Block(block) => {
                             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                            log::debug!(
+                                target: &log_target,
+                                "New relay chain block 0x{}",
+                                HashDisplay(&hash)
+                            );
+
                             let parent = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == block.parent_hash).map(|b| b.0); // TODO: check if finalized
                             async_tree.input_insert_block(hash, parent, false, block.is_new_best);
                         }
@@ -1514,6 +1541,13 @@ async fn start_parachain(
                                 if parahead != finalized_parahead =>
                             {
                                 finalized_parahead = parahead;
+                                let hash = header::hash_from_scale_encoded_header(&finalized_parahead);
+
+                                log::debug!(
+                                    target: &log_target,
+                                    "Reporting finalized parablock 0x{}",
+                                    HashDisplay(&hash)
+                                );
 
                                 // Elements in `finalized_subscriptions` are removed one by one
                                 // and inserted back if the channel is still open.
@@ -1526,7 +1560,6 @@ async fn start_parachain(
 
                                 // Elements in `all_subscriptions` are removed one by one and
                                 // inserted back if the channel is still open.
-                                let hash = header::hash_from_scale_encoded_header(&finalized_parahead);
                                 let best_block_hash = async_tree.best_block_index()
                                     .map(|(_, parahead)| header::hash_from_scale_encoded_header(parahead))
                                     .unwrap_or(hash);
@@ -1562,6 +1595,12 @@ async fn start_parachain(
 
                                 // TODO: if parent wasn't best block but child is best block, and parent is equal to child, then we don't report the fact that the block is best to the subscribers, causing a state mismatch with potential new subscribers that are grabbed later
 
+                                log::debug!(
+                                    target: &log_target,
+                                    "Reporting new parablock 0x{}",
+                                    HashDisplay(&header::hash_from_scale_encoded_header(&scale_encoded_header))
+                                );
+
                                 if is_new_best {
                                     // Elements in `best_subscriptions` are removed one by one
                                     // and inserted back if the channel is still open.
@@ -1595,10 +1634,29 @@ async fn start_parachain(
                 (async_op_id, parahead_result) = in_progress_paraheads.select_next_some() => {
                     match parahead_result {
                         Ok(parahead) => {
+                            // TODO: print more info
+                            log::debug!(
+                                target: &log_target,
+                                "Successfully fetched parahead",
+                            );
+
                             async_tree.async_op_finished(async_op_id, parahead);
                         },
-                        Err(_error) => {
-                            // TODO: log here?
+                        Err(error) => {
+                            // Only a debug line is printed if not near the head of the chain,
+                            // to handle chains that have been upgraded later on to support
+                            // parachains later.
+                            log::log!(
+                                target: &log_target,
+                                if is_near_head_of_chain && !error.is_network_problem() { // TODO: is is_near_head_of_chain the correct flag?
+                                    log::Level::Error
+                                } else {
+                                    log::Level::Debug
+                                },
+                                "Failed to fetch the parachain head from relay chain: {}",
+                                error
+                            );
+
                             async_tree.async_op_failure(async_op_id, &ffi::Instant::now());
                         }
                     }
@@ -1805,41 +1863,8 @@ async fn parahead(
     // chain.
     match para::decode_persisted_validation_data_return_value(&output) {
         Ok(Some(pvd)) => Ok(pvd.parent_head.to_vec()),
-        Ok(None) => {
-            // TODO:
-            /*// `Ok(None)` indicates that the parachain doesn't occupy any core
-            // on the relay chain at the latest block that the relay chain syncing
-            // has synced. It might have occupied a core before, or might occupy
-            // a core in the future, and as such this is not a fatal error.
-            log::log!(
-                target: &log_target,
-                if relay_sync_near_head_of_chain {
-                    log::Level::Warn
-                } else {
-                    log::Level::Debug
-                },
-                "Couldn't find the parachain head from relay chain. \
-                    The parachain likely doesn't occupy a core."
-            );*/
-            Err(ParaheadError::NoCore)
-        }
-        Err(error) => {
-            // TODO:
-            /*// Only a debug line is printed if not near the head of the chain,
-            // to handle chains that have been upgraded later on to support
-            // parachains later.
-            log::log!(
-                target: &log_target,
-                if relay_sync_near_head_of_chain {
-                    log::Level::Error
-                } else {
-                    log::Level::Debug
-                },
-                "Failed to fetch the parachain head from relay chain: {}",
-                error
-            );*/
-            Err(ParaheadError::InvalidRuntimeOutput(error))
-        }
+        Ok(None) => Err(ParaheadError::NoCore),
+        Err(error) => Err(ParaheadError::InvalidRuntimeOutput(error)),
     }
 }
 
