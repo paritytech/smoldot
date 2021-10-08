@@ -1510,7 +1510,9 @@ async fn start_parachain(
 
                     while let Some(update) = async_tree.try_advance_output() {
                         match update {
-                            async_tree::OutputUpdate::Finalized { async_op_user_data: parahead, .. } => {
+                            async_tree::OutputUpdate::Finalized { async_op_user_data: parahead, .. }
+                                if parahead != finalized_parahead =>
+                            {
                                 finalized_parahead = parahead;
 
                                 // Elements in `finalized_subscriptions` are removed one by one
@@ -1539,13 +1541,33 @@ async fn start_parachain(
                                     }
                                 }
                             }
+                            async_tree::OutputUpdate::Finalized { .. } => {
+                                // Finalized parahead is same as was already finalized. Don't
+                                // report it again.
+                            }
                             async_tree::OutputUpdate::Block(block) => {
-                                if block.is_new_best {
+                                // We need to access `async_tree` below, so deconstruct `block`.
+                                let is_new_best = block.is_new_best;
+                                let scale_encoded_header = block.async_op_user_data.clone();
+                                let block_index = block.index;
+
+                                let parent_header = async_tree.parent(block_index)
+                                    .map(|idx| async_tree.block_async_user_data(idx).unwrap())
+                                    .unwrap_or_else(|| &finalized_parahead);
+
+                                // Do not report the new block if it is the same as its parent.
+                                if *parent_header == scale_encoded_header {
+                                    continue;
+                                }
+
+                                // TODO: if parent wasn't best block but child is best block, and parent is equal to child, then we don't report the fact that the block is best to the subscribers, causing a state mismatch with potential new subscribers that are grabbed later
+
+                                if is_new_best {
                                     // Elements in `best_subscriptions` are removed one by one
                                     // and inserted back if the channel is still open.
                                     for index in (0..best_subscriptions.len()).rev() {
                                         let mut sender = best_subscriptions.swap_remove(index);
-                                        if sender.send(block.async_op_user_data.clone()).is_ok() {
+                                        if sender.send(scale_encoded_header.clone()).is_ok() {
                                             best_subscriptions.push(sender);
                                         }
                                     }
@@ -1553,12 +1575,7 @@ async fn start_parachain(
 
                                 // Elements in `all_subscriptions` are removed one by one and
                                 // inserted back if the channel is still open.
-                                let is_new_best = block.is_new_best;
-                                let scale_encoded_header = block.async_op_user_data.clone();
-                                let block_index = block.index;
-                                let parent_hash = async_tree.parent(block_index)
-                                    .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap()))
-                                    .unwrap_or_else(|| header::hash_from_scale_encoded_header(&finalized_parahead));
+                                let parent_hash = header::hash_from_scale_encoded_header(&parent_header);
                                 for index in (0..all_subscriptions.len()).rev() {
                                     let mut sender = all_subscriptions.swap_remove(index);
                                     let notif = Notification::Block(BlockNotification {
