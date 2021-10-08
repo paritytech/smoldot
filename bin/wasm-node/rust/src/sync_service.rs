@@ -1466,7 +1466,7 @@ async fn start_parachain(
                 .find(|(_, b, _, _)| **b == block.parent_hash)
                 .map(|b| b.0);
             debug_assert!(
-                parent.is_none()
+                parent.is_some()
                     || block.parent_hash
                         == header::hash_from_scale_encoded_header(
                             &relay_chain_subscribe_all.finalized_block_scale_encoded_header
