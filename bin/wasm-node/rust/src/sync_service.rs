@@ -1457,7 +1457,14 @@ async fn start_parachain(
             let parent = async_tree
                 .input_iter_unordered()
                 .find(|(_, b, _, _)| **b == block.parent_hash)
-                .map(|b| b.0); // TODO: check if finalized
+                .map(|b| b.0);
+            debug_assert!(
+                parent.is_none()
+                    || block.parent_hash
+                        == header::hash_from_scale_encoded_header(
+                            &relay_chain_subscribe_all.finalized_block_scale_encoded_header
+                        )
+            );
             async_tree.input_insert_block(hash, parent, false, block.is_new_best);
         }
 
