@@ -1468,7 +1468,7 @@ impl Background {
         let mut blocks_list = {
             let subscribe_all = self.sync_service.subscribe_all(16).await;
             // TODO: is it correct to return all non-finalized blocks first? have to compare with PolkadotJS
-            stream::iter(subscribe_all.non_finalized_blocks)
+            stream::iter(subscribe_all.non_finalized_blocks_ancestry_order)
                 .chain(subscribe_all.new_blocks.filter_map(|notif| {
                     future::ready(match notif {
                         sync_service::Notification::Block(b) => Some(b),

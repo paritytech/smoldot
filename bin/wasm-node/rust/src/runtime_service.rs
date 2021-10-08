@@ -418,14 +418,14 @@ impl RuntimeService {
 
         let tree = guarded.tree.as_ref().unwrap();
 
-        let non_finalized_blocks: Vec<_> = tree
-            .non_finalized_blocks_headers_unordered()
+        let non_finalized_blocks_ancestry_order: Vec<_> = tree
+            .non_finalized_blocks_headers_ancestry_order()
             .map(|(scale_encoded_header, is_new_best)| {
                 let parent_hash = *header::decode(scale_encoded_header).unwrap().parent_hash; // TODO: correct? if yes, document
                 debug_assert!(
                     parent_hash == *tree.finalized_block_hash()
                         || tree
-                            .non_finalized_blocks_headers_unordered()
+                            .non_finalized_blocks_headers_ancestry_order()
                             .any(|(h, _)| parent_hash == header::hash_from_scale_encoded_header(h))
                 );
                 sync_service::BlockNotification {
@@ -437,7 +437,7 @@ impl RuntimeService {
             .collect();
 
         debug_assert!(matches!(
-            non_finalized_blocks
+            non_finalized_blocks_ancestry_order
                 .iter()
                 .filter(|b| b.is_new_best)
                 .count(),
@@ -447,7 +447,7 @@ impl RuntimeService {
         sync_service::SubscribeAll {
             finalized_block_scale_encoded_header: tree.finalized_block_header().to_vec(),
             new_blocks,
-            non_finalized_blocks,
+            non_finalized_blocks_ancestry_order,
         }
     }
 
@@ -1028,7 +1028,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
             runtime_downloads: stream::FuturesUnordered::new(),
         };
 
-        for block in subscription.non_finalized_blocks {
+        for block in subscription.non_finalized_blocks_ancestry_order {
             let _ = background
                 .runtime_service
                 .guarded

@@ -637,7 +637,10 @@ pub struct SubscribeAll {
     /// List of all known non-finalized blocks at the time of subscription.
     ///
     /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
-    pub non_finalized_blocks: Vec<BlockNotification>,
+    ///
+    /// The blocks are guaranteed to be ordered so that parents are always found before their
+    /// children.
+    pub non_finalized_blocks_ancestry_order: Vec<BlockNotification>,
 
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
@@ -654,8 +657,8 @@ pub enum Notification {
         /// Blake2 hash of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
-        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
-        /// [`Notification::Block`].
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
         ///
         /// It is, however, not guaranteed that this block is a child of the previously-finalized
         /// block. In other words, if multiple blocks are finalized at the same time, only one
@@ -669,8 +672,8 @@ pub enum Notification {
         /// the non-finalized block with the given hash.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
-        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
-        /// [`Notification::Block`].
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
         best_block_hash: [u8; 32],
     },
 
@@ -693,8 +696,8 @@ pub struct BlockNotification {
     ///
     ///
     /// A block with this hash is guaranteed to have earlier been reported in a
-    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
-    /// [`Notification::Block`].
+    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`] or
+    /// in a [`Notification::Block`].
     ///
     /// > **Note**: The header of a block contains the hash of its parent. When it comes to
     /// >           consensus algorithms such as Babe or Aura, the syncing code verifies that this
@@ -965,7 +968,7 @@ async fn start_relay_chain(
                                     let mut subscription = all_notifications.swap_remove(index);
                                     // TODO: the code below is `O(n)` complexity
                                     let header = sync_out
-                                        .non_finalized_blocks()
+                                        .non_finalized_blocks_ancestry_order()
                                         .find(|h| h.hash() == verified_hash)
                                         .unwrap();
                                     let notification = Notification::Block(BlockNotification {
@@ -1248,9 +1251,9 @@ async fn start_relay_chain(
                             all_notifications.push(tx);
                             let _ = send_back.send(SubscribeAll {
                                 finalized_block_scale_encoded_header: sync.finalized_block_header().scale_encoding_vec(),
-                                non_finalized_blocks: {
+                                non_finalized_blocks_ancestry_order: {
                                     let best_hash = sync.best_block_hash();
-                                    sync.non_finalized_blocks().map(|h| {
+                                    sync.non_finalized_blocks_ancestry_order().map(|h| {
                                         let scale_encoding = h.scale_encoding_vec();
                                         BlockNotification {
                                             is_new_best: header::hash_from_scale_encoded_header(&scale_encoding) == best_hash,
@@ -1456,12 +1459,19 @@ async fn start_parachain(
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
         // is fetched, this parahead is reported to our subscriptions.
         let mut async_tree = async_tree::AsyncTree::<ffi::Instant, [u8; 32], Vec<u8>>::new();
-        for block in relay_chain_subscribe_all.non_finalized_blocks {
+        for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
             let parent = async_tree
                 .input_iter_unordered()
                 .find(|(_, b, _, _)| **b == block.parent_hash)
-                .map(|b| b.0); // TODO: check if finalized
+                .map(|b| b.0);
+            debug_assert!(
+                parent.is_none()
+                    || block.parent_hash
+                        == header::hash_from_scale_encoded_header(
+                            &relay_chain_subscribe_all.finalized_block_scale_encoded_header
+                        )
+            );
             async_tree.input_insert_block(hash, parent, false, block.is_new_best);
         }
 
@@ -1693,7 +1703,7 @@ async fn start_parachain(
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                             let _ = send_back.send(SubscribeAll {
                                 finalized_block_scale_encoded_header: finalized_parahead.clone(),
-                                non_finalized_blocks: async_tree.input_iter_unordered().filter_map(|(node_index, _, parahead, is_best)| {
+                                non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|(node_index, _, parahead, is_best)| {
                                     let parahead = parahead?;
                                     let parent_hash = async_tree.parent(node_index)
                                         .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap()))
