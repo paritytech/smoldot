@@ -38,15 +38,12 @@
 // the health of the chain.
 //
 // In addition to this, as long as the health check reports that `isSyncing` is `true`, the
-// health checker also maintains a subscription to new best blocks and to runtime version changes
-// using `chain_subscribeNewHeads` and `state_subscribeRuntimeVersion`.
-// Whenever a new block or runtime version is notified, a health check is performed immediately
-// in order to determine whether `isSyncing` has changed to `false`.
+// health checker also maintains a subscription to new best blocks using `chain_subscribeNewHeads`.
+// Whenever a new block is notified, a health check is performed immediately in order to determine
+// whether `isSyncing` has changed to `false`.
 //
 // Thanks to this subscription, the latency of the report of the switch from `isSyncing: true` to
-// `isSyncing: false` is usually very low. It is, however, not completely robust: if the runtime
-// version isn't modified after the chain has finished syncing, then it will take until the next
-// best block to detect to end of the syncing.
+// `isSyncing: false` is very low.
 //
 export function healthChecker() {
     // `null` if health checker is not started.
@@ -68,10 +65,8 @@ export function healthChecker() {
                 healthCallback,
                 currentHealthCheckId: null,
                 currentHealthTimeout: null,
-                currentBestSubunsubRequestId: null,
-                currentBestSubscriptionId: null,
-                currentRuntimeSubunsubRequestId: null,
-                currentRuntimeSubscriptionId: null,
+                currentSubunsubRequestId: null,
+                currentSubscriptionId: null,
                 isSyncing: false,
                 nextRequestId: 0,
 
@@ -117,10 +112,9 @@ export function healthChecker() {
                         return null;
                     }
 
-                    // Check whether response is a response to the best block subscription or
-                    // unsubscription.
-                    if (parsedResponse.id && this.currentBestSubunsubRequestId == parsedResponse.id) {
-                        this.currentBestSubunsubRequestId = null;
+                    // Check whether response is a response to the subscription or unsubscription.
+                    if (parsedResponse.id && this.currentSubunsubRequestId == parsedResponse.id) {
+                        this.currentSubunsubRequestId = null;
 
                         // Check whether query was successful. It is possible for queries to fail for
                         // various reasons, such as the client being overloaded.
@@ -129,44 +123,18 @@ export function healthChecker() {
                             return null;
                         }
 
-                        if (this.currentBestSubscriptionId)
-                            this.currentBestSubscriptionId = null;
+                        if (this.currentSubscriptionId)
+                            this.currentSubscriptionId = null;
                         else
-                            this.currentBestSubscriptionId = parsedResponse.result;
-
-                        this.update();
-                        return null;
-                    }
-
-                    // Check whether response is a response to the runtime version subscription or
-                    // unsubscription.
-                    if (parsedResponse.id && this.currentRuntimeSubunsubRequestId == parsedResponse.id) {
-                        this.currentRuntimeSubunsubRequestId = null;
-
-                        // Check whether query was successful. It is possible for queries to fail for
-                        // various reasons, such as the client being overloaded.
-                        if (!parsedResponse.result) {
-                            this.update();
-                            return null;
-                        }
-
-                        if (this.currentRuntimeSubscriptionId)
-                            this.currentRuntimeSubscriptionId = null;
-                        else
-                            this.currentRuntimeSubscriptionId = parsedResponse.result;
+                            this.currentSubscriptionId = parsedResponse.result;
 
                         this.update();
                         return null;
                     }
 
                     // Check whether response is a notification to a subscription.
-                    if (parsedResponse.params && (
-                        (this.currentBestSubscriptionId &&
-                            parsedResponse.params.subscription == this.currentBestSubscriptionId)
-                        ||
-                        (this.currentRuntimeSubscriptionId &&
-                            parsedResponse.params.subscription == this.currentRuntimeSubscriptionId)
-                    )) {
+                    if (parsedResponse.params && this.currentSubscriptionId &&
+                        parsedResponse.params.subscription == this.currentSubscriptionId) {
                         // Note that after a successful subscription, a notification containing
                         // the current best block is always returned. Considering that a
                         // subscription is performed in response to a health check, calling
@@ -201,14 +169,10 @@ export function healthChecker() {
                         }, 10000);
                     }
 
-                    if (this.isSyncing && !this.currentBestSubscriptionId && !this.currentBestSubunsubRequestId)
-                        this.startBestSubscription();
-                    if (this.isSyncing && !this.currentRuntimeSubscriptionId && !this.currentRuntimeSubunsubRequestId)
-                        this.startRuntimeSubscription();
-                    if (!this.isSyncing && this.currentBestSubscriptionId && !this.currentBestSubunsubRequestId)
-                        this.endBestSubscription();
-                    if (!this.isSyncing && this.currentRuntimeSubscriptionId && !this.currentRuntimeSubunsubRequestId)
-                        this.endRuntimeSubscription();
+                    if (this.isSyncing && !this.currentSubscriptionId && !this.currentSubunsubRequestId)
+                        this.startSubscription();
+                    if (!this.isSyncing && this.currentSubscriptionId && !this.currentSubunsubRequestId)
+                        this.endSubscription();
                 },
 
                 startHealthCheck: function () {
@@ -228,55 +192,29 @@ export function healthChecker() {
                     }));
                 },
 
-                startBestSubscription: function () {
-                    if (this.currentBestSubunsubRequestId || this.currentBestSubscriptionId)
+                startSubscription: function () {
+                    if (this.currentSubunsubRequestId || this.currentSubscriptionId)
                         throw new Error('Internal error in health checker');
-                    this.currentBestSubunsubRequestId = "health-checker:" + this.nextRequestId;
+                    this.currentSubunsubRequestId = "health-checker:" + this.nextRequestId;
                     this.nextRequestId += 1;
                     sendJsonRpc(JSON.stringify({
                         jsonrpc: "2.0",
-                        id: this.currentBestSubunsubRequestId,
+                        id: this.currentSubunsubRequestId,
                         method: 'chain_subscribeNewHeads',
                         params: [],
                     }));
                 },
 
-                endBestSubscription: function () {
-                    if (this.currentBestSubunsubRequestId || !this.currentBestSubscriptionId)
+                endSubscription: function () {
+                    if (this.currentSubunsubRequestId || !this.currentSubscriptionId)
                         throw new Error('Internal error in health checker');
-                    this.currentBestSubunsubRequestId = "health-checker:" + this.nextRequestId;
+                    this.currentSubunsubRequestId = "health-checker:" + this.nextRequestId;
                     this.nextRequestId += 1;
                     sendJsonRpc(JSON.stringify({
                         jsonrpc: "2.0",
-                        id: this.currentBestSubunsubRequestId,
+                        id: this.currentSubunsubRequestId,
                         method: 'chain_unsubscribeNewHeads',
-                        params: [this.currentBestSubscriptionId],
-                    }));
-                },
-
-                startRuntimeSubscription: function () {
-                    if (this.currentRuntimeSubunsubRequestId || this.currentRuntimeSubscriptionId)
-                        throw new Error('Internal error in health checker');
-                    this.currentRuntimeSubunsubRequestId = "health-checker:" + this.nextRequestId;
-                    this.nextRequestId += 1;
-                    sendJsonRpc(JSON.stringify({
-                        jsonrpc: "2.0",
-                        id: this.currentRuntimeSubunsubRequestId,
-                        method: 'state_subscribeRuntimeVersion',
-                        params: [],
-                    }));
-                },
-
-                endRuntimeSubscription: function () {
-                    if (this.currentRuntimeSubunsubRequestId || !this.currentRuntimeSubscriptionId)
-                        throw new Error('Internal error in health checker');
-                    this.currentRuntimeSubunsubRequestId = "health-checker:" + this.nextRequestId;
-                    this.nextRequestId += 1;
-                    sendJsonRpc(JSON.stringify({
-                        jsonrpc: "2.0",
-                        id: this.currentRuntimeSubunsubRequestId,
-                        method: 'state_unsubscribeRuntimeVersion',
-                        params: [this.currentRuntimeSubscriptionId],
+                        params: [this.currentSubscriptionId],
                     }));
                 },
 
