@@ -725,7 +725,7 @@ where
                 .unwrap()
                 .async_op
             {
-                AsyncOpState::Finished { reported, .. } => {
+                AsyncOpState::Finished { reported, .. } if !*reported => {
                     *reported = true;
                 }
                 _ => continue,
