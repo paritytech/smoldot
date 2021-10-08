@@ -297,7 +297,7 @@ async fn background_task(
             finalized_block_hash: initial_finalized_block_hash,
         });
 
-        for block in subscribe_all.non_finalized_blocks {
+        for block in subscribe_all.non_finalized_blocks_ancestry_order {
             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
             worker.pending_transactions.add_block(
                 hash,
