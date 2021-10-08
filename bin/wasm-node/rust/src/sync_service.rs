@@ -657,8 +657,8 @@ pub enum Notification {
         /// Blake2 hash of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
-        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
-        /// [`Notification::Block`].
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
         ///
         /// It is, however, not guaranteed that this block is a child of the previously-finalized
         /// block. In other words, if multiple blocks are finalized at the same time, only one
@@ -672,8 +672,8 @@ pub enum Notification {
         /// the non-finalized block with the given hash.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
-        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
-        /// [`Notification::Block`].
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
         best_block_hash: [u8; 32],
     },
 
@@ -696,8 +696,8 @@ pub struct BlockNotification {
     ///
     ///
     /// A block with this hash is guaranteed to have earlier been reported in a
-    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks`] or in a
-    /// [`Notification::Block`].
+    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`] or
+    /// in a [`Notification::Block`].
     ///
     /// > **Note**: The header of a block contains the hash of its parent. When it comes to
     /// >           consensus algorithms such as Babe or Aura, the syncing code verifies that this
