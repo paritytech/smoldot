@@ -3,10 +3,10 @@
   "id": "adz_westend",
   "chainType": "Live",
   "bootNodes": [
-    "/ip4/34.91.168.125/tcp/30344/ws/p2p/12D3KooWJBaes599q6rbaEWscc2gUpoz6nccYHkuSrRyeTneVcDa",
-    "/ip4/34.147.84.110/tcp/30344/ws/p2p/12D3KooWQiWo5Nr11Aqa67zBvhR3LQvbcjwdBvSkRwtCHwRhzWGv",
-    "/ip4/34.90.216.184/tcp/30344/ws/p2p/12D3KooWFZ8h6sbRVfQdQn2TCjYXL6ySLRNZb1TcCsURoy6qbx7q",
-    "/ip4/34.90.122.191/tcp/30344/ws/p2p/12D3KooWNQZvD8Vvr4RXTxus5SyVVavPipr5UcnpL1qbSX1A6eUF"
+    "/dns/adz-collator-0.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWJBaes599q6rbaEWscc2gUpoz6nccYHkuSrRyeTneVcDa",
+    "/dns/adz-collator-1.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWQiWo5Nr11Aqa67zBvhR3LQvbcjwdBvSkRwtCHwRhzWGv",
+    "/dns/adz-collator-2.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWFZ8h6sbRVfQdQn2TCjYXL6ySLRNZb1TcCsURoy6qbx7q",
+    "/dns/adz-collator-3.parity-testnet.parity.io/tcp/443/wss/p2p/12D3KooWNQZvD8Vvr4RXTxus5SyVVavPipr5UcnpL1qbSX1A6eUF"
   ],
   "telemetryEndpoints": null,
   "protocolId": null,
