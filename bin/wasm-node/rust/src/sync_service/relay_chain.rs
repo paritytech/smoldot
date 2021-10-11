@@ -693,11 +693,12 @@ pub(super) async fn start_relay_chain(
                 | all::ResponseOutcome::NotFinalizedChain { .. }
                 | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
                 all::ResponseOutcome::WarpSyncFinished => {
-                    let finalized_num = sync.finalized_block_header().number;
+                    let finalized_header = sync.finalized_block_header();
                     log::info!(
                         target: &log_target,
-                        "GrandPa warp sync finished to #{}",
-                        finalized_num
+                        "GrandPa warp sync finished to #{} ({})",
+                        finalized_header.number,
+                        HashDisplay(&finalized_header.hash())
                     );
                     has_new_finalized = true;
                     has_new_best = true;
