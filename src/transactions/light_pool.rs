@@ -793,7 +793,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         }
 
         // Return value of the function.
-        let return_value = Vec::with_capacity(num_blocks_to_remove);
+        let mut return_value = Vec::with_capacity(num_blocks_to_remove);
 
         // Do the actual pruning.
         for pruned in self.blocks_tree.prune_ancestors(upmost_to_remove) {
@@ -805,7 +805,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             debug_assert_eq!(_removed, Some(pruned.index));
 
             // List of transactions that were included in this block.
-            let included_transactions = self
+            let included_transactions_ids = self
                 .transactions_by_inclusion
                 .range(
                     (pruned.user_data.hash, TransactionId(usize::min_value()))
@@ -813,25 +813,84 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 )
                 .map(|(_, tx_id)| *tx_id)
                 .collect::<Vec<_>>();
+            let mut included_transactions = Vec::with_capacity(included_transactions_ids.len());
 
-            for tx_id in included_transactions {
+            for tx_id in &included_transactions_ids {
+                // Completely remove this transaction from the pool, similar to what
+                // `remove_transaction` does.
+                let tx = self.transactions.remove(tx_id.0);
+                included_transactions.push((*tx_id, tx.user_data));
+
+                let blocks_included = self
+                    .included_transactions
+                    .range((*tx_id, [0; 32])..=(*tx_id, [0xff; 32]))
+                    .map(|(_, block)| *block)
+                    .collect::<Vec<_>>();
+
+                let blocks_validated = self
+                    .transaction_validations
+                    .range((*tx_id, [0; 32])..=(*tx_id, [0xff; 32]))
+                    .map(|((_, block), _)| *block)
+                    .collect::<Vec<_>>();
+
+                if blocks_validated.is_empty() {
+                    let _was_removed = self.not_validated.remove(tx_id);
+                    debug_assert!(_was_removed);
+                }
+
+                for block_hash in blocks_included {
+                    let _removed = self.included_transactions.remove(&(*tx_id, block_hash));
+                    debug_assert!(_removed);
+                    let _removed = self.transactions_by_inclusion.remove(&(block_hash, *tx_id));
+                    debug_assert!(_removed);
+                }
+
+                for block_hash in blocks_validated {
+                    let _removed = self.transaction_validations.remove(&(*tx_id, block_hash));
+                    debug_assert!(_removed.is_some());
+                    let _removed = self
+                        .transactions_by_validation
+                        .remove(&(block_hash, *tx_id));
+                    debug_assert!(_removed);
+                }
+
+                let _removed = self
+                    .by_hash
+                    .remove(&(blake2_hash(&tx.double_scale_encoded), *tx_id));
+                debug_assert!(_removed);
+            }
+
+            // Purge the state from any validation information about that block.
+            let validated_txs = self
+                .transactions_by_validation
+                .range(
+                    (pruned.user_data.hash, TransactionId(usize::min_value()))
+                        ..=(pruned.user_data.hash, TransactionId(usize::max_value())),
+                )
+                .map(|(_, tx)| *tx)
+                .collect::<Vec<_>>();
+
+            for tx_id in validated_txs {
                 let _was_removed = self
-                    .transactions_by_inclusion
+                    .transactions_by_validation
                     .remove(&(pruned.user_data.hash, tx_id));
                 debug_assert!(_was_removed);
                 let _was_removed = self
-                    .included_transactions
+                    .transaction_validations
                     .remove(&(tx_id, pruned.user_data.hash));
-                debug_assert!(_was_removed);
-
-                // TODO: finish here
+                debug_assert!(_was_removed.is_some());
             }
 
-            // TODO: handle transactions validated against that block /!\ /!\
+            return_value.push(PruneBodyFinalized {
+                block_hash: pruned.user_data.hash,
+                included_transactions,
+                user_data: pruned.user_data.user_data,
+            });
         }
 
+        // We returned earlier in the function if `finalized_node_index` is `None`. Consequently,
+        // `best_block_index` can't be `None` either.
         if self.best_block_index.unwrap() == upmost_to_remove {
-            debug_assert!(self.blocks_tree.is_empty());
             self.best_block_index = None;
         }
 
