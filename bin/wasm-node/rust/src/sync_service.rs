@@ -1499,12 +1499,12 @@ async fn start_parachain(
             if finalized_parahead_up_to_date {
                 loop {
                     match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
-                        async_tree::NextNecessaryAsyncOp::NotReady { when } => {
-                            if let Some(when) = when {
-                                wakeup_deadline = future::Either::Left(ffi::Delay::new_at(when));
-                            } else {
-                                wakeup_deadline = future::Either::Right(future::pending())
-                            }
+                        async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
+                            wakeup_deadline = future::Either::Left(ffi::Delay::new_at(when));
+                            break;
+                        }
+                        async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
+                            wakeup_deadline = future::Either::Right(future::pending());
                             break;
                         }
                         async_tree::NextNecessaryAsyncOp::Ready(op) => {
