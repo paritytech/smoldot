@@ -637,7 +637,7 @@ impl<'a> RuntimeLock<'a> {
     }
 
     pub async fn start<'b>(
-        mut self,
+        self,
         method: &'b str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
     ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
@@ -647,9 +647,14 @@ impl<'a> RuntimeLock<'a> {
             .unwrap()
             .number;
         let block_hash = *self.block_hash();
+        let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
+
+        // Unlock `guarded` before doing anything that takes a long time, such as the network
+        // request below.
+        drop(self.guarded);
 
         // Perform the call proof request.
-        // Note that `guarded` is not locked. // TODO: wait, no, guarded is locked
+        // Note that `guarded` is not locked.
         // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
         // TODO: also, an empty proof will be reported as an error right now, which is weird
         let call_proof = self
@@ -667,9 +672,12 @@ impl<'a> RuntimeLock<'a> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
-        let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
+        // Lock `guarded` again now that the call is finished.
+        let mut guarded = self.service.guarded.lock().await;
 
-        let tree = self.guarded.tree.as_mut().unwrap();
+        // TODO: /!\ it is not guaranteed that the block is still in the tree after the storage proof has ended
+
+        let tree = guarded.tree.as_mut().unwrap();
         let runtime = match tree
             .block_runtime_mut(&self.block_hash)
             .unwrap()
@@ -683,7 +691,7 @@ impl<'a> RuntimeLock<'a> {
         };
 
         let lock = RuntimeCallLock {
-            guarded: self.guarded,
+            guarded,
             block_hash: self.block_hash,
             runtime_block_header,
             call_proof,
