@@ -1491,13 +1491,20 @@ async fn start_parachain(
         // List of in-progress parahead fetching operations.
         let mut in_progress_paraheads = stream::FuturesUnordered::new();
 
+        // Future that is ready when we need to wake up the `select!` below.
+        let mut wakeup_deadline = future::Either::Right(future::pending());
+
         loop {
             // Start fetching paraheads of new blocks whose parahead needs to be fetched.
             if finalized_parahead_up_to_date {
                 loop {
                     match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
-                        async_tree::NextNecessaryAsyncOp::NotReady { when } => {
-                            // TODO: register when
+                        async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
+                            wakeup_deadline = future::Either::Left(ffi::Delay::new_at(when));
+                            break;
+                        }
+                        async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
+                            wakeup_deadline = future::Either::Right(future::pending());
                             break;
                         }
                         async_tree::NextNecessaryAsyncOp::Ready(op) => {
@@ -1523,6 +1530,10 @@ async fn start_parachain(
             }
 
             futures::select! {
+                () = wakeup_deadline => {
+                    // Do nothing. This is simply to wake up and loop again.
+                },
+
                 relay_chain_notif = relay_chain_subscribe_all.new_blocks.next() => {
                     let relay_chain_notif = match relay_chain_notif {
                         Some(n) => n,
