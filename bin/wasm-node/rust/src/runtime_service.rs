@@ -360,12 +360,11 @@ impl RuntimeService {
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
     /// that produces one item every time the finalized block is changed.
     ///
-    /// This function is similar to [`sync_service::SyncService::subscribe_finalized`], except
-    /// that it is called less often. Additionally, it is guaranteed that when a notification is
-    /// sent out, calling [`RuntimeService::recent_finalized_block_runtime_lock`] will operate on
-    /// this block or more recent. In other words, if you call
-    /// [`RuntimeService::recent_finalized_block_runtime_lock`] and the stream of notifications is
-    /// empty, you are guaranteed that the call has been performed on the best block.
+    /// It is guaranteed that when a notification is sent out, calling
+    /// [`RuntimeService::recent_finalized_block_runtime_lock`] will operate on this block or more
+    /// recent. In other words, if you call [`RuntimeService::recent_finalized_block_runtime_lock`]
+    /// and the stream of notifications is empty, you are guaranteed that the call has been
+    /// performed on the finalized block.
     pub async fn subscribe_finalized(
         self: &Arc<RuntimeService>,
     ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
@@ -386,12 +385,11 @@ impl RuntimeService {
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
     /// produces one item every time the best block is changed.
     ///
-    /// This function is similar to [`sync_service::SyncService::subscribe_best`], except that
-    /// it is called less often. Additionally, it is guaranteed that when a notification is sent
-    /// out, calling [`RuntimeService::recent_best_block_runtime_lock`] will operate on this
-    /// block or more recent. In other words, if you call
-    /// [`RuntimeService::recent_best_block_runtime_lock`] and the stream of notifications is
-    /// empty, you are guaranteed that the call has been performed on the best block.
+    /// It is guaranteed that when a notification is sent out, calling
+    /// [`RuntimeService::recent_best_block_runtime_lock`] will operate on this block or more
+    /// recent. In other words, if you call [`RuntimeService::recent_best_block_runtime_lock`] and
+    /// the stream of notifications is empty, you are guaranteed that the call has been performed
+    /// on the best block.
     pub async fn subscribe_best(
         self: &Arc<RuntimeService>,
     ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {

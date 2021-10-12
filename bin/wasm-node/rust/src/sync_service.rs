@@ -24,8 +24,7 @@
 //! after which it will spawn background tasks and use the networking service to stay
 //! synchronized.
 //!
-//! Use [`SyncService::subscribe_best`] and [`SyncService::subscribe_finalized`] to get notified
-//! about updates of the best and finalized blocks.
+//! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
 use crate::{network_service, runtime_service};
 
@@ -148,9 +147,9 @@ impl SyncService {
 
     /// Subscribes to the state of the chain: the current state and the new blocks.
     ///
-    /// Contrary to [`SyncService::subscribe_best`], *all* new blocks are reported. Only up to
-    /// `buffer_size` block notifications are buffered in the channel. If the channel is full
-    /// when a new notification is attempted to be pushed, the channel gets closed.
+    /// All new blocks are reported. Only up to `buffer_size` block notifications are buffered
+    /// in the channel. If the channel is full when a new notification is attempted to be pushed,
+    /// the channel gets closed.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
