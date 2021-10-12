@@ -1223,9 +1223,9 @@ impl Background {
                         runtime,
                     },
                 );
-
-            self.advance_and_notify_subscribers(&mut guarded);
         }
+
+        self.advance_and_notify_subscribers(&mut guarded);
     }
 
     fn advance_and_notify_subscribers(&self, guarded: &mut Guarded) {
