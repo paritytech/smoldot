@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
-use crate::{ffi, lossy_channel, network_service};
+use crate::{ffi, network_service};
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
@@ -81,8 +81,6 @@ pub(super) async fn start_relay_chain(
         let mut pending_grandpa_requests = stream::FuturesUnordered::new();
         // List of storage requests currently in progress.
         let mut pending_storage_requests = stream::FuturesUnordered::new();
-        let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
-        let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
         let mut all_notifications = Vec::<mpsc::Sender<Notification>>::new();
 
         let mut has_new_best = false;
@@ -345,14 +343,6 @@ pub(super) async fn start_relay_chain(
             if has_new_best {
                 has_new_best = false;
 
-                let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                for index in (0..best_notifications.len()).rev() {
-                    let mut notif = best_notifications.swap_remove(index);
-                    if notif.send(scale_encoded_header.clone()).is_ok() {
-                        best_notifications.push(notif);
-                    }
-                }
-
                 let fut = network_service.set_local_best_block(
                     network_chain_index,
                     sync.best_block_hash(),
@@ -400,14 +390,6 @@ pub(super) async fn start_relay_chain(
                             },
                         )
                         .await;
-                }
-
-                let scale_encoded_header = sync.finalized_block_header().scale_encoding_vec();
-                for index in (0..finalized_notifications.len()).rev() {
-                    let mut notif = finalized_notifications.swap_remove(index);
-                    if notif.send(scale_encoded_header.clone()).is_ok() {
-                        finalized_notifications.push(notif);
-                    }
                 }
 
                 // Since this task is verifying blocks, a heavy CPU-only operation, it is very
@@ -554,18 +536,6 @@ pub(super) async fn start_relay_chain(
                     match message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
                             let _ = send_back.send(sync.is_near_head_of_chain_heuristic());
-                        }
-                        ToBackground::SubscribeFinalized { send_back } => {
-                            let (tx, rx) = lossy_channel::channel();
-                            finalized_notifications.push(tx);
-                            let current = sync.finalized_block_header().scale_encoding_vec();
-                            let _ = send_back.send((current, rx));
-                        }
-                        ToBackground::SubscribeBest { send_back } => {
-                            let (tx, rx) = lossy_channel::channel();
-                            best_notifications.push(tx);
-                            let current = sync.best_block_header().scale_encoding_vec();
-                            let _ = send_back.send((current, rx));
                         }
                         ToBackground::SubscribeAll { send_back, buffer_size } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));

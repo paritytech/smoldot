@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
-use crate::{ffi, lossy_channel, network_service, runtime_service};
+use crate::{ffi, network_service, runtime_service};
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
@@ -47,11 +47,6 @@ pub(super) async fn start_parachain(
     // Whether `finalized_parahead` corresponds to the parahead of the finalized relay chain
     // block. `false` if it is older.
     let mut finalized_parahead_up_to_date;
-
-    // List of senders that get notified when the best block is modified.
-    let mut best_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
-    // List of senders that get notified when the finalized block is modified.
-    let mut finalized_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
 
     // State machine that tracks the list of parachain network sources and their known blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
@@ -89,15 +84,6 @@ pub(super) async fn start_parachain(
         )
         .await
         {
-            // Elements in `finalized_subscriptions` are removed one by one
-            // and inserted back if the channel is still open.
-            for index in (0..finalized_subscriptions.len()).rev() {
-                let mut sender = finalized_subscriptions.swap_remove(index);
-                if sender.send(finalized.clone()).is_ok() {
-                    finalized_subscriptions.push(sender);
-                }
-            }
-
             finalized_parahead = finalized;
             finalized_parahead_up_to_date = true;
         } else {
@@ -232,15 +218,6 @@ pub(super) async fn start_parachain(
                                     HashDisplay(&hash)
                                 );
 
-                                // Elements in `finalized_subscriptions` are removed one by one
-                                // and inserted back if the channel is still open.
-                                for index in (0..finalized_subscriptions.len()).rev() {
-                                    let mut sender = finalized_subscriptions.swap_remove(index);
-                                    if sender.send(finalized_parahead.clone()).is_ok() {
-                                        finalized_subscriptions.push(sender);
-                                    }
-                                }
-
                                 // Elements in `all_subscriptions` are removed one by one and
                                 // inserted back if the channel is still open.
                                 let best_block_hash = async_tree.best_block_index()
@@ -283,17 +260,6 @@ pub(super) async fn start_parachain(
                                     "Reporting new parablock 0x{}",
                                     HashDisplay(&header::hash_from_scale_encoded_header(&scale_encoded_header))
                                 );
-
-                                if is_new_best {
-                                    // Elements in `best_subscriptions` are removed one by one
-                                    // and inserted back if the channel is still open.
-                                    for index in (0..best_subscriptions.len()).rev() {
-                                        let mut sender = best_subscriptions.swap_remove(index);
-                                        if sender.send(scale_encoded_header.clone()).is_ok() {
-                                            best_subscriptions.push(sender);
-                                        }
-                                    }
-                                }
 
                                 // Elements in `all_subscriptions` are removed one by one and
                                 // inserted back if the channel is still open.
@@ -363,17 +329,6 @@ pub(super) async fn start_parachain(
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
                             let _ = send_back.send(is_near_head_of_chain && finalized_parahead_up_to_date);
                         },
-                        ToBackground::SubscribeFinalized { send_back } => {
-                            let (tx, rx) = lossy_channel::channel();
-                            finalized_subscriptions.push(tx);
-                            let _ = send_back.send((finalized_parahead.clone(), rx));
-                        }
-                        ToBackground::SubscribeBest { send_back } => {
-                            let (tx, rx) = lossy_channel::channel();
-                            best_subscriptions.push(tx);
-                            let best_parahead = async_tree.best_block_index().map(|(_, h)| h.clone()).unwrap_or_else(|| finalized_parahead.clone());
-                            let _ = send_back.send((best_parahead, rx));
-                        }
                         ToBackground::SubscribeAll { send_back, buffer_size } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                             let _ = send_back.send(SubscribeAll {
