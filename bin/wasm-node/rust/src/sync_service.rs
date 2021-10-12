@@ -27,7 +27,7 @@
 //! Use [`SyncService::subscribe_best`] and [`SyncService::subscribe_finalized`] to get notified
 //! about updates of the best and finalized blocks.
 
-use crate::{lossy_channel, network_service, runtime_service};
+use crate::{network_service, runtime_service};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -144,49 +144,6 @@ impl SyncService {
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
         }
-    }
-
-    /// Returns the SCALE-encoded header of the current finalized block, alongside with a stream
-    /// producing updates of the finalized block.
-    ///
-    /// Not all updates are necessarily reported. In particular, updates that weren't pulled from
-    /// the `Stream` yet might get overwritten by newest updates.
-    ///
-    /// If you have subscribed to new blocks, the finalized blocks reported in this channel are
-    /// guaranteed to have earlier been reported as new blocks.
-    ///
-    /// If you have subscribed to best blocks, the finalized blocks reported in this channel are
-    /// guaranteed to be ancestors of the latest reported best block.
-    // TODO: is this last paragraph true for parachains?
-    pub async fn subscribe_finalized(&self) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
-        let (send_back, rx) = oneshot::channel();
-
-        self.to_background
-            .lock()
-            .await
-            .send(ToBackground::SubscribeFinalized { send_back })
-            .await
-            .unwrap();
-
-        rx.await.unwrap()
-    }
-
-    /// Returns the SCALE-encoded header of the current best block, alongside with a stream
-    /// producing updates of the best block.
-    ///
-    /// Not all updates are necessarily reported. In particular, updates that weren't pulled from
-    /// the `Stream` yet might get overwritten by newest updates.
-    pub async fn subscribe_best(&self) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
-        let (send_back, rx) = oneshot::channel();
-
-        self.to_background
-            .lock()
-            .await
-            .send(ToBackground::SubscribeBest { send_back })
-            .await
-            .unwrap();
-
-        rx.await.unwrap()
     }
 
     /// Subscribes to the state of the chain: the current state and the new blocks.
@@ -708,14 +665,6 @@ pub struct BlockNotification {
 enum ToBackground {
     /// See [`SyncService::is_near_head_of_chain_heuristic`].
     IsNearHeadOfChainHeuristic { send_back: oneshot::Sender<bool> },
-    /// See [`SyncService::subscribe_finalized`].
-    SubscribeFinalized {
-        send_back: oneshot::Sender<(Vec<u8>, lossy_channel::Receiver<Vec<u8>>)>,
-    },
-    /// See [`SyncService::subscribe_best`].
-    SubscribeBest {
-        send_back: oneshot::Sender<(Vec<u8>, lossy_channel::Receiver<Vec<u8>>)>,
-    },
     /// See [`SyncService::subscribe_all`].
     SubscribeAll {
         send_back: oneshot::Sender<SubscribeAll>,
