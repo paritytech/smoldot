@@ -1104,7 +1104,7 @@ impl Background {
                     self.runtime_service
                         .best_block_runtime()
                         .await
-                        .map_err(runtime_service::RuntimeVersionOfBlockError::InvalidRuntime)
+                        .map_err(runtime_service::RuntimeCallError::InvalidRuntime)
                 };
 
                 let response = match runtime_spec {

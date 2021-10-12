@@ -2050,7 +2050,7 @@ pub enum BlocksRequestError {
 }
 
 /// Error returned by [`ChainNetwork::storage_proof_request`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageProofRequestError {
     Request(peers::RequestError),
     Decode(protocol::DecodeStorageProofResponseError),
