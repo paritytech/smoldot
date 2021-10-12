@@ -545,7 +545,7 @@ impl SyncService {
 }
 
 /// Error that can happen when calling [`SyncService::storage_query`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StorageQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
@@ -583,7 +583,7 @@ impl fmt::Display for StorageQueryError {
 }
 
 /// See [`StorageQueryError`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
     #[display(fmt = "{}", _0)]

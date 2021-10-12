@@ -164,7 +164,7 @@ pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Er
 }
 
 /// Potential error when decoding a header.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// Header is not long enough.
     TooShort,

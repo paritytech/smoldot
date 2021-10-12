@@ -230,7 +230,7 @@ impl RuntimeService {
     pub async fn runtime_version_of_block(
         self: &Arc<RuntimeService>,
         block_hash: &[u8; 32],
-    ) -> Result<executor::CoreVersion, RuntimeVersionOfBlockError> {
+    ) -> Result<executor::CoreVersion, RuntimeCallError> {
         // If the requested block is the best known block, optimize by
         // immediately returning the cached spec.
         {
@@ -244,12 +244,37 @@ impl RuntimeService {
                     .runtime
                     .as_ref()
                     .map(|r| r.runtime_spec.clone())
-                    .map_err(|err| RuntimeVersionOfBlockError::InvalidRuntime(err.clone()));
+                    .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()));
             }
         }
 
+        let (_, vm) = self.network_block_info(block_hash).await?;
+
+        let (runtime_spec, _) = match executor::core_version(vm) {
+            (Ok(spec), vm) => (spec, vm),
+            (Err(error), _) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Failed to call Core_version on runtime: {}",
+                    error
+                );
+                return Err(RuntimeCallError::InvalidRuntime(RuntimeError::CoreVersion(
+                    error,
+                )));
+            }
+        };
+
+        Ok(runtime_spec)
+    }
+
+    /// Downloads from the network the SCALE-encoded header and the runtime of the block with
+    /// the given hash.
+    async fn network_block_info(
+        self: &Arc<RuntimeService>,
+        block_hash: &[u8; 32],
+    ) -> Result<(Vec<u8>, executor::host::HostVmPrototype), RuntimeCallError> {
         // Ask the network for the header of this block, as we need to know the state root.
-        let state_root = {
+        let header = {
             let result = self
                 .sync_service
                 .clone()
@@ -265,43 +290,41 @@ impl RuntimeService {
 
             // Note that the `block_query` method guarantees that the header is present
             // and valid.
-            let header = if let Ok(block) = result {
+            if let Ok(block) = result {
                 block.header.unwrap()
             } else {
-                return Err(RuntimeVersionOfBlockError::NetworkBlockRequest); // TODO: precise error
-            };
-
-            *header::decode(&header)
-                .map_err(RuntimeVersionOfBlockError::InvalidBlockHeader)?
-                .state_root
+                return Err(RuntimeCallError::NetworkBlockRequest); // TODO: precise error
+            }
         };
 
-        // Download the runtime code of this block.
-        let code_query_result = self
-            .sync_service
-            .clone()
-            .storage_query(
-                block_hash,
-                &state_root,
-                iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-            )
-            .await;
+        let state_root = *header::decode(&header)
+            .map_err(RuntimeCallError::InvalidBlockHeader)?
+            .state_root;
 
+        // Download the runtime code of this block.
         let (code, heap_pages) = {
-            let mut results =
-                code_query_result.map_err(RuntimeVersionOfBlockError::StorageQuery)?;
-            let heap_pages = results.pop().unwrap();
-            let code = results.pop().unwrap();
+            let mut code_query_result = self
+                .sync_service
+                .clone()
+                .storage_query(
+                    block_hash,
+                    &state_root,
+                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                )
+                .await
+                .map_err(RuntimeCallError::StorageQuery)?;
+            let heap_pages = code_query_result.pop().unwrap();
+            let code = code_query_result.pop().unwrap();
             (code, heap_pages)
         };
 
         let vm = match executor::host::HostVmPrototype::new(
             code.as_ref()
                 .ok_or(RuntimeError::CodeNotFound)
-                .map_err(RuntimeVersionOfBlockError::InvalidRuntime)?,
+                .map_err(RuntimeCallError::InvalidRuntime)?,
             executor::storage_heap_pages_to_value(heap_pages.as_deref())
                 .map_err(RuntimeError::InvalidHeapPages)
-                .map_err(RuntimeVersionOfBlockError::InvalidRuntime)?,
+                .map_err(RuntimeCallError::InvalidRuntime)?,
             executor::vm::ExecHint::CompileAheadOfTime,
         ) {
             Ok(vm) => vm,
@@ -311,27 +334,11 @@ impl RuntimeService {
                     "Failed to compile best block runtime: {}",
                     error
                 );
-                return Err(RuntimeVersionOfBlockError::InvalidRuntime(
-                    RuntimeError::Build(error),
-                ));
+                return Err(RuntimeCallError::InvalidRuntime(RuntimeError::Build(error)));
             }
         };
 
-        let (runtime_spec, _) = match executor::core_version(vm) {
-            (Ok(spec), vm) => (spec, vm),
-            (Err(error), _) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Failed to call Core_version on runtime: {}",
-                    error
-                );
-                return Err(RuntimeVersionOfBlockError::InvalidRuntime(
-                    RuntimeError::CoreVersion(error),
-                ));
-            }
-        };
-
-        Ok(runtime_spec)
+        Ok((header, vm))
     }
 
     /// Returns the runtime version of the current best block.
@@ -459,7 +466,7 @@ impl RuntimeService {
         let block_hash = *guarded.tree.as_ref().unwrap().finalized_block_hash();
         RuntimeLock {
             service: self,
-            guarded,
+            inner: RuntimeLockInner::InTree(guarded),
             block_hash,
         }
     }
@@ -472,13 +479,14 @@ impl RuntimeService {
         let block_hash = *guarded.tree.as_ref().unwrap().best_block_hash();
         RuntimeLock {
             service: self,
-            guarded,
+            inner: RuntimeLockInner::InTree(guarded),
             block_hash,
         }
     }
 
-    // TODO: should be callable with a slightly older finalized block
+    // TODO: should have a LRU cache of slightly older finalized blocks
     // TODO: doc, especially about which blocks are available
+    // TODO: return error instead
     pub async fn runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
         block_hash: &[u8; 32],
@@ -489,14 +497,23 @@ impl RuntimeService {
             .as_ref()
             .unwrap()
             .block_runtime(block_hash)
-            .is_none()
+            .is_some()
         {
-            return None;
+            return Some(RuntimeLock {
+                service: self,
+                inner: RuntimeLockInner::InTree(guarded),
+                block_hash: *block_hash,
+            });
         }
 
+        let (scale_encoded_header, virtual_machine) =
+            self.network_block_info(block_hash).await.ok()?;
         Some(RuntimeLock {
             service: self,
-            guarded,
+            inner: RuntimeLockInner::OutOfTree {
+                scale_encoded_header,
+                virtual_machine,
+            },
             block_hash: *block_hash,
         })
     }
@@ -540,16 +557,17 @@ impl RuntimeService {
         let (metadata_result, virtual_machine) = loop {
             match query {
                 metadata::Query::Finished(Ok(metadata), virtual_machine) => {
-                    runtime_call_lock
-                        .guarded
-                        .tree
-                        .as_mut()
-                        .unwrap()
-                        .best_block_runtime_mut()
-                        .runtime
-                        .as_mut()
-                        .unwrap()
-                        .metadata = Some(metadata.clone());
+                    if let Some(guarded) = &mut runtime_call_lock.guarded {
+                        guarded
+                            .tree
+                            .as_mut()
+                            .unwrap()
+                            .best_block_runtime_mut()
+                            .runtime
+                            .as_mut()
+                            .unwrap()
+                            .metadata = Some(metadata.clone());
+                    }
                     break (Ok(metadata), virtual_machine);
                 }
                 metadata::Query::StorageGet(storage_get) => {
@@ -601,9 +619,19 @@ impl RuntimeService {
 #[must_use]
 pub struct RuntimeLock<'a> {
     service: &'a Arc<RuntimeService>,
-    guarded: MutexGuard<'a, Guarded>,
+    inner: RuntimeLockInner<'a>,
     /// Hash of the block to make the call against.
     block_hash: [u8; 32],
+}
+
+enum RuntimeLockInner<'a> {
+    /// Block is found in [`Guarded::tree`].
+    InTree(MutexGuard<'a, Guarded>),
+    /// Block information directly inlined in this enum.
+    OutOfTree {
+        scale_encoded_header: Vec<u8>,
+        virtual_machine: executor::host::HostVmPrototype,
+    },
 }
 
 impl<'a> RuntimeLock<'a> {
@@ -611,12 +639,18 @@ impl<'a> RuntimeLock<'a> {
     ///
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
-        self.guarded
-            .tree
-            .as_ref()
-            .unwrap()
-            .block_header(&self.block_hash)
-            .unwrap()
+        match &self.inner {
+            RuntimeLockInner::InTree(guarded) => guarded
+                .tree
+                .as_ref()
+                .unwrap()
+                .block_header(&self.block_hash)
+                .unwrap(),
+            RuntimeLockInner::OutOfTree {
+                scale_encoded_header,
+                ..
+            } => scale_encoded_header,
+        }
     }
 
     /// Returns the hash of the block the call is being made against.
@@ -625,15 +659,22 @@ impl<'a> RuntimeLock<'a> {
     }
 
     pub fn runtime(&self) -> &executor::host::HostVmPrototype {
-        let tree = self.guarded.tree.as_ref().unwrap();
-        tree.block_runtime(&self.block_hash)
-            .unwrap()
-            .runtime
-            .as_ref()
-            .unwrap()
-            .virtual_machine
-            .as_ref()
-            .unwrap()
+        match &self.inner {
+            RuntimeLockInner::InTree(guarded) => {
+                let tree = guarded.tree.as_ref().unwrap();
+                tree.block_runtime(&self.block_hash)
+                    .unwrap()
+                    .runtime
+                    .as_ref()
+                    .unwrap()
+                    .virtual_machine
+                    .as_ref()
+                    .unwrap()
+            }
+            RuntimeLockInner::OutOfTree {
+                virtual_machine, ..
+            } => virtual_machine,
+        }
     }
 
     pub async fn start<'b>(
@@ -648,10 +689,17 @@ impl<'a> RuntimeLock<'a> {
             .number;
         let block_hash = *self.block_hash();
         let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
-
-        // Unlock `guarded` before doing anything that takes a long time, such as the network
-        // request below.
-        drop(self.guarded);
+        let virtual_machine = match self.inner {
+            RuntimeLockInner::InTree(lock) => {
+                // Unlock `guarded` before doing anything that takes a long time, such as the
+                // network request below.
+                drop(lock);
+                None
+            }
+            RuntimeLockInner::OutOfTree {
+                virtual_machine, ..
+            } => Some(virtual_machine),
+        };
 
         // Perform the call proof request.
         // Note that `guarded` is not locked.
@@ -672,21 +720,35 @@ impl<'a> RuntimeLock<'a> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
-        // Lock `guarded` again now that the call is finished.
-        let mut guarded = self.service.guarded.lock().await;
+        let (guarded, virtual_machine) = if let Some(virtual_machine) = virtual_machine {
+            (None, virtual_machine)
+        } else {
+            // Lock `guarded` again now that the call is finished.
+            let mut guarded = self.service.guarded.lock().await;
 
-        // TODO: /!\ it is not guaranteed that the block is still in the tree after the storage proof has ended
+            // It is not guaranteed that the block is still in the tree after the storage proof
+            // has ended.
+            match guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .block_runtime_mut(&self.block_hash)
+            {
+                Some(block) => {
+                    let virtual_machine = match block.runtime.as_mut() {
+                        Ok(r) => r.virtual_machine.take().unwrap(),
+                        Err(err) => {
+                            return Err(RuntimeCallError::InvalidRuntime(err.clone()));
+                        }
+                    };
 
-        let tree = guarded.tree.as_mut().unwrap();
-        let runtime = match tree
-            .block_runtime_mut(&self.block_hash)
-            .unwrap()
-            .runtime
-            .as_mut()
-        {
-            Ok(r) => r.virtual_machine.take().unwrap(),
-            Err(err) => {
-                return Err(RuntimeCallError::InvalidRuntime(err.clone()));
+                    (Some(guarded), virtual_machine)
+                }
+                None => {
+                    let (_, virtual_machine) =
+                        self.service.network_block_info(&self.block_hash).await?;
+                    (None, virtual_machine)
+                }
             }
         };
 
@@ -697,14 +759,15 @@ impl<'a> RuntimeLock<'a> {
             call_proof,
         };
 
-        Ok((lock, runtime))
+        Ok((lock, virtual_machine))
     }
 }
 
 /// See [`RuntimeService::recent_best_block_runtime_lock`].
 #[must_use]
 pub struct RuntimeCallLock<'a> {
-    guarded: MutexGuard<'a, Guarded>,
+    /// If `Some`, the virtual machine must be put back in the tree.
+    guarded: Option<MutexGuard<'a, Guarded>>,
     runtime_block_header: Vec<u8>,
     block_hash: [u8; 32],
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
@@ -807,36 +870,39 @@ impl<'a> RuntimeCallLock<'a> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        self.guarded
-            .tree
-            .as_mut()
-            .unwrap()
-            .block_runtime_mut(&self.block_hash)
-            .unwrap()
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine = Some(vm);
+        if let Some(guarded) = &mut self.guarded {
+            guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .block_runtime_mut(&self.block_hash)
+                .unwrap()
+                .runtime
+                .as_mut()
+                .unwrap()
+                .virtual_machine = Some(vm);
+        }
     }
 }
 
 impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        let vm = &mut self
-            .guarded
-            .tree
-            .as_mut()
-            .unwrap()
-            .block_runtime_mut(&self.block_hash)
-            .unwrap()
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine;
+        if let Some(guarded) = &mut self.guarded {
+            let vm = &mut guarded
+                .tree
+                .as_mut()
+                .unwrap()
+                .block_runtime_mut(&self.block_hash)
+                .unwrap()
+                .runtime
+                .as_mut()
+                .unwrap()
+                .virtual_machine;
 
-        if vm.is_none() {
-            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
-            panic!()
+            if vm.is_none() {
+                // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+                panic!()
+            }
         }
     }
 }
@@ -854,6 +920,14 @@ pub enum RuntimeCallError {
     /// Error while retrieving the call proof from the network.
     #[display(fmt = "Error when retrieving the call proof: {}", _0)]
     CallProof(sync_service::CallProofQueryError),
+    /// Error while performing the block request on the network.
+    NetworkBlockRequest, // TODO: precise error
+    /// Failed to decode the header of the block.
+    #[display(fmt = "Failed to decode header of the block: {}", _0)]
+    InvalidBlockHeader(header::Error),
+    /// Error while querying the storage of the block.
+    #[display(fmt = "Error while querying block storage: {}", _0)]
+    StorageQuery(sync_service::StorageQueryError),
 }
 
 impl RuntimeCallError {
@@ -866,6 +940,9 @@ impl RuntimeCallError {
             RuntimeCallError::StorageRetrieval(proof_verify::Error::TrieRootNotFound) => true,
             RuntimeCallError::StorageRetrieval(_) => false,
             RuntimeCallError::CallProof(err) => err.is_network_problem(),
+            RuntimeCallError::InvalidBlockHeader(_) => false,
+            RuntimeCallError::NetworkBlockRequest => true,
+            RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
         }
     }
 }
@@ -882,22 +959,6 @@ pub enum MetadataError {
     /// Error in the metadata-specific runtime API.
     #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
     MetadataQuery(metadata::Error),
-}
-
-/// Error that can happen when calling [`RuntimeService::runtime_version_of_block`].
-#[derive(Debug, derive_more::Display)]
-pub enum RuntimeVersionOfBlockError {
-    /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
-    InvalidRuntime(RuntimeError),
-    /// Error while performing the block request on the network.
-    NetworkBlockRequest, // TODO: precise error
-    /// Failed to decode the header of the block.
-    #[display(fmt = "Failed to decode header of the block: {}", _0)]
-    InvalidBlockHeader(header::Error),
-    /// Error while querying the storage of the block.
-    #[display(fmt = "Error while querying block storage: {}", _0)]
-    StorageQuery(sync_service::StorageQueryError),
 }
 
 struct Guarded {
