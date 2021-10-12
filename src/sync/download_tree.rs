@@ -1244,6 +1244,23 @@ where
             }
         }
 
+        // Try to report the finalized block if it is ready but not reported yet.
+        match &mut self.finalized_block.runtime {
+            Ok(RuntimeDownloadState::Finished {
+                reported: reported @ false,
+                ..
+            }) => {
+                *reported = true;
+                // According to the API, `FirstFinalized` implies that the first finalized
+                // block is also the best. Make sure to comply to this.
+                self.best_block_index = None;
+                return Some(OutputUpdate::FirstFinalized {
+                    scale_encoded_header: &self.finalized_block.header,
+                });
+            }
+            _ => {}
+        }
+
         if !self.has_output() {
             return None;
         }
