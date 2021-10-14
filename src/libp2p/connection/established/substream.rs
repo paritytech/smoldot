@@ -31,7 +31,7 @@ use alloc::{
     string::String,
     vec::{self, Vec},
 };
-use core::fmt;
+use core::{fmt, num::NonZeroUsize};
 
 /// State machine containing the state of a single substream of an established connection.
 pub struct Substream<TNow, TRqUd, TNotifUd> {
@@ -182,6 +182,38 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         payload_in: arrayvec::ArrayVec<u8, 32>,
         payload_out: VecDeque<u8>,
     },
+
+    /// Negotiating a protocol for an outgoing ping substream.
+    ///
+    /// Note that the negotiation process doesn't have any timeout. Individual outgoing ping
+    /// requests *will* time out.
+    PingOutNegotiating {
+        /// State of the protocol negotiation.
+        negotiation: multistream_select::InProgress<vec::IntoIter<String>, String>,
+        /// Payload of the queued pings that remains to write out. Since the substream is still
+        /// negotiating, no ping has been sent out, and this is thus always equal to 32 times the
+        /// number of queued pings.
+        outgoing_payload: VecDeque<u8>,
+        /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
+        /// out, or `None` if the timeout has already occured.
+        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+    },
+    /// Failed to negotiate a protocol for an outgoing ping substream.
+    PingOutFailed {
+        /// FIFO queue of pings that will immediately fail.
+        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+    },
+    /// Outbound ping substream.
+    PingOut {
+        /// Payload of the queued pings that remains to write out.
+        outgoing_payload: VecDeque<u8>,
+        /// Data waiting to be received from the remote. Any mismatch will cause an error.
+        /// Contains even the data that is still queued in `outgoing_payload`.
+        expected_payload: VecDeque<u8>,
+        /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
+        /// out, or `None` if the timeout has already occured.
+        queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
+    },
 }
 
 impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd>
@@ -286,6 +318,30 @@ where
         }
 
         // TODO: somehow do substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
+    }
+
+    /// Initializes an outgoing ping substream.
+    ///
+    /// Call [`Substream::queue_ping`] in order to queue an outgoing ping on this substream. This
+    /// can be done at any time, even immediately after this function has returned.
+    ///
+    /// The substream will attempt to negotiate the ping protocol. No event is reported if the
+    /// protocol fails to negotiate. Instead, outgoing pings will be transparently failing.
+    ///
+    /// > Note: At the time of the writing of this comment, no API method exists to close an
+    /// >       outgoing ping substream.
+    pub fn ping_out(ping_protocol_name: String) -> Self {
+        let negotiation = multistream_select::InProgress::new(multistream_select::Config::Dialer {
+            requested_protocol: ping_protocol_name,
+        });
+
+        Substream {
+            inner: SubstreamInner::PingOutNegotiating {
+                negotiation,
+                outgoing_payload: VecDeque::with_capacity(32),
+                queued_pings: smallvec::SmallVec::new(),
+            },
+        }
     }
 
     /// Returns the user data associated to a request substream.
@@ -921,6 +977,136 @@ where
                     None,
                 )
             }
+
+            SubstreamInner::PingOutNegotiating {
+                negotiation,
+                mut queued_pings,
+                mut outgoing_payload,
+            } => {
+                for timeout in queued_pings.iter_mut() {
+                    if timeout.as_ref().map_or(false, |t| *t < read_write.now) {
+                        *timeout = None;
+                        return (
+                            Some(SubstreamInner::PingOutNegotiating {
+                                negotiation,
+                                outgoing_payload,
+                                queued_pings,
+                            }),
+                            Some(Event::PingOutError {
+                                num_pings: NonZeroUsize::new(1).unwrap(),
+                            }),
+                        );
+                    }
+
+                    if let Some(timeout) = timeout {
+                        read_write.wake_up_after(timeout);
+                    }
+                }
+
+                while queued_pings.get(0).map_or(false, |p| p.is_none()) {
+                    queued_pings.remove(0);
+                    for _ in 0..32 {
+                        outgoing_payload.pop_front();
+                    }
+                }
+
+                match negotiation.read_write(read_write) {
+                    Ok(multistream_select::Negotiation::InProgress(nego)) => (
+                        Some(SubstreamInner::PingOutNegotiating {
+                            negotiation: nego,
+                            outgoing_payload,
+                            queued_pings,
+                        }),
+                        None,
+                    ),
+                    Ok(multistream_select::Negotiation::Success(_)) => (
+                        Some(SubstreamInner::PingOut {
+                            outgoing_payload: outgoing_payload.clone(),
+                            expected_payload: outgoing_payload,
+                            queued_pings,
+                        }),
+                        None,
+                    ),
+                    Ok(multistream_select::Negotiation::NotAvailable) => {
+                        (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                    }
+                    Err(_) => (Some(SubstreamInner::PingOutFailed { queued_pings }), None),
+                }
+            }
+            SubstreamInner::PingOutFailed { mut queued_pings } => {
+                read_write.close_write();
+                if !queued_pings.is_empty() {
+                    queued_pings.remove(0);
+                    (
+                        Some(SubstreamInner::PingOutFailed { queued_pings }),
+                        Some(Event::PingOutError {
+                            num_pings: NonZeroUsize::new(1).unwrap(),
+                        }),
+                    )
+                } else {
+                    (Some(SubstreamInner::PingOutFailed { queued_pings }), None)
+                }
+            }
+            SubstreamInner::PingOut {
+                mut queued_pings,
+                mut outgoing_payload,
+                mut expected_payload,
+            } => {
+                read_write.write_from_vec_deque(&mut outgoing_payload);
+
+                // We check the timeouts before checking the incoming data, as otherwise pings
+                // might succeed after their timeout.
+                for timeout in queued_pings.iter_mut() {
+                    if timeout.as_ref().map_or(false, |t| *t < read_write.now) {
+                        *timeout = None;
+                        return (
+                            Some(SubstreamInner::PingOut {
+                                expected_payload,
+                                outgoing_payload,
+                                queued_pings,
+                            }),
+                            Some(Event::PingOutError {
+                                num_pings: NonZeroUsize::new(1).unwrap(),
+                            }),
+                        );
+                    }
+
+                    if let Some(timeout) = timeout {
+                        read_write.wake_up_after(timeout);
+                    }
+                }
+
+                for actual_byte in read_write.incoming_bytes_iter() {
+                    if expected_payload.pop_front() != Some(actual_byte) {
+                        return (Some(SubstreamInner::PingOutFailed { queued_pings }), None);
+                    }
+
+                    // When a ping has been fully answered is determined based on the number of
+                    // bytes in `expected_payload`.
+                    if expected_payload.len() % 32 == 0 {
+                        debug_assert!(!queued_pings.is_empty()); // `expected_payload.pop_front()` should have returned `None` above otherwise
+                        if queued_pings.remove(0).is_some() {
+                            return (
+                                Some(SubstreamInner::PingOut {
+                                    expected_payload,
+                                    outgoing_payload,
+                                    queued_pings,
+                                }),
+                                Some(Event::PingOutSuccess),
+                            );
+                        }
+                    }
+                }
+
+                (
+                    Some(SubstreamInner::PingOut {
+                        expected_payload,
+                        outgoing_payload,
+                        queued_pings,
+                    }),
+                    None,
+                )
+            }
         }
     }
 
@@ -962,6 +1148,15 @@ where
             SubstreamInner::RequestInRecvEmpty { .. } => None,
             SubstreamInner::RequestInApiWait => None,
             SubstreamInner::RequestInRespond { .. } => None,
+            SubstreamInner::PingOut { queued_pings, .. }
+            | SubstreamInner::PingOutNegotiating { queued_pings, .. }
+            | SubstreamInner::PingOutFailed { queued_pings, .. } => {
+                if let Some(num_pings) = NonZeroUsize::new(queued_pings.len()) {
+                    Some(Event::PingOutError { num_pings })
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -1078,6 +1273,42 @@ where
             }
             _ => panic!(),
         };
+    }
+
+    /// Queues a ping on the given substream. Must be passed a randomly-generated payload of 32
+    /// bytes, the time after which this ping is considered as failed.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the substream isn't an outgoing ping substream.
+    ///
+    pub fn queue_ping(&mut self, payload: &[u8; 32], timeout: TNow) {
+        match &mut self.inner {
+            SubstreamInner::PingOut { queued_pings, .. }
+            | SubstreamInner::PingOutNegotiating { queued_pings, .. }
+            | SubstreamInner::PingOutFailed { queued_pings, .. } => {
+                queued_pings.push(Some(timeout));
+            }
+            _ => panic!(),
+        }
+
+        match &mut self.inner {
+            SubstreamInner::PingOut {
+                outgoing_payload,
+                expected_payload,
+                ..
+            } => {
+                outgoing_payload.extend(payload.iter().copied());
+                expected_payload.extend(payload.iter().copied());
+            }
+            SubstreamInner::PingOutNegotiating {
+                outgoing_payload, ..
+            } => {
+                outgoing_payload.extend(payload.iter().copied());
+            }
+            SubstreamInner::PingOutFailed { .. } => {}
+            _ => panic!(),
+        }
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
@@ -1204,6 +1435,11 @@ where
             SubstreamInner::RequestInRespond { .. } => f.debug_tuple("request-in-respond").finish(),
             SubstreamInner::RequestInApiWait => f.debug_tuple("request-in").finish(),
             SubstreamInner::PingIn { .. } => f.debug_tuple("ping-in").finish(),
+            SubstreamInner::PingOutNegotiating { .. } => {
+                f.debug_tuple("ping-out-negotiating").finish()
+            }
+            SubstreamInner::PingOutFailed { .. } => f.debug_tuple("ping-out-failed").finish(),
+            SubstreamInner::PingOut { .. } => f.debug_tuple("ping-out").finish(),
         }
     }
 }
@@ -1288,6 +1524,14 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsOutReset {
         /// Value that was passed to [`Substream::notifications_out`].
         user_data: TNotifUd,
+    },
+
+    /// A ping has been successfully answered by the remote.
+    PingOutSuccess,
+    /// Remote has failed to answer one or more pings.
+    PingOutError {
+        /// Number of pings that the remote has failed to answer.
+        num_pings: NonZeroUsize,
     },
 }
 
