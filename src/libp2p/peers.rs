@@ -692,6 +692,79 @@ where
                         outcome,
                     };
                 }
+
+                collection::Event::PingOutSuccess { .. } => {
+                    // We don't care about or report successful pings at the moment.
+                }
+
+                collection::Event::PingOutFailed {
+                    id: connection_id,
+                    user_data: local_connection_index,
+                    ..
+                } => {
+                    // TODO: future cancellation issue
+                    self.inner.remove(connection_id).await;
+
+                    // A failed ping must lead to a disconnect.
+                    let (peer_index, user_data) =
+                        guarded.connections.remove(local_connection_index);
+                    let peer_index = peer_index.unwrap();
+
+                    // TODO: DRY with the Shutdown event
+
+                    guarded
+                        .connections_by_peer
+                        .remove(&(peer_index, connection_id))
+                        .unwrap();
+
+                    for (_, state) in guarded.peers_notifications_out.range_mut(
+                        (peer_index, usize::min_value())..=(peer_index, usize::max_value()),
+                    ) {
+                        match state.open {
+                            NotificationsOutOpenState::Closed => {}
+                            NotificationsOutOpenState::Opening(id, _)
+                            | NotificationsOutOpenState::Open(id, _)
+                                if id == connection_id =>
+                            {
+                                state.open = NotificationsOutOpenState::Closed;
+                                // TODO: reopen in a different connection if desired
+                                /*if state.desired {
+                                    todo!()
+                                }*/
+                            }
+                            NotificationsOutOpenState::Opening(_, _)
+                            | NotificationsOutOpenState::Open(_, _) => {}
+                            NotificationsOutOpenState::ApiHandshakeWait(id) => {
+                                debug_assert!(guarded.desired_out_notifications[id.0].is_some());
+                                guarded.desired_out_notifications[id.0] = None;
+                                // We intentionally don't clean up
+                                // `pending_desired_out_notifs`.
+                            }
+                        }
+                    }
+
+                    let peer_id = guarded.peers[peer_index].peer_id.clone();
+                    let peer_is_desired = guarded.peers[peer_index].desired;
+
+                    guarded.try_clean_up_peer(peer_index);
+
+                    return Event::Disconnected {
+                        num_peer_connections: {
+                            let num = guarded
+                                .connections_by_peer
+                                .range(
+                                    (peer_index, collection::ConnectionId::min_value())
+                                        ..=(peer_index, collection::ConnectionId::max_value()),
+                                )
+                                .filter(|(_, established)| **established)
+                                .count();
+                            u32::try_from(num).unwrap()
+                        },
+                        peer_id,
+                        peer_is_desired,
+                        user_data,
+                    };
+                }
             }
         }
     }

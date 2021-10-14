@@ -382,6 +382,32 @@ where
         connection_id
     }
 
+    /// Removes a connection from the collection.
+    ///
+    /// Has no effect if the connection id was invalid, in order to avoid a potential race
+    /// condition with the [`Event::Shutdown`] effect.
+    // TODO: reconsider this "no effect if connection invalid"
+    pub async fn remove(&self, connection_id: ConnectionId) {
+        let connection = {
+            let mut guarded = self.guarded.lock().await;
+            let guarded = &mut *guarded;
+
+            let connection_index = match guarded.connections_by_id.get(&connection_id) {
+                Some(idx) => *idx,
+                None => return,
+            };
+
+            guarded.connections.get(connection_index).unwrap().clone()
+        };
+
+        {
+            let mut connection = connection.lock().await;
+            connection.connection = ConnectionInner::Removed;
+        }
+
+        // TODO: return something?
+    }
+
     /// Returns the number of connections in the collection.
     ///
     /// > **Note**: Keep in mind that this method is prone to race conditions, as the user can
@@ -549,7 +575,7 @@ where
             ConnectionInner::Handshake { .. } => {
                 return Err(OpenNotificationsSubstreamError::NotEstablished)
             }
-            ConnectionInner::Errored(_) | ConnectionInner::Dead => {
+            ConnectionInner::Errored(_) | ConnectionInner::Dead | ConnectionInner::Removed => {
                 return Err(OpenNotificationsSubstreamError::BadConnection)
             }
             ConnectionInner::Poisoned => unreachable!(),
@@ -646,6 +672,7 @@ where
             ConnectionInner::Handshake { .. }
             | ConnectionInner::Errored(_)
             | ConnectionInner::Dead
+            | ConnectionInner::Removed
             | ConnectionInner::Poisoned => unreachable!(),
         };
 
@@ -987,6 +1014,7 @@ where
                 debug_assert!(connection_lock.pending_event.is_none());
 
                 let mut guarded = self.guarded.lock().await;
+                // TODO: really remove? race with remove()
                 let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap(); // TODO: don't unwrap?
                 guarded.connections.remove(connection_index);
 
@@ -1003,7 +1031,11 @@ where
         Ok(())
     }
 
-    fn build_connection_config(&self, randomness_seed: [u8; 32]) -> established::Config {
+    fn build_connection_config(
+        &self,
+        now: &TNow,
+        randomness_seed: [u8; 32],
+    ) -> established::Config<TNow> {
         established::Config {
             notifications_protocols: self
                 .notification_protocols
@@ -1025,6 +1057,9 @@ where
             request_protocols: self.request_response_protocols.clone(),
             randomness_seed,
             ping_protocol: self.ping_protocol.clone(), // TODO: cloning :-/
+            ping_interval: Duration::from_secs(20),    // TODO: hardcoded
+            ping_timeout: Duration::from_secs(10),     // TODO: hardcoded
+            first_out_ping: now.clone() + Duration::from_secs(2), // TODO: hardcoded
         }
     }
 }
@@ -1146,6 +1181,21 @@ pub enum Event<TConn> {
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
+
+    /// An outgoing ping has succeeded. This event is generated automatically over time for each
+    /// connection in the collection.
+    PingOutSuccess {
+        id: ConnectionId,
+        /// Copy of the user data provided when creating the connection.
+        user_data: TConn,
+    },
+    /// An outgoing ping has failed. This event is generated automatically over time for each
+    /// connection in the collection.
+    PingOutFailed {
+        id: ConnectionId,
+        /// Copy of the user data provided when creating the connection.
+        user_data: TConn,
+    },
 }
 
 impl<TConn> Event<TConn> {
@@ -1161,6 +1211,8 @@ impl<TConn> Event<TConn> {
             Event::NotificationsInOpen { id, .. } => *id,
             Event::NotificationsIn { id, .. } => *id,
             Event::NotificationsInClose { id, .. } => *id,
+            Event::PingOutSuccess { id, .. } => *id,
+            Event::PingOutFailed { id, .. } => *id,
         }
     }
 
@@ -1176,6 +1228,8 @@ impl<TConn> Event<TConn> {
             Event::NotificationsInOpen { user_data, .. } => user_data,
             Event::NotificationsIn { user_data, .. } => user_data,
             Event::NotificationsInClose { user_data, .. } => user_data,
+            Event::PingOutSuccess { user_data, .. } => user_data,
+            Event::PingOutFailed { user_data, .. } => user_data,
         }
     }
 }
@@ -1302,7 +1356,9 @@ where
 
                         self.connection =
                             ConnectionInner::Errored(ConnectionError::Established(err));
-                        self.pending_event = Some(PendingEvent::Disconnect);
+                        self.pending_event = Some(PendingEvent::Disconnect {
+                            emit_shutdown_event: true,
+                        });
                     }
                 };
 
@@ -1353,10 +1409,12 @@ where
                             debug_assert!(self.pending_event.is_none());
                             self.pending_event =
                                 Some(PendingEvent::HandshakeFinished(remote_peer_id));
-                            self.connection =
-                                ConnectionInner::Established(connection.into_connection(
-                                    parent.build_connection_config(randomness_seed),
-                                ));
+                            self.connection = ConnectionInner::Established(
+                                connection.into_connection(
+                                    parent
+                                        .build_connection_config(&read_write.now, randomness_seed),
+                                ),
+                            );
                             break;
                         }
                         handshake::Handshake::NoiseKeyRequired(key) => {
@@ -1369,6 +1427,13 @@ where
             }
 
             ConnectionInner::Errored(err) => Err(err),
+            ConnectionInner::Removed => {
+                self.connection = ConnectionInner::Removed; // TODO: correct?
+                self.pending_event = Some(PendingEvent::Disconnect {
+                    emit_shutdown_event: false,
+                });
+                Ok(()) // TODO: is this correct?
+            }
             ConnectionInner::Dead => panic!(),
             ConnectionInner::Poisoned => unreachable!(),
         }
@@ -1625,7 +1690,27 @@ where
                     })
                     .unwrap();
             }
-            PendingEvent::Disconnect => {
+            PendingEvent::Inner(established::Event::PingOutSuccess) => {
+                guarded
+                    .events_tx
+                    .try_send(Event::PingOutSuccess {
+                        id: self.id,
+                        user_data: self.user_data.clone(),
+                    })
+                    .unwrap();
+            }
+            PendingEvent::Inner(established::Event::PingOutFailed) => {
+                guarded
+                    .events_tx
+                    .try_send(Event::PingOutFailed {
+                        id: self.id,
+                        user_data: self.user_data.clone(),
+                    })
+                    .unwrap();
+            }
+            PendingEvent::Disconnect {
+                emit_shutdown_event,
+            } => {
                 let substreams = guarded
                     .connection_overlays
                     .range(
@@ -1652,32 +1737,33 @@ where
                         SubstreamState::Open => {}
                     };
 
-                    let overlay_network_index = *self
-                        .connection
-                        .as_established()
-                        .unwrap()
-                        .notifications_substream_user_data_mut(substream_id)
-                        .unwrap();
+                    if let Some(established) = self.connection.as_established() {
+                        let overlay_network_index = *established
+                            .notifications_substream_user_data_mut(substream_id)
+                            .unwrap();
 
-                    match direction {
-                        SubstreamDirection::In => {
-                            in_overlay_network_indices.push(overlay_network_index);
-                        }
-                        SubstreamDirection::Out => {
-                            out_overlay_network_indices.push(overlay_network_index);
+                        match direction {
+                            SubstreamDirection::In => {
+                                in_overlay_network_indices.push(overlay_network_index);
+                            }
+                            SubstreamDirection::Out => {
+                                out_overlay_network_indices.push(overlay_network_index);
+                            }
                         }
                     }
                 }
 
-                guarded
-                    .events_tx
-                    .try_send(Event::Shutdown {
-                        id: self.id,
-                        in_notification_protocols_indices: in_overlay_network_indices,
-                        out_notification_protocols_indices: out_overlay_network_indices,
-                        user_data: self.user_data.clone(),
-                    })
-                    .unwrap();
+                if emit_shutdown_event {
+                    guarded
+                        .events_tx
+                        .try_send(Event::Shutdown {
+                            id: self.id,
+                            in_notification_protocols_indices: in_overlay_network_indices,
+                            out_notification_protocols_indices: out_overlay_network_indices,
+                            user_data: self.user_data.clone(),
+                        })
+                        .unwrap();
+                }
             }
         }
     }
@@ -1703,6 +1789,8 @@ enum ConnectionInner<TNow> {
         established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
     ),
     Errored(ConnectionError),
+    /// [`Network::remove`] has been called.
+    Removed,
     Dead,
     Poisoned,
 }
@@ -1724,7 +1812,7 @@ impl<TNow> ConnectionInner<TNow> {
 enum PendingEvent {
     HandshakeFinished(PeerId),
     Inner(established::Event<oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
-    Disconnect,
+    Disconnect { emit_shutdown_event: bool },
 }
 
 /// Error potentially returned by [`Network::request`].
