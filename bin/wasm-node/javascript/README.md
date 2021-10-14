@@ -2,7 +2,7 @@
 
 This JavaScript library provides a light client for
 [the Polkadot blockchain](https://polkadot.network/) and for chains built
-using [the Substrate blockchain framework](https://substrate.dev/).
+using [the Substrate blockchain framework](https://substrate.io/).
 
 It is an "actual" light client, in the sense that it is byzantine-resilient.
 It does not rely on the presence of an RPC server, but directly connects to
