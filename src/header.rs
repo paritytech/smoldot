@@ -23,7 +23,7 @@
 //! or the block number, and a variable-sized list of log items.
 //!
 //! The standard format of a block header is the
-//! [SCALE encoding](https://substrate.dev/docs/en/knowledgebase/advanced/codec). It is typically
+//! [SCALE encoding](https://docs.substrate.io/v3/advanced/scale-codec). It is typically
 //! under this encoding that block headers are for example transferred over the network or stored
 //! in the database. Use the [`decode`] function in order to decompose a SCALE-encoded header
 //! into a usable [`HeaderRef`].
