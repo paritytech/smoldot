@@ -272,8 +272,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
 
                 // Actual signatures verification performed here.
                 // TODO: thread_rng()?!?! what to do here?
-                // TODO: ed25519_zebra depends on rand_core 0.5, which forces us to use an older version of rand; really annoying
-                match self.signatures_batch.verify(rand7::thread_rng()) {
+                match self.signatures_batch.verify(rand::thread_rng()) {
                     Ok(()) => {}
                     Err(_) => return InProgress::Finished(Err(Error::BadSignature)),
                 }
