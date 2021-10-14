@@ -42,6 +42,6 @@ The Wasm light node is published on NPM: https://www.npmjs.com/package/@substrat
 
 There exists multiple objectives behind this repository:
 
-- Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation, and the documentation of the `main` branch is automatically deployed [here](https://paritytech.github.io/smoldot/smoldot/index.html).
+- Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation.
 - Implement a client that is lighter than Substrate, in terms of memory consumption, number of threads, and code size, in order to compile it to WebAssembly and distribute it in webpages.
 - Experiment with a new code architecture, to maybe upstream some components to Substrate and Polkadot.
