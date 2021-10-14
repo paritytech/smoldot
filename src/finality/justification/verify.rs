@@ -94,9 +94,8 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
 
     // Actual signatures verification performed here.
     // TODO: thread_rng()?!?! what to do here?
-    // TODO: ed25519_zebra depends on rand_core 0.5, which forces us to use an older version of rand; really annoying
     batch
-        .verify(rand7::thread_rng())
+        .verify(rand::thread_rng())
         .map_err(|_| Error::BadSignature)?;
 
     // TODO: must check that votes_ancestries doesn't contain any unused entry
