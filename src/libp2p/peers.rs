@@ -728,41 +728,10 @@ where
                     guarded.pending_inner_event = None;
                 }
 
-                collection::Event::PingOutFailed {
-                    id: connection_id,
-                    user_data: local_connection_index,
-                    ..
-                } => {
+                collection::Event::PingOutFailed { id, .. } => {
                     // A failed ping must lead to a disconnect.
-                    self.inner.remove(*connection_id).await;
-
-                    let connection_id = *connection_id;
-                    let local_connection_index = *local_connection_index;
+                    self.inner.start_shutdown(*id).await;
                     guarded.pending_inner_event = None;
-
-                    // Update the state of `guarded` to match the fact that the connection has
-                    // been removed from `inner`.
-                    let (peer_id, peer_is_desired, num_peer_connections, user_data) = match self
-                        .removed_from_inner(&mut *guarded, connection_id, local_connection_index)
-                    {
-                        (Some((a, b, c, _was_established)), d) => {
-                            debug_assert!(_was_established);
-                            (a, b, c, d)
-                        }
-                        (None, _) => {
-                            // A ping failure event can only happen after a connection has been
-                            // established, in which case `removed_from_inner` is guaranteed to
-                            // return `Some`.
-                            unreachable!()
-                        }
-                    };
-
-                    return Event::Disconnected {
-                        num_peer_connections,
-                        peer_id,
-                        peer_is_desired,
-                        user_data,
-                    };
                 }
             }
         }

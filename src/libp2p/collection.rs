@@ -382,12 +382,14 @@ where
         connection_id
     }
 
-    /// Removes a connection from the collection.
+    /// Switches the connection to a state where it will shut down soon.
+    ///
+    /// Has no effect if this connection was already shutting down.
     ///
     /// Has no effect if the connection id was invalid, in order to avoid a potential race
     /// condition with the [`Event::Shutdown`] effect.
     // TODO: reconsider this "no effect if connection invalid"
-    pub async fn remove(&self, connection_id: ConnectionId) {
+    pub async fn start_shutdown(&self, connection_id: ConnectionId) {
         let connection = {
             let mut guarded = self.guarded.lock().await;
             let guarded = &mut *guarded;
@@ -402,7 +404,7 @@ where
 
         {
             let mut connection = connection.lock().await;
-            connection.connection = ConnectionInner::Removed;
+            connection.connection = ConnectionInner::ForcedShutdown;
         }
 
         // TODO: return something?
@@ -575,7 +577,9 @@ where
             ConnectionInner::Handshake { .. } => {
                 return Err(OpenNotificationsSubstreamError::NotEstablished)
             }
-            ConnectionInner::Errored(_) | ConnectionInner::Dead | ConnectionInner::Removed => {
+            ConnectionInner::Errored(_)
+            | ConnectionInner::Dead
+            | ConnectionInner::ForcedShutdown => {
                 return Err(OpenNotificationsSubstreamError::BadConnection)
             }
             ConnectionInner::Poisoned => unreachable!(),
@@ -672,7 +676,7 @@ where
             ConnectionInner::Handshake { .. }
             | ConnectionInner::Errored(_)
             | ConnectionInner::Dead
-            | ConnectionInner::Removed
+            | ConnectionInner::ForcedShutdown
             | ConnectionInner::Poisoned => unreachable!(),
         };
 
@@ -1356,9 +1360,7 @@ where
 
                         self.connection =
                             ConnectionInner::Errored(ConnectionError::Established(err));
-                        self.pending_event = Some(PendingEvent::Disconnect {
-                            emit_shutdown_event: true,
-                        });
+                        self.pending_event = Some(PendingEvent::Disconnect);
                     }
                 };
 
@@ -1427,11 +1429,9 @@ where
             }
 
             ConnectionInner::Errored(err) => Err(err),
-            ConnectionInner::Removed => {
-                self.connection = ConnectionInner::Removed; // TODO: correct?
-                self.pending_event = Some(PendingEvent::Disconnect {
-                    emit_shutdown_event: false,
-                });
+            ConnectionInner::ForcedShutdown => {
+                self.connection = ConnectionInner::ForcedShutdown; // TODO: correct?
+                self.pending_event = Some(PendingEvent::Disconnect);
                 Ok(()) // TODO: is this correct?
             }
             ConnectionInner::Dead => panic!(),
@@ -1708,9 +1708,7 @@ where
                     })
                     .unwrap();
             }
-            PendingEvent::Disconnect {
-                emit_shutdown_event,
-            } => {
+            PendingEvent::Disconnect => {
                 let substreams = guarded
                     .connection_overlays
                     .range(
@@ -1753,17 +1751,15 @@ where
                     }
                 }
 
-                if emit_shutdown_event {
-                    guarded
-                        .events_tx
-                        .try_send(Event::Shutdown {
-                            id: self.id,
-                            in_notification_protocols_indices: in_overlay_network_indices,
-                            out_notification_protocols_indices: out_overlay_network_indices,
-                            user_data: self.user_data.clone(),
-                        })
-                        .unwrap();
-                }
+                guarded
+                    .events_tx
+                    .try_send(Event::Shutdown {
+                        id: self.id,
+                        in_notification_protocols_indices: in_overlay_network_indices,
+                        out_notification_protocols_indices: out_overlay_network_indices,
+                        user_data: self.user_data.clone(),
+                    })
+                    .unwrap();
             }
         }
     }
@@ -1789,8 +1785,8 @@ enum ConnectionInner<TNow> {
         established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
     ),
     Errored(ConnectionError),
-    /// [`Network::remove`] has been called.
-    Removed,
+    /// [`Network::start_shutdown`] has been called.
+    ForcedShutdown,
     Dead,
     Poisoned,
 }
@@ -1812,7 +1808,7 @@ impl<TNow> ConnectionInner<TNow> {
 enum PendingEvent {
     HandshakeFinished(PeerId),
     Inner(established::Event<oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
-    Disconnect { emit_shutdown_event: bool },
+    Disconnect,
 }
 
 /// Error potentially returned by [`Network::request`].
