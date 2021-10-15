@@ -880,18 +880,18 @@ async fn validate_transaction(
     ValidateTransactionError,
 > {
     let runtime_lock = relay_chain_sync.recent_best_block_runtime_lock().await;
+    let block_hash = runtime_lock.block_hash();
 
     log::debug!(
         target: log_target,
         "Starting validation of {} against block {} (height: {:?})",
         HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
-        HashDisplay(runtime_lock.block_hash()),
+        HashDisplay(&block_hash),
         header::decode(runtime_lock.block_scale_encoded_header())
             .ok()
             .map(|h| h.number)
     );
 
-    let block_hash = *runtime_lock.block_hash();
     let (runtime_call_lock, runtime) = runtime_lock
         .start(
             validate::VALIDATION_FUNCTION_NAME,
