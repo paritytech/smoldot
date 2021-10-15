@@ -332,22 +332,19 @@ pub(super) async fn start_parachain(
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                             let _ = send_back.send(SubscribeAll {
                                 finalized_block_scale_encoded_header: async_tree.finalized_async_user_data().clone(),
-                                non_finalized_blocks_ancestry_order: if finalized_parahead_valid {
-                                    async_tree.input_iter_unordered().filter_map(|(node_index, _, parahead, is_best)| {
-                                        let parahead = parahead?;
-                                        let parent_hash = async_tree.parent(node_index)
-                                            .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap()))
-                                            .unwrap_or_else(|| header::hash_from_scale_encoded_header(async_tree.finalized_async_user_data()));
+                                non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|(node_index, _, parahead, is_best)| {
+                                    let parahead = parahead?;
+                                    debug_assert!(finalized_parahead_valid);
+                                    let parent_hash = async_tree.parent(node_index)
+                                        .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap()))
+                                        .unwrap_or_else(|| header::hash_from_scale_encoded_header(async_tree.finalized_async_user_data()));
 
-                                        Some(BlockNotification {
-                                            is_new_best: is_best,
-                                            scale_encoded_header: parahead.clone(),
-                                            parent_hash,
-                                        })
-                                    }).collect()
-                                } else {
-                                    Vec::new()
-                                },
+                                    Some(BlockNotification {
+                                        is_new_best: is_best,
+                                        scale_encoded_header: parahead.clone(),
+                                        parent_hash,
+                                    })
+                                }).collect(),
                                 new_blocks,
                             });
 
