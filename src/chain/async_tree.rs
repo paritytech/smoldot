@@ -91,6 +91,7 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
 impl<TNow, TBl, TAsync> AsyncTree<TNow, TBl, TAsync>
 where
     TNow: Clone + ops::Add<Duration, Output = TNow> + Ord,
+    TAsync: Clone,
 {
     /// Returns a new empty [`AsyncTree`].
     pub fn new(finalized_async_user_data: TAsync) -> Self {
@@ -272,7 +273,8 @@ where
     ///
     /// This "destroys" the [`AsyncOpId`].
     ///
-    /// Returns the number of blocks whose state was affected by this asynchronous operation.
+    /// Returns the number of blocks whose state was affected by this asynchronous operation. This
+    /// can be more than 1 if blocks were inserted with `same_async_op_as_parent` as `true`.
     ///
     /// # Panic
     ///
@@ -317,7 +319,6 @@ where
             }
         }
 
-        // TODO: weird to return the number of concerned blocks if `same_as_parent` is unused, as this would always be 1; figure out based on the actual use case of this data structure
         num_concerned_blocks
     }
 
@@ -337,31 +338,46 @@ where
         let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded value
 
         // Update the blocks that were performing this operation.
-        // TODO: O(n)
+        // The blocks are iterated from child to parent, so that we can check, for each node,
+        // whether its parent has the same asynchronous operation id.
+        // TODO: O(n) and allocation
         for index in self
             .non_finalized_blocks
-            .iter_unordered()
+            .iter_ancestry_order()
             .map(|(index, _)| index)
             .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
         {
-            let block = self.non_finalized_blocks.get_mut(index).unwrap();
-            match block.async_op {
+            let new_timeout = match self.non_finalized_blocks.get_mut(index).unwrap().async_op {
                 AsyncOpState::InProgress {
                     async_op_id: id,
-                    ref timeout,
-                } if id == async_op_id => {
-                    let timeout = match timeout {
-                        Some(a) => Some(cmp::min(a.clone(), new_timeout.clone())),
-                        None => Some(new_timeout.clone()),
-                    };
+                    timeout: Some(ref timeout),
+                } if id == async_op_id => Some(cmp::min(timeout.clone(), new_timeout.clone())),
+                AsyncOpState::InProgress {
+                    async_op_id: id,
+                    timeout: None,
+                } if id == async_op_id => Some(new_timeout.clone()),
+                _ => continue,
+            };
 
-                    block.async_op = AsyncOpState::Pending {
-                        same_as_parent: false, // TODO: not implemented properly; should check if parent had same async op id
-                        timeout,
-                    };
-                }
-                _ => {}
-            }
+            let same_as_parent = self
+                .non_finalized_blocks
+                .parent(index)
+                .map(
+                    |idx| match self.non_finalized_blocks.get(idx).unwrap().async_op {
+                        AsyncOpState::InProgress {
+                            async_op_id: id, ..
+                        } => id == async_op_id,
+                        _ => false,
+                    },
+                )
+                .unwrap_or(false);
+
+            self.non_finalized_blocks.get_mut(index).unwrap().async_op = AsyncOpState::Pending {
+                same_as_parent,
+                timeout: new_timeout,
+            };
         }
     }
 
@@ -473,31 +489,84 @@ where
         block_index: NodeIndex,
         now: &TNow,
     ) -> NextNecessaryAsyncOpInternal<TNow> {
-        let block = self.non_finalized_blocks.get_mut(block_index).unwrap();
-
-        if let AsyncOpState::Pending { ref timeout, .. } = block.async_op {
-            if timeout.as_ref().map_or(true, |t| t <= now) {
-                let async_op_id = self.next_async_op_id;
-                self.next_async_op_id.0 += 1;
-                block.async_op = AsyncOpState::InProgress {
-                    async_op_id,
-                    timeout: None,
-                };
-
-                // TODO: update all children that have same as parent to point to the same operation
-
-                return NextNecessaryAsyncOpInternal::Ready(async_op_id, block_index);
-            } else {
+        match self
+            .non_finalized_blocks
+            .get_mut(block_index)
+            .unwrap()
+            .async_op
+        {
+            AsyncOpState::Pending {
+                same_as_parent: false,
+                ref timeout,
+                ..
+            } if timeout.as_ref().map_or(true, |t| t <= now) => {}
+            AsyncOpState::Pending {
+                same_as_parent: false,
+                ref timeout,
+                ..
+            } => {
                 return NextNecessaryAsyncOpInternal::NotReady {
                     when: timeout.clone(),
-                };
+                }
             }
+            _ => return NextNecessaryAsyncOpInternal::NotReady { when: None },
+        };
+
+        // A new asynchronous operation can be started.
+        let async_op_id = self.next_async_op_id;
+        self.next_async_op_id.0 += 1;
+
+        // Gather `block_index` and all its descendants in `to_update`, provided the chain between
+        // `block_index` and the node only contains `Pending { same_as_parent: true }`.
+        // TODO: allocation and O(n) :-/
+        let mut to_update = Vec::new();
+        for (child_index, _) in self.non_finalized_blocks.iter_unordered() {
+            if !self
+                .non_finalized_blocks
+                .is_ancestor(block_index, child_index)
+            {
+                continue;
+            }
+
+            if !self
+                .non_finalized_blocks
+                .node_to_root_path(child_index)
+                .take_while(|idx| *idx != block_index)
+                .all(|idx| {
+                    matches!(
+                        self.non_finalized_blocks.get(idx).unwrap().async_op,
+                        AsyncOpState::Pending {
+                            same_as_parent: true,
+                            ..
+                        }
+                    )
+                })
+            {
+                continue;
+            }
+
+            to_update.push(child_index);
         }
 
-        NextNecessaryAsyncOpInternal::NotReady { when: None }
+        debug_assert!(to_update.iter().any(|idx| *idx == block_index));
+        for to_update in to_update {
+            self.non_finalized_blocks
+                .get_mut(to_update)
+                .unwrap()
+                .async_op = AsyncOpState::InProgress {
+                async_op_id,
+                timeout: None,
+            };
+        }
+
+        NextNecessaryAsyncOpInternal::Ready(async_op_id, block_index)
     }
 
     /// Inserts a new block in the state machine.
+    ///
+    /// If `same_async_op_as_parent` is `true`, then the asynchronous operation user data is
+    /// shared with the parent of the block. This "sharing" is done by emitting only one
+    /// asynchronous operation for both blocks, and/or by cloning the `TAsyncOp`.
     ///
     /// # Panic
     ///
@@ -523,17 +592,44 @@ where
             0
         };
 
-        // TODO: implement same_async_op_as_parent
+        let async_op = match (same_async_op_as_parent, parent_index) {
+            (true, Some(parent_index)) => {
+                match &self
+                    .non_finalized_blocks
+                    .get(parent_index)
+                    .unwrap()
+                    .async_op
+                {
+                    AsyncOpState::InProgress { async_op_id, .. } => AsyncOpState::InProgress {
+                        async_op_id: *async_op_id,
+                        timeout: None,
+                    },
+                    AsyncOpState::Finished { user_data, .. } => AsyncOpState::Finished {
+                        user_data: user_data.clone(),
+                        reported: false,
+                    },
+                    AsyncOpState::Pending { .. } => AsyncOpState::Pending {
+                        same_as_parent: true,
+                        timeout: None,
+                    },
+                }
+            }
+            (true, None) => AsyncOpState::Finished {
+                user_data: self.finalized_async_user_data.clone(),
+                reported: false,
+            },
+            (false, _) => AsyncOpState::Pending {
+                same_as_parent: false,
+                timeout: None,
+            },
+        };
 
         // Insert the new block.
         self.non_finalized_blocks.insert(
             parent_index,
             Block {
                 user_data: block,
-                async_op: AsyncOpState::Pending {
-                    same_as_parent: same_async_op_as_parent,
-                    timeout: None,
-                },
+                async_op,
                 input_best_block_weight,
             },
         )
@@ -890,7 +986,6 @@ enum AsyncOpState<TNow, TAsync> {
         /// [`AsyncOpState::Finished`] or [`AsyncOpState::InProgress`].
         ///
         /// When in doubt, `false`.
-        // TODO: make use of this
         same_as_parent: bool,
 
         /// Do not start any operation before `TNow`. Used to avoid repeatedly trying to perform
