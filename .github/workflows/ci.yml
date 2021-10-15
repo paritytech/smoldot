@@ -43,15 +43,24 @@ jobs:
 
   wasm-node-check:
     runs-on: ubuntu-latest
-    container:
-      image: rust
     steps:
+    - name: Start Polkadot node in the background
+      # Note: feel free to update the Polkadot version here when one is released
+      run: docker run --network host -d parity/polkadot:v0.9.8 --chain polkadot-dev --unsafe-rpc-external --unsafe-ws-external
+    - name: Wait for node to be up
+      run: |
+        bash -c 'while true; do curl -X POST -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"system_health\",\"params\":[]}" localhost:9933; if [ $? -eq 0 ]; then break; fi; sleep 1; done'
     - uses: actions/checkout@v2.3.4
+    - uses: actions-rs/toolchain@v1
+      with:
+        # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
+        toolchain: stable
+        profile: minimal
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.4.1
       with:
         node-version: '12'
-    - run: apt-get update && apt install -y binaryen # For `wasm-opt`
+    - run: sudo apt-get update && sudo apt install -y binaryen # For `wasm-opt`
     - run: cd bin/wasm-node/javascript && npm install-ci-test
 
   check-features:
