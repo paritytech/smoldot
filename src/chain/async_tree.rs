@@ -29,7 +29,7 @@
 
 use crate::chain::fork_tree;
 use alloc::vec::Vec;
-use core::{cmp, time::Duration};
+use core::{cmp, mem, ops, time::Duration};
 
 pub use fork_tree::NodeIndex;
 
@@ -61,6 +61,9 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
     /// State of all the non-finalized blocks.
     non_finalized_blocks: fork_tree::ForkTree<Block<TNow, TBl, TAsync>>,
 
+    /// Outcome of the asynchronous operation for the finalized block.
+    finalized_async_user_data: TAsync,
+
     /// Index within [`AsyncTree::non_finalized_blocks`] of the current "output" best block.
     /// `None` if the best block is the finalized block.
     ///
@@ -87,12 +90,13 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
 
 impl<TNow, TBl, TAsync> AsyncTree<TNow, TBl, TAsync>
 where
-    TNow: Clone + core::ops::Add<Duration, Output = TNow> + Ord,
+    TNow: Clone + ops::Add<Duration, Output = TNow> + Ord,
 {
     /// Returns a new empty [`AsyncTree`].
-    pub fn new() -> Self {
+    pub fn new(finalized_async_user_data: TAsync) -> Self {
         AsyncTree {
             best_block_index: None,
+            finalized_async_user_data,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
             input_finalized_index: None,
             input_best_block_next_weight: 2,
@@ -149,6 +153,14 @@ where
             .get_mut(node_index)
             .unwrap()
             .user_data
+    }
+
+    /// Returns the outcome of the asynchronous operation for the finalized block.
+    ///
+    /// This is the value that was passed at initialization, or is updated after
+    /// [`AsyncTree::try_advance_output`] has returned [`OutputUpdate::Finalized`].
+    pub fn finalized_async_user_data(&self) -> &TAsync {
+        &self.finalized_async_user_data
     }
 
     /// Returns the asynchronous operation user data associated to the given block.
@@ -511,6 +523,8 @@ where
             0
         };
 
+        // TODO: implement same_async_op_as_parent
+
         // Insert the new block.
         self.non_finalized_blocks.insert(
             parent_index,
@@ -687,13 +701,19 @@ where
                 }
 
                 let pruned_finalized = pruned_finalized.unwrap();
+                let former_finalized_async_op_user_data = match pruned_finalized.user_data.async_op
+                {
+                    AsyncOpState::Finished { user_data, .. } => {
+                        mem::replace(&mut self.finalized_async_user_data, user_data)
+                    }
+                    _ => unreachable!(),
+                };
+
                 return Some(OutputUpdate::Finalized {
                     former_index: new_finalized,
                     user_data: pruned_finalized.user_data.user_data,
-                    async_op_user_data: match pruned_finalized.user_data.async_op {
-                        AsyncOpState::Finished { user_data, .. } => user_data,
-                        _ => unreachable!(),
-                    },
+                    async_op_user_data: &self.finalized_async_user_data,
+                    former_finalized_async_op_user_data,
                     pruned_blocks,
                     best_block_index: self.best_block_index,
                 });
@@ -789,7 +809,13 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
         user_data: TBl,
 
         /// User data associated to the async operation of this block.
-        async_op_user_data: TAsync,
+        ///
+        /// This is the same value as is now returned by
+        /// [`AsyncTree::finalized_async_user_data`], and is provided here for convenience.
+        async_op_user_data: &'a TAsync,
+
+        /// User data associated to the async operation of the previous finalized block.
+        former_finalized_async_op_user_data: TAsync,
 
         /// Index of the best block after the finalization. `None` if the best block is the block
         /// that has just been finalized.
@@ -864,7 +890,7 @@ enum AsyncOpState<TNow, TAsync> {
         /// [`AsyncOpState::Finished`] or [`AsyncOpState::InProgress`].
         ///
         /// When in doubt, `false`.
-        // TODO: remove?!
+        // TODO: make use of this
         same_as_parent: bool,
 
         /// Do not start any operation before `TNow`. Used to avoid repeatedly trying to perform
