@@ -44,9 +44,7 @@ export async function start(config) {
   // The actual execution of Smoldot is performed in a worker thread.
   //
   // The line of code below (`new Worker(...)`) is designed to hopefully work across all
-  // platforms. It should work in NodeJS, browsers, webpack
-  // (https://webpack.js.org/guides/web-workers/), and parcel
-  // (https://github.com/parcel-bundler/parcel/pull/5846)
+  // platforms and bundlers. See the README.md for more context.
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
