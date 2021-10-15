@@ -446,76 +446,40 @@ where
                     user_data: local_connection_index,
                     ..
                 } => {
-                    let (expected_peer_index, user_data) =
-                        guarded.connections.remove(*local_connection_index);
+                    let connection_id = *connection_id;
+                    let local_connection_index = *local_connection_index;
+                    guarded.pending_inner_event = None;
 
-                    if let Some(expected_peer_index) = expected_peer_index {
-                        let was_established = guarded
-                            .connections_by_peer
-                            .remove(&(expected_peer_index, *connection_id))
-                            .unwrap();
-
-                        for (_, state) in guarded.peers_notifications_out.range_mut(
-                            (expected_peer_index, usize::min_value())
-                                ..=(expected_peer_index, usize::max_value()),
-                        ) {
-                            match state.open {
-                                NotificationsOutOpenState::Closed => {}
-                                NotificationsOutOpenState::Opening(id, _)
-                                | NotificationsOutOpenState::Open(id, _)
-                                    if id == *connection_id =>
-                                {
-                                    state.open = NotificationsOutOpenState::Closed;
-                                    if state.desired {
-                                        // TODO: reopen in a different connection if desired
-                                        todo!()
-                                    }
-                                }
-                                NotificationsOutOpenState::Opening(_, _)
-                                | NotificationsOutOpenState::Open(_, _) => {}
-                                NotificationsOutOpenState::ApiHandshakeWait(id) => {
-                                    debug_assert!(guarded.desired_out_notifications[id.0].is_some());
-                                    guarded.desired_out_notifications[id.0] = None;
-                                    // We intentionally don't clean up
-                                    // `pending_desired_out_notifs`.
-                                }
-                            }
+                    // Update the state of `guarded` to match the fact that the connection has
+                    // been removed from `inner`.
+                    let (
+                        peer_id,
+                        peer_is_desired,
+                        num_peer_connections,
+                        was_established,
+                        user_data,
+                    ) = match self.removed_from_inner(
+                        &mut *guarded,
+                        connection_id,
+                        local_connection_index,
+                    ) {
+                        (Some((a, b, c, d)), e) => (a, b, c, d, e),
+                        (None, _) => {
+                            // A ping failure event can only happen after a connection has been
+                            // established, in which case `removed_from_inner` is guaranteed to
+                            // return `Some`.
+                            unreachable!()
                         }
+                    };
 
-                        let peer_id = guarded.peers[expected_peer_index].peer_id.clone();
-                        let peer_is_desired = guarded.peers[expected_peer_index].desired;
-
-                        guarded.try_clean_up_peer(expected_peer_index);
-
-                        guarded.pending_inner_event = None;
-
-                        // Only produce a `Disconnected` event if connection wasn't handshaking.
-                        if was_established {
-                            return Event::Disconnected {
-                                num_peer_connections: {
-                                    let num = guarded
-                                        .connections_by_peer
-                                        .range(
-                                            (
-                                                expected_peer_index,
-                                                collection::ConnectionId::min_value(),
-                                            )
-                                                ..=(
-                                                    expected_peer_index,
-                                                    collection::ConnectionId::max_value(),
-                                                ),
-                                        )
-                                        .filter(|(_, established)| **established)
-                                        .count();
-                                    u32::try_from(num).unwrap()
-                                },
-                                peer_id,
-                                peer_is_desired,
-                                user_data,
-                            };
-                        }
-                    } else {
-                        guarded.pending_inner_event = None;
+                    // Only produce a `Disconnected` event if connection wasn't handshaking.
+                    if was_established {
+                        return Event::Disconnected {
+                            num_peer_connections,
+                            peer_id,
+                            peer_is_desired,
+                            user_data,
+                        };
                     }
                 }
 
@@ -769,66 +733,32 @@ where
                     user_data: local_connection_index,
                     ..
                 } => {
-                    // TODO: future cancellation issue
+                    // A failed ping must lead to a disconnect.
                     self.inner.remove(*connection_id).await;
 
-                    // A failed ping must lead to a disconnect.
-                    let (peer_index, user_data) =
-                        guarded.connections.remove(*local_connection_index);
-                    let peer_index = peer_index.unwrap();
-
-                    // TODO: DRY with the Shutdown event
-
-                    guarded
-                        .connections_by_peer
-                        .remove(&(peer_index, *connection_id))
-                        .unwrap();
-
-                    for (_, state) in guarded.peers_notifications_out.range_mut(
-                        (peer_index, usize::min_value())..=(peer_index, usize::max_value()),
-                    ) {
-                        match state.open {
-                            NotificationsOutOpenState::Closed => {}
-                            NotificationsOutOpenState::Opening(id, _)
-                            | NotificationsOutOpenState::Open(id, _)
-                                if id == *connection_id =>
-                            {
-                                state.open = NotificationsOutOpenState::Closed;
-                                // TODO: reopen in a different connection if desired
-                                /*if state.desired {
-                                    todo!()
-                                }*/
-                            }
-                            NotificationsOutOpenState::Opening(_, _)
-                            | NotificationsOutOpenState::Open(_, _) => {}
-                            NotificationsOutOpenState::ApiHandshakeWait(id) => {
-                                debug_assert!(guarded.desired_out_notifications[id.0].is_some());
-                                guarded.desired_out_notifications[id.0] = None;
-                                // We intentionally don't clean up
-                                // `pending_desired_out_notifs`.
-                            }
-                        }
-                    }
-
-                    let peer_id = guarded.peers[peer_index].peer_id.clone();
-                    let peer_is_desired = guarded.peers[peer_index].desired;
-
-                    guarded.try_clean_up_peer(peer_index);
-
+                    let connection_id = *connection_id;
+                    let local_connection_index = *local_connection_index;
                     guarded.pending_inner_event = None;
 
+                    // Update the state of `guarded` to match the fact that the connection has
+                    // been removed from `inner`.
+                    let (peer_id, peer_is_desired, num_peer_connections, user_data) = match self
+                        .removed_from_inner(&mut *guarded, connection_id, local_connection_index)
+                    {
+                        (Some((a, b, c, _was_established)), d) => {
+                            debug_assert!(_was_established);
+                            (a, b, c, d)
+                        }
+                        (None, _) => {
+                            // A ping failure event can only happen after a connection has been
+                            // established, in which case `removed_from_inner` is guaranteed to
+                            // return `Some`.
+                            unreachable!()
+                        }
+                    };
+
                     return Event::Disconnected {
-                        num_peer_connections: {
-                            let num = guarded
-                                .connections_by_peer
-                                .range(
-                                    (peer_index, collection::ConnectionId::min_value())
-                                        ..=(peer_index, collection::ConnectionId::max_value()),
-                                )
-                                .filter(|(_, established)| **established)
-                                .count();
-                            u32::try_from(num).unwrap()
-                        },
+                        num_peer_connections,
                         peer_id,
                         peer_is_desired,
                         user_data,
@@ -1003,7 +933,7 @@ where
 
             // If substream is closed, try to open it.
             if matches!(current_state.open, NotificationsOutOpenState::Closed) {
-                if let Some(connection_id) = self.connection_id_for_peer(&guarded, peer_id) {
+                if let Some(connection_id) = self.connection_id_for_peer(&mut guarded, peer_id) {
                     let id =
                         DesiredOutNotificationId(guarded.desired_out_notifications.insert(Some((
                             peer_index,
@@ -1313,8 +1243,8 @@ where
         request_data: Vec<u8>,
     ) -> Result<Vec<u8>, RequestError> {
         let target = {
-            let guarded = self.guarded.lock().await;
-            match self.connection_id_for_peer(&guarded, target) {
+            let mut guarded = self.guarded.lock().await;
+            match self.connection_id_for_peer(&mut *guarded, target) {
                 Some(id) => id,
                 None => return Err(RequestError::NotConnected),
             }
@@ -1414,7 +1344,7 @@ where
     /// Picks the connection to use to send requests or notifications to the given peer.
     fn connection_id_for_peer(
         &self,
-        guarded: &MutexGuard<'_, Guarded<TConn>>,
+        guarded: &mut Guarded<TConn>,
         target: &PeerId,
     ) -> Option<collection::ConnectionId> {
         let peer_index = *guarded.peer_indices.get(target)?;
@@ -1431,6 +1361,89 @@ where
         }
 
         None
+    }
+
+    /// Updates the state of `guarded` after a connection has been removed from [`Peers::inner`].
+    /// Keep in mind that `guarded` should have been locked before the connection is removed, in
+    /// order to avoid race conditions where the methods of `Peers` find a connection within
+    /// `guarded` even though it no longer exists.
+    ///
+    /// Returns information about the connection: the [`PeerId`], whether the peer was desired,
+    /// the number of connections remaining with this peer, and whether the connection was in the
+    /// established phrase (`false` is still handshaking). Returns `None` if the connection was an
+    /// incoming connection whose handshake wasn't finished yet.
+    fn removed_from_inner(
+        &self,
+        guarded: &mut Guarded<TConn>,
+        connection_id: ConnectionId,
+        local_connection_index: usize,
+    ) -> (Option<(PeerId, bool, u32, bool)>, TConn) {
+        let (expected_peer_index, user_data) = guarded.connections.remove(local_connection_index);
+
+        // `expected_peer_index` is `None` iff the connection was an incoming connection whose
+        // handshake isn't finished yet.
+
+        if let Some(expected_peer_index) = expected_peer_index {
+            let was_established = guarded
+                .connections_by_peer
+                .remove(&(expected_peer_index, connection_id))
+                .unwrap();
+
+            for (_, state) in guarded.peers_notifications_out.range_mut(
+                (expected_peer_index, usize::min_value())
+                    ..=(expected_peer_index, usize::max_value()),
+            ) {
+                match state.open {
+                    NotificationsOutOpenState::Closed => {}
+                    NotificationsOutOpenState::Opening(id, _)
+                    | NotificationsOutOpenState::Open(id, _)
+                        if id == connection_id =>
+                    {
+                        state.open = NotificationsOutOpenState::Closed;
+                        // TODO: reopen in a different connection if desired
+                        /*if state.desired {
+                            todo!()
+                        }*/
+                    }
+                    NotificationsOutOpenState::Opening(_, _)
+                    | NotificationsOutOpenState::Open(_, _) => {}
+                    NotificationsOutOpenState::ApiHandshakeWait(id) => {
+                        debug_assert!(guarded.desired_out_notifications[id.0].is_some());
+                        guarded.desired_out_notifications[id.0] = None;
+                        // We intentionally don't clean up
+                        // `pending_desired_out_notifs`.
+                    }
+                }
+            }
+
+            let peer_id = guarded.peers[expected_peer_index].peer_id.clone();
+            let peer_is_desired = guarded.peers[expected_peer_index].desired;
+            let num_peer_connections = {
+                let num = guarded
+                    .connections_by_peer
+                    .range(
+                        (expected_peer_index, collection::ConnectionId::min_value())
+                            ..=(expected_peer_index, collection::ConnectionId::max_value()),
+                    )
+                    .filter(|(_, established)| **established)
+                    .count();
+                u32::try_from(num).unwrap()
+            };
+
+            guarded.try_clean_up_peer(expected_peer_index);
+
+            (
+                Some((
+                    peer_id,
+                    peer_is_desired,
+                    num_peer_connections,
+                    was_established,
+                )),
+                user_data,
+            )
+        } else {
+            (None, user_data)
+        }
     }
 }
 
@@ -1737,7 +1750,7 @@ impl<TConn> Guarded<TConn> {
     }
 
     /// Checks the state of the given `peer_index`. If there is no difference between this peer's
-    /// state and no the default state, removes the peer from the data structure altogether.
+    /// state and the default state, removes the peer from the data structure altogether.
     ///
     /// # Panic
     ///
