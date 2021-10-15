@@ -731,6 +731,7 @@ where
                 collection::Event::PingOutFailed { id, .. } => {
                     // A failed ping must lead to a disconnect.
                     self.inner.start_shutdown(*id).await;
+                    guarded.pending_inner_event = None;
                 }
             }
         }
