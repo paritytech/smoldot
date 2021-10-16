@@ -32,7 +32,7 @@ The full client is currently a work in progress and doesn't support many feature
 
 Pre-requisite: in order to run the wasm light node, you must have installed [rustup](https://rustup.rs/).
 
-The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
+The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm install; npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
 
 > Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hardcodes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
 
