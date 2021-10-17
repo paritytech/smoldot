@@ -34,7 +34,7 @@ use std::{
     sync::Arc,
 };
 
-pub(super) async fn start_relay_chain(
+pub(super) async fn start_standalone_chain(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
