@@ -1239,13 +1239,11 @@ impl Background {
                         .map(
                             |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
                                 peer_id: peer_id.to_string(),
-                                // TODO: use an enum
                                 roles: match role {
-                                    protocol::Role::Authority => "authority",
-                                    protocol::Role::Full => "full",
-                                    protocol::Role::Light => "light",
-                                }
-                                .to_string(),
+                                    protocol::Role::Authority => methods::SystemPeerRole::Authority,
+                                    protocol::Role::Full => methods::SystemPeerRole::Full,
+                                    protocol::Role::Light => methods::SystemPeerRole::Light,
+                                },
                                 best_hash: methods::HashHexString(best_hash),
                                 best_number,
                             },
