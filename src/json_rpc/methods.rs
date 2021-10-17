@@ -527,11 +527,21 @@ pub struct SystemHealth {
 pub struct SystemPeer {
     #[serde(rename = "peerId")]
     pub peer_id: String, // Example: "12D3KooWHEQXbvCzLYvc87obHV6HY4rruHz8BJ9Lw1Gg2csVfR6Z"
-    pub roles: String, // "AUTHORITY", "FULL", or "LIGHT"
+    pub roles: SystemPeerRole,
     #[serde(rename = "bestHash")]
     pub best_hash: HashHexString,
     #[serde(rename = "bestNumber")]
     pub best_number: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum SystemPeerRole {
+    #[serde(rename = "AUTHORITY")]
+    Authority,
+    #[serde(rename = "FULL")]
+    Full,
+    #[serde(rename = "LIGHT")]
+    Light,
 }
 
 #[derive(Debug, Clone)]
