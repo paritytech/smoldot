@@ -30,6 +30,7 @@ use smoldot::{
 };
 use std::{collections::HashMap, iter, sync::Arc};
 
+/// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
@@ -39,7 +40,7 @@ pub(super) async fn start_parachain(
     network_chain_index: usize,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) {
-    // Latest finalized parahead.
+    // Parahead of the genesis block.
     let chainspec_finalized_parahead = chain_information
         .as_ref()
         .finalized_block_header
@@ -59,6 +60,9 @@ pub(super) async fn start_parachain(
     // TODO: handled in a hacky way; unclear how to handle properly
     let mut is_near_head_of_chain;
 
+    // This function contains two loops within each other. If the relay chain syncing service has
+    // a gap in its blocks, or if the node is overloaded and can't process blocks in time, then
+    // we break out of the inner loop in order to reset everything.
     loop {
         // Stream of blocks of the relay chain this parachain is registered on.
         let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32).await;
@@ -141,15 +145,103 @@ pub(super) async fn start_parachain(
                                 op.id
                             );
 
-                            let relay_chain_sync = relay_chain_sync.clone();
-                            let block_hash = *op.block_user_data;
-                            let async_op_id = op.id;
-                            in_progress_paraheads.push(Box::pin(async move {
-                                (
-                                    async_op_id,
-                                    parahead(&relay_chain_sync, parachain_id, &block_hash).await,
-                                )
-                            }));
+                            in_progress_paraheads.push({
+                                let relay_chain_sync = relay_chain_sync.clone();
+                                let block_hash = *op.block_user_data;
+                                let async_op_id = op.id;
+                                async move {
+                                    (
+                                        async_op_id,
+                                        parahead(&relay_chain_sync, parachain_id, &block_hash)
+                                            .await,
+                                    )
+                                }
+                                .boxed()
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Report to the outside any block in the `async_tree` that is now ready.
+            while let Some(update) = async_tree.try_advance_output() {
+                match update {
+                    async_tree::OutputUpdate::Finalized {
+                        async_op_user_data: new_parahead,
+                        former_finalized_async_op_user_data: former_parahead,
+                        ..
+                    } if *new_parahead != former_parahead => {
+                        debug_assert!(finalized_parahead_valid);
+
+                        let hash = header::hash_from_scale_encoded_header(new_parahead);
+
+                        log::debug!(
+                            target: &log_target,
+                            "Reporting finalized parablock 0x{}",
+                            HashDisplay(&hash)
+                        );
+
+                        // Elements in `all_subscriptions` are removed one by one and
+                        // inserted back if the channel is still open.
+                        let best_block_hash = async_tree
+                            .best_block_index()
+                            .map(|(_, parahead)| header::hash_from_scale_encoded_header(parahead))
+                            .unwrap_or(hash);
+                        for index in (0..all_subscriptions.len()).rev() {
+                            let mut sender = all_subscriptions.swap_remove(index);
+                            let notif = Notification::Finalized {
+                                hash,
+                                best_block_hash,
+                            };
+                            if sender.try_send(notif).is_ok() {
+                                all_subscriptions.push(sender);
+                            }
+                        }
+                    }
+                    async_tree::OutputUpdate::Finalized { .. } => {
+                        // Finalized parahead is same as was already finalized. Don't
+                        // report it again.
+                    }
+                    async_tree::OutputUpdate::Block(block) => {
+                        // We need to access `async_tree` below, so deconstruct `block`.
+                        let is_new_best = block.is_new_best;
+                        let scale_encoded_header = block.async_op_user_data.clone();
+                        let block_index = block.index;
+
+                        debug_assert!(finalized_parahead_valid);
+                        let parent_header = async_tree
+                            .parent(block_index)
+                            .map(|idx| async_tree.block_async_user_data(idx).unwrap())
+                            .unwrap_or_else(|| async_tree.finalized_async_user_data());
+
+                        // Do not report the new block if it is the same as its parent.
+                        if *parent_header == scale_encoded_header {
+                            continue;
+                        }
+
+                        // TODO: if parent wasn't best block but child is best block, and parent is equal to child, then we don't report the fact that the block is best to the subscribers, causing a state mismatch with potential new subscribers that are grabbed later
+
+                        log::debug!(
+                            target: &log_target,
+                            "Reporting new parablock 0x{}",
+                            HashDisplay(&header::hash_from_scale_encoded_header(
+                                &scale_encoded_header
+                            ))
+                        );
+
+                        // Elements in `all_subscriptions` are removed one by one and
+                        // inserted back if the channel is still open.
+                        let parent_hash = header::hash_from_scale_encoded_header(&parent_header);
+                        for index in (0..all_subscriptions.len()).rev() {
+                            let mut sender = all_subscriptions.swap_remove(index);
+                            let notif = Notification::Block(BlockNotification {
+                                is_new_best,
+                                parent_hash,
+                                scale_encoded_header: scale_encoded_header.clone(),
+                            });
+                            if sender.try_send(notif).is_ok() {
+                                all_subscriptions.push(sender);
+                            }
                         }
                     }
                 }
@@ -168,6 +260,8 @@ pub(super) async fn start_parachain(
 
                     is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
+                    // Update the local tree of blocks to match the update sent by the relay chain
+                    // syncing service.
                     match relay_chain_notif {
                         Notification::Finalized { hash, best_block_hash } => {
                             log::debug!(
@@ -200,88 +294,15 @@ pub(super) async fn start_parachain(
                             async_tree.input_insert_block(hash, parent, false, block.is_new_best);
                         }
                     };
-
-                    while let Some(update) = async_tree.try_advance_output() {
-                        match update {
-                            async_tree::OutputUpdate::Finalized { async_op_user_data: new_parahead, former_finalized_async_op_user_data: former_parahead, .. }
-                                if *new_parahead != former_parahead =>
-                            {
-                                debug_assert!(finalized_parahead_valid);
-
-                                let hash = header::hash_from_scale_encoded_header(new_parahead);
-
-                                log::debug!(
-                                    target: &log_target,
-                                    "Reporting finalized parablock 0x{}",
-                                    HashDisplay(&hash)
-                                );
-
-                                // Elements in `all_subscriptions` are removed one by one and
-                                // inserted back if the channel is still open.
-                                let best_block_hash = async_tree.best_block_index()
-                                    .map(|(_, parahead)| header::hash_from_scale_encoded_header(parahead))
-                                    .unwrap_or(hash);
-                                for index in (0..all_subscriptions.len()).rev() {
-                                    let mut sender = all_subscriptions.swap_remove(index);
-                                    let notif = Notification::Finalized {
-                                        hash,
-                                        best_block_hash,
-                                    };
-                                    if sender.try_send(notif).is_ok() {
-                                        all_subscriptions.push(sender);
-                                    }
-                                }
-                            }
-                            async_tree::OutputUpdate::Finalized { .. } => {
-                                // Finalized parahead is same as was already finalized. Don't
-                                // report it again.
-                            }
-                            async_tree::OutputUpdate::Block(block) => {
-                                // We need to access `async_tree` below, so deconstruct `block`.
-                                let is_new_best = block.is_new_best;
-                                let scale_encoded_header = block.async_op_user_data.clone();
-                                let block_index = block.index;
-
-                                debug_assert!(finalized_parahead_valid);
-                                let parent_header = async_tree.parent(block_index)
-                                    .map(|idx| async_tree.block_async_user_data(idx).unwrap())
-                                    .unwrap_or_else(|| async_tree.finalized_async_user_data());
-
-                                // Do not report the new block if it is the same as its parent.
-                                if *parent_header == scale_encoded_header {
-                                    continue;
-                                }
-
-                                // TODO: if parent wasn't best block but child is best block, and parent is equal to child, then we don't report the fact that the block is best to the subscribers, causing a state mismatch with potential new subscribers that are grabbed later
-
-                                log::debug!(
-                                    target: &log_target,
-                                    "Reporting new parablock 0x{}",
-                                    HashDisplay(&header::hash_from_scale_encoded_header(&scale_encoded_header))
-                                );
-
-                                // Elements in `all_subscriptions` are removed one by one and
-                                // inserted back if the channel is still open.
-                                let parent_hash = header::hash_from_scale_encoded_header(&parent_header);
-                                for index in (0..all_subscriptions.len()).rev() {
-                                    let mut sender = all_subscriptions.swap_remove(index);
-                                    let notif = Notification::Block(BlockNotification {
-                                        is_new_best,
-                                        parent_hash,
-                                        scale_encoded_header: scale_encoded_header.clone(),
-                                    });
-                                    if sender.try_send(notif).is_ok() {
-                                        all_subscriptions.push(sender);
-                                    }
-                                }
-                            }
-                        }
-                    }
                 },
 
                 (async_op_id, parahead_result) = in_progress_paraheads.select_next_some() => {
+                    // A parahead fetching operation is finished.
+
+                    // We shouldn't have started any request if `!finalized_parahead_valid`.
                     debug_assert!(finalized_parahead_valid);
 
+                    // Log and update the `async_tree` accordingly.
                     match parahead_result {
                         Ok(parahead) => {
                             // TODO: print more info
@@ -313,16 +334,13 @@ pub(super) async fn start_parachain(
                 }
 
                 foreground_message = from_foreground.next().fuse() => {
+                    // Message from the public API of the syncing service.
+
                     // Terminating the parachain sync task if the foreground has closed.
                     let foreground_message = match foreground_message {
                         Some(m) => m,
                         None => return,
                     };
-
-                    // Note that the rest of this `select!` statement can block for a long time,
-                    // which means that there might be a big delay for processing the messages here.
-                    // At the time of writing, the nature of the messages makes this a non-issue,
-                    // but care should be taken about this.
 
                     match foreground_message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
@@ -381,18 +399,8 @@ pub(super) async fn start_parachain(
                     }
                 },
 
-                network_event = from_network_service.next() => {
+                network_event = from_network_service.select_next_some() => {
                     // Something happened on the network.
-
-                    let network_event = match network_event {
-                        Some(m) => m,
-                        None => {
-                            // The channel from the network service has been closed. Closing the
-                            // sync background task as well.
-                            return
-                        },
-                    };
-
                     match network_event {
                         network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
