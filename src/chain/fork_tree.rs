@@ -51,7 +51,6 @@
 //! assert!(tree.get(node2).is_some());
 //! ```
 
-use alloc::vec::Vec;
 use core::{fmt, iter};
 
 /// Tree of nodes. Each node contains a value of type `T`.
@@ -129,27 +128,30 @@ impl<T> ForkTree<T> {
 
     /// Returns an iterator to all the node values. The returned items are guaranteed to be in an
     /// order in which the parents are found before their children.
-    pub fn iter_ancestry_order(&self) -> impl Iterator<Item = (NodeIndex, &T)> {
-        // TODO: consider using a custom iterator in order to not allocate? really needs a test first because it's tricky
-        let mut list = Vec::with_capacity(self.nodes.len());
-        if let Some(first_root) = self.first_root {
-            list.push(first_root);
+    pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = (NodeIndex, &'_ T)> + '_ {
+        iter::successors(self.first_root.map(NodeIndex), move |n| {
+            self.ancestry_order_next(*n)
+        })
+        .map(move |idx| (idx, &self.nodes[idx.0].data))
+    }
+
+    fn ancestry_order_next(&self, node_index: NodeIndex) -> Option<NodeIndex> {
+        if let Some(idx) = self.nodes[node_index.0].first_child {
+            return Some(NodeIndex(idx));
         }
 
-        let mut index = 0;
-        while index < list.len() {
-            let node = &self.nodes[list[index]];
-            if let Some(first_child) = node.first_child {
-                list.push(first_child);
-            }
-            if let Some(next_sibling) = node.next_sibling {
-                list.push(next_sibling);
-            }
-            index += 1;
+        if let Some(idx) = self.nodes[node_index.0].next_sibling {
+            return Some(NodeIndex(idx));
         }
 
-        list.into_iter()
-            .map(move |idx| (NodeIndex(idx), &self.nodes[idx].data))
+        let mut return_value = self.nodes[node_index.0].parent;
+        while let Some(idx) = return_value {
+            if let Some(next_sibling) = self.nodes[idx].next_sibling {
+                return Some(NodeIndex(next_sibling));
+            }
+            return_value = self.nodes[idx].parent;
+        }
+        return_value.map(NodeIndex)
     }
 
     /// Returns the value of the node with the given index.
