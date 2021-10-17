@@ -31,9 +31,11 @@ use super::{RequestId, SourceId}; // TODO: ?
 
 /// Queue of block requests, either waiting to be started, in progress, or completed.
 pub(super) struct VerificationQueue<TRq, TBl> {
-    /// Actual queue.
+    /// Actual queue. Never empty.
     ///
-    /// Must contain at least one entry of type [`VerificationQueueEntryTy::Missing`] at the end.
+    /// Must always end with an entry of type [`VerificationQueueEntryTy::Missing`].
+    ///
+    /// Must never contain two [`VerificationQueueEntryTy::Missing`] entries in a row.
     verification_queue: VecDeque<VerificationQueueEntry<TRq, TBl>>,
 }
 
@@ -153,6 +155,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     ///
     /// Returns `Ok` if the request has updated the queue, and `Err` if the request isn't relevant
     /// to anything in the queue and has been silently discarded.
+    // TODO: why are we passing a RequestId?
     pub fn insert_request(
         &mut self,
         block_height: NonZeroU64,
@@ -161,19 +164,56 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         source: SourceId,
         user_data: TRq,
     ) -> Result<(), TRq> {
-        // Find the entry where the request can be inserted.
-        // TODO: the equality check on block_height is too strict; instead adjust the queue if there isn't a strict match
-        let missing_pos = self.verification_queue.iter().position(|entry| {
-            entry.block_height == block_height
-                && matches!(entry.ty, VerificationQueueEntryTy::Missing)
-        });
+        debug_assert!(!self.verification_queue.is_empty());
 
-        let missing_pos = match missing_pos {
-            Some(n) => n,
-            None => return Err(user_data),
+        // Find the entry where the request can be inserted.
+        let insert_pos = {
+            let pos_after = self
+                .verification_queue
+                .iter()
+                .position(|entry| entry.block_height > block_height);
+            match pos_after {
+                Some(0) => return Err(user_data),
+                Some(n) => n - 1,
+                None => self.verification_queue.len() - 1,
+            }
+        };
+        debug_assert!(self.verification_queue[insert_pos].block_height <= block_height);
+
+        // If the entry concerned by this request has already been started (or finished), discard
+        // it. It is possible that the end of the newly-started request overlaps with a `Missing`
+        // entry later in the queue, but this situation is explicitly not handled.
+        if !matches!(
+            self.verification_queue[insert_pos].ty,
+            VerificationQueueEntryTy::Missing
+        ) {
+            return Err(user_data);
+        }
+
+        // If `block_height` doesn't exactly match an entry in the queue, insert a new one
+        // in-between. This might update `insert_pos`.
+        // This temporarily cause the queue to have two `Missing` entries in a row.
+        let insert_pos = {
+            let insert_pos_block_height = self.verification_queue[insert_pos].block_height;
+            if insert_pos_block_height < block_height {
+                self.verification_queue[insert_pos].block_height = block_height;
+
+                self.verification_queue.insert(
+                    insert_pos,
+                    VerificationQueueEntry {
+                        block_height: insert_pos_block_height,
+                        ty: VerificationQueueEntryTy::Missing,
+                    },
+                );
+
+                insert_pos + 1
+            } else {
+                insert_pos
+            }
         };
 
-        self.verification_queue[missing_pos].ty = VerificationQueueEntryTy::Requested {
+        // Now update the state of the queue.
+        self.verification_queue[insert_pos].ty = VerificationQueueEntryTy::Requested {
             id: request_id,
             source,
             user_data,
@@ -181,7 +221,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
 
         // `verification_queue` must always end with an entry of type `Missing`. Add it, if
         // necessary.
-        if missing_pos == self.verification_queue.len() - 1 {
+        if insert_pos == self.verification_queue.len() - 1 {
             self.verification_queue.push_back(VerificationQueueEntry {
                 block_height: NonZeroU64::new(
                     block_height
@@ -198,29 +238,29 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             VerificationQueueEntryTy::Missing
         ));
 
-        // If `num_blocks` is < gap between `missing_pos` and `missing_pos + 1`, we have to either
-        // adjust `missing_pos + 1` or insert an entry in between.
+        // If `num_blocks` is < gap between `insert_pos` and `insert_pos + 1`, we have to either
+        // adjust `insert_pos + 1` or insert an entry in between.
         //
         // Note that the case where `num_blocks` is strictly superior to the distance to the next
         // entry isn't handled. The worst that can happen is the same blocks being requested
         // multiple times.
-        debug_assert!(self.verification_queue.get(missing_pos + 1).is_some());
-        match (self.verification_queue[missing_pos + 1].block_height.get() - block_height.get())
+        debug_assert!(self.verification_queue.get(insert_pos + 1).is_some());
+        match (self.verification_queue[insert_pos + 1].block_height.get() - block_height.get())
             .checked_sub(u64::from(num_blocks.get()))
         {
             Some(0) => {}
             Some(n) => {
                 if matches!(
-                    self.verification_queue[missing_pos + 1].ty,
+                    self.verification_queue[insert_pos + 1].ty,
                     VerificationQueueEntryTy::Missing
                 ) {
-                    self.verification_queue[missing_pos + 1].block_height = NonZeroU64::new(
-                        self.verification_queue[missing_pos + 1].block_height.get() - n,
+                    self.verification_queue[insert_pos + 1].block_height = NonZeroU64::new(
+                        self.verification_queue[insert_pos + 1].block_height.get() - n,
                     )
                     .unwrap();
                 } else {
                     self.verification_queue.insert(
-                        missing_pos + 1,
+                        insert_pos + 1,
                         VerificationQueueEntry {
                             block_height: NonZeroU64::new(block_height.get() + n).unwrap(),
                             ty: VerificationQueueEntryTy::Missing,
@@ -234,10 +274,19 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         Ok(())
     }
 
+    /// Marks a request previously inserted with [`VerificationQueue::insert_request`] as done.
+    ///
+    /// The number of blocks in the result doesn't have to match the number of blocks that was
+    /// passed to [`VerificationQueue::insert_request`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
     pub fn finish_request(
         &mut self,
         request_id: RequestId,
-        replacement: Result<impl Iterator<Item = TBl>, ()>,
+        result: Result<impl Iterator<Item = TBl>, ()>,
     ) -> (TRq, SourceId) {
         // Find the position of that request in the queue.
         let (index, source_id) = self
@@ -254,7 +303,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             .unwrap();
 
         let prev_value;
-        if let Ok(blocks) = replacement {
+        if let Ok(blocks) = result {
             let gap_with_next = self.verification_queue[index + 1].block_height.get()
                 - self.verification_queue[index].block_height.get();
 
