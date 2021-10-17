@@ -952,32 +952,15 @@ where
                         .await;
 
                     {
-                        let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
                         let local_genesis = ephemeral_guarded.chains[chain_index]
                             .chain_config
                             .genesis_hash;
                         let remote_genesis = *remote_handshake.genesis_hash;
 
                         if remote_genesis != local_genesis {
-                            // TODO: DRY
-                            // Unassign the out and in slots of the remote, if any.
-                            self.inner
-                                .set_peer_notifications_out_desired(
-                                    peer_id,
-                                    chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                                    peers::DesiredState::NotDesired,
-                                )
+                            self.unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
                                 .await;
-                            {
-                                let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                                let _was_in_out = ephemeral_guarded.chains[chain_index]
-                                    .out_peers
-                                    .remove(peer_id);
-                                let _was_in_in = ephemeral_guarded.chains[chain_index]
-                                    .in_peers
-                                    .remove(peer_id);
-                                debug_assert!(!_was_in_out || !_was_in_in);
-                            }
 
                             return match guarded.to_process_pre_event.take().unwrap() {
                                 peers::Event::NotificationsOutResult { peer_id, .. } => {
@@ -1128,24 +1111,12 @@ where
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    // Unassign the out and in slots of the remote, if any.
-                    self.inner
-                        .set_peer_notifications_out_desired(
-                            peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                            peers::DesiredState::NotDesired,
-                        )
-                        .await;
-                    {
-                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let _was_in_out = ephemeral_guarded.chains[chain_index]
-                            .out_peers
-                            .remove(peer_id);
-                        let _was_in_in = ephemeral_guarded.chains[chain_index]
-                            .in_peers
-                            .remove(peer_id);
-                        debug_assert!(!_was_in_out || !_was_in_in);
-                    }
+                    self.unassign_slot(
+                        &mut *self.ephemeral_guarded.lock().await,
+                        chain_index,
+                        peer_id,
+                    )
+                    .await;
 
                     // As a slot has been unassigned, wake up the discovery process in order for
                     // it to be filled.
@@ -1184,6 +1155,9 @@ where
 
                     // The desirability of the transactions and grandpa substreams is always equal
                     // to whether the block announces substream is open.
+                    //
+                    // These two calls modify `self.inner`, but they are still cancellation-safe
+                    // as they can be repeated multiple times.
                     self.inner
                         .set_peer_notifications_out_desired(
                             peer_id,
@@ -1199,24 +1173,12 @@ where
                         )
                         .await;
 
-                    // Unassign the out and in slots of the remote, if any.
-                    self.inner
-                        .set_peer_notifications_out_desired(
-                            peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                            peers::DesiredState::NotDesired,
-                        )
-                        .await;
-                    {
-                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let _was_in_out = ephemeral_guarded.chains[chain_index]
-                            .out_peers
-                            .remove(peer_id);
-                        let _was_in_in = ephemeral_guarded.chains[chain_index]
-                            .in_peers
-                            .remove(peer_id);
-                        debug_assert!(!_was_in_out || !_was_in_in);
-                    }
+                    self.unassign_slot(
+                        &mut *self.ephemeral_guarded.lock().await,
+                        chain_index,
+                        peer_id,
+                    )
+                    .await;
 
                     // The chain is now considered as closed.
                     let _was_removed = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
@@ -1719,6 +1681,30 @@ where
     /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
         self.inner.peers_list().await
+    }
+
+    /// Removes the slot assignment of the given peer, if any.
+    async fn unassign_slot(
+        &self,
+        ephemeral_guarded: &mut EphemeralGuarded<TNow>,
+        chain_index: usize,
+        peer_id: &PeerId,
+    ) {
+        self.inner
+            .set_peer_notifications_out_desired(
+                peer_id,
+                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+                peers::DesiredState::NotDesired,
+            )
+            .await;
+
+        let _was_in_out = ephemeral_guarded.chains[chain_index]
+            .out_peers
+            .remove(peer_id);
+        let _was_in_in = ephemeral_guarded.chains[chain_index]
+            .in_peers
+            .remove(peer_id);
+        debug_assert!(!_was_in_out || !_was_in_in);
     }
 }
 
