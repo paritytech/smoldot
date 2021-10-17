@@ -44,7 +44,7 @@ use std::{fmt, num::NonZeroU32, pin::Pin, sync::Arc};
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
 mod parachain;
-mod relay_chain;
+mod standalone;
 
 /// Configuration for a [`SyncService`].
 pub struct Config {
@@ -125,7 +125,7 @@ impl SyncService {
             (config.tasks_executor)(
                 "sync-relay".into(),
                 Box::pin(
-                    relay_chain::start_relay_chain(
+                    standalone::start_standalone_chain(
                         log_target,
                         config.chain_information,
                         from_foreground,
