@@ -1745,8 +1745,13 @@ where
         self.inner.peers_list().await
     }
 
+    ///
+    ///
+    /// Returns the [`PeerId`] that now has an outbound slot. This information can be used for
+    /// logging purposes.
+    // TODO: docs
     // TODO: when to call this?
-    pub async fn assign_slots(&self, chain_index: usize) {
+    pub async fn assign_slots(&self, chain_index: usize) -> Option<PeerId> {
         let mut lock = self.ephemeral_guarded.lock().await;
         let chain = &mut lock.chains[chain_index];
 
@@ -1775,7 +1780,7 @@ where
             // the inbound slot into an outbound slot.
             if chain.in_peers.remove(peer_id) {
                 chain.out_peers.insert(peer_id.clone());
-                continue;
+                return Some(peer_id.clone());
             }
 
             // The peer is marked as desired before inserting it in `out_peers`, to handle
@@ -1790,7 +1795,10 @@ where
             chain.out_peers.insert(peer_id.clone());
 
             self.next_start_connect_waker.wake();
+            return Some(peer_id.clone());
         }
+
+        None
     }
 
     /// Removes the slot assignment of the given peer, if any.
