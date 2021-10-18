@@ -786,7 +786,7 @@ where
             .get(&expected_peer_id)
             .unwrap()
             .get()
-            == 1;
+            != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
         if !has_any_attempt_left && !lock.connections.contains(&expected_peer_id) {
