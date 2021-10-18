@@ -477,7 +477,16 @@ impl NetworkService {
                                 None => return,
                             };
 
-                            network_service.network.assign_slots(chain_index).await;
+                            let peer = network_service.network.assign_slots(chain_index).await;
+                            if let Some(_peer_id) = peer {
+                                // TODO: restore and log also the de-assignments
+                                /*log::debug!(
+                                    target: "connections",
+                                    "Slots({}) ∋ {}",
+                                    &network_service.log_chain_names[chain_index],
+                                    peer_id
+                                );*/
+                            }
 
                             ffi::Delay::new(next_round).await;
                             next_round = cmp::min(next_round * 2, Duration::from_secs(5));
