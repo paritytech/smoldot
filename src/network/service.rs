@@ -806,10 +806,8 @@ where
                 .unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
-                true
             } else {
                 lock.num_pending_per_peer.remove(&expected_peer_id).unwrap();
-                false
             }
         };
 
@@ -1752,6 +1750,12 @@ where
         let mut lock = self.ephemeral_guarded.lock().await;
         let chain = &mut lock.chains[chain_index];
 
+        // Do one rotation, so that not the same peers are picked every time.
+        // TODO: this is a hack
+        if let Some(item) = chain.discovered_peers.pop_front() {
+            chain.discovered_peers.push_back(item);
+        }
+
         for (peer_id, _) in &chain.discovered_peers {
             // Check if maximum number of slots is reached.
             if chain.out_peers.len()
@@ -1784,6 +1788,8 @@ where
                 )
                 .await;
             chain.out_peers.insert(peer_id.clone());
+
+            self.next_start_connect_waker.wake();
         }
     }
 
