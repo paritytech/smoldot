@@ -1726,18 +1726,24 @@ where
                                 SubstreamId::max_value(),
                             ),
                     )
-                    .map(|(key, state)| (*key, *state))
+                    .map(|(key, _)| *key)
                     .collect::<Vec<_>>();
 
-                let mut out_overlay_network_indices = Vec::with_capacity(substreams.len());
-                let mut in_overlay_network_indices = Vec::with_capacity(substreams.len());
+                let mut out_notification_protocols_indices = Vec::with_capacity(substreams.len());
+                let mut in_notification_protocols_indices = Vec::with_capacity(substreams.len());
 
-                for ((_, direction, substream_id), state) in substreams {
+                for (_, direction, substream_id) in substreams {
+                    let state = guarded
+                        .connection_overlays
+                        .remove(&(connection_index, direction, substream_id))
+                        .unwrap();
+
                     match state {
                         SubstreamState::Pending(_) => continue,
                         SubstreamState::Open => {}
                     };
 
+                    // TODO: doesn't work properly because the connection has been switched to a non-established state beforehand
                     if let Some(established) = self.connection.as_established() {
                         let overlay_network_index = *established
                             .notifications_substream_user_data_mut(substream_id)
@@ -1745,10 +1751,10 @@ where
 
                         match direction {
                             SubstreamDirection::In => {
-                                in_overlay_network_indices.push(overlay_network_index);
+                                in_notification_protocols_indices.push(overlay_network_index);
                             }
                             SubstreamDirection::Out => {
-                                out_overlay_network_indices.push(overlay_network_index);
+                                out_notification_protocols_indices.push(overlay_network_index);
                             }
                         }
                     }
@@ -1758,8 +1764,8 @@ where
                     .events_tx
                     .try_send(Event::Shutdown {
                         id: self.id,
-                        in_notification_protocols_indices: in_overlay_network_indices,
-                        out_notification_protocols_indices: out_overlay_network_indices,
+                        in_notification_protocols_indices,
+                        out_notification_protocols_indices,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
