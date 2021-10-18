@@ -1969,6 +1969,10 @@ where
         let discovered_peers = &mut lock.chains[self.chain_index].discovered_peers;
 
         for (peer_id, addrs) in self.outcome {
+            if addrs.is_empty() {
+                continue;
+            }
+
             // TODO: O(n)
             if let Some(entry) = discovered_peers.iter_mut().find(|(p, _)| *p == peer_id) {
                 // Completely replace previously-discovered addresses.
