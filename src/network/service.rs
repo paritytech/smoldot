@@ -875,7 +875,7 @@ where
                     peer_id,
                     num_peer_connections,
                     peer_is_desired,
-                    ..
+                    user_data: address,
                 } if *num_peer_connections == 0 => {
                     if *peer_is_desired {
                         self.next_start_connect_waker.wake();
@@ -890,18 +890,36 @@ where
                         .collect::<Vec<_>>();
 
                     let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let _was_in = ephemeral_guarded.connections.remove(peer_id);
-                    debug_assert!(_was_in);
 
                     // Un-assign all the slots of that peer.
                     // Because this is an asynchronous operation, this is done ahead of time and
-                    // before any modification to `guarded`.
+                    // before any modification to `guarded` or `ephemeral_guarded`.
                     for idx in &chain_indices {
                         self.unassign_slot(&mut *ephemeral_guarded, *idx, peer_id)
                             .await;
                     }
 
+                    let _was_in = ephemeral_guarded.connections.remove(peer_id);
+                    debug_assert!(_was_in);
+
                     for idx in &chain_indices {
+                        // Insert the peer back in `discovered_peers` so that we potentially try
+                        // to connect again to it.
+                        let discovered_peers = &mut ephemeral_guarded.chains[*idx].discovered_peers;
+                        if let Some((_, addrs)) =
+                            discovered_peers.iter_mut().find(|(p, _)| p == peer_id)
+                        {
+                            if !addrs.iter().any(|a| *a == *address) {
+                                addrs.push(address.clone());
+                            }
+                        } else {
+                            if discovered_peers.capacity() == discovered_peers.len() {
+                                discovered_peers.pop_front();
+                            }
+
+                            discovered_peers.push_back((peer_id.clone(), vec![address.clone()]));
+                        }
+
                         guarded.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
                     }
 
@@ -913,7 +931,42 @@ where
                         _ => unreachable!(),
                     };
                 }
-                peers::Event::Disconnected { .. } => {
+                peers::Event::Disconnected {
+                    peer_id,
+                    user_data: address,
+                    ..
+                } => {
+                    // TODO: DRY
+
+                    // TODO: O(n)
+                    let chain_indices = guarded
+                        .open_chains
+                        .iter()
+                        .filter(|(pid, _)| pid == peer_id)
+                        .map(|(_, c)| *c)
+                        .collect::<Vec<_>>();
+
+                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+
+                    for idx in &chain_indices {
+                        // Insert the peer back in `discovered_peers` so that we potentially try
+                        // to connect again to it.
+                        let discovered_peers = &mut ephemeral_guarded.chains[*idx].discovered_peers;
+                        if let Some((_, addrs)) =
+                            discovered_peers.iter_mut().find(|(p, _)| p == peer_id)
+                        {
+                            if !addrs.iter().any(|a| *a == *address) {
+                                addrs.push(address.clone());
+                            }
+                        } else {
+                            if discovered_peers.capacity() == discovered_peers.len() {
+                                discovered_peers.pop_front();
+                            }
+
+                            discovered_peers.push_back((peer_id.clone(), vec![address.clone()]));
+                        }
+                    }
+
                     guarded.to_process_pre_event = None;
                 }
 
