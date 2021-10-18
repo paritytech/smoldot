@@ -393,6 +393,26 @@ impl NetworkService {
                 }
                 .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
             }));
+
+            (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
+                let network_service = Arc::downgrade(&network_service);
+                async move {
+                    let mut next_round = Duration::from_millis(500);
+
+                    loop {
+                        let network_service = match network_service.upgrade() {
+                            Some(ns) => ns,
+                            None => return,
+                        };
+
+                        network_service.network.assign_slots(chain_index).await;
+
+                        futures_timer::Delay::new(next_round).await;
+                        next_round = cmp::min(next_round * 2, Duration::from_secs(5));
+                    }
+                }
+                .instrument(tracing::debug_span!(parent: None, "slots-assign"))
+            }));
         }
 
         // Spawn task dedicated to opening connections.
