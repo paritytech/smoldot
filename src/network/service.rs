@@ -779,24 +779,28 @@ where
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
         let mut lock = self.ephemeral_guarded.lock().await;
-        let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
+        let (expected_peer_id, _, _) = lock.pending_ids.get(id.0).unwrap();
 
         let has_any_attempt_left = lock
             .num_pending_per_peer
-            .get(&expected_peer_id)
+            .get(expected_peer_id)
             .unwrap()
             .get()
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !lock.connections.contains(&expected_peer_id) {
+        if !has_any_attempt_left && !lock.connections.contains(expected_peer_id) {
+            let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
+
             for chain_index in 0..lock.chains.len() {
                 self.unassign_slot(&mut *lock, chain_index, &expected_peer_id)
                     .await;
             }
         }
 
-        // Update `lock.peers`.
+        // Now update `lock`.
+        let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
+
         // For future-cancellation-safety reasons, this is done after all the asynchronous
         // operations.
         {
