@@ -201,6 +201,9 @@ struct EphemeralGuarded<TNow> {
     /// [`EphemeralGuarded::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
 
+    /// List of all open connections.
+    connections: hashbrown::HashSet<PeerId, ahash::RandomState>,
+
     /// For each item in [`Config::chains`], the corresponding chain state.
     ///
     /// The `Vec` always has the same length as [`Config::chains`].
@@ -329,6 +332,17 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
         let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
 
+        let connections = {
+            let k0 = randomness.next_u64();
+            let k1 = randomness.next_u64();
+            let k2 = randomness.next_u64();
+            let k3 = randomness.next_u64();
+            hashbrown::HashSet::with_capacity_and_hasher(
+                config.peers_capacity,
+                ahash::RandomState::with_seeds(k0, k1, k2, k3),
+            )
+        };
+
         let peers = {
             let k0 = randomness.next_u64();
             let k1 = randomness.next_u64();
@@ -435,6 +449,7 @@ where
             ephemeral_guarded: Mutex::new(EphemeralGuarded {
                 num_pending_per_peer: peers,
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
+                connections,
                 chains,
             }),
             handshake_timeout: config.handshake_timeout,
@@ -766,8 +781,25 @@ where
         let mut lock = self.ephemeral_guarded.lock().await;
         let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
 
+        let has_any_attempt_left = lock
+            .num_pending_per_peer
+            .get(&expected_peer_id)
+            .unwrap()
+            .get()
+            == 1;
+
+        // If the peer is completely unreachable, unassign all of its slots.
+        if !has_any_attempt_left && lock.connections.contains(&expected_peer_id) {
+            for chain_index in 0..lock.chains.len() {
+                self.unassign_slot(&mut *lock, chain_index, &expected_peer_id)
+                    .await;
+            }
+        }
+
         // Update `lock.peers`.
-        let has_any_attempt_left = {
+        // For future-cancellation-safety reasons, this is done after all the asynchronous
+        // operations.
+        {
             let value = lock
                 .num_pending_per_peer
                 .get_mut(&expected_peer_id)
@@ -780,12 +812,6 @@ where
                 false
             }
         };
-
-        // If the peer is completely unreachable, unassign all of its outbound slots and remove
-        // its desired state.
-        if !has_any_attempt_left {
-            // TODO: actually do it; tricky because we should only do this if we're not connected
-        }
 
         self.next_start_connect_waker.wake();
     }
@@ -823,9 +849,17 @@ where
             // asynchronous operations are finished.
             match inner_event {
                 peers::Event::Connected {
+                    peer_id,
                     num_peer_connections,
                     ..
                 } if num_peer_connections.get() == 1 => {
+                    let _was_inserted = self
+                        .ephemeral_guarded
+                        .lock()
+                        .await
+                        .connections
+                        .insert(peer_id.clone());
+                    debug_assert!(_was_inserted);
                     return match guarded.to_process_pre_event.take().unwrap() {
                         peers::Event::Connected { peer_id, .. } => Event::Connected(peer_id),
                         _ => unreachable!(),
@@ -854,6 +888,8 @@ where
                         .collect::<Vec<_>>();
 
                     let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                    let _was_in = ephemeral_guarded.connections.remove(peer_id);
+                    debug_assert!(_was_in);
 
                     // Un-assign all the slots of that peer.
                     // Because this is an asynchronous operation, this is done ahead of time and
