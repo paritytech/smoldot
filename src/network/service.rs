@@ -789,7 +789,7 @@ where
             == 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && lock.connections.contains(&expected_peer_id) {
+        if !has_any_attempt_left && !lock.connections.contains(&expected_peer_id) {
             for chain_index in 0..lock.chains.len() {
                 self.unassign_slot(&mut *lock, chain_index, &expected_peer_id)
                     .await;
