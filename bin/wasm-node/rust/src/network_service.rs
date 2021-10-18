@@ -384,7 +384,12 @@ impl NetworkService {
                         // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
                         // into a `Future<dyn Output = Result<TcpStream, ...>>`.
                         let socket = {
-                            log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
+                            log::debug!(
+                                target: "connections",
+                                "Pending({:?}, {}) started: {}",
+                                start_connect.id, start_connect.expected_peer_id,
+                                start_connect.multiaddr
+                            );
                             ffi::Connection::connect(&start_connect.multiaddr.to_string())
                         };
 
