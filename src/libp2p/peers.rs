@@ -446,6 +446,8 @@ where
                     user_data: local_connection_index,
                     ..
                 } => {
+                    debug_assert!(guarded.connections.contains(*local_connection_index));
+
                     let connection_id = *connection_id;
                     let local_connection_index = *local_connection_index;
                     guarded.pending_inner_event = None;
@@ -1347,6 +1349,7 @@ where
         connection_id: ConnectionId,
         local_connection_index: usize,
     ) -> (Option<(PeerId, bool, u32, bool)>, TConn) {
+        debug_assert!(guarded.connections.contains(local_connection_index));
         let (expected_peer_index, user_data) = guarded.connections.remove(local_connection_index);
 
         // `expected_peer_index` is `None` iff the connection was an incoming connection whose
