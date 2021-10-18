@@ -896,7 +896,7 @@ where
                     }
 
                     let _was_in = ephemeral_guarded.connections.remove(peer_id);
-                    debug_assert!(_was_in); 
+                    debug_assert!(_was_in);
 
                     for idx in &chain_indices {
                         // Insert the peer back in `discovered_peers` so that we potentially try
