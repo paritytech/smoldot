@@ -410,7 +410,7 @@ impl NetworkService {
             }),
         );
 
-        // Spawn tasks dedicated to the Kademlia discovery.
+        // Spawn tasks dedicated to the Kademlia discovery and slots assignment.
         for chain_index in 0..num_chains {
             (network_service.guarded.try_lock().unwrap().tasks_executor)(
                 "discovery".into(),
@@ -453,6 +453,29 @@ impl NetworkService {
                                     );
                                 }
                             }
+                        }
+                    }
+                }),
+            );
+
+            (network_service.guarded.try_lock().unwrap().tasks_executor)(
+                "slots-assign".into(),
+                Box::pin({
+                    // TODO: keeping a Weak here doesn't really work to shut down tasks
+                    let network_service = Arc::downgrade(&network_service);
+                    async move {
+                        let mut next_round = Duration::from_millis(500);
+
+                        loop {
+                            let network_service = match network_service.upgrade() {
+                                Some(ns) => ns,
+                                None => return,
+                            };
+
+                            network_service.network.assign_slots(chain_index).await;
+
+                            ffi::Delay::new(next_round).await;
+                            next_round = cmp::min(next_round * 2, Duration::from_secs(5));
                         }
                     }
                 }),
