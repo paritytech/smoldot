@@ -1265,6 +1265,9 @@ pub enum ConnectionError {
     /// Eror during the handshake phase.
     #[display(fmt = "{}", _0)]
     Handshake(HandshakeError),
+    /// Connection was shut down by calling [`Network::start_shutdown`].
+    // TODO: that seems hacky
+    LocalShutdown,
 }
 
 /// Protocol error within the context of a connection. See [`Network::read_write`].
@@ -1430,9 +1433,9 @@ where
 
             ConnectionInner::Errored(err) => Err(err),
             ConnectionInner::ForcedShutdown => {
-                self.connection = ConnectionInner::ForcedShutdown; // TODO: correct?
+                self.connection = ConnectionInner::Errored(ConnectionError::LocalShutdown);
                 self.pending_event = Some(PendingEvent::Disconnect);
-                Ok(()) // TODO: is this correct?
+                Ok(())
             }
             ConnectionInner::Dead => panic!(),
             ConnectionInner::Poisoned => unreachable!(),
