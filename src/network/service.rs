@@ -852,11 +852,20 @@ where
                         .filter(|(pid, _)| pid == peer_id)
                         .map(|(_, c)| *c)
                         .collect::<Vec<_>>();
+
+                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+
+                    // Un-assign all the slots of that peer.
+                    // Because this is an asynchronous operation, this is done ahead of time and
+                    // before any modification to `guarded`.
+                    for idx in &chain_indices {
+                        self.unassign_slot(&mut *ephemeral_guarded, *idx, peer_id)
+                            .await;
+                    }
+
                     for idx in &chain_indices {
                         guarded.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
                     }
-
-                    // TODO: unassign peer slots?
 
                     return match guarded.to_process_pre_event.take().unwrap() {
                         peers::Event::Disconnected { peer_id, .. } => Event::Disconnected {
