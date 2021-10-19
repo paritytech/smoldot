@@ -57,8 +57,10 @@
 
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
-    /// Must throw an exception. The message is a UTF-8 string found in the memory of the
-    /// WebAssembly at offset `message_ptr` and with length `message_len`.
+    /// Must stop the execution immediately. The message is a UTF-8 string found in the memory of
+    /// the WebAssembly at offset `message_ptr` and with length `message_len`.
+    ///
+    /// > **Note**: This function is typically implemented using `throw`.
     ///
     /// After this function has been called, no further Wasm functions must be called again on
     /// this Wasm virtual machine. Explanation below.
@@ -72,16 +74,17 @@ extern "C" {
     /// the fact that `std::panic::catch_unwind` will catch this unwinding and let them perform
     /// some additional clean-ups.
     ///
-    /// Calling `throw` is neither `abort`, because the JavaScript could call into the Wasm again
-    /// later, nor `unwind`, because it isn't caught by `std::panic::catch_unwind`. By being
-    /// neither of the two, it breaks the assumptions that some Rust codes might rely on for
-    /// either correctness or safety.
-    /// In order to solve this problem, we enforce that `throw` must behave like `abort`, and
+    /// This function is typically implemented using `throw`. However, "just" throwing a JavaScript
+    /// exception from within the implementation of this function is neither `abort`, because the
+    /// JavaScript could call into the Wasm again later, nor `unwind`, because it isn't caught by
+    /// `std::panic::catch_unwind`. By being neither of the two, it breaks the assumptions that
+    /// some Rust codes might rely on for either correctness or safety.
+    /// In order to solve this problem, we enforce that `panic` must behave like `abort`, and
     /// forbid calling into the Wasm virtual machine again.
     ///
-    /// Beyond the `throw` function itself, any other FFI function that throws must similarly
+    /// Beyond the `panic` function itself, any other FFI function that throws must similarly
     /// behave like `abort` and prevent any further execution.
-    pub fn throw(message_ptr: u32, message_len: u32);
+    pub fn panic(message_ptr: u32, message_len: u32);
 
     /// Client is emitting a response to a previous JSON-RPC request sent using [`json_rpc_send`].
     /// Also used to send subscriptions notifications.

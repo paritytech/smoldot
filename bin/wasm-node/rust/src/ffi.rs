@@ -41,10 +41,10 @@ pub use timers::Delay;
 pub mod bindings;
 mod timers;
 
-/// Stops execution, throwing a string exception with the given content.
-pub(crate) fn throw(message: String) -> ! {
+/// Stops execution, providing a string explaining what happened.
+pub(crate) fn panic(message: String) -> ! {
     unsafe {
-        bindings::throw(
+        bindings::panic(
             u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
             u32::try_from(message.as_bytes().len()).unwrap(),
         );

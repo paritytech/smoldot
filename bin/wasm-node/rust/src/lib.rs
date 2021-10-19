@@ -131,7 +131,7 @@ impl Client {
         let _ = log::set_boxed_logger(Box::new(ffi::Logger))
             .map(|()| log::set_max_level(max_log_level));
         std::panic::set_hook(Box::new(|info| {
-            ffi::throw(info.to_string());
+            ffi::panic(info.to_string());
         }));
 
         // Fool-proof check to make sure that randomness is properly implemented.
