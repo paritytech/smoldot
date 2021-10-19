@@ -38,7 +38,7 @@
 
 use crate::ffi;
 
-use core::{cmp, fmt, num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{cmp, convert::TryFrom as _, fmt, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     informant::HashDisplay,
@@ -79,9 +79,16 @@ pub struct ConfigChain {
 
     /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
     /// the chains match.
+    ///
+    /// > **Note**: Be aware that this *must* be the *genesis* block, not any block known to be
+    /// >           in the chain.
     pub genesis_block_hash: [u8; 32],
 
-    /// Number and hash of the current best block. Can later be updated with // TODO: which function?
+    /// Number of the finalized block at the time of the initialization.
+    pub finalized_block_height: u64,
+
+    /// Number and hash of the current best block. Can later be updated with
+    /// [`NetworkService::set_local_best_block`].
     pub best_block: (u64, [u8; 32]),
 
     /// Identifier of the chain to connect to.
@@ -151,7 +158,8 @@ impl NetworkService {
                 grandpa_protocol_config: if chain.has_grandpa_protocol {
                     // TODO: dummy values
                     Some(service::GrandpaState {
-                        commit_finalized_height: 0,
+                        commit_finalized_height: u32::try_from(chain.finalized_block_height)
+                            .unwrap(), // TODO: unwrap()?!
                         round_number: 1,
                         set_id: 0,
                     })
