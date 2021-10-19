@@ -34,6 +34,55 @@ use std::{
     sync::Arc,
 };
 
+struct Task {
+    sync: all::AllSync<future::AbortHandle, (libp2p::PeerId, protocol::Role), ()>,
+    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId>,
+
+    /// List of block requests currently in progress.
+    pending_block_requests: stream::FuturesUnordered<
+        future::BoxFuture<
+            'static,
+            (
+                all::RequestId,
+                Result<
+                    Result<Vec<protocol::BlockData>, network::service::BlocksRequestError>,
+                    future::Aborted,
+                >,
+            ),
+        >,
+    >,
+    /// List of grandpa warp sync requests currently in progress.
+    pending_grandpa_requests: stream::FuturesUnordered<
+        future::BoxFuture<
+            'static,
+            (
+                all::RequestId,
+                Result<
+                    Result<
+                        protocol::GrandpaWarpSyncResponse,
+                        network::service::GrandpaWarpSyncRequestError,
+                    >,
+                    future::Aborted,
+                >,
+            ),
+        >,
+    >,
+    /// List of storage requests currently in progress.
+    pending_storage_requests: stream::FuturesUnordered<
+        future::BoxFuture<
+            'static,
+            (
+                all::RequestId,
+                Result<Result<Vec<Option<Vec<u8>>>, ()>, future::Aborted>,
+            ),
+        >,
+    >,
+    all_notifications: Vec<mpsc::Sender<Notification>>,
+
+    has_new_best: bool,
+    has_new_finalized: bool,
+}
+
 pub(super) async fn start_standalone_chain(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
@@ -42,49 +91,51 @@ pub(super) async fn start_standalone_chain(
     network_chain_index: usize,
     mut from_network_service: mpsc::Receiver<network_service::Event>,
 ) -> impl Future<Output = ()> {
-    // TODO: implicit generics
-    let mut sync = all::AllSync::<_, (libp2p::PeerId, protocol::Role), ()>::new(all::Config {
-        chain_information,
-        sources_capacity: 32,
-        blocks_capacity: {
-            // This is the maximum number of blocks between two consecutive justifications.
-            1024
-        },
-        max_disjoint_headers: 1024,
-        max_requests_per_block: NonZeroU32::new(3).unwrap(),
-        download_ahead_blocks: {
-            // Verifying a block mostly consists in:
-            //
-            // - Verifying a sr25519 signature for each block, plus a VRF output when the
-            // block is claiming a primary BABE slot.
-            // - Verifying one ed25519 signature per authority for every justification.
-            //
-            // At the time of writing, the speed of these operations hasn't been benchmarked.
-            // It is likely that it varies quite a bit between the various environments (the
-            // different browser engines, and NodeJS).
-            //
-            // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
-            // second, the number of blocks to download ahead of time in order to not block
-            // is 5k.
-            NonZeroU32::new(5000).unwrap()
-        },
-        full: None,
-    });
+    let mut task = Task {
+        sync: all::AllSync::new(all::Config {
+            chain_information,
+            sources_capacity: 32,
+            blocks_capacity: {
+                // This is the maximum number of blocks between two consecutive justifications.
+                1024
+            },
+            max_disjoint_headers: 1024,
+            max_requests_per_block: NonZeroU32::new(3).unwrap(),
+            download_ahead_blocks: {
+                // Verifying a block mostly consists in:
+                //
+                // - Verifying a sr25519 signature for each block, plus a VRF output when the
+                // block is claiming a primary BABE slot.
+                // - Verifying one ed25519 signature per authority for every justification.
+                //
+                // At the time of writing, the speed of these operations hasn't been benchmarked.
+                // It is likely that it varies quite a bit between the various environments (the
+                // different browser engines, and NodeJS).
+                //
+                // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
+                // second, the number of blocks to download ahead of time in order to not block
+                // is 5k.
+                NonZeroU32::new(5000).unwrap()
+            },
+            full: None,
+        }),
+        peers_source_id_map: HashMap::new(),
+        pending_block_requests: stream::FuturesUnordered::new(),
+        pending_grandpa_requests: stream::FuturesUnordered::new(),
+        pending_storage_requests: stream::FuturesUnordered::new(),
+        all_notifications: Vec::<mpsc::Sender<Notification>>::new(),
+        has_new_best: false,
+        has_new_finalized: false,
+    };
 
     async move {
-        // TODO: remove
-        let mut peers_source_id_map = HashMap::new();
-
-        // List of block requests currently in progress.
-        let mut pending_block_requests = stream::FuturesUnordered::new();
-        // List of grandpa warp sync requests currently in progress.
-        let mut pending_grandpa_requests = stream::FuturesUnordered::new();
-        // List of storage requests currently in progress.
-        let mut pending_storage_requests = stream::FuturesUnordered::new();
-        let mut all_notifications = Vec::<mpsc::Sender<Notification>>::new();
-
-        let mut has_new_best = false;
-        let mut has_new_finalized = false;
+        task.peers_source_id_map = HashMap::new();
+        task.pending_block_requests = stream::FuturesUnordered::new();
+        task.pending_grandpa_requests = stream::FuturesUnordered::new();
+        task.pending_storage_requests = stream::FuturesUnordered::new();
+        task.all_notifications = Vec::<mpsc::Sender<Notification>>::new();
+        task.has_new_best = false;
+        task.has_new_finalized = false;
 
         // Main loop of the syncing logic.
         loop {
@@ -92,13 +143,13 @@ pub(super) async fn start_standalone_chain(
                 // `desired_requests()` returns, in decreasing order of priority, the requests
                 // that should be started in order for the syncing to proceed. We simply pick the
                 // first request, but enforce one ongoing request per source.
-                let (source_id, _, mut request_detail) = match sync
-                    .desired_requests()
-                    .find(|(source_id, _, _)| sync.source_num_ongoing_requests(*source_id) == 0)
-                {
-                    Some(v) => v,
-                    None => break,
-                };
+                let (source_id, _, mut request_detail) =
+                    match task.sync.desired_requests().find(|(source_id, _, _)| {
+                        task.sync.source_num_ongoing_requests(*source_id) == 0
+                    }) {
+                        Some(v) => v,
+                        None => break,
+                    };
 
                 // Before notifying the syncing of the request, clamp the number of blocks to the
                 // number of blocks we expect to receive.
@@ -114,7 +165,7 @@ pub(super) async fn start_standalone_chain(
                         request_bodies,
                         request_justification,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                        let peer_id = task.sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let block_request = network_service.clone().blocks_request(
                             peer_id,
@@ -147,15 +198,15 @@ pub(super) async fn start_standalone_chain(
                         );
 
                         let (block_request, abort) = future::abortable(block_request);
-                        let request_id = sync.add_request(source_id, request_detail, abort);
+                        let request_id = task.sync.add_request(source_id, request_detail, abort);
 
-                        pending_block_requests
-                            .push(async move { (request_id, block_request.await) });
+                        task.pending_block_requests
+                            .push(async move { (request_id, block_request.await) }.boxed());
                     }
                     all::RequestDetail::GrandpaWarpSync {
                         sync_start_block_hash,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                        let peer_id = task.sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let grandpa_request = network_service.clone().grandpa_warp_sync_request(
                             peer_id,
@@ -164,17 +215,17 @@ pub(super) async fn start_standalone_chain(
                         );
 
                         let (grandpa_request, abort) = future::abortable(grandpa_request);
-                        let request_id = sync.add_request(source_id, request_detail, abort);
+                        let request_id = task.sync.add_request(source_id, request_detail, abort);
 
-                        pending_grandpa_requests
-                            .push(async move { (request_id, grandpa_request.await) });
+                        task.pending_grandpa_requests
+                            .push(async move { (request_id, grandpa_request.await) }.boxed());
                     }
                     all::RequestDetail::StorageGet {
                         block_hash,
                         state_trie_root,
                         ref keys,
                     } => {
-                        let peer_id = sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                        let peer_id = task.sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                         let storage_request = network_service.clone().storage_proof_request(
                             network_chain_index,
@@ -209,10 +260,10 @@ pub(super) async fn start_standalone_chain(
                         };
 
                         let (storage_request, abort) = future::abortable(storage_request);
-                        let request_id = sync.add_request(source_id, request_detail, abort);
+                        let request_id = task.sync.add_request(source_id, request_detail, abort);
 
-                        pending_storage_requests
-                            .push(async move { (request_id, storage_request.await) });
+                        task.pending_storage_requests
+                            .push(async move { (request_id, storage_request.await) }.boxed());
                     }
                 }
             }
@@ -225,16 +276,16 @@ pub(super) async fn start_standalone_chain(
             // If the state is one of the "verifying" states, perform the actual verification and
             // loop again until the sync is in an idle state.
             loop {
-                match sync.process_one() {
+                match task.sync.process_one() {
                     all::ProcessOne::AllSync(idle) => {
-                        sync = idle;
+                        task.sync = idle;
                         break;
                     }
                     all::ProcessOne::VerifyWarpSyncFragment(verify) => {
                         let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
 
                         let (sync_out, result) = verify.perform();
-                        sync = sync_out;
+                        task.sync = sync_out;
 
                         if let Err(err) = result {
                             log::warn!(
@@ -271,20 +322,21 @@ pub(super) async fn start_standalone_chain(
                                 );
 
                                 if is_new_best {
-                                    has_new_best = true;
+                                    task.has_new_best = true;
                                 }
                                 if is_new_finalized {
                                     // It is possible that finalizing this new block has modified
                                     // the best block as well.
                                     // TODO: ^ this is really a footgun; make it clearer in the syncing API
-                                    has_new_best = true;
-                                    has_new_finalized = true;
+                                    task.has_new_best = true;
+                                    task.has_new_finalized = true;
                                 }
 
                                 // Elements in `all_notifications` are removed one by one and
                                 // inserted back if the channel is still open.
-                                for index in (0..all_notifications.len()).rev() {
-                                    let mut subscription = all_notifications.swap_remove(index);
+                                for index in (0..task.all_notifications.len()).rev() {
+                                    let mut subscription =
+                                        task.all_notifications.swap_remove(index);
                                     // TODO: the code below is `O(n)` complexity
                                     let header = sync_out
                                         .non_finalized_blocks_ancestry_order()
@@ -310,10 +362,10 @@ pub(super) async fn start_standalone_chain(
                                             continue;
                                         }
                                     }
-                                    all_notifications.push(subscription);
+                                    task.all_notifications.push(subscription);
                                 }
 
-                                sync = sync_out;
+                                task.sync = sync_out;
                                 continue;
                             }
                             all::HeaderVerifyOutcome::Error {
@@ -328,7 +380,7 @@ pub(super) async fn start_standalone_chain(
                                     error
                                 );
 
-                                sync = sync_out;
+                                task.sync = sync_out;
                                 continue;
                             }
                         }
@@ -340,13 +392,13 @@ pub(super) async fn start_standalone_chain(
             }
 
             // TODO: handle this differently
-            if has_new_best {
-                has_new_best = false;
+            if task.has_new_best {
+                task.has_new_best = false;
 
                 let fut = network_service.set_local_best_block(
                     network_chain_index,
-                    sync.best_block_hash(),
-                    sync.best_block_number(),
+                    task.sync.best_block_hash(),
+                    task.sync.best_block_number(),
                 );
                 fut.await;
 
@@ -360,8 +412,8 @@ pub(super) async fn start_standalone_chain(
             }
 
             // TODO: handle this differently
-            if has_new_finalized {
-                has_new_finalized = false;
+            if task.has_new_finalized {
+                task.has_new_finalized = false;
 
                 // If the chain uses GrandPa, the networking has to be kept up-to-date with the
                 // state of finalization for other peers to send back relevant gossip messages.
@@ -371,7 +423,7 @@ pub(super) async fn start_standalone_chain(
                     if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
                         after_finalized_block_authorities_set_id,
                         ..
-                    } = sync.as_chain_information().as_ref().finality
+                    } = task.sync.as_chain_information().as_ref().finality
                     {
                         Some(after_finalized_block_authorities_set_id)
                     } else {
@@ -379,7 +431,7 @@ pub(super) async fn start_standalone_chain(
                     };
                 if let Some(set_id) = grandpa_set_id {
                     let commit_finalized_height =
-                        u32::try_from(sync.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
+                        u32::try_from(task.sync.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
                     network_service
                         .set_local_grandpa_state(
                             network_chain_index,
@@ -421,14 +473,14 @@ pub(super) async fn start_standalone_chain(
                         network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
-                            let id = sync.add_source((peer_id.clone(), role), best_block_number, best_block_hash);
-                            peers_source_id_map.insert(peer_id, id);
+                            let id = task.sync.add_source((peer_id.clone(), role), best_block_number, best_block_hash);
+                            task.peers_source_id_map.insert(peer_id, id);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
                             if chain_index == network_chain_index =>
                         {
-                            let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (_, requests) = sync.remove_source(id);
+                            let id = task.peers_source_id_map.remove(&peer_id).unwrap();
+                            let (_, requests) = task.sync.remove_source(id);
                             for (_, abort) in requests {
                                 abort.abort();
                             }
@@ -436,10 +488,10 @@ pub(super) async fn start_standalone_chain(
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
                             if chain_index == network_chain_index =>
                         {
-                            let id = *peers_source_id_map.get(&peer_id).unwrap();
+                            let id = *task.peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             // TODO: stupid to re-encode header
-                            match sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                            match task.sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify |
                                 all::BlockAnnounceOutcome::AlreadyInChain => {
                                     log::debug!(
@@ -485,25 +537,25 @@ pub(super) async fn start_standalone_chain(
                         network_service::Event::GrandpaCommitMessage { chain_index, message }
                             if chain_index == network_chain_index =>
                         {
-                            match sync.grandpa_commit_message(&message.as_encoded()) {
+                            match task.sync.grandpa_commit_message(&message.as_encoded()) {
                                 Ok(()) => {
-                                    has_new_finalized = true;
-                                    has_new_best = true;  // TODO: done in case finality changes the best block; make this clearer in the sync layer
+                                    task.has_new_finalized = true;
+                                    task.has_new_best = true;  // TODO: done in case finality changes the best block; make this clearer in the sync layer
 
                                     // Elements in `all_notifications` are removed one by one and
                                     // inserted back if the channel is still open.
-                                    for index in (0..all_notifications.len()).rev() {
-                                        let mut subscription = all_notifications.swap_remove(index);
+                                    for index in (0..task.all_notifications.len()).rev() {
+                                        let mut subscription = task.all_notifications.swap_remove(index);
                                         if subscription
                                             .try_send(Notification::Finalized {
-                                                hash: sync.finalized_block_header().hash(),
-                                                best_block_hash: sync.best_block_hash(),
+                                                hash: task.sync.finalized_block_header().hash(),
+                                                best_block_hash: task.sync.best_block_hash(),
                                             })
                                             .is_err()
                                         {
                                             continue;
                                         }
-                                        all_notifications.push(subscription);
+                                        task.all_notifications.push(subscription);
                                     }
                                 },
                                 Err(err) => {
@@ -535,16 +587,16 @@ pub(super) async fn start_standalone_chain(
 
                     match message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            let _ = send_back.send(sync.is_near_head_of_chain_heuristic());
+                            let _ = send_back.send(task.sync.is_near_head_of_chain_heuristic());
                         }
                         ToBackground::SubscribeAll { send_back, buffer_size } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
-                            all_notifications.push(tx);
+                            task.all_notifications.push(tx);
                             let _ = send_back.send(SubscribeAll {
-                                finalized_block_scale_encoded_header: sync.finalized_block_header().scale_encoding_vec(),
+                                finalized_block_scale_encoded_header: task.sync.finalized_block_header().scale_encoding_vec(),
                                 non_finalized_blocks_ancestry_order: {
-                                    let best_hash = sync.best_block_hash();
-                                    sync.non_finalized_blocks_ancestry_order().map(|h| {
+                                    let best_hash = task.sync.best_block_hash();
+                                    task.sync.non_finalized_blocks_ancestry_order().map(|h| {
                                         let scale_encoding = h.scale_encoding_vec();
                                         BlockNotification {
                                             is_new_best: header::hash_from_scale_encoded_header(&scale_encoding) == best_hash,
@@ -557,30 +609,30 @@ pub(super) async fn start_standalone_chain(
                             });
                         }
                         ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
-                            let finalized_num = sync.finalized_block_header().number;
+                            let finalized_num = task.sync.finalized_block_header().number;
                             let outcome = if block_number <= finalized_num {
-                                sync.sources()
+                                task.sync.sources()
                                     .filter(|source_id| {
-                                        let source_best = sync.source_best_block(*source_id);
+                                        let source_best = task.sync.source_best_block(*source_id);
                                         source_best.0 > block_number ||
                                             (source_best.0 == block_number && *source_best.1 == block_hash)
                                     })
-                                    .map(|id| sync.source_user_data(id).0.clone())
+                                    .map(|id| task.sync.source_user_data(id).0.clone())
                                     .collect()
                             } else {
                                 // As documented, `knows_non_finalized_block` would panic if the
                                 // block height was below the one of the known finalized block.
-                                sync.knows_non_finalized_block(block_number, &block_hash)
-                                    .map(|id| sync.source_user_data(id).0.clone())
+                                task.sync.knows_non_finalized_block(block_number, &block_hash)
+                                    .map(|id| task.sync.source_user_data(id).0.clone())
                                     .collect()
                             };
                             let _ = send_back.send(outcome);
                         }
                         ToBackground::SyncingPeers { send_back } => {
-                            let out = sync.sources()
+                            let out = task.sync.sources()
                                 .map(|src| {
-                                    let (peer_id, role) = sync.source_user_data(src).clone();
-                                    let (height, hash) = sync.source_best_block(src);
+                                    let (peer_id, role) = task.sync.source_user_data(src).clone();
+                                    let (height, hash) = task.sync.source_best_block(src);
                                     (peer_id, role, height, *hash)
                                 })
                                 .collect::<Vec<_>>();
@@ -591,13 +643,13 @@ pub(super) async fn start_standalone_chain(
                     continue;
                 },
 
-                (request_id, result) = pending_block_requests.select_next_some() => {
+                (request_id, result) = task.pending_block_requests.select_next_some() => {
                     // A block(s) request has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
                         // Inject the result of the request into the sync state machine.
-                        sync.blocks_request_response(
+                        task.sync.blocks_request_response(
                             request_id,
                             result.map_err(|_| ()).map(|v| {
                                 v.into_iter().filter_map(|block| {
@@ -618,13 +670,13 @@ pub(super) async fn start_standalone_chain(
                     }
                 },
 
-                (request_id, result) = pending_grandpa_requests.select_next_some() => {
+                (request_id, result) = task.pending_grandpa_requests.select_next_some() => {
                     // A GrandPa warp sync request has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
                         // Inject the result of the request into the sync state machine.
-                        sync.grandpa_warp_sync_response(
+                        task.sync.grandpa_warp_sync_response(
                             request_id,
                             result.ok(),
                         ).1
@@ -636,13 +688,13 @@ pub(super) async fn start_standalone_chain(
                     }
                 },
 
-                (request_id, result) = pending_storage_requests.select_next_some() => {
+                (request_id, result) = task.pending_storage_requests.select_next_some() => {
                     // A storage request has been finished.
                     // `result` is an error if the block request got cancelled by the sync state
                     // machine.
                     if let Ok(result) = result {
                         // Inject the result of the request into the sync state machine.
-                        sync.storage_get_response(
+                        task.sync.storage_get_response(
                             request_id,
                             result.map(|list| list.into_iter()),
                         ).1
@@ -663,18 +715,18 @@ pub(super) async fn start_standalone_chain(
                 | all::ResponseOutcome::NotFinalizedChain { .. }
                 | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
                 all::ResponseOutcome::WarpSyncFinished => {
-                    let finalized_header = sync.finalized_block_header();
+                    let finalized_header = task.sync.finalized_block_header();
                     log::info!(
                         target: &log_target,
                         "GrandPa warp sync finished to #{} ({})",
                         finalized_header.number,
                         HashDisplay(&finalized_header.hash())
                     );
-                    has_new_finalized = true;
-                    has_new_best = true;
+                    task.has_new_finalized = true;
+                    task.has_new_best = true;
                     // Since there is a gap in the blocks, all active notifications to all blocks
                     // must be cleared.
-                    all_notifications.clear();
+                    task.all_notifications.clear();
                 }
             }
         }
