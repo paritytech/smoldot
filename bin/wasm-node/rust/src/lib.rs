@@ -850,6 +850,7 @@ async fn start_services(
                     .as_ref()
                     .finalized_block_header
                     .hash(),
+                finalized_block_height: chain_information.as_ref().finalized_block_header.number,
                 best_block: (
                     chain_information.as_ref().finalized_block_header.number,
                     chain_information.as_ref().finalized_block_header.hash(),
