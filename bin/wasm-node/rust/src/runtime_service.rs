@@ -521,7 +521,19 @@ impl RuntimeService {
     /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
-    pub async fn metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
+    pub async fn metadata(
+        self: Arc<RuntimeService>,
+        block_hash: &[u8; 32],
+    ) -> Result<Vec<u8>, MetadataError> {
+        self.metadata_inner(Some(block_hash)).await
+    }
+
+    /// Obtain the metadata of the runtime of the current best block.
+    ///
+    /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
+    /// >           of the best block can change at any time. This method should ideally be called
+    /// >           again after every runtime change.
+    pub async fn best_block_metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
         // First, try the cache.
         {
             let guarded = self.guarded.lock().await;
@@ -544,12 +556,23 @@ impl RuntimeService {
             }
         }
 
-        let (mut runtime_call_lock, virtual_machine) = self
-            .recent_best_block_runtime_lock()
-            .await
-            .start("Metadata_metadata", iter::empty::<Vec<u8>>())
-            .await
-            .map_err(MetadataError::CallError)?;
+        self.metadata_inner(None).await
+    }
+
+    async fn metadata_inner(
+        self: Arc<RuntimeService>,
+        block_hash: Option<&[u8; 32]>,
+    ) -> Result<Vec<u8>, MetadataError> {
+        let (mut runtime_call_lock, virtual_machine) = if let Some(block_hash) = block_hash {
+            self.runtime_lock(block_hash)
+                .await
+                .ok_or(MetadataError::RuntimeFetch)?
+        } else {
+            self.recent_best_block_runtime_lock().await
+        }
+        .start("Metadata_metadata", iter::empty::<Vec<u8>>())
+        .await
+        .map_err(MetadataError::CallError)?;
 
         let mut query = metadata::query_metadata(virtual_machine);
         let (metadata_result, virtual_machine) = loop {
@@ -957,6 +980,8 @@ pub enum MetadataError {
     /// Error in the metadata-specific runtime API.
     #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
     MetadataQuery(metadata::Error),
+    /// Error while fetching the runtime of the desired block.
+    RuntimeFetch,
 }
 
 struct Guarded {

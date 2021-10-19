@@ -858,8 +858,14 @@ impl Background {
                     )
                     .await;
             }
-            methods::MethodCall::state_getMetadata {} => {
-                let response = match self.runtime_service.clone().metadata().await {
+            methods::MethodCall::state_getMetadata { hash } => {
+                let result = if let Some(hash) = hash {
+                    self.runtime_service.clone().metadata(&hash.0).await
+                } else {
+                    self.runtime_service.clone().best_block_metadata().await
+                };
+
+                let response = match result {
                     Ok(metadata) => {
                         methods::Response::state_getMetadata(methods::HexString(metadata))
                             .to_json_response(request_id)
