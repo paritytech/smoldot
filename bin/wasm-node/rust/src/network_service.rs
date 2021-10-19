@@ -384,7 +384,12 @@ impl NetworkService {
                         // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
                         // into a `Future<dyn Output = Result<TcpStream, ...>>`.
                         let socket = {
-                            log::debug!(target: "connections", "Pending({:?}) started: {}", start_connect.id, start_connect.multiaddr);
+                            log::debug!(
+                                target: "connections",
+                                "Pending({:?}, {}) started: {}",
+                                start_connect.id, start_connect.expected_peer_id,
+                                start_connect.multiaddr
+                            );
                             ffi::Connection::connect(&start_connect.multiaddr.to_string())
                         };
 
@@ -410,7 +415,7 @@ impl NetworkService {
             }),
         );
 
-        // Spawn tasks dedicated to the Kademlia discovery.
+        // Spawn tasks dedicated to the Kademlia discovery and slots assignment.
         for chain_index in 0..num_chains {
             (network_service.guarded.try_lock().unwrap().tasks_executor)(
                 "discovery".into(),
@@ -453,6 +458,38 @@ impl NetworkService {
                                     );
                                 }
                             }
+                        }
+                    }
+                }),
+            );
+
+            (network_service.guarded.try_lock().unwrap().tasks_executor)(
+                "slots-assign".into(),
+                Box::pin({
+                    // TODO: keeping a Weak here doesn't really work to shut down tasks
+                    let network_service = Arc::downgrade(&network_service);
+                    async move {
+                        let mut next_round = Duration::from_millis(500);
+
+                        loop {
+                            let network_service = match network_service.upgrade() {
+                                Some(ns) => ns,
+                                None => return,
+                            };
+
+                            let peer = network_service.network.assign_slots(chain_index).await;
+                            if let Some(_peer_id) = peer {
+                                // TODO: restore and log also the de-assignments
+                                /*log::debug!(
+                                    target: "connections",
+                                    "Slots({}) ∋ {}",
+                                    &network_service.log_chain_names[chain_index],
+                                    peer_id
+                                );*/
+                            }
+
+                            ffi::Delay::new(next_round).await;
+                            next_round = cmp::min(next_round * 2, Duration::from_secs(5));
                         }
                     }
                 }),

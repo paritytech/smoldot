@@ -39,7 +39,7 @@ std = [
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
-ahash = { version = "0.7.5", default-features = false }
+ahash = { version = "0.7.6", default-features = false }
 arrayvec = { version = "0.7.1", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
@@ -66,7 +66,7 @@ prost = { version = "0.9.0", default-features = false, features = ["prost-derive
 rand = { version = "0.8.4", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.2.4" }  # TODO: doesn't support no_std :-/
-schnorrkel = { version = "0.10.1", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
+schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
 serde = { version = "1.0.130", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.68", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.9.8", default-features = false }

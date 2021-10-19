@@ -28,7 +28,7 @@ hex = { version = "0.4.3", default-features = false }
 parking_lot = { version = "0.11.2" }
 rand = "0.8.4"
 smoldot = { version = "0.1.0", path = "../..", default-features = false, features = ["database-sqlite", "std"] }
-structopt = { version = "0.3.23", default-features = false, features = ["color", "suggestions", "wrap_help"] }
+structopt = { version = "0.3.25", default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = "0.1.17"
 tracing = { version = "0.1.29", features = ["attributes"] }
 tracing-subscriber = { version = "0.2.25", default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "smallvec"] }
