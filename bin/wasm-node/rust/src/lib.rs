@@ -26,7 +26,7 @@ use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec,
-    informant::HashDisplay,
+    informant::{BytesDisplay, HashDisplay},
     json_rpc::{self, methods},
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -38,8 +38,10 @@ use std::{
     str,
     sync::Arc,
     task,
+    time::Duration,
 };
 
+mod alloc;
 pub mod ffi;
 
 mod json_rpc_service;
@@ -48,15 +50,6 @@ mod network_service;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
-
-// Use the default "system" allocator. In the context of Wasm, this uses the `dlmalloc` library.
-// See <https://github.com/rust-lang/rust/tree/1.47.0/library/std/src/sys/wasm>.
-//
-// While the `wee_alloc` crate is usually the recommended choice in WebAssembly, testing has shown
-// that using it makes memory usage explode from ~100MiB to ~2GiB and more (the environment then
-// refuses to allocate 4GiB).
-#[global_allocator]
-static ALLOC: std::alloc::System = std::alloc::System;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -153,7 +146,8 @@ impl Client {
         // The `new_task_tx` and `new_task_rx` variables are used when spawning a new task is
         // required. Send a task on `new_task_tx` to start running it.
         // TODO: update comment ^
-        let (new_task_tx, mut new_task_rx) = mpsc::unbounded();
+        let (new_task_tx, mut new_task_rx) =
+            mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
 
         // This is the main future that executes the entire client.
         ffi::spawn_background_task(async move {
@@ -191,6 +185,24 @@ impl Client {
             }
         });
 
+        // Spawn a constantly-running task that periodically prints the total memory usage of
+        // the node.
+        new_task_tx
+            .unbounded_send((
+                "memory-printer".to_owned(),
+                Box::pin(async move {
+                    loop {
+                        ffi::Delay::new(Duration::from_secs(15)).await;
+
+                        // For the unwrap below to fail, the quantity of allocated would have to
+                        // not fit in a `u64`, which as of 2021 is basically impossible.
+                        let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
+                        log::info!(target: "smoldot", "Node memory usage: {}", BytesDisplay(mem));
+                    }
+                }),
+            ))
+            .unwrap();
+
         Client {
             new_task_tx,
             public_api_chains: slab::Slab::with_capacity(2),
@@ -203,6 +215,18 @@ impl Client {
         &mut self,
         config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
+        // Fail any new chain initialization if the amount of free memory is too low. This
+        // avoids running into OOM errors. The threshold is completely empirical and should
+        // probably be updated regularly to account for changes in the implementation.
+        if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+            return ChainId(
+                self.public_api_chains
+                    .insert(PublicApiChain::Erroneous(format!(
+                        "Wasm node is running low on memory and will prevent any new chain from being added"
+                    ))),
+            );
+        }
+
         // Decode the chain specification.
         let chain_spec =
             match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
