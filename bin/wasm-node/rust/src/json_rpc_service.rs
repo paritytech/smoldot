@@ -1184,16 +1184,6 @@ impl Background {
                     // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
                     // is finished and that the block notifications report blocks that are
                     // believed to be near the head of the chain.
-                    // Note that since it is the `sync_service` that is used for block
-                    // subscriptions (as opposed to the `runtime_service`), it would also make
-                    // sense for the `sync_service` that is used to determine `is_syncing`.
-                    // Unfortunately, this means that the runtime version will likely change
-                    // *after* `isSyncing` becomes `false`, which causes issues in PolkadotJS
-                    // Because of this, we report `isSyncing` equal to `false` only after the
-                    // runtime service has obtained the runtime of the best block.
-                    // Additionally, using the `runtime_service` instead of the `sync_service`
-                    // means that, when it comes to parachains, `isSyncing` will be `true` for as
-                    // long as we haven't found any peer.
                     is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
                     peers: u64::try_from(self.sync_service.syncing_peers().await.len())
                         .unwrap_or(u64::max_value()),
