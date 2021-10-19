@@ -289,11 +289,11 @@ where
             .non_finalized_blocks
             .iter_unordered()
             .map(|(_, b)| b)
-            .filter(|b| match b.async_op {
+            .filter(|b| {
+                matches!(b.async_op,
                 AsyncOpState::InProgress {
                     async_op_id: id, ..
-                } if id == async_op_id => true,
-                _ => false,
+                } if id == async_op_id)
             })
             .count();
 

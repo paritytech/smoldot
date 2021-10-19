@@ -41,8 +41,8 @@ impl LightSyncState {
             finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
                 .unwrap()
                 .into(),
-            grandpa_authority_set: AuthoritySet::decode_all(&grandpa_authority_set_slice).unwrap(),
-            babe_epoch_changes: EpochChanges::decode_all(&babe_epoch_changes_slice).unwrap(),
+            grandpa_authority_set: AuthoritySet::decode_all(grandpa_authority_set_slice).unwrap(),
+            babe_epoch_changes: EpochChanges::decode_all(babe_epoch_changes_slice).unwrap(),
         };
 
         decoded

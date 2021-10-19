@@ -62,7 +62,7 @@
 // TODO: review this last sentence, as this API might change after some experience with it
 
 use crate::libp2p::{
-    peer_id::{PeerId, PublicKey},
+    peer_id::{PeerId, PublicKey, SignatureVerifyFailed},
     read_write::ReadWrite,
 };
 
@@ -751,15 +751,12 @@ impl HandshakeInProgress {
                 // checked that the payload arrives when it is supposed to, this can never panic.
                 let remote_noise_static = self.inner.get_remote_static().unwrap();
                 // TODO: don't use concat() in order to not allocate a Vec
-                if remote_public_key
+                remote_public_key
                     .verify(
                         &[b"noise-libp2p-static-key:", remote_noise_static].concat(),
                         &handshake_payload.identity_sig,
                     )
-                    .is_err()
-                {
-                    return Err(HandshakeError::SignatureVerificationFailed);
-                }
+                    .map_err(HandshakeError::SignatureVerificationFailed)?;
 
                 self.rx_payload = RxPayload::Received(remote_public_key.into_peer_id());
             } else if !decoded_payload.is_empty() {
@@ -806,7 +803,8 @@ pub enum HandshakeError {
     /// Received a payload as part of a handshake message when none was expected.
     UnexpectedPayload,
     /// Signature of the noise public key by the libp2p key failed.
-    SignatureVerificationFailed,
+    #[display(fmt = "Signature of the noise public key by the libp2p key failed.")]
+    SignatureVerificationFailed(SignatureVerifyFailed),
 }
 
 /// Error while decoding data.
