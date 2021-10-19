@@ -399,9 +399,10 @@ pub(super) async fn start_parachain(
                     }
                 },
 
-                network_event = from_network_service.select_next_some() => {
+                network_event = from_network_service.next() => {
                     // Something happened on the network.
-                    match network_event {
+                    // We expect the networking channel to never close, so the event is unwrapped.
+                    match network_event.unwrap() {
                         network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
