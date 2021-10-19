@@ -124,17 +124,14 @@ impl SyncService {
         } else {
             (config.tasks_executor)(
                 "sync-relay".into(),
-                Box::pin(
-                    standalone::start_standalone_chain(
-                        log_target,
-                        config.chain_information,
-                        from_foreground,
-                        config.network_service.0.clone(),
-                        config.network_service.1,
-                        config.network_events_receiver,
-                    )
-                    .await,
-                ),
+                Box::pin(standalone::start_standalone_chain(
+                    log_target,
+                    config.chain_information,
+                    from_foreground,
+                    config.network_service.0.clone(),
+                    config.network_service.1,
+                    config.network_events_receiver,
+                )),
             );
         }
 
