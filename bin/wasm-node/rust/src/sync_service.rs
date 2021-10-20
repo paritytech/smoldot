@@ -299,8 +299,15 @@ impl SyncService {
                 continue;
             }
             match (&result.header, &result.body) {
-                (Some(_), Some(_)) => {
-                    // TODO: verify correctness of body
+                (Some(header), Some(body)) => {
+                    if let Ok(decoded_header) = header::decode(header) {
+                        let expected = header::extrinsics_root(body.iter());
+                        if expected != *decoded_header.extrinsics_root {
+                            return Err(());
+                        }
+                    } else {
+                        return Err(());
+                    }
                 }
                 _ => {}
             }
