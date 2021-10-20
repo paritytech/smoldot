@@ -548,17 +548,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
         for included_body in body {
             let included_body = included_body.as_ref();
-
-            // As explained in the documentation, the transactions passed as parameter are
-            // single-SCALE-encoded, while the ones stored in the pool are SCALE-encoded.
-            // This is taken into account when comparing hashes.
-            let hash = {
-                let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
-                hasher
-                    .update(crate::util::encode_scale_compact_usize(included_body.len()).as_ref());
-                hasher.update(included_body);
-                <[u8; 32]>::try_from(hasher.finalize().as_bytes()).unwrap()
-            };
+            let hash = blake2_hash(included_body);
 
             'tx_in_pool: for (_, known_tx_id) in self.by_hash.range(
                 (hash, TransactionId(usize::min_value()))
