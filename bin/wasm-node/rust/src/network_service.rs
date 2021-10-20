@@ -529,6 +529,18 @@ impl NetworkService {
             result.as_ref().map(|b| b.len())
         );
 
+        match &result {
+            Ok(_) | Err(service::BlocksRequestError::Request(_)) => {},
+            Err(err) => {
+                log::warn!(
+                    target: "network",
+                    "Error in block request with {}. This might indicate an incompatibility. Error: {}",
+                    target,
+                    err
+                );
+            }
+        }
+
         result
     }
 

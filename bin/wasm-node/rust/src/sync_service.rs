@@ -34,7 +34,7 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain, header,
+    chain,
     libp2p::PeerId,
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
