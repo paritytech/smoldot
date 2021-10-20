@@ -31,9 +31,9 @@ export default (config) => {
     let connections = {};
 
     const bindings = {
-        // Must throw an error. A human-readable message can be found in the WebAssembly memory in
-        // the given buffer.
-        throw: (ptr, len) => {
+        // Must exit with an error. A human-readable message can be found in the WebAssembly
+        // memory in the given buffer.
+        panic: (ptr, len) => {
             ptr >>>= 0;
             len >>>= 0;
 
