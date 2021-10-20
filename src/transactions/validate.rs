@@ -35,7 +35,7 @@ pub struct Config<'a, TTx> {
     /// The runtime of this block must be the one in [`Config::runtime`].
     pub scale_encoded_header: &'a [u8],
 
-    /// Double-SCALE-encoded transaction.
+    /// SCALE-encoded transaction.
     pub scale_encoded_transaction: TTx,
 
     /// Source of the transaction.

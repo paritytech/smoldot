@@ -694,7 +694,7 @@ where
 
     ///
     ///
-    /// Must be passed the double-SCALE-encoded transaction.
+    /// Must be passed the SCALE-encoded transaction.
     // TODO: -> broadcast_transaction
     pub async fn announce_transaction(
         &self,
