@@ -634,6 +634,7 @@ where
                             .inner
                             .reject_notifications_in(*connection_id, *substream_id)
                             .await;
+                    } else {
                         guarded
                             .peers_notifications_in
                             .insert((peer_index, *notifications_protocol_index));
