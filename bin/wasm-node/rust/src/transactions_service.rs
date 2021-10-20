@@ -152,7 +152,7 @@ impl TransactionsService {
     /// Adds a transaction to the service. The service will try to send it out as soon as
     /// possible.
     ///
-    /// Must pass as parameter the double-SCALE-encoded transaction.
+    /// Must pass as parameter the SCALE-encoded transaction.
     ///
     /// The return value of this method is a channel which will receive updates on the state
     /// of the extrinsic. The channel is closed when no new update is expected or if it becomes
@@ -358,7 +358,7 @@ async fn background_task(
                     let log_target = log_target.clone();
                     let scale_encoded_transaction = worker
                         .pending_transactions
-                        .double_scale_encoding(to_start_validate)
+                        .scale_encoding(to_start_validate)
                         .unwrap()
                         .to_owned();
                     async move {
@@ -558,13 +558,13 @@ async fn background_task(
                     log::debug!(
                         target: &log_target,
                         "Announcing {}",
-                        HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_reannounce_tx_id).unwrap()))
+                        HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()))
                     );
                     let peers_sent = worker.network_service
                         .clone()
                         .announce_transaction(
                             worker.network_chain_index,
-                            &worker.pending_transactions.double_scale_encoding(maybe_reannounce_tx_id).unwrap()
+                            &worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
 
@@ -613,7 +613,7 @@ async fn background_task(
                             log::debug!(
                                 target: &log_target,
                                 "Successfully validated transaction {} at {}: {:?}",
-                                HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
+                                HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap())),
                                 HashDisplay(&block_hash),
                                 result
                             );
@@ -630,7 +630,7 @@ async fn background_task(
                             log::warn!(
                                 target: &log_target,
                                 "Discarding invalid transaction {}: {:?}",
-                                HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
+                                HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap())),
                                 error,
                             );
 
@@ -643,7 +643,7 @@ async fn background_task(
                             log::warn!(
                                 target: &log_target,
                                 "Failed to validate transaction {}: {}",
-                                HashDisplay(&blake2_hash(worker.pending_transactions.double_scale_encoding(maybe_validated_tx_id).unwrap())),
+                                HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap())),
                                 error
                             );
 

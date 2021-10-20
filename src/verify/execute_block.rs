@@ -66,6 +66,8 @@ pub struct Config<'a, TBody> {
     pub block_header: header::HeaderRef<'a>,
 
     /// Body of the block to verify.
+    ///
+    /// Must be an iterator to a list of SCALE-encoded extrinsics.
     pub block_body: TBody,
 
     /// Optional cache corresponding to the storage trie root hash calculation.
@@ -108,20 +110,15 @@ pub fn execute_block(
         function_to_call: "Core_execute_block",
         parameter: {
             // The `Code_execute_block` function expects a SCALE-encoded `(header, body)`
-            // where `body` is a `Vec<Vec<u8>>`. We perform the encoding manually to avoid
+            // where `body` is a `Vec<Extrinsic>`. We perform the encoding manually to avoid
             // performing redundant data copies.
             let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
-            let body = config.block_body.flat_map(|ext| {
-                let encoded_ext_len = util::encode_scale_compact_usize(ext.as_ref().len());
-                iter::once(either::Left(encoded_ext_len)).chain(iter::once(either::Right(ext)))
-            });
-
             config
                 .block_header
                 .scale_encoding()
                 .map(|b| either::Right(either::Left(b)))
                 .chain(iter::once(either::Right(either::Right(encoded_body_len))))
-                .chain(body.map(either::Left))
+                .chain(config.block_body.map(either::Left))
         },
         top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
         storage_top_trie_changes: Default::default(),
