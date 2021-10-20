@@ -29,7 +29,7 @@ fn regular_path() {
 
     assert_eq!(pool.missing_block_bodies().count(), 0);
 
-    let tx_id = pool.add_unvalidated(vec![4, 0], ());
+    let tx_id = pool.add_unvalidated(vec![0], ());
 
     pool.add_block([1; 32], &[0; 32], ());
     let set_best_block = pool.set_best_block(&[1; 32]);
@@ -54,7 +54,7 @@ fn included_after_set_best() {
 
     assert_eq!(pool.missing_block_bodies().count(), 0);
 
-    let tx_id = pool.add_unvalidated(vec![4, 0], ());
+    let tx_id = pool.add_unvalidated(vec![0], ());
 
     pool.add_block([1; 32], &[0; 32], ());
     let included_txs = pool
@@ -77,7 +77,7 @@ fn transaction_retracted_after_reorg() {
 
     assert_eq!(pool.missing_block_bodies().count(), 0);
 
-    let tx_id = pool.add_unvalidated(vec![4, 0], ());
+    let tx_id = pool.add_unvalidated(vec![0], ());
 
     // Add blocks 1 and 2, both children of block 0.
     pool.add_block([1; 32], &[0; 32], ());
