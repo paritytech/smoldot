@@ -191,7 +191,7 @@ impl Client {
                 "memory-printer".to_owned(),
                 Box::pin(async move {
                     loop {
-                        ffi::Delay::new(Duration::from_secs(15)).await;
+                        ffi::Delay::new(Duration::from_secs(60)).await;
 
                         // For the unwrap below to fail, the quantity of allocated would have to
                         // not fit in a `u64`, which as of 2021 is basically impossible.
