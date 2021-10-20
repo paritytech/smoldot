@@ -591,7 +591,7 @@ where
         let request_start = config.start.clone();
         let requested_fields = config.fields.clone();
 
-        let result = self
+        let mut result = self
             .blocks_request_unchecked(now, target, chain_index, config)
             .await?;
 
@@ -600,7 +600,7 @@ where
         }
 
         // Verify validity of all the blocks.
-        for (block_index, block) in result.iter().enumerate() {
+        for (block_index, block) in result.iter_mut().enumerate() {
             if block.header.is_none() {
                 return Err(BlocksRequestError::Entry {
                     index: block_index,
@@ -619,11 +619,17 @@ where
                 });
             }
 
-            if block.body.is_none() && requested_fields.body {
-                return Err(BlocksRequestError::Entry {
-                    index: block_index,
-                    error: BlocksRequestResponseEntryError::MissingField,
-                });
+            match (block.body.is_some(), requested_fields.body) {
+                (false, true) => {
+                    return Err(BlocksRequestError::Entry {
+                        index: block_index,
+                        error: BlocksRequestResponseEntryError::MissingField,
+                    });
+                }
+                (true, false) => {
+                    block.body = None;
+                }
+                _ => {}
             }
 
             // Note: the presence of a justification isn't checked and can't be checked, as not
@@ -645,7 +651,10 @@ where
                     if expected != *decoded_header.extrinsics_root {
                         return Err(BlocksRequestError::Entry {
                             index: block_index,
-                            error: BlocksRequestResponseEntryError::InvalidExtrinsicsRoot,
+                            error: BlocksRequestResponseEntryError::InvalidExtrinsicsRoot {
+                                calculated: expected,
+                                in_header: *decoded_header.extrinsics_root,
+                            },
                         });
                     }
                 }
@@ -661,10 +670,11 @@ where
                 if header::decode(&result[0].header.as_ref().unwrap())
                     .unwrap()
                     .number
-                    != n.get() => {}
-            _ => {
-                return Err(BlocksRequestError::InvalidStart);
+                    != n.get() =>
+            {
+                return Err(BlocksRequestError::InvalidStart)
             }
+            _ => {}
         }
 
         Ok(result)
@@ -2303,7 +2313,13 @@ pub enum BlocksRequestResponseEntryError {
     MissingField,
     /// The header has an extrinsics root that doesn't match the body. Can only happen if both the
     /// header and body were requested.
-    InvalidExtrinsicsRoot,
+    #[display(fmt = "The header has an extrinsics root that doesn't match the body")]
+    InvalidExtrinsicsRoot {
+        /// Extrinsics root that was calculated from the body.
+        calculated: [u8; 32],
+        /// Extrinsics root found in the header.
+        in_header: [u8; 32],
+    },
     /// The header has an invalid format.
     InvalidHeader,
     /// The hash of the header doesn't match the hash provided by the remote.
