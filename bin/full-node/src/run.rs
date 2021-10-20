@@ -160,6 +160,20 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         smoldot::metadata::decode(&metadata).unwrap()
     );*/
 
+    let parse_bootnode = |node: &String| {
+        if let Ok(mut address) = node.parse::<multiaddr::Multiaddr>() {
+            if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                PeerId::from_multihash(peer_id)
+                    .map(|peer_id| (peer_id, address))
+                    .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     let (network_service, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
             listen_addresses: Vec::new(),
@@ -178,56 +192,41 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     (number, hash)
                 },
                 bootstrap_nodes: {
-                    let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-                    for node in chain_spec.boot_nodes().iter() {
-                        let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                        if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                            let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
-                            list.push((peer_id, address));
-                        } else {
-                            panic!() // TODO:
-                        }
-                    }
-                    list
+                    chain_spec
+                        .boot_nodes()
+                        .iter()
+                        .filter_map(parse_bootnode)
+                        .collect()
                 },
             })
             .chain(
                 relay_chain_spec
                     .as_ref()
-                    .map(|relay_chains_specs| {
-                        network_service::ChainConfig {
-                            protocol_id: relay_chains_specs.protocol_id().to_owned(),
-                            has_grandpa_protocol: matches!(
-                                relay_genesis_chain_information.as_ref().unwrap().finality,
-                                chain::chain_information::ChainInformationFinality::Grandpa { .. }
-                            ),
-                            genesis_block_hash: relay_genesis_chain_information
-                                .as_ref()
-                                .unwrap()
-                                .finalized_block_header
-                                .hash(),
-                            best_block: {
-                                let db = relay_chain_database.as_ref().unwrap();
-                                let hash = db.finalized_block_hash().unwrap();
-                                let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
-                                let number = header::decode(&header).unwrap().number;
-                                (number, hash)
-                            },
-                            bootstrap_nodes: {
-                                let mut list =
-                                    Vec::with_capacity(relay_chains_specs.boot_nodes().len());
-                                for node in relay_chains_specs.boot_nodes().iter() {
-                                    let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                                    if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                                        let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
-                                        list.push((peer_id, address));
-                                    } else {
-                                        panic!() // TODO:
-                                    }
-                                }
-                                list
-                            },
-                        }
+                    .map(|relay_chains_specs| network_service::ChainConfig {
+                        protocol_id: relay_chains_specs.protocol_id().to_owned(),
+                        has_grandpa_protocol: matches!(
+                            relay_genesis_chain_information.as_ref().unwrap().finality,
+                            chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                        ),
+                        genesis_block_hash: relay_genesis_chain_information
+                            .as_ref()
+                            .unwrap()
+                            .finalized_block_header
+                            .hash(),
+                        best_block: {
+                            let db = relay_chain_database.as_ref().unwrap();
+                            let hash = db.finalized_block_hash().unwrap();
+                            let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
+                            let number = header::decode(&header).unwrap().number;
+                            (number, hash)
+                        },
+                        bootstrap_nodes: {
+                            relay_chains_specs
+                                .boot_nodes()
+                                .iter()
+                                .filter_map(parse_bootnode)
+                                .collect()
+                        },
                     })
                     .into_iter(),
             )
