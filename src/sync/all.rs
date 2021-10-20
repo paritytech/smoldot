@@ -1260,9 +1260,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                // TODO: we use `Oneshot` because the VM is thrown away afterwards; ideally it wouldn't be be thrown away
+                // We use an `ExecHint` that assumes that the runtime will continue being used
+                // after the end of the warp syncing. This might be the case, since we provide
+                // the runtime to the API user. The API user might then immediately throw away
+                // this runtime, but we don't care enough about this possibility to optimize
+                // this.
                 let (grandpa_warp_sync, error) =
-                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::Oneshot);
+                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::CompileAheadOfTime);
 
                 if let Some(_error) = error {
                     // TODO: error handling
@@ -1331,9 +1335,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 ResponseOutcome::Queued
             }
             grandpa_warp_sync::GrandpaWarpSync::Finished(success) => {
-                let all_forks = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                let (all_forks, finalized_block_runtime) =
+                    self.shared.transition_grandpa_warp_sync_all_forks(success);
                 self.inner = AllSyncInner::AllForks(all_forks);
-                ResponseOutcome::WarpSyncFinished
+                ResponseOutcome::WarpSyncFinished {
+                    finalized_block_runtime,
+                }
             }
         }
     }
@@ -1464,7 +1471,13 @@ pub enum ResponseOutcome {
     Queued,
 
     /// Response has made it possible to finish warp syncing.
-    WarpSyncFinished,
+    WarpSyncFinished {
+        /// Runtime of the newly finalized block.
+        ///
+        /// > **Note**: Use methods such as [`AllSync::finalized_block_header`] to know which
+        /// >           block this runtime corresponds to.
+        finalized_block_runtime: host::HostVmPrototype,
+    },
 
     /// Source has given blocks that aren't part of the finalized chain.
     ///
@@ -1960,7 +1973,10 @@ impl<TRq> Shared<TRq> {
     fn transition_grandpa_warp_sync_all_forks<TSrc, TBl>(
         &mut self,
         grandpa: grandpa_warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
-    ) -> all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>> {
+    ) -> (
+        all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+        host::HostVmPrototype,
+    ) {
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
             chain_information: grandpa.chain_information,
             sources_capacity: self.sources_capacity,
@@ -1993,7 +2009,7 @@ impl<TRq> Shared<TRq> {
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::AllForks(_))));
 
-        all_forks
+        (all_forks, grandpa.runtime)
     }
 }
 
