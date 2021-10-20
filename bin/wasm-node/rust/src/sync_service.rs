@@ -269,50 +269,7 @@ impl SyncService {
                 Err(_) => continue,
             };
 
-            if result.len() != 1 {
-                continue;
-            }
-
-            let result = result.remove(0);
-
-            if result.header.is_none() && fields.header {
-                continue;
-            }
-            if result
-                .header
-                .as_ref()
-                .map_or(false, |h| header::decode(h).is_err())
-            {
-                continue;
-            }
-            if result.body.is_none() && fields.body {
-                continue;
-            }
-            // Note: the presence of a justification isn't checked and can't be checked, as not
-            // all blocks have a justification in the first place.
-            if result.hash != hash {
-                continue;
-            }
-            if result.header.as_ref().map_or(false, |h| {
-                header::hash_from_scale_encoded_header(&h) != result.hash
-            }) {
-                continue;
-            }
-            match (&result.header, &result.body) {
-                (Some(header), Some(body)) => {
-                    if let Ok(decoded_header) = header::decode(header) {
-                        let expected = header::extrinsics_root(body.iter());
-                        if expected != *decoded_header.extrinsics_root {
-                            return Err(());
-                        }
-                    } else {
-                        return Err(());
-                    }
-                }
-                _ => {}
-            }
-
-            return Ok(result);
+            return Ok(result.remove(0));
         }
 
         Err(())

@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::header;
 use crate::libp2p::{
     connection, multiaddr, peer_id,
     peers::{self, QueueNotificationError},
@@ -577,6 +578,101 @@ where
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     pub async fn blocks_request(
+        &self,
+        now: TNow,
+        target: &peer_id::PeerId,
+        chain_index: usize,
+        config: protocol::BlocksRequestConfig,
+    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
+        if !config.fields.header {
+            return Err(BlocksRequestError::NotVerifiable);
+        }
+
+        let request_start = config.start.clone();
+        let requested_fields = config.fields.clone();
+
+        let result = self
+            .blocks_request_unchecked(now, target, chain_index, config)
+            .await?;
+
+        if result.is_empty() {
+            return Err(BlocksRequestError::EmptyResponse);
+        }
+
+        // Verify validity of all the blocks.
+        for (block_index, block) in result.iter().enumerate() {
+            if block.header.is_none() {
+                return Err(BlocksRequestError::Entry {
+                    index: block_index,
+                    error: BlocksRequestResponseEntryError::MissingField,
+                });
+            }
+
+            if block
+                .header
+                .as_ref()
+                .map_or(false, |h| header::decode(h).is_err())
+            {
+                return Err(BlocksRequestError::Entry {
+                    index: block_index,
+                    error: BlocksRequestResponseEntryError::InvalidHeader,
+                });
+            }
+
+            if block.body.is_none() && requested_fields.body {
+                return Err(BlocksRequestError::Entry {
+                    index: block_index,
+                    error: BlocksRequestResponseEntryError::MissingField,
+                });
+            }
+
+            // Note: the presence of a justification isn't checked and can't be checked, as not
+            // all blocks have a justification in the first place.
+
+            if block.header.as_ref().map_or(false, |h| {
+                header::hash_from_scale_encoded_header(&h) != block.hash
+            }) {
+                return Err(BlocksRequestError::Entry {
+                    index: block_index,
+                    error: BlocksRequestResponseEntryError::InvalidHash,
+                });
+            }
+
+            match (&block.header, &block.body) {
+                (Some(header), Some(body)) => {
+                    let decoded_header = header::decode(header).unwrap();
+                    let expected = header::extrinsics_root(body.iter());
+                    if expected != *decoded_header.extrinsics_root {
+                        return Err(BlocksRequestError::Entry {
+                            index: block_index,
+                            error: BlocksRequestResponseEntryError::InvalidExtrinsicsRoot,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match request_start {
+            protocol::BlocksRequestConfigStart::Hash(hash) if result[0].hash != hash => {
+                return Err(BlocksRequestError::InvalidStart);
+            }
+            protocol::BlocksRequestConfigStart::Number(n)
+                if header::decode(&result[0].header.as_ref().unwrap())
+                    .unwrap()
+                    .number
+                    != n.get() => {}
+            _ => {
+                return Err(BlocksRequestError::InvalidStart);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Sends a blocks request to the given peer.
+    // TODO: more docs
+    pub async fn blocks_request_unchecked(
         &self,
         now: TNow,
         target: &peer_id::PeerId,
@@ -2180,8 +2276,38 @@ pub enum KademliaFindNodeError {
 /// Error returned by [`ChainNetwork::blocks_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum BlocksRequestError {
+    /// Error while waiting for the response from the peer.
     Request(peers::RequestError),
+    /// Error while decoding the response returned by the peer.
     Decode(protocol::DecodeBlockResponseError),
+    /// Block request doesn't request headers, and as such its validity cannot be verified.
+    NotVerifiable,
+    /// Response returned by the remote doesn't contain any entry.
+    EmptyResponse,
+    /// Start of the response doesn't correspond to the requested start.
+    InvalidStart,
+    /// Error at a specific index in the response.
+    #[display(fmt = "Error in response at offset {}: {}", index, error)]
+    Entry {
+        /// Index in the response where the problem happened.
+        index: usize,
+        /// Problem in question.
+        error: BlocksRequestResponseEntryError,
+    },
+}
+
+/// See [`BlocksRequestError`].
+#[derive(Debug, derive_more::Display)]
+pub enum BlocksRequestResponseEntryError {
+    /// One of the requested fields is missing from the block.
+    MissingField,
+    /// The header has an extrinsics root that doesn't match the body. Can only happen if both the
+    /// header and body were requested.
+    InvalidExtrinsicsRoot,
+    /// The header has an invalid format.
+    InvalidHeader,
+    /// The hash of the header doesn't match the hash provided by the remote.
+    InvalidHash,
 }
 
 /// Error returned by [`ChainNetwork::storage_proof_request`].
