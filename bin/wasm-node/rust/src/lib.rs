@@ -15,8 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Contains a light client implementation usable from a browser environment, using the
-//! `wasm-bindgen` library.
+//! Contains a light client implementation usable from a browser environment.
 
 #![recursion_limit = "512"]
 #![deny(rustdoc::broken_intra_doc_links)]
