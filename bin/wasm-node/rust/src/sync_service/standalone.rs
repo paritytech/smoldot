@@ -248,7 +248,8 @@ pub(super) async fn start_standalone_chain(
             | all::ResponseOutcome::Queued
             | all::ResponseOutcome::NotFinalizedChain { .. }
             | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-            all::ResponseOutcome::WarpSyncFinished => {
+            all::ResponseOutcome::WarpSyncFinished { .. } => {
+                // TODO: somehow pass the `finalized_block_runtime` provided by the `WarpSyncFinished` and communicate it to the runtime service
                 let finalized_header = task.sync.finalized_block_header();
                 log::info!(
                     target: &task.log_target,

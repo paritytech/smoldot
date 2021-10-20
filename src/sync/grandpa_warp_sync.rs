@@ -119,7 +119,8 @@ pub struct SourceId(usize);
 pub struct Success<TSrc> {
     /// The synced chain information.
     pub chain_information: ValidChainInformation,
-    /// The runtime constructed in `VirtualMachineParamsGet`.
+    /// The runtime constructed in `VirtualMachineParamsGet`. Corresponds to the runtime of the
+    /// finalized block of [`Success::chain_information`].
     pub runtime: HostVmPrototype,
     /// The list of sources that were added to the state machine.
     pub sources: Vec<TSrc>,
