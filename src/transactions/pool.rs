@@ -160,11 +160,7 @@ impl<TTx> Pool<TTx> {
     }
 
     /// Inserts a new unvalidated transaction in the pool.
-    pub fn add_unvalidated(
-        &mut self,
-        scale_encoded: Vec<u8>,
-        user_data: TTx,
-    ) -> TransactionId {
+    pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
         self.add_unvalidated_inner(scale_encoded, None, user_data)
     }
 
@@ -218,9 +214,7 @@ impl<TTx> Pool<TTx> {
             debug_assert!(_removed);
         }
 
-        let _removed = self
-            .by_hash
-            .remove(&(blake2_hash(&tx.scale_encoded), id));
+        let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
         debug_assert!(_removed);
 
         tx.user_data

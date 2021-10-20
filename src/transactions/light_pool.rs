@@ -184,11 +184,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Inserts a new unvalidated transaction in the pool.
     ///
     /// Must be passed as parameter the SCALE-encoded transaction.
-    pub fn add_unvalidated(
-        &mut self,
-        scale_encoded: Vec<u8>,
-        user_data: TTx,
-    ) -> TransactionId {
+    pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
         let hash = blake2_hash(scale_encoded.as_ref());
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
@@ -246,9 +242,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             debug_assert!(_removed);
         }
 
-        let _removed = self
-            .by_hash
-            .remove(&(blake2_hash(&tx.scale_encoded), id));
+        let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
         debug_assert!(_removed);
 
         tx.user_data
