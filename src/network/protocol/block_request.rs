@@ -165,6 +165,11 @@ pub struct BlockData {
 
     /// Block body, if requested. Each item (each `Vec<u8>`) is a SCALE-encoded transaction.
     /// These transactions aren't decodable, as their meaning depends on the chain.
+    ///
+    /// > **Note**: Be aware that in many chains a transaction is actually a `Vec<u8>`, which
+    /// >           means that you will find, at the beginning of each SCALE-encoded transaction,
+    /// >           a length prefix. Don't get fooled into thinking that this length prefix must
+    /// >           be removed. It is part of the opaque format transaction format.
     pub body: Option<Vec<Vec<u8>>>,
 
     /// SCALE-encoded justification, if requested and available.
