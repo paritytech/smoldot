@@ -210,11 +210,12 @@ impl JsonRpcService {
                     blocks.best_block = best_block_hash;
                 }
 
-                let mut tasks = stream::FuturesUnordered::new();
+                let mut main_tasks = stream::FuturesUnordered::new();
+                let mut secondary_tasks = stream::FuturesUnordered::new();
 
                 for _ in 0..max_parallel_requests.get() {
                     let background = background.clone();
-                    tasks.push(
+                    main_tasks.push(
                         async move {
                             loop {
                                 let message = background.new_requests_rx.lock().await.next().await;
@@ -234,15 +235,16 @@ impl JsonRpcService {
                 }
 
                 loop {
-                    if tasks.is_empty() {
+                    if main_tasks.is_empty() {
                         break;
                     }
 
                     futures::select! {
-                        () = tasks.select_next_some() => {},
+                        () = main_tasks.select_next_some() => {},
+                        () = secondary_tasks.select_next_some() => {},
                         task = new_child_tasks_rx.next() => {
                             let task = task.unwrap();
-                            tasks.push(task);
+                            secondary_tasks.push(task);
                         }
                         block = best_blocks_subscription.next() => {
                             match block {
