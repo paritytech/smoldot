@@ -23,11 +23,7 @@ use super::{
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
-use core::{
-    cell::RefCell,
-    convert::{TryFrom, TryInto as _},
-    fmt,
-};
+use core::{cell::RefCell, fmt};
 use wasmi::memory_units::ByteSize as _;
 
 /// See [`super::Module`].

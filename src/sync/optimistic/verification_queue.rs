@@ -20,9 +20,7 @@
 
 use alloc::collections::VecDeque;
 use core::{
-    cmp,
-    convert::TryFrom as _,
-    fmt, iter, mem,
+    cmp, fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
 };
 use itertools::Itertools as _;

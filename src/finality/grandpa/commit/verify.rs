@@ -18,7 +18,6 @@
 use crate::finality::grandpa::commit::decode;
 
 use alloc::vec::Vec;
-use core::convert::TryFrom as _;
 
 /// Configuration for a commit verification process.
 #[derive(Debug)]

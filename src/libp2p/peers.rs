@@ -53,7 +53,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    convert::TryFrom as _,
     num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Sub},
     task::Poll,

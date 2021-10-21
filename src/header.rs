@@ -74,7 +74,7 @@
 use crate::{trie, util};
 
 use alloc::{vec, vec::Vec};
-use core::{convert::TryFrom, fmt, iter, slice};
+use core::{fmt, iter, slice};
 
 mod aura;
 mod babe;

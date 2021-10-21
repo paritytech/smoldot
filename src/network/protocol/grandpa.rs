@@ -20,7 +20,7 @@
 use crate::finality::{grandpa::commit::decode, justification::decode::PrecommitRef};
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, iter};
+use core::iter;
 use nom::Finish as _;
 
 pub use crate::finality::grandpa::commit::decode::{CommitMessageRef, UnsignedPrecommitRef};

@@ -38,7 +38,7 @@
 
 use crate::ffi;
 
-use core::{cmp, convert::TryFrom as _, fmt, num::NonZeroUsize, pin::Pin, time::Duration};
+use core::{cmp, fmt, num::NonZeroUsize, pin::Pin, time::Duration};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     informant::HashDisplay,

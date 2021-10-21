@@ -289,7 +289,6 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use core::convert::TryFrom as _;
 
     #[test]
     fn basic_works() {

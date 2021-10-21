@@ -18,7 +18,7 @@
 use crate::header;
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom, fmt};
+use core::fmt;
 
 /// Attempt to decode the given SCALE-encoded justification.
 pub fn decode_grandpa(scale_encoded: &[u8]) -> Result<GrandpaJustificationRef, Error> {

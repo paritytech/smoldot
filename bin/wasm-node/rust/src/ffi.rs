@@ -19,7 +19,6 @@
 
 use core::{
     cmp::Ordering,
-    convert::TryFrom as _,
     fmt,
     future::Future,
     marker,

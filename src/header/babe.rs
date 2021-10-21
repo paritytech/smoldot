@@ -19,7 +19,7 @@ use super::Error;
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom, fmt, iter, slice};
+use core::{cmp, fmt, iter, slice};
 
 /// A consensus log item for BABE.
 #[derive(Debug, Clone, PartialEq, Eq)]

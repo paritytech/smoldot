@@ -5,7 +5,7 @@ authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krie
 description = "Browser bindings to a light client for Substrate-based blockchains"
 repository = "https://github.com/paritytech/smoldot"
 license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
-edition = "2018"
+edition = "2021"
 publish = false
 
 [lib]

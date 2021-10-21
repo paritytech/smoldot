@@ -31,7 +31,6 @@ use smoldot::{
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
-    convert::TryFrom as _,
     num::NonZeroU32,
     pin::Pin,
     str,

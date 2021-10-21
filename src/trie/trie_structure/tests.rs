@@ -23,7 +23,7 @@ use rand::{
     distributions::{Distribution as _, Uniform},
     seq::SliceRandom as _,
 };
-use std::{collections::HashSet, convert::TryFrom as _};
+use std::collections::HashSet;
 
 #[test]
 fn remove_turns_storage_into_branch() {

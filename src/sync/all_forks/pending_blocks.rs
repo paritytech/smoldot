@@ -89,7 +89,6 @@ use super::{disjoint, sources};
 
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{
-    convert::TryFrom as _,
     iter,
     num::{NonZeroU32, NonZeroU64},
 };

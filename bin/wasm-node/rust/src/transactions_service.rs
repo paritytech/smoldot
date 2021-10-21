@@ -77,7 +77,7 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, convert::TryFrom as _, iter, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
+use std::{cmp, iter, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config {

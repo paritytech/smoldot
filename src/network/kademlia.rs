@@ -20,7 +20,7 @@
 use crate::libp2p::{multiaddr, peer_id};
 
 use alloc::vec::Vec;
-use core::convert::TryFrom as _;
+
 use prost::Message as _;
 
 mod dht_proto {

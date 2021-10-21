@@ -41,7 +41,7 @@
 use crate::{chain_spec::ChainSpec, finality::grandpa, header};
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{convert::TryFrom, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 pub mod aura_config;
 pub mod babe_config;

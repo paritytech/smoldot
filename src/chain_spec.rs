@@ -39,7 +39,7 @@ use crate::chain::chain_information::{
     ValidChainInformation,
 };
 use alloc::{string::String, vec::Vec};
-use core::{convert::TryInto as _, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 mod light_sync_state;
 mod structs;

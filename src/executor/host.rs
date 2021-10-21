@@ -184,7 +184,7 @@ use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, format, string::String, vec::Vec};
-use core::{convert::TryFrom as _, fmt, hash::Hasher as _, iter, str};
+use core::{fmt, hash::Hasher as _, iter, str};
 use parity_scale_codec::DecodeAll as _;
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
