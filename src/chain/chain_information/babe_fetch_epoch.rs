@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    chain::chain_information::BabeEpochInformation,
+    chain::chain_information::{BabeEpochInformation, BabeValidityError},
     executor::{host, read_only_runtime_host},
     header,
 };
@@ -53,6 +53,8 @@ pub enum Error {
     /// Error while decoding the babe epoch.
     #[display(fmt = "{}", _0)]
     DecodeFailed(parity_scale_codec::Error),
+    /// Invalid Babe information found in the runtime.
+    InvalidBabeInfo(BabeValidityError),
 }
 
 /// Fetches a Babe epoch using `BabeApi_current_epoch` or `BabeApi_next_epoch`.
@@ -83,7 +85,11 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
 pub enum Query {
     /// Fetching the Babe epoch is over.
     Finished {
+        /// The result of the computation.
+        ///
+        /// If successful, the epoch information is guaranteed to be valid.
         result: Result<BabeEpochInformation, Error>,
+        /// Value of [`Config::runtime`] passed back.
         virtual_machine: host::HostVmPrototype,
     },
     /// Loading a storage value is required in order to continue.
@@ -105,8 +111,8 @@ impl Query {
                 let virtual_machine = success.virtual_machine.into_prototype();
 
                 match decoded {
-                    Ok(epoch) => Query::Finished {
-                        result: Ok(BabeEpochInformation {
+                    Ok(epoch) => {
+                        let info = BabeEpochInformation {
                             epoch_index: epoch.epoch_index,
                             start_slot_number: Some(epoch.start_slot_number),
                             authorities: epoch
@@ -120,9 +126,20 @@ impl Query {
                             randomness: epoch.randomness,
                             c: epoch.c,
                             allowed_slots: epoch.allowed_slots,
-                        }),
-                        virtual_machine,
-                    },
+                        };
+
+                        if let Err(err) = info.validate() {
+                            return Query::Finished {
+                                result: Err(Error::InvalidBabeInfo(err)),
+                                virtual_machine,
+                            };
+                        }
+
+                        Query::Finished {
+                            result: Ok(info),
+                            virtual_machine,
+                        }
+                    }
                     Err(error) => Query::Finished {
                         result: Err(Error::DecodeFailed(error)),
                         virtual_machine,
