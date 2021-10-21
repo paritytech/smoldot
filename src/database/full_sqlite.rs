@@ -1291,6 +1291,12 @@ fn decode_babe_epoch_information(
     .map(|(_, v)| v)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
 
+    let result = match result {
+        Ok(r) if r.validate().is_ok() => Ok(r),
+        Ok(_) => Err(()),
+        Err(()) => Err(()),
+    };
+
     result
         .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
         .map_err(AccessError::Corrupted)
