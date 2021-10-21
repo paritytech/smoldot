@@ -166,11 +166,12 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 PeerId::from_multihash(peer_id)
                     .map(|peer_id| (peer_id, address))
                     .ok()
+                    .unwrap_or_else(|| panic!("Invalid peer_id parsed from the bootnode: {}", node))
             } else {
-                None
+                panic!("Could not find peer_id from the bootnode: {}", node)
             }
         } else {
-            None
+            panic!("Failed to parse the bootnode: {}", node)
         }
     };
 
@@ -195,7 +196,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     chain_spec
                         .boot_nodes()
                         .iter()
-                        .filter_map(parse_bootnode)
+                        .map(parse_bootnode)
                         .collect()
                 },
             })
@@ -224,7 +225,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                             relay_chains_specs
                                 .boot_nodes()
                                 .iter()
-                                .filter_map(parse_bootnode)
+                                .map(parse_bootnode)
                                 .collect()
                         },
                     })
