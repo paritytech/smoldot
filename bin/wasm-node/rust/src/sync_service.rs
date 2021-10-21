@@ -66,7 +66,7 @@ pub struct Config {
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: mpsc::Receiver<network_service::Event>,
+    pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
 
     /// Extra fields used when the chain is a parachain.
     /// If `None`, this chain is a standalone chain or a relay chain.
