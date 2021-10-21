@@ -18,7 +18,7 @@
 //! List of requests and how to answer them.
 
 use super::parse;
-use crate::{header, util};
+use crate::header;
 
 use alloc::{
     boxed::Box,
@@ -628,13 +628,8 @@ impl serde::Serialize for Extrinsic {
     where
         S: serde::Serializer,
     {
-        let length_prefix = util::encode_scale_compact_usize(self.0.len());
-        format!(
-            "0x{}{}",
-            hex::encode(length_prefix.as_ref()),
-            hex::encode(&self.0[..])
-        )
-        .serialize(serializer)
+        // TODO: use HashString or something
+        format!("0x{}", hex::encode(&self.0[..])).serialize(serializer)
     }
 }
 

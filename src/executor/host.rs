@@ -181,7 +181,7 @@
 //! ```
 
 use super::{allocator, vm};
-use crate::util;
+use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, format, string::String, vec::Vec};
 use core::{convert::TryFrom as _, fmt, hash::Hasher as _, iter, str};
@@ -1249,6 +1249,7 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
+                // TODO: don't use parity_scale_codec
                 let decode_result = Vec::<Vec<u8>>::decode_all(expect_pointer_size!(0).as_ref());
 
                 let elements = match decode_result {
@@ -1261,14 +1262,7 @@ impl ReadyToRun {
                     }
                 };
 
-                // TODO: optimize this
-                let mut trie = crate::trie::Trie::new();
-                for (idx, value) in elements.into_iter().enumerate() {
-                    let key = util::encode_scale_compact_usize(idx);
-                    trie.insert(key.as_ref(), value);
-                }
-                let out = trie.root_merkle_value(None);
-
+                let out = trie::ordered_root(elements.into_iter());
                 self.inner
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }

@@ -34,7 +34,7 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain, header,
+    chain,
     libp2p::PeerId,
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
@@ -269,43 +269,7 @@ impl SyncService {
                 Err(_) => continue,
             };
 
-            if result.len() != 1 {
-                continue;
-            }
-
-            let result = result.remove(0);
-
-            if result.header.is_none() && fields.header {
-                continue;
-            }
-            if result
-                .header
-                .as_ref()
-                .map_or(false, |h| header::decode(h).is_err())
-            {
-                continue;
-            }
-            if result.body.is_none() && fields.body {
-                continue;
-            }
-            // Note: the presence of a justification isn't checked and can't be checked, as not
-            // all blocks have a justification in the first place.
-            if result.hash != hash {
-                continue;
-            }
-            if result.header.as_ref().map_or(false, |h| {
-                header::hash_from_scale_encoded_header(&h) != result.hash
-            }) {
-                continue;
-            }
-            match (&result.header, &result.body) {
-                (Some(_), Some(_)) => {
-                    // TODO: verify correctness of body
-                }
-                _ => {}
-            }
-
-            return Ok(result);
+            return Ok(result.remove(0));
         }
 
         Err(())

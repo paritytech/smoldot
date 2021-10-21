@@ -126,21 +126,6 @@ pub fn decode_block_response(
             return Err(DecodeBlockResponseError::InvalidHashLength);
         }
 
-        let mut body = Vec::with_capacity(block.body.len());
-        for extrinsic in block.body {
-            // TODO: this encoding really is a bit stupid
-            let parsing: nom::IResult<_, _> = nom::combinator::all_consuming(
-                nom::multi::length_data(crate::util::nom_scale_compact_usize),
-            )(extrinsic.as_ref());
-
-            match parsing {
-                Ok((_, e)) => body.push(e.to_vec()),
-                Err(_) => {
-                    return Err(DecodeBlockResponseError::BodyDecodeError);
-                }
-            }
-        }
-
         blocks.push(BlockData {
             hash: <[u8; 32]>::try_from(&block.hash[..]).unwrap(),
             header: if !block.header.is_empty() {
@@ -149,7 +134,7 @@ pub fn decode_block_response(
                 None
             },
             // TODO: no; we might not have asked for the body
-            body: Some(body),
+            body: Some(block.body),
             justification: if !block.justification.is_empty() {
                 Some(block.justification)
             } else if block.is_empty_justification {
@@ -178,10 +163,16 @@ pub struct BlockData {
     /// SCALE-encoded block header, if requested.
     pub header: Option<Vec<u8>>,
 
-    /// Block body, if requested.
+    /// Block body, if requested. Each item (each `Vec<u8>`) is a SCALE-encoded transaction.
+    /// These transactions aren't decodable, as their meaning depends on the chain.
+    ///
+    /// > **Note**: Be aware that in many chains a transaction is actually a `Vec<u8>`, which
+    /// >           means that you will find, at the beginning of each SCALE-encoded transaction,
+    /// >           a length prefix. Don't get fooled into thinking that this length prefix must
+    /// >           be removed. It is part of the opaque format transaction format.
     pub body: Option<Vec<Vec<u8>>>,
 
-    /// Justification, if requested and available.
+    /// SCALE-encoded justification, if requested and available.
     pub justification: Option<Vec<u8>>,
 }
 
