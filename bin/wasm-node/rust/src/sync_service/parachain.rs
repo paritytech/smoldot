@@ -28,7 +28,7 @@ use smoldot::{
     network::protocol,
     sync::{all_forks::sources, para},
 };
-use std::{collections::HashMap, iter, sync::Arc};
+use std::{collections::HashMap, iter, sync::Arc, time::Duration};
 
 /// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain(
@@ -96,7 +96,10 @@ pub(super) async fn start_parachain(
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
         // is fetched, this parahead is reported to our subscriptions.
         let mut async_tree =
-            async_tree::AsyncTree::<ffi::Instant, [u8; 32], Vec<u8>>::new(finalized_parahead);
+            async_tree::AsyncTree::<ffi::Instant, [u8; 32], _>::new(async_tree::Config {
+                finalized_async_user_data: finalized_parahead,
+                retry_after_failed: Duration::from_secs(5),
+            });
         for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
             let parent = async_tree
