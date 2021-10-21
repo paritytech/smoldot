@@ -176,7 +176,7 @@ pub enum UnknownTransaction {
 }
 
 /// Problem encountered during a call to [`validate_transaction`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// Error while decoding the block header against which to make the call.
     InvalidHeader(header::Error),
@@ -200,7 +200,7 @@ pub enum Error {
 }
 
 /// Error that can happen during the decoding.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub struct DecodeError();
 
 /// Errors that can occur while checking the validity of a transaction.

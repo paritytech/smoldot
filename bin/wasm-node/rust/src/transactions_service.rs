@@ -102,7 +102,7 @@ pub struct Config {
 
     /// Maximum number of pending transactions allowed in the service.
     ///
-    /// Any extra transaction will lead to [`TransactionStatus::Dropped`].
+    /// Any extra transaction will lead to [`TransactionStatus::MaxPendingTransactionsReached`].
     pub max_pending_transactions: NonZeroU32,
 
     /// Maximum number of block body downloads that can be performed in parallel.
@@ -222,12 +222,31 @@ pub enum TransactionStatus {
     /// Contains the same block as was previously passed in [`TransactionStatus::InBlock`].
     Retracted([u8; 32]),
 
-    /// Transaction has been dropped because the service was full, too slow, or generally
-    /// encountered a problem.
-    Dropped,
+    /// Transaction has been dropped because there was a gap in the chain of blocks. It is
+    /// impossible to know.
+    GapInChain,
+
+    /// Transaction has been dropped because the maximum number of transactions in the pool has
+    /// been reached.
+    MaxPendingTransactionsReached,
+
+    /// Transaction has been dropped because it is invalid.
+    Invalid(validate::TransactionValidityError),
+
+    /// Transaction has been dropped because we have failed to validate it.
+    ValidateError(ValidateTransactionError),
 
     /// Transaction has been included in a finalized block.
     Finalized([u8; 32]),
+}
+
+/// Failed to check the validity of a transaction.
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum ValidateTransactionError {
+    /// Error during the network request.
+    Call(runtime_service::RuntimeCallError),
+    /// Error during the validation runtime call.
+    Validation(validate::Error),
 }
 
 /// Message sent from the foreground service to the background.
@@ -287,7 +306,8 @@ async fn background_task(
 
         // Drop all pending transactions of the pool.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
-            pending.update_status(TransactionStatus::Dropped);
+            // TODO: only do this if transaction hasn't been validated yet
+            pending.update_status(TransactionStatus::GapInChain);
         }
 
         // Reset the blocks tracking state machine.
@@ -637,7 +657,7 @@ async fn background_task(
                             // The validation itself has completed, but the runtime indicated
                             // that the transaction was invalid. Drop the transaction.
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::Dropped);
+                            tx.update_status(TransactionStatus::Invalid(error));
                         }
                         Err(error) => {
                             log::warn!(
@@ -651,7 +671,7 @@ async fn background_task(
                             // executing the runtime. This most likely indicates a compatibility
                             // problem between smoldot and the runtime code. Drop the transaction.
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::Dropped);
+                            tx.update_status(TransactionStatus::ValidateError(error));
                         }
                     }
                 },
@@ -686,7 +706,7 @@ async fn background_task(
                             // and immediately drop new transactions of this limit is reached.
                             if worker.pending_transactions.num_transactions() >= worker.max_pending_transactions {
                                 if let Some(mut updates_report) = updates_report {
-                                    let _ = updates_report.try_send(TransactionStatus::Dropped);
+                                    let _ = updates_report.try_send(TransactionStatus::MaxPendingTransactionsReached);
                                 }
                                 continue;
                             }
@@ -962,13 +982,6 @@ async fn validate_transaction(
             }
         }
     }
-}
-
-/// See [`validate_transaction`].
-#[derive(Debug, derive_more::Display)]
-enum ValidateTransactionError {
-    Call(runtime_service::RuntimeCallError),
-    Validation(validate::Error),
 }
 
 /// Utility. Calculates the blake2 hash of the given bytes.
