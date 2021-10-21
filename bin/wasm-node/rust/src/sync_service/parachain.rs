@@ -38,8 +38,11 @@ pub(super) async fn start_parachain(
     parachain_id: u32,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_chain_index: usize,
-    mut from_network_service: mpsc::Receiver<network_service::Event>,
+    from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
+    // Necessary for the `select!` loop below.
+    let mut from_network_service = from_network_service.fuse();
+
     // Parahead of the genesis block.
     let chainspec_finalized_parahead = chain_information
         .as_ref()
