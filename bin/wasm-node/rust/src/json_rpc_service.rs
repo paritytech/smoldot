@@ -1352,7 +1352,10 @@ impl Background {
                                 transactions_service::TransactionStatus::Retracted(block) => {
                                     methods::TransactionStatus::Retracted(block)
                                 }
-                                transactions_service::TransactionStatus::Dropped => {
+                                transactions_service::TransactionStatus::GapInChain |
+                                transactions_service::TransactionStatus::MaxPendingTransactionsReached |
+                                transactions_service::TransactionStatus::Invalid(_) |
+                                transactions_service::TransactionStatus::ValidateError(_) => {
                                     methods::TransactionStatus::Dropped
                                 }
                                 transactions_service::TransactionStatus::Finalized(block) => {
