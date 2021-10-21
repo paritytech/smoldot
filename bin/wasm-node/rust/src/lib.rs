@@ -631,6 +631,7 @@ impl Client {
 
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
                 if running_chain.2.get() == 1 {
+                    log::info!("Shutting down chain {}", running_chain.1);
                     self.chains_by_key.remove(&key);
                 } else {
                     running_chain.2 = NonZeroU32::new(running_chain.2.get() - 1).unwrap();
