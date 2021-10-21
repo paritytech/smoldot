@@ -57,6 +57,15 @@ pub struct AsyncOpParams<'a, TBl> {
     pub block_user_data: &'a TBl,
 }
 
+/// Configuration for [`AsyncTree::new`].
+pub struct Config<TAsync> {
+    /// Outcome of the asynchronous operation of the finalized block.
+    pub finalized_async_user_data: TAsync,
+
+    /// After an asynchronous operation fails, retry after this given duration.
+    pub retry_after_failed: Duration,
+}
+
 pub struct AsyncTree<TNow, TBl, TAsync> {
     /// State of all the non-finalized blocks.
     non_finalized_blocks: fork_tree::ForkTree<Block<TNow, TBl, TAsync>>,
@@ -86,6 +95,9 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
 
     /// Identifier to assign to the next asynchronous operation.
     next_async_op_id: AsyncOpId,
+
+    /// See [`Config::retry_after_failed`].
+    retry_after_failed: Duration,
 }
 
 impl<TNow, TBl, TAsync> AsyncTree<TNow, TBl, TAsync>
@@ -94,15 +106,16 @@ where
     TAsync: Clone,
 {
     /// Returns a new empty [`AsyncTree`].
-    pub fn new(finalized_async_user_data: TAsync) -> Self {
+    pub fn new(config: Config<TAsync>) -> Self {
         AsyncTree {
             best_block_index: None,
-            finalized_async_user_data,
+            finalized_async_user_data: config.finalized_async_user_data,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
             input_finalized_index: None,
             input_best_block_next_weight: 2,
             finalized_block_weight: 1, // `0` is reserved for blocks who are never best.
             next_async_op_id: AsyncOpId(0),
+            retry_after_failed: config.retry_after_failed,
         }
     }
 
@@ -335,7 +348,7 @@ where
     /// Panics if the [`AsyncOpId`] is invalid.
     ///
     pub fn async_op_failure(&mut self, async_op_id: AsyncOpId, now: &TNow) {
-        let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded value
+        let new_timeout = now.clone() + self.retry_after_failed;
 
         // Update the blocks that were performing this operation.
         // The blocks are iterated from child to parent, so that we can check, for each node,
