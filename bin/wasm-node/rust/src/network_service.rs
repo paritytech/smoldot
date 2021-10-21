@@ -184,13 +184,11 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 chains,
                 known_nodes,
-                connections_capacity: 100, // TODO: ?
-                peers_capacity: 100,       // TODO: ?
+                connections_capacity: 32,
+                peers_capacity: 8,
                 noise_key: config.noise_key,
                 handshake_timeout: Duration::from_secs(8),
-                // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
-                // once the issue is solved, this should be restored to a smaller value, such as 16
-                pending_api_events_buffer_size: NonZeroUsize::new(2048).unwrap(),
+                pending_api_events_buffer_size: NonZeroUsize::new(32).unwrap(),
                 randomness_seed: rand::random(),
             }),
             important_nodes,
