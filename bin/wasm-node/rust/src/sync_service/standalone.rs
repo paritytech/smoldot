@@ -40,7 +40,7 @@ pub(super) async fn start_standalone_chain(
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService>,
     network_chain_index: usize,
-    mut from_network_service: mpsc::Receiver<network_service::Event>,
+    from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
@@ -81,6 +81,9 @@ pub(super) async fn start_standalone_chain(
         network_chain_index,
         peers_source_id_map: HashMap::new(),
     };
+
+    // Necessary for the `select!` loop below.
+    let mut from_network_service = from_network_service.fuse();
 
     // Main loop of the syncing logic.
     loop {
