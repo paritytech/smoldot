@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use core::{
     convert::TryFrom,
     iter,
-    num::{NonZeroU32, NonZeroU64},
+    num::NonZeroU32,
 };
 use prost::Message as _;
 
@@ -63,7 +63,7 @@ pub enum BlocksRequestConfigStart {
     /// Hash of the block.
     Hash([u8; 32]),
     /// Number of the block, where 0 would be the genesis block.
-    Number(NonZeroU64),
+    Number(u64),
 }
 
 /// Builds the bytes corresponding to a block request.
@@ -90,7 +90,7 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
                     Some(schema::block_request::FromBlock::Hash(h.to_vec()))
                 }
                 BlocksRequestConfigStart::Number(n) => Some(
-                    schema::block_request::FromBlock::Number(n.get().to_le_bytes().to_vec()),
+                    schema::block_request::FromBlock::Number(n.to_le_bytes().to_vec()),
                 ),
             },
             to_block: Vec::new(),
