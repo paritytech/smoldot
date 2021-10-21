@@ -258,7 +258,7 @@ impl SyncBackground {
                                 network::protocol::BlocksRequestConfigStart::Hash(first_block_hash)
                             } else {
                                 network::protocol::BlocksRequestConfigStart::Number(
-                                    NonZeroU64::new(first_block_height).unwrap(), // TODO: unwrap?
+                                    first_block_height,
                                 )
                             },
                             desired_count: NonZeroU32::new(
