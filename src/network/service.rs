@@ -670,7 +670,7 @@ where
                 if header::decode(&result[0].header.as_ref().unwrap())
                     .unwrap()
                     .number
-                    != n.get() =>
+                    != n =>
             {
                 return Err(BlocksRequestError::InvalidStart)
             }
