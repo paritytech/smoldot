@@ -102,7 +102,7 @@ pub struct Config {
 
     /// Maximum number of pending transactions allowed in the service.
     ///
-    /// Any extra transaction will lead to [`TransactionStatus::Dropped`].
+    /// Any extra transaction will lead to [`TransactionStatus::MaxPendingTransactionsReached`].
     pub max_pending_transactions: NonZeroU32,
 
     /// Maximum number of block body downloads that can be performed in parallel.
