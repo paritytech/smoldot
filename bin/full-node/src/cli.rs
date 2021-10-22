@@ -49,6 +49,9 @@ pub struct CliOptionsRun {
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[structopt(long, default_value = "auto")]
     pub output: Output,
+    /// Log filter. Example: foo=trace
+    #[structopt(long)]
+    pub log: Vec<tracing_subscriber::filter::Directive>,
     /// Coloring: auto, always, never
     #[structopt(long, default_value = "auto")]
     pub color: ColorChoice,
@@ -119,6 +122,7 @@ pub struct ColorChoiceParseError;
 
 #[derive(Debug)]
 pub enum Output {
+    Auto,
     None,
     Informant,
     Logs,
@@ -130,11 +134,7 @@ impl core::str::FromStr for Output {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "auto" {
-            if atty::is(atty::Stream::Stderr) {
-                Ok(Output::Informant)
-            } else {
-                Ok(Output::Logs)
-            }
+            Ok(Output::Auto)
         } else if s == "none" {
             Ok(Output::None)
         } else if s == "informant" {

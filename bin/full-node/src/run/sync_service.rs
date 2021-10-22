@@ -77,7 +77,7 @@ pub struct SyncService {
 
 impl SyncService {
     /// Initializes the [`SyncService`] with the given configuration.
-    #[tracing::instrument(skip(config))]
+    #[tracing::instrument(level = "trace", skip(config))]
     pub async fn new(mut config: Config) -> Arc<Self> {
         let (to_database, messages_rx) = mpsc::channel(4);
 
@@ -169,7 +169,7 @@ impl SyncService {
 
         (config.tasks_executor)(Box::pin(
             start_database_write(config.database, messages_rx).instrument(
-                tracing::debug_span!(parent: None, "database-write", root = ?finalized_block_hash), // TDOO: better display
+                tracing::trace_span!(parent: None, "database-write", root = ?finalized_block_hash), // TDOO: better display
             ),
         ));
 
@@ -180,7 +180,7 @@ impl SyncService {
     ///
     /// > **Important**: This doesn't represent the content of the database.
     // TODO: maybe remove this in favour of the database; seems like a better idea
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "trace", skip(self))]
     pub async fn sync_state(&self) -> SyncState {
         self.sync_state.lock().await.clone()
     }
@@ -316,7 +316,7 @@ impl SyncBackground {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
 
-                    let span = tracing::debug_span!(
+                    let span = tracing::trace_span!(
                         "block-verification",
                         hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
                         outcome = tracing::field::Empty, is_new_best = tracing::field::Empty,
@@ -490,7 +490,7 @@ impl SyncBackground {
         self
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "trace", skip(self))]
     async fn run(mut self) {
         loop {
             self.start_requests().await;
@@ -580,7 +580,7 @@ impl SyncBackground {
 }
 
 /// Starts the task that writes blocks to the database.
-#[tracing::instrument(skip(database, messages_rx))]
+#[tracing::instrument(level = "trace", skip(database, messages_rx))]
 async fn start_database_write(
     database: Arc<full_sqlite::SqliteFullDatabase>,
     mut messages_rx: mpsc::Receiver<ToDatabase>,
