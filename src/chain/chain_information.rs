@@ -38,9 +38,9 @@
 //! They also do not contain the past history of the chain. It is, however, similarly possible to
 //! for instance download the history from other nodes.
 
-use crate::{chain_spec::ChainSpec, finality::grandpa, header};
+use crate::header;
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 pub mod aura_config;
@@ -62,15 +62,6 @@ impl From<ValidChainInformation> for ChainInformation {
 }
 
 impl ValidChainInformation {
-    /// Builds the [`ChainInformation`] corresponding to the genesis block contained in the chain
-    /// spec.
-    pub fn from_chain_spec(chain_spec: &ChainSpec) -> Result<Self, FromGenesisStorageError> {
-        let inner = ChainInformation::from_chain_spec(chain_spec)?;
-        #[cfg(debug_assertions)]
-        ChainInformationRef::from(&inner).validate().unwrap();
-        Ok(ValidChainInformation { inner })
-    }
-
     /// Gives access to the information.
     pub fn as_ref(&self) -> ChainInformationRef {
         From::from(&self.inner)
@@ -137,86 +128,6 @@ pub struct ChainInformation {
 
     /// Extra items that depend on the finality engine.
     pub finality: ChainInformationFinality,
-}
-
-impl ChainInformation {
-    /// Builds the [`ChainInformation`] corresponding to the genesis block contained in the chain spec.
-    pub fn from_chain_spec(chain_spec: &ChainSpec) -> Result<Self, FromGenesisStorageError> {
-        let consensus = {
-            let aura_genesis_config =
-                aura_config::AuraGenesisConfiguration::from_genesis_storage(|k| {
-                    chain_spec.genesis_storage_value(k).map(|v| v.to_owned())
-                });
-
-            let babe_genesis_config =
-                babe_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
-                    chain_spec.genesis_storage_value(k).map(|v| v.to_owned())
-                });
-
-            match (aura_genesis_config, babe_genesis_config) {
-                (Ok(aura_genesis_config), Err(err)) if err.is_function_not_found() => {
-                    ChainInformationConsensus::Aura {
-                        finalized_authorities_list: aura_genesis_config.authorities_list,
-                        slot_duration: aura_genesis_config.slot_duration,
-                    }
-                }
-                (Err(err), Ok(babe_genesis_config)) if err.is_function_not_found() => {
-                    ChainInformationConsensus::Babe {
-                        slots_per_epoch: babe_genesis_config.slots_per_epoch,
-                        finalized_block_epoch_information: None,
-                        finalized_next_epoch_transition: BabeEpochInformation {
-                            epoch_index: 0,
-                            start_slot_number: None,
-                            authorities: babe_genesis_config.epoch0_information.authorities,
-                            randomness: babe_genesis_config.epoch0_information.randomness,
-                            c: babe_genesis_config.epoch0_configuration.c,
-                            allowed_slots: babe_genesis_config.epoch0_configuration.allowed_slots,
-                        },
-                    }
-                }
-                (Err(err1), Err(err2))
-                    if err1.is_function_not_found() && err2.is_function_not_found() =>
-                {
-                    // TODO: seems a bit risky to automatically fall back to this?
-                    ChainInformationConsensus::AllAuthorized
-                }
-                (Err(error), _) => {
-                    // Note that Babe might have produced an error as well, which is intentionally
-                    // ignored here in order to not make the API too complicated.
-                    return Err(FromGenesisStorageError::AuraConfigLoad(error));
-                }
-                (_, Err(error)) => {
-                    return Err(FromGenesisStorageError::BabeConfigLoad(error));
-                }
-                (Ok(_), Ok(_)) => {
-                    return Err(FromGenesisStorageError::MultipleConsensusAlgorithms);
-                }
-            }
-        };
-
-        let finality = {
-            let grandpa_genesis_config =
-                grandpa::chain_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
-                    chain_spec.genesis_storage_value(k).map(|v| v.to_owned())
-                });
-
-            match grandpa_genesis_config {
-                Ok(grandpa_genesis_config) => ChainInformationFinality::Grandpa {
-                    after_finalized_block_authorities_set_id: 0,
-                    finalized_scheduled_change: None,
-                    finalized_triggered_authorities: grandpa_genesis_config.initial_authorities,
-                },
-                Err(error) if error.is_function_not_found() => ChainInformationFinality::Outsourced,
-                Err(error) => return Err(FromGenesisStorageError::GrandpaConfigLoad(error)),
-            }
-        };
-
-        Ok(ChainInformation {
-            finalized_block_header: crate::calculate_genesis_block_header(chain_spec),
-            consensus,
-            finality,
-        })
-    }
 }
 
 impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
@@ -411,19 +322,6 @@ pub enum ChainInformationFinality {
         /// >           change is triggered is the same as the one where it is scheduled.
         finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
     },
-}
-
-/// Error when building the chain information from the genesis storage.
-#[derive(Debug, derive_more::Display)]
-pub enum FromGenesisStorageError {
-    /// Error when retrieving the GrandPa configuration.
-    GrandpaConfigLoad(grandpa::chain_config::FromGenesisStorageError),
-    /// Error when retrieving the Aura algorithm configuration.
-    AuraConfigLoad(aura_config::FromGenesisStorageError),
-    /// Error when retrieving the Babe algorithm configuration.
-    BabeConfigLoad(babe_config::FromGenesisStorageError),
-    /// Multiple consensus algorithms have been detected.
-    MultipleConsensusAlgorithms,
 }
 
 /// Equivalent to a [`ChainInformation`] but referencing an existing structure. Cheap to copy.

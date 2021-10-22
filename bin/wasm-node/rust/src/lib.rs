@@ -240,8 +240,15 @@ impl Client {
         // present in the chain specs, it is possible to start sync at the finalized block it
         // describes.
         let genesis_chain_information =
-            match chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec) {
-                Ok(ci) => ci,
+            match chain_spec.as_chain_information() {
+                Ok(ci) => match chain::chain_information::ValidChainInformation::try_from(ci) {
+                    Ok(ci) => ci,
+                    Err(err) => {
+                        return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                            format!("Invalid genesis chain information: {}", err),
+                        )));
+                    }
+                },
                 Err(err) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
                         format!("Failed to build genesis chain information: {}", err),

@@ -84,8 +84,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     };
 
     // TODO: don't unwrap?
-    let genesis_chain_information =
-        chain::chain_information::ChainInformation::from_chain_spec(&chain_spec).unwrap();
+    let genesis_chain_information = chain_spec.as_chain_information().unwrap();
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
     let (relay_chain_spec, _parachain_id) =
@@ -118,7 +117,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let relay_genesis_chain_information = if let Some(relay_chain_spec) = &relay_chain_spec {
         // TODO: don't unwrap?
-        Some(chain::chain_information::ChainInformation::from_chain_spec(relay_chain_spec).unwrap())
+        Some(relay_chain_spec.as_chain_information().unwrap())
     } else {
         None
     };
