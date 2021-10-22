@@ -37,94 +37,16 @@
 use crate::{
     chain::chain_information::{
         aura_config, babe_config, BabeEpochInformation, ChainInformation,
-        ChainInformationConsensus, ChainInformationFinality, ValidChainInformation,
+        ChainInformationConsensus, ChainInformationFinality,
     },
     finality::grandpa,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
-use core::{convert::TryInto as _, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 mod light_sync_state;
 mod structs;
-
-pub struct LightSyncState {
-    inner: light_sync_state::DecodedLightSyncState,
-}
-
-fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
-    let epoch_authorities: Vec<_> = epoch
-        .authorities
-        .iter()
-        .map(|authority| crate::header::BabeAuthority {
-            public_key: authority.public_key,
-            weight: authority.weight,
-        })
-        .collect();
-
-    BabeEpochInformation {
-        epoch_index: epoch.epoch_index,
-        start_slot_number: Some(epoch.slot_number),
-        authorities: epoch_authorities,
-        randomness: epoch.randomness,
-        c: epoch.config.c,
-        allowed_slots: epoch.config.allowed_slots,
-    }
-}
-
-impl LightSyncState {
-    pub fn as_chain_information(&self) -> ValidChainInformation {
-        // Create a sorted list of all regular epochs that haven't been pruned from the sync state.
-        let mut epochs: Vec<_> = self
-            .inner
-            .babe_epoch_changes
-            .epochs
-            .iter()
-            .filter(|((_, block_num), _)| {
-                *block_num as u64 <= self.inner.finalized_block_header.number
-            })
-            .filter_map(|((_, block_num), epoch)| match epoch {
-                light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),
-                _ => None,
-            })
-            .collect();
-
-        epochs.sort_unstable_by_key(|(&block_num, _)| block_num);
-
-        // TODO: it seems that multiple identical epochs can be found in the list ; figure out why Substrate does that and fix it
-        epochs.dedup_by_key(|(_, epoch)| epoch.epoch_index);
-
-        // Get the latest two epochs.
-        let current_epoch = &epochs[epochs.len() - 2].1;
-        let next_epoch = &epochs[epochs.len() - 1].1;
-
-        ChainInformation {
-            finalized_block_header: self.inner.finalized_block_header.clone(),
-            consensus: ChainInformationConsensus::Babe {
-                slots_per_epoch: NonZeroU64::new(current_epoch.duration).unwrap(),
-                finalized_block_epoch_information: Some(convert_epoch(current_epoch)),
-                finalized_next_epoch_transition: convert_epoch(next_epoch),
-            },
-            finality: ChainInformationFinality::Grandpa {
-                after_finalized_block_authorities_set_id: self.inner.grandpa_authority_set.set_id,
-                finalized_triggered_authorities: {
-                    self.inner
-                        .grandpa_authority_set
-                        .current_authorities
-                        .iter()
-                        .map(|authority| crate::header::GrandpaAuthority {
-                            public_key: authority.public_key,
-                            weight: NonZeroU64::new(authority.weight).unwrap(),
-                        })
-                        .collect()
-                },
-                finalized_scheduled_change: None, // TODO: unimplemented
-            },
-        }
-        .try_into()
-        .unwrap() // TODO: don't unwrap /!\ should fail when parsing the chain spec instead
-    }
-}
 
 /// A configuration of a chain. Can be used to build a genesis block.
 #[derive(Clone)]
@@ -133,15 +55,6 @@ pub struct ChainSpec {
 }
 
 impl ChainSpec {
-    pub fn light_sync_state(&self) -> Option<LightSyncState> {
-        self.client_spec
-            .light_sync_state
-            .as_ref()
-            .map(|state| LightSyncState {
-                inner: state.decode(),
-            })
-    }
-
     /// Parse JSON content into a [`ChainSpec`].
     pub fn from_json_bytes(json: impl AsRef<[u8]>) -> Result<Self, ParseError> {
         let client_spec: structs::ClientSpec =
@@ -325,6 +238,91 @@ impl ChainSpec {
             .as_ref()
             .map(|p| p.get())
             .unwrap_or("{}")
+    }
+
+    pub fn light_sync_state(&self) -> Option<LightSyncState> {
+        self.client_spec
+            .light_sync_state
+            .as_ref()
+            .map(|state| LightSyncState {
+                inner: state.decode(),
+            })
+    }
+}
+
+pub struct LightSyncState {
+    inner: light_sync_state::DecodedLightSyncState,
+}
+
+fn convert_epoch(epoch: &light_sync_state::BabeEpoch) -> BabeEpochInformation {
+    let epoch_authorities: Vec<_> = epoch
+        .authorities
+        .iter()
+        .map(|authority| crate::header::BabeAuthority {
+            public_key: authority.public_key,
+            weight: authority.weight,
+        })
+        .collect();
+
+    BabeEpochInformation {
+        epoch_index: epoch.epoch_index,
+        start_slot_number: Some(epoch.slot_number),
+        authorities: epoch_authorities,
+        randomness: epoch.randomness,
+        c: epoch.config.c,
+        allowed_slots: epoch.config.allowed_slots,
+    }
+}
+
+impl LightSyncState {
+    pub fn as_chain_information(&self) -> ChainInformation {
+        // Create a sorted list of all regular epochs that haven't been pruned from the sync state.
+        let mut epochs: Vec<_> = self
+            .inner
+            .babe_epoch_changes
+            .epochs
+            .iter()
+            .filter(|((_, block_num), _)| {
+                *block_num as u64 <= self.inner.finalized_block_header.number
+            })
+            .filter_map(|((_, block_num), epoch)| match epoch {
+                light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),
+                _ => None,
+            })
+            .collect();
+
+        epochs.sort_unstable_by_key(|(&block_num, _)| block_num);
+
+        // TODO: it seems that multiple identical epochs can be found in the list ; figure out why Substrate does that and fix it
+        epochs.dedup_by_key(|(_, epoch)| epoch.epoch_index);
+
+        // Get the latest two epochs.
+        let current_epoch = &epochs[epochs.len() - 2].1;
+        let next_epoch = &epochs[epochs.len() - 1].1;
+
+        ChainInformation {
+            finalized_block_header: self.inner.finalized_block_header.clone(),
+            consensus: ChainInformationConsensus::Babe {
+                slots_per_epoch: NonZeroU64::new(current_epoch.duration).unwrap(),
+                finalized_block_epoch_information: Some(convert_epoch(current_epoch)),
+                finalized_next_epoch_transition: convert_epoch(next_epoch),
+            },
+            finality: ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id: self.inner.grandpa_authority_set.set_id,
+                finalized_triggered_authorities: {
+                    self.inner
+                        .grandpa_authority_set
+                        .current_authorities
+                        .iter()
+                        .map(|authority| crate::header::GrandpaAuthority {
+                            public_key: authority.public_key,
+                            weight: NonZeroU64::new(authority.weight).unwrap(),
+                        })
+                        .collect()
+                },
+                finalized_scheduled_change: None, // TODO: unimplemented
+            },
+        }
     }
 }
 
