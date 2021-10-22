@@ -425,13 +425,10 @@ impl<'a> serde::Deserialize<'a> for AccountId {
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub extrinsics: Vec<Extrinsic>,
+    pub extrinsics: Vec<HexString>,
     pub header: Header,
     pub justification: Option<HexString>,
 }
-
-#[derive(Debug, Clone)]
-pub struct Extrinsic(pub Vec<u8>);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Header {
@@ -606,7 +603,7 @@ impl serde::Serialize for Block {
 
         #[derive(serde::Serialize)]
         struct SerdeBlockInner<'a> {
-            extrinsics: &'a [Extrinsic],
+            extrinsics: &'a [HexString],
             header: &'a Header,
             justification: Option<&'a HexString>, // TODO: unsure of the type
         }
@@ -619,16 +616,6 @@ impl serde::Serialize for Block {
             },
         }
         .serialize(serializer)
-    }
-}
-
-impl serde::Serialize for Extrinsic {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        // TODO: use HashString or something
-        format!("0x{}", hex::encode(&self.0[..])).serialize(serializer)
     }
 }
 

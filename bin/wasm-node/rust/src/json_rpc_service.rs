@@ -593,7 +593,7 @@ impl Background {
                             .body
                             .unwrap()
                             .into_iter()
-                            .map(methods::Extrinsic)
+                            .map(methods::HexString)
                             .collect(),
                         header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
                             .unwrap(),
