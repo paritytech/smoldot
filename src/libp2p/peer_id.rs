@@ -19,7 +19,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 use alloc::{string::String, vec::Vec};
-use core::{cmp, convert::TryFrom, fmt, hash, str::FromStr};
+use core::{cmp, fmt, hash, str::FromStr};
 use prost::Message as _;
 
 mod keys_proto {

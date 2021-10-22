@@ -41,7 +41,7 @@
 use crate::header;
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 pub mod aura_config;
 pub mod babe_config;

@@ -23,7 +23,7 @@
 //! See <https://en.wikipedia.org/wiki/LEB128>.
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom as _, mem};
+use core::{cmp, mem};
 
 /// Returns an LEB128-encoded integer as a list of bytes.
 ///

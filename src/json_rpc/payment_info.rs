@@ -17,7 +17,7 @@
 
 use super::methods;
 
-use core::{convert::TryFrom as _, iter};
+use core::iter;
 
 /// Produces the input to pass to the `TransactionPaymentApi_query_info` runtime call.
 // TODO: single-encoded or double-encoded tx?

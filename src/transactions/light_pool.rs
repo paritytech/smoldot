@@ -66,7 +66,7 @@ use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
 };
-use core::{convert::TryFrom as _, fmt, iter};
+use core::{fmt, iter};
 
 mod tests;
 

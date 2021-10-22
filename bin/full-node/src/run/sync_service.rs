@@ -26,7 +26,7 @@
 
 use crate::run::network_service;
 
-use core::{convert::TryFrom as _, num::NonZeroU32, pin::Pin};
+use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     database::full_sqlite,

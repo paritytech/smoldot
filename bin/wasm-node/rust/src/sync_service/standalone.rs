@@ -29,7 +29,6 @@ use smoldot::{
 };
 use std::{
     collections::HashMap,
-    convert::TryFrom as _,
     num::{NonZeroU32, NonZeroU64},
     sync::Arc,
 };

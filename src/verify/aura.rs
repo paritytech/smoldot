@@ -47,7 +47,7 @@
 
 use crate::header;
 
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for [`verify_header`].
 pub struct VerifyConfig<'a, TAuthList> {

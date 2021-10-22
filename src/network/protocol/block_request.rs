@@ -18,7 +18,7 @@
 use super::{schema, ProtobufDecodeError};
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom, iter, num::NonZeroU32};
+use core::{iter, num::NonZeroU32};
 use prost::Message as _;
 
 /// Description of a block request that can be sent to a peer.

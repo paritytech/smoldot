@@ -41,9 +41,7 @@ use crate::{
 use alloc::{vec, vec::Vec};
 
 use core::{
-    cmp,
-    convert::TryFrom as _,
-    iter, mem,
+    cmp, iter, mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };

@@ -67,7 +67,7 @@ use crate::libp2p::{
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{cmp, convert::TryFrom as _, fmt, iter};
+use core::{cmp, fmt, iter};
 use prost::Message as _;
 
 mod payload_proto {

@@ -62,12 +62,7 @@
 
 use crate::{chain::chain_information, header, util};
 
-use core::{
-    convert::TryFrom,
-    fmt,
-    iter::{self, FromIterator},
-    num::NonZeroU64,
-};
+use core::{fmt, iter, num::NonZeroU64};
 use parking_lot::Mutex;
 
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};

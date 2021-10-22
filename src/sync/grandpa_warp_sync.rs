@@ -70,7 +70,6 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::convert::TryFrom as _;
 
 pub use warp_sync::Error as FragmentError;
 

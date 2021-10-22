@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use core::{convert::TryFrom, fmt};
+use core::fmt;
 
 /// A single nibble with four bits.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -141,7 +141,6 @@ impl<I: ExactSizeIterator<Item = u8>> ExactSizeIterator for BytesToNibbles<I> {}
 #[cfg(test)]
 mod tests {
     use super::{bytes_to_nibbles, Nibble, NibbleFromU8Error};
-    use core::convert::TryFrom as _;
 
     #[test]
     fn nibble_try_from() {

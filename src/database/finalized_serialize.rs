@@ -32,7 +32,7 @@
 use crate::chain::chain_information;
 
 use alloc::{string::String, vec::Vec};
-use core::{convert::TryFrom, iter};
+use core::iter;
 use hashbrown::HashMap;
 
 mod defs;

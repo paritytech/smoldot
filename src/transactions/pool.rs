@@ -83,7 +83,7 @@
 use super::validate::{TransactionValidityError, ValidTransaction};
 
 use alloc::{collections::BTreeSet, vec::Vec};
-use core::{convert::TryFrom as _, fmt};
+use core::fmt;
 use hashbrown::HashSet;
 
 /// Identifier of a transaction stored within the [`Pool`].

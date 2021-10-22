@@ -55,7 +55,6 @@ use smoldot::{
 };
 use std::{
     collections::HashMap,
-    convert::TryFrom as _,
     iter,
     num::NonZeroU32,
     pin::Pin,

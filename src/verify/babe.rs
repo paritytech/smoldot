@@ -131,7 +131,7 @@
 
 use crate::{chain::chain_information, header};
 
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 use num_traits::{cast::ToPrimitive as _, identities::One as _};
 
 /// Configuration for [`verify_header`].

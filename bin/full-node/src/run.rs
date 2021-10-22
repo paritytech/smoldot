@@ -25,10 +25,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id::PeerId},
 };
-use std::{
-    borrow::Cow, convert::TryFrom as _, fs, io, iter, path::PathBuf, sync::Arc, thread,
-    time::Duration,
-};
+use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
 use tracing::Instrument as _;
 
 mod json_rpc_service;

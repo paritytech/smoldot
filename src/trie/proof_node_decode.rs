@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::nibble;
-use core::{convert::TryFrom as _, fmt, iter, slice};
+use core::{fmt, iter, slice};
 
 /// Decodes a node value found in a proof into its components.
 pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
@@ -235,7 +235,6 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::super::nibble;
-    use core::convert::TryFrom as _;
 
     #[test]
     fn basic() {

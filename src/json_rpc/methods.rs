@@ -26,7 +26,6 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::convert::TryFrom as _;
 
 /// Parses a JSON call (usually received from a JSON-RPC server).
 ///

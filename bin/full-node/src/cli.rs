@@ -30,7 +30,6 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use core::convert::TryFrom as _;
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is

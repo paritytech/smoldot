@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::vec::Vec;
-use core::convert::TryFrom as _;
 
 /// Attempt to decode the given SCALE-encoded Grandpa commit.
 pub fn decode_grandpa_commit(scale_encoded: &[u8]) -> Result<CommitMessageRef, Error> {

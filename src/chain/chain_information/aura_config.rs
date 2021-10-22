@@ -21,7 +21,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 /// Aura configuration of a chain, as extracted from the genesis block.
 ///

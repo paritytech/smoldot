@@ -54,9 +54,7 @@ use crate::{
 
 use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{
-    cmp,
-    convert::TryFrom as _,
-    fmt, iter, mem,
+    cmp, fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
