@@ -256,7 +256,16 @@ impl Client {
                 }
             };
         let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
-            light_sync_state.as_chain_information()
+            match chain::chain_information::ValidChainInformation::try_from(
+                light_sync_state.as_chain_information(),
+            ) {
+                Ok(ci) => ci,
+                Err(err) => {
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                        format!("Invalid checkpoint in chain specification: {}", err),
+                    )));
+                }
+            }
         } else {
             genesis_chain_information.clone()
         };
