@@ -18,6 +18,7 @@
 use super::multiaddr;
 
 use alloc::vec::Vec;
+use core::fmt;
 
 /// List of potential addresses of a single peer, reachable or not.
 pub(super) struct Addresses {
@@ -100,6 +101,14 @@ impl Addresses {
             .position(|(_, s)| matches!(s, State::DisconnectedReachable | State::NotTried))?;
         self.list[index].1 = State::PendingConnect;
         Some(&self.list[index].0)
+    }
+}
+
+impl fmt::Debug for Addresses {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list()
+            .entries(self.list.iter().map(|(a, _)| a))
+            .finish()
     }
 }
 
