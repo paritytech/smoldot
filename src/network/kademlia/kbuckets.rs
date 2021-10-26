@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use alloc::vec::Vec;
-use core::{ops::Add, time::Duration};
+use core::{fmt, ops::Add, time::Duration};
 use sha2::{Digest as _, Sha256};
 
 const ENTRIES_PER_BUCKET: usize = 20;
@@ -58,6 +58,28 @@ where
         &self.local_key.0
     }
 
+    /// Returns the value corresponding to the given key. Returns `None` if the key can't be found.
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let key_hashed = Key::new(key.as_ref());
+        let distance = match distance_log2(&self.local_key.1, &key_hashed) {
+            Some(d) => d,
+            None => return None,
+        };
+
+        self.buckets[usize::from(distance)].get(key)
+    }
+
+    /// Returns the value corresponding to the given key. Returns `None` if the key can't be found.
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let key_hashed = Key::new(key.as_ref());
+        let distance = match distance_log2(&self.local_key.1, &key_hashed) {
+            Some(d) => d,
+            None => return None,
+        };
+
+        self.buckets[usize::from(distance)].get_mut(key)
+    }
+
     /// Inserts or updates an entry in the buckets.
     pub fn entry<'a>(&'a mut self, key: &'a K) -> Entry<'a, K, V, TNow>
     where
@@ -83,31 +105,11 @@ where
             distance,
         })
     }
+}
 
-    /// Returns the value corresponding to the given key. Returns `None` if the key can't be found.
-    pub fn get(&self, key: &K) -> Option<&V> {
-        let key_hashed = Key::new(key.as_ref());
-        let distance = match distance_log2(&self.local_key.1, &key_hashed) {
-            Some(d) => d,
-            None => return None,
-        };
-
-        self.buckets[usize::from(distance)].get(key)
-    }
-
-    /// Returns the value corresponding to the given key. Returns `None` if the key can't be found.
-    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        let key_hashed = Key::new(key.as_ref());
-        let distance = match distance_log2(&self.local_key.1, &key_hashed) {
-            Some(d) => d,
-            None => return None,
-        };
-
-        self.buckets[usize::from(distance)].get_mut(key)
-    }
-
+impl<K, V, TNow> KBuckets<K, V, TNow> {
     /// Iterates over all the peers in the k-buckets.
-    pub fn iter(&mut self) -> impl Iterator<Item = (&K, &V)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.buckets
             .iter()
             .flat_map(|b| b.entries.iter().map(|(k, v)| (k, v)))
@@ -118,6 +120,16 @@ where
         self.buckets
             .iter_mut()
             .flat_map(|b| b.entries.iter_mut().map(|(k, v)| (&*k, v)))
+    }
+}
+
+impl<K, V, TNow> fmt::Debug for KBuckets<K, V, TNow>
+where
+    K: fmt::Debug,
+    V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
