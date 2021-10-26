@@ -914,8 +914,7 @@ where
         // TODO: O(n)
         for chain in &mut lock.chains {
             if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
-                let _was_in = addrs.remove(&multiaddr);
-                debug_assert!(_was_in);
+                addrs.remove(&multiaddr);
             }
         }
 
