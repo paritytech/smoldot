@@ -169,7 +169,7 @@ where
 {
     /// Inserts the entry in the vacant slot. Returns an error if the k-buckets are full.
     pub fn insert(
-        mut self,
+        self,
         value: V,
         now: &TNow,
         state: PeerState,
@@ -232,8 +232,37 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
     /// Updates the state of this entry.
-    pub fn set_state(&mut self, now: &TNow, state: PeerState) {
-        todo!()
+    pub fn set_state(&mut self, state: PeerState) {
+        let bucket = &mut self.inner.buckets[usize::from(self.distance)];
+        match (bucket.pending_entry.as_ref(), state) {
+            (Some(pending_entry), PeerState::Disconnected) if pending_entry.0 == *self.key => {}
+            (Some(pending_entry), PeerState::Connected) if pending_entry.0 == *self.key => {}
+            (_, PeerState::Connected) => {
+                let position = bucket
+                    .entries
+                    .iter()
+                    .position(|(k, _)| *k == *self.key)
+                    .unwrap();
+                if position >= bucket.num_connected_entries {
+                    debug_assert!(bucket.num_connected_entries < ENTRIES_PER_BUCKET);
+                    let entry = bucket.entries.remove(position);
+                    bucket.entries.insert(bucket.num_connected_entries, entry);
+                    bucket.num_connected_entries += 1;
+                }
+            }
+            (_, PeerState::Disconnected) => {
+                let position = bucket
+                    .entries
+                    .iter()
+                    .position(|(k, _)| *k == *self.key)
+                    .unwrap();
+                if position < bucket.num_connected_entries {
+                    let entry = bucket.entries.remove(position);
+                    bucket.num_connected_entries -= 1;
+                    bucket.entries.insert(bucket.num_connected_entries, entry);
+                }
+            }
+        }
     }
 
     pub fn get_mut(&mut self) -> &mut V {

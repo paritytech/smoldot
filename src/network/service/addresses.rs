@@ -17,6 +17,8 @@
 
 use super::multiaddr;
 
+use alloc::vec::Vec;
+
 /// List of potential addresses of a single peer, reachable or not.
 pub(super) struct Addresses {
     list: Vec<(multiaddr::Multiaddr, State)>,
@@ -43,14 +45,61 @@ impl Addresses {
         self.list.push((addr, State::NotTried));
     }
 
+    /// If the given address is in the list, removes it.
+    ///
+    /// Returns whether the value was present.
+    pub(super) fn remove(&mut self, addr: &multiaddr::Multiaddr) -> bool {
+        if let Some(index) = self.list.iter().position(|(a, _)| a == addr) {
+            self.list.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if the list of addresses is empty.
+    ///
+    /// > **Note**: This is not the same as the list of addresses containing only disconnected
+    /// >           addresses.
     pub(super) fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
 
+    /// If the given address is in the list, sets its state to "connected".
+    ///
+    /// # Panic
+    ///
+    /// Panics if the state of this address was already connected.
+    ///
+    pub(super) fn set_connected(&mut self, addr: &multiaddr::Multiaddr) {
+        if let Some(index) = self.list.iter().position(|(a, _)| a == addr) {
+            assert!(!matches!(self.list[index].1, State::Connected));
+            self.list[index].1 = State::Connected;
+        }
+    }
+
+    /// If the given address is in the list, sets its state to "disconnected".
+    ///
+    /// # Panic
+    ///
+    /// Panics if the state of this address was already disconnected.
+    ///
+    pub(super) fn set_disconnected(&mut self, addr: &multiaddr::Multiaddr) {
+        if let Some(index) = self.list.iter().position(|(a, _)| a == addr) {
+            assert!(matches!(self.list[index].1, State::Connected));
+            self.list[index].1 = State::DisconnectedReachable;
+        }
+    }
+
     /// Picks an address from the list whose state is "not connected", and switches it to
     /// "pending". Returns `None` if no such address is available.
-    pub(super) fn addr_to_pending(&mut self) -> Option<multiaddr::Multiaddr> {
-        todo!()
+    pub(super) fn addr_to_pending(&mut self) -> Option<&multiaddr::Multiaddr> {
+        let index = self
+            .list
+            .iter()
+            .position(|(_, s)| matches!(s, State::DisconnectedReachable | State::NotTried))?;
+        self.list[index].1 = State::PendingConnect;
+        Some(&self.list[index].0)
     }
 }
 

@@ -52,7 +52,10 @@ pub use crate::libp2p::{
 mod addresses;
 
 /// Configuration for a [`ChainNetwork`].
-pub struct Config {
+pub struct Config<TNow> {
+    /// Time at the moment of the initialization of the service.
+    pub now: TNow,
+
     /// Capacity to initially reserve to the list of connections.
     pub connections_capacity: usize,
 
@@ -243,7 +246,7 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
     /// Initializes a new [`ChainNetwork`].
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config<TNow>) -> Self {
         // The order of protocols here is important, as it defines the values of `protocol_index`
         // to pass to libp2p or that libp2p produces.
         let notification_protocols = config
@@ -397,6 +400,7 @@ where
                     // entries.
                     if let Ok(mut entry) = kbuckets.entry(peer_id).or_insert(
                         addresses::Addresses::new(),
+                        &config.now,
                         kademlia::kbuckets::PeerState::Disconnected,
                     ) {
                         entry.get_mut().insert_discovered(addr.clone());
@@ -859,14 +863,8 @@ where
         // Update the list of addresses.
         // TODO: O(n)
         for chain in &mut lock.chains {
-            if let Some((_, addrs)) = chain
-                .discovered_peers
-                .iter_mut()
-                .find(|(p, _)| *p == *expected_peer_id)
-            {
-                if !addrs.iter().any(|a| *a == *multiaddr) {
-                    addrs.push(multiaddr.clone());
-                }
+            if let Some(addrs) = chain.kbuckets.get_mut(expected_peer_id) {
+                addrs.set_connected(multiaddr);
             }
         }
 
@@ -886,7 +884,8 @@ where
     ///
     pub async fn pending_outcome_err(&self, id: PendingId) {
         let mut lock = self.ephemeral_guarded.lock().await;
-        let (expected_peer_id, _, _) = lock.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, _) = lock.pending_ids.get(id.0).unwrap();
+        let multiaddr = multiaddr.clone(); // Solves borrowck issues.
 
         let has_any_attempt_left = lock
             .num_pending_per_peer
@@ -906,10 +905,20 @@ where
         }
 
         // Now update `lock`.
-        let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
-
         // For future-cancellation-safety reasons, this is done after all the asynchronous
         // operations.
+
+        let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
+
+        // Update the list of addresses.
+        // TODO: O(n)
+        for chain in &mut lock.chains {
+            if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
+                let _was_in = addrs.remove(&multiaddr);
+                debug_assert!(_was_in);
+            }
+        }
+
         {
             let value = lock
                 .num_pending_per_peer
@@ -1014,7 +1023,8 @@ where
                             .entry(peer_id)
                             .into_occupied()
                         {
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
+                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.get_mut().set_disconnected(address);
                         }
 
                         // Insert the address back in `discovered_peers` so that we potentially try
@@ -1159,7 +1169,7 @@ where
                             .entry(peer_id)
                             .into_occupied()
                         {
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Connected);
+                            entry.set_state(kademlia::kbuckets::PeerState::Connected);
                         }
                     }
 
@@ -1373,7 +1383,7 @@ where
                             .entry(peer_id)
                             .into_occupied()
                         {
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
+                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
                         }
                     }
 
@@ -1812,7 +1822,7 @@ where
                         .find(|(p, addr)| **p == *entry.key())
                         .and_then(|(_, addrs)| addrs.addr_to_pending());
                     match potential {
-                        Some(a) => a,
+                        Some(a) => a.clone(),
                         None => continue,
                     }
                 };
@@ -2167,13 +2177,13 @@ where
             }
 
             // TODO: also insert addresses in kbuckets of other chains? a bit unclear
-            if let Ok(kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
+            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
                 addresses::Addresses::with_capacity(discovered_addrs.len()),
                 now,
                 kademlia::kbuckets::PeerState::Disconnected,
             ) {
                 for to_insert in discovered_addrs {
-                    kbuckets_addrs.insert_discovered(to_insert);
+                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
                 }
             }
         }
