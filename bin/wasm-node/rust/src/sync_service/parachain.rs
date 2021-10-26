@@ -314,7 +314,7 @@ pub(super) async fn start_parachain(
                         Ok(parahead) => {
                             log::debug!(
                                 target: &log_target,
-                                "Successfully fetched parahead of blake2 hash {} for relay chain blocks {}",
+                                "Successfully fetched parahead of blake2 hash {} for relay chain block(s) {}",
                                 HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
                                 async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
                             );
