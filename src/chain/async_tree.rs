@@ -24,8 +24,58 @@
 //! of the tree, is only implicitly there.
 //!
 //! When a block is inserted in the [`AsyncTree`], it is marked as "pending".
+//! TODO: finish doc
 //!
-// TODO: finish docs
+//! # Example
+//!
+//! ```
+//! use smoldot::chain::async_tree;
+//! use std::time::{Instant, Duration};
+//!
+//! let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+//!     finalized_async_user_data: "hello",
+//!     retry_after_failed: Duration::from_secs(5),
+//! });
+//!
+//! // Insert a new best block, parent of the finalized block.
+//! // When doing so, we insert a "user data", a value opaque to the tree and that can be
+//! // retreived later. Here we pass "my block".
+//! let _my_block_index = tree.input_insert_block("my block", None, false, true);
+//!
+//! // When calling `next_necessary_async_op`, the tree now generates a new asynchronous
+//! // operation id.
+//! let async_op_id = match tree.next_necessary_async_op(&Instant::now()) {
+//!     async_tree::NextNecessaryAsyncOp::Ready(params) => {
+//!         assert_eq!(params.block_index, _my_block_index);
+//!         assert_eq!(*params.block_user_data, "my block");
+//!         params.id
+//!     }
+//!     async_tree::NextNecessaryAsyncOp::NotReady { when: _ } => {
+//!         // In this example, this variant can't be returned. In practice, however, you need
+//!         // to call `next_necessary_async_op` again after `when`.
+//!         panic!();
+//!     }
+//! };
+//!
+//! // The user is now responsible for performing this asynchronous operation.
+//! // When it is finished, call `async_op_finished`.
+//! // Just like when inserting a new block, we insert another "user data" in all the blocks that
+//! // have this asynchronous operation associated to them.
+//! tree.async_op_finished(async_op_id, "world");
+//!
+//! // You can now advance the best and finalized block of the tree. Calling this function tries
+//! // to update the tree to match the best and finalized block of the input, except that only
+//! // blocks whose asynchronous operation is finished are considered.
+//! match tree.try_advance_output() {
+//!     Some(async_tree::OutputUpdate::Block(block)) => {
+//!         assert_eq!(block.index, _my_block_index);
+//!         assert_eq!(*block.user_data, "my block");
+//!         assert_eq!(*block.async_op_user_data, "world");
+//!         assert!(block.is_new_best);
+//!     }
+//!     _ => unreachable!() // Unreachable in this example.
+//! }
+//! ```
 
 use crate::chain::fork_tree;
 use alloc::vec::Vec;
