@@ -298,7 +298,10 @@ where
                 max_response_size: 16 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
-                timeout: Duration::from_secs(6),
+                // The timeout needs to be long enough to potentially download the maximum
+                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
+                // TODO: 128 seconds is way too long, so we put 16 seconds instead for now
+                timeout: Duration::from_secs(16),
             })
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/light/2", chain.protocol_id),
@@ -308,7 +311,10 @@ where
                 max_response_size: 10 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
-                timeout: Duration::from_secs(6),
+                // The timeout needs to be long enough to potentially download the maximum
+                // response size of 10 MiB. Assuming a 128 kiB/sec connection, that's 80 seconds.
+                // TODO: 80 seconds is too much, reduce these 10 MiB to less?
+                timeout: Duration::from_secs(80),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/kad", chain.protocol_id),
@@ -316,15 +322,20 @@ where
                 max_response_size: 1024 * 1024,
                 // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
                 inbound_allowed: false,
-                timeout: Duration::from_secs(6),
+                // The timeout needs to be long enough to potentially download the maximum
+                // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
+                timeout: Duration::from_secs(8),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 32 },
-                max_response_size: 128 * 1024 * 1024, // TODO: this is way too large at the moment ; see https://github.com/paritytech/substrate/pull/8578
+                max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
-                timeout: Duration::from_secs(6),
+                // The timeout needs to be long enough to potentially download the maximum
+                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
+                // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
+                timeout: Duration::from_secs(32),
             }))
         }))
         .collect();
