@@ -282,6 +282,17 @@ where
             })
     }
 
+    /// Returns the blocks targeted by this asynchronous operation.
+    pub fn async_op_blocks(&self, async_op_id: AsyncOpId) -> impl Iterator<Item = &TBl> {
+        self.non_finalized_blocks
+            .iter_unordered()
+            .map(|(_, b)| b)
+            .filter(move |b| {
+                matches!(b.async_op, AsyncOpState::InProgress { async_op_id: id, .. } if id == async_op_id)
+            })
+            .map(|b| &b.user_data)
+    }
+
     /// Injects into the state of the data structure a completed operation.
     ///
     /// This "destroys" the [`AsyncOpId`].

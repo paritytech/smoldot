@@ -19,6 +19,7 @@ use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
 use crate::{ffi, network_service, runtime_service};
 
 use futures::{channel::mpsc, prelude::*};
+use itertools::Itertools as _;
 use smoldot::{
     chain::{self, async_tree},
     executor::{host, read_only_runtime_host},
@@ -311,10 +312,11 @@ pub(super) async fn start_parachain(
                     // Log and update the `async_tree` accordingly.
                     match parahead_result {
                         Ok(parahead) => {
-                            // TODO: print more info
                             log::debug!(
                                 target: &log_target,
-                                "Successfully fetched parahead",
+                                "Successfully fetched parahead of blake2 hash {} for relay chain block(s) {}",
+                                HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
                             );
 
                             async_tree.async_op_finished(async_op_id, parahead);
@@ -330,7 +332,8 @@ pub(super) async fn start_parachain(
                                 } else {
                                     log::Level::Debug
                                 },
-                                "Failed to fetch the parachain head from relay chain: {}",
+                                "Failed to fetch the parachain head from relay chain blocks {}: {}",
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
                                 error
                             );
 
