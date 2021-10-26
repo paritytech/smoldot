@@ -1819,7 +1819,7 @@ where
                         .chains
                         .iter_mut()
                         .flat_map(|chain| chain.kbuckets.iter_mut())
-                        .find(|(p, addr)| **p == *entry.key())
+                        .find(|(p, _)| **p == *entry.key())
                         .and_then(|(_, addrs)| addrs.addr_to_pending());
                     match potential {
                         Some(a) => a.clone(),
