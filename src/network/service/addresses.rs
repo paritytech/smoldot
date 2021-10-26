@@ -107,11 +107,12 @@ impl Addresses {
 impl fmt::Debug for Addresses {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list()
-            .entries(self.list.iter().map(|(a, _)| a))
+            .entries(self.list.iter())
             .finish()
     }
 }
 
+#[derive(Debug)]
 enum State {
     /// Currently connected to this address.
     Connected,
