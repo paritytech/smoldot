@@ -40,6 +40,7 @@ use crate::ffi;
 
 use core::{cmp, fmt, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
+use itertools::Itertools as _;
 use smoldot::{
     informant::HashDisplay,
     libp2p::{
@@ -456,12 +457,11 @@ impl NetworkService {
                                 .await
                             {
                                 Ok(insert) => {
-                                    for peer_id in insert.peer_ids() {
-                                        log::trace!(
-                                            target: "connections", "Discovered {} on {}",
-                                            peer_id, &network_service.log_chain_names[chain_index]
-                                        );
-                                    }
+                                    log::debug!(
+                                        target: "connections", "On chain {}, discovered: {}",
+                                        &network_service.log_chain_names[chain_index],
+                                        insert.peer_ids().map(|p| p.to_string()).join(", ")
+                                    );
 
                                     insert.insert(&ffi::Instant::now()).await;
                                 }

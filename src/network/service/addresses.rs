@@ -43,6 +43,19 @@ impl Addresses {
         self.list.len()
     }
 
+    /// Returns the list of addresses stored in this list.
+    pub(super) fn iter(&'_ self) -> impl Iterator<Item = &'_ multiaddr::Multiaddr> + '_ {
+        self.list.iter().map(|(a, _)| a)
+    }
+
+    /// Returns the list of addresses stored in this list that are marked as connected.
+    pub(super) fn iter_connected(&'_ self) -> impl Iterator<Item = &'_ multiaddr::Multiaddr> + '_ {
+        self.list
+            .iter()
+            .filter(|(_, s)| matches!(s, State::Connected))
+            .map(|(a, _)| a)
+    }
+
     /// Inserts a new address in the list in the "not tried" state.
     pub(super) fn insert_discovered(&mut self, addr: multiaddr::Multiaddr) {
         if self.list.iter().any(|(a, _)| *a == addr) {
