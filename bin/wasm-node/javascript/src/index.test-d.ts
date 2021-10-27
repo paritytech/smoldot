@@ -6,7 +6,7 @@ import smoldot, { Smoldot, Client } from 'smoldot';
 
 // Test when supplying all options and all params to logCallback
 
-// $ExpectType Promise<SmoldotClient>
+// $ExpectType Promise<Client>
 let sp = smoldot.start({
   maxLogLevel: 3,
   logCallback: (level, target, message) => { },
@@ -17,15 +17,15 @@ let sp = smoldot.start({
 
 // Test when not supplying optional options and optional params
 
-// $ExpectType Promise<SmoldotClient>
+// $ExpectType Promise<Client>
 sp = smoldot.start();
 
 sp.then(async (sm) => {
-  // $ExpectType Promise<SmoldotChain>
+  // $ExpectType Promise<Chain>
   const chain1 = sm.addChain({ chainSpec: '' });
-  // $ExpectType Promise<SmoldotChain>
+  // $ExpectType Promise<Chain>
   const chain2Promise = sm.addChain({ chainSpec: '', potentialRelayChains: [await chain1], jsonRpcCallback: (resp) => { } });
-  // $ExpectType SmoldotChain
+  // $ExpectType Chain
   const chain2 = await chain2Promise;
   // $ExpectType void
   chain2.sendJsonRpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}');
