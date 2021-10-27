@@ -440,7 +440,7 @@ impl NetworkService {
                         Ok(socket) => socket,
                         Err(_) => {
                             tracing::debug!(%start_connect.multiaddr, "not-tcp");
-                            network_service.network.pending_outcome_err(start_connect.id).await;
+                            network_service.network.pending_outcome_err(start_connect.id, true).await;
                             continue;
                         }
                     };
@@ -530,14 +530,14 @@ async fn connection_task(
         futures::pin_mut!(tcp_socket);
         futures::select! {
             _ = timeout => {
-                network_service.network.pending_outcome_err(id).await;
+                network_service.network.pending_outcome_err(id, false).await;
                 return;
             }
             result = tcp_socket => {
                 match result {
                     Ok(s) => s,
                     Err(_) => {
-                        network_service.network.pending_outcome_err(id).await;
+                        network_service.network.pending_outcome_err(id, true).await;
                         return;
                     }
                 }

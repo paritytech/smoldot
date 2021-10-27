@@ -845,10 +845,10 @@ async fn connection_task(
 
         match result {
             Ok(ws) => ws,
-            Err(_) => {
+            Err(err) => {
                 network_service
                     .network
-                    .pending_outcome_err(pending_id)
+                    .pending_outcome_err(pending_id, err.is_some())
                     .await;
                 return;
             }
