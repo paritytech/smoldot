@@ -551,7 +551,7 @@ impl Task {
                                 // TODO: the code below is `O(n)` complexity
                                 let header = self
                                     .sync
-                                    .non_finalized_blocks_ancestry_order()
+                                    .non_finalized_blocks_unordered()
                                     .find(|h| h.hash() == verified_hash)
                                     .unwrap();
                                 Notification::Block(BlockNotification {
