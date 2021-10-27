@@ -237,6 +237,7 @@ impl NetworkService {
                 peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
                 handshake_timeout: Duration::from_secs(8),
+                max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
                 pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
                 randomness_seed: rand::random(),
             }),
