@@ -233,6 +233,8 @@ struct EphemeralGuardedChain<TNow> {
     ///
     /// A peer is marked as "connected" in the k-buckets when a block announces substream is open,
     /// and disconnected when it is closed.
+    ///
+    /// For each peer, a list of addresses is hold. This list must never become empty.
     kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow>,
 }
 
@@ -922,7 +924,14 @@ where
         // TODO: O(n)
         for chain in &mut lock.chains {
             if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
-                // TODO: if we remove the addr here, then losing Internet connection means that all addresses will be removed at some point
+                // TODO: only remove if the reason for the reach failure is a permanent error, such as unreachable peer; timeouts shouldn't lead to remove address
+                // Do not remove last remaining address, in order to prevent the addresses list
+                // from ever becoming empty.
+                debug_assert!(!addrs.is_empty());
+                if addrs.len() <= 1 {
+                    continue;
+                }
+
                 addrs.remove(&multiaddr);
             }
         }
@@ -2199,6 +2208,9 @@ where
 
                     kbuckets_addrs.get_mut().insert_discovered(to_insert);
                 }
+
+                // List of addresses must never be empty.
+                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
             }
         }
     }
