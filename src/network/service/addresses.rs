@@ -36,12 +36,15 @@ impl Addresses {
         }
     }
 
+    /// Returns the number of addresses.
+    pub(super) fn len(&self) -> usize {
+        self.list.len()
+    }
+
     pub(super) fn insert_discovered(&mut self, addr: multiaddr::Multiaddr) {
         if self.list.iter().any(|(a, _)| *a == addr) {
             return;
         }
-
-        // TODO: add a cap to the number of addresses?
 
         self.list.push((addr, State::NotTried));
     }
@@ -106,9 +109,7 @@ impl Addresses {
 
 impl fmt::Debug for Addresses {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_list()
-            .entries(self.list.iter())
-            .finish()
+        f.debug_list().entries(self.list.iter()).finish()
     }
 }
 

@@ -405,6 +405,14 @@ where
                     ) {
                         entry.get_mut().insert_discovered(addr.clone());
                     }
+
+                    // TODO: remove this section once peer slots attribution is fleshed out
+                    for notifications_protocol in (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+                        .map(|n| n + NOTIFICATIONS_PROTOCOLS_PER_CHAIN * chain_index)
+                    {
+                        initial_desired_substreams
+                            .insert((peer_id.clone(), notifications_protocol));
+                    }
                 }
 
                 EphemeralGuardedChain {
@@ -1737,7 +1745,7 @@ where
             peer_id::PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
         };
 
-        // TODO: implement Kademlia properly
+        // TODO: use k-buckets for that
 
         if let Some(target) = self.inner.peers_list().await.next() {
             // TODO: better peer selection
@@ -2182,6 +2190,12 @@ where
                 kademlia::kbuckets::PeerState::Disconnected,
             ) {
                 for to_insert in discovered_addrs {
+                    if kbuckets_addrs.get_mut().len() >= 5 {
+                        // TODO: this limit should also be the capacity of the `Addresses`
+                        // TODO: hardcoded limit
+                        continue;
+                    }
+
                     kbuckets_addrs.get_mut().insert_discovered(to_insert);
                 }
             }
