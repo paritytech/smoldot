@@ -91,6 +91,9 @@ pub struct Config<TNow> {
     /// and must be aborted.
     pub handshake_timeout: Duration,
 
+    /// Maximum number of addresses kept in memory per network identity.
+    pub max_addresses_per_peer: NonZeroUsize,
+
     /// Number of events that can be buffered internally before connections are back-pressured.
     ///
     /// A good default value is 64.
@@ -160,6 +163,9 @@ pub struct ChainNetwork<TNow> {
 
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
+
+    /// See [`Config::max_addresses_per_peer`].
+    max_addresses_per_peer: NonZeroUsize,
 
     /// Extra fields protected by a `Mutex` and that relate to the logic in
     /// [`ChainNetwork::next_event`]. Must only be locked within that method and is kept locked
@@ -401,7 +407,7 @@ where
                     // The insertion can fail if we have more bootnodes than the k-buckets have
                     // entries.
                     if let Ok(mut entry) = kbuckets.entry(peer_id).or_insert(
-                        addresses::Addresses::new(),
+                        addresses::Addresses::with_capacity(config.max_addresses_per_peer.get()),
                         &config.now,
                         kademlia::kbuckets::PeerState::Disconnected,
                     ) {
@@ -469,6 +475,7 @@ where
                 chains,
             }),
             handshake_timeout: config.handshake_timeout,
+            max_addresses_per_peer: config.max_addresses_per_peer,
             num_chains,
             randomness: Mutex::new(randomness),
             next_start_connect_waker: AtomicWaker::new(),
@@ -2195,14 +2202,12 @@ where
 
             // TODO: also insert addresses in kbuckets of other chains? a bit unclear
             if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
-                addresses::Addresses::with_capacity(discovered_addrs.len()),
+                addresses::Addresses::with_capacity(self.service.max_addresses_per_peer.get()),
                 now,
                 kademlia::kbuckets::PeerState::Disconnected,
             ) {
                 for to_insert in discovered_addrs {
-                    if kbuckets_addrs.get_mut().len() >= 5 {
-                        // TODO: this limit should also be the capacity of the `Addresses`
-                        // TODO: hardcoded limit
+                    if kbuckets_addrs.get_mut().len() >= self.service.max_addresses_per_peer.get() {
                         continue;
                     }
 
