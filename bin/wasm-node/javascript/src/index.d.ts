@@ -18,7 +18,7 @@
 /**
  * Thrown in case of a problem when initializing the chain.
  */
- declare class AddChainError extends Error {
+declare class AddChainError extends Error {
   constructor(message: string);
 }
 
@@ -38,7 +38,7 @@ declare class JsonRpcDisabledError extends Error {
 /**
  * Thrown in case the underlying client encounters an unexpected crash.
  *
- * This is always an internal bug in smoldot and is never supported to happen.
+ * This is always an internal bug in smoldot and is never supposed to happen.
  */
 declare class CrashError extends Error {
   constructor(message: string);
