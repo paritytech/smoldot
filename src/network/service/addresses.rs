@@ -26,10 +26,12 @@ pub(super) struct Addresses {
 }
 
 impl Addresses {
+    /// Creates a new empty list of addresses.
     pub(super) fn new() -> Self {
         Addresses { list: Vec::new() }
     }
 
+    /// Creates a new empty list of addresses with the given capacity pre-allocated.
     pub(super) fn with_capacity(cap: usize) -> Self {
         Addresses {
             list: Vec::with_capacity(cap),
@@ -41,6 +43,7 @@ impl Addresses {
         self.list.len()
     }
 
+    /// Inserts a new address in the list in the "not tried" state.
     pub(super) fn insert_discovered(&mut self, addr: multiaddr::Multiaddr) {
         if self.list.iter().any(|(a, _)| *a == addr) {
             return;
@@ -123,4 +126,62 @@ enum State {
     DisconnectedReachable,
     /// Address has been discovered, but its reachability hasn't been tried yet.
     NotTried,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::network::Multiaddr;
+
+    #[test]
+    fn transition_not_tried_connected() {
+        let mut addresses = super::Addresses::new();
+        assert!(addresses.is_empty());
+
+        let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
+        addresses.insert_discovered(addr.clone());
+
+        addresses.set_connected(&addr);
+        assert!(addresses.addr_to_pending().is_none());
+
+        addresses.set_disconnected(&addr);
+    }
+
+    #[test]
+    fn transition_not_tried_pending_connected() {
+        let mut addresses = super::Addresses::new();
+        assert!(addresses.is_empty());
+
+        let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
+        addresses.insert_discovered(addr.clone());
+
+        assert_eq!(addresses.addr_to_pending(), Some(&addr));
+        assert!(addresses.addr_to_pending().is_none());
+
+        addresses.set_connected(&addr);
+
+        addresses.set_disconnected(&addr);
+    }
+
+    #[test]
+    #[should_panic]
+    fn transition_not_tried_disconnected() {
+        let mut addresses = super::Addresses::new();
+
+        let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
+        addresses.insert_discovered(addr.clone());
+
+        addresses.set_disconnected(&addr);
+    }
+
+    #[test]
+    #[should_panic]
+    fn transition_connected_twice() {
+        let mut addresses = super::Addresses::new();
+
+        let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
+        addresses.insert_discovered(addr.clone());
+
+        addresses.set_connected(&addr);
+        addresses.set_connected(&addr);
+    }
 }
