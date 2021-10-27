@@ -922,6 +922,7 @@ where
         // TODO: O(n)
         for chain in &mut lock.chains {
             if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
+                // TODO: if we remove the addr here, then losing Internet connection means that all addresses will be removed at some point
                 addrs.remove(&multiaddr);
             }
         }
