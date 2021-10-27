@@ -297,6 +297,14 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         self.chain.best_block_hash()
     }
 
+    /// Returns the header of all known non-finalized blocks in the chain without any specific
+    /// order.
+    pub fn non_finalized_blocks_unordered(
+        &'_ self,
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+        self.chain.iter_unordered()
+    }
+
     /// Returns the header of all known non-finalized blocks in the chain.
     ///
     /// The returned items are guaranteed to be in an order in which the parents are found before

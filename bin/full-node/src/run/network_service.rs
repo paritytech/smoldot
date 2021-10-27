@@ -230,6 +230,7 @@ impl NetworkService {
                 tasks_executor: config.tasks_executor,
             }),
             network: service::ChainNetwork::new(service::Config {
+                now: Instant::now(),
                 chains,
                 known_nodes,
                 connections_capacity: 100, // TODO: ?
@@ -379,7 +380,7 @@ impl NetworkService {
                         {
                             Ok(insert) => {
                                 insert
-                                    .insert()
+                                    .insert(&Instant::now())
                                     .instrument(tracing::trace_span!("insert"))
                                     .await
                             }

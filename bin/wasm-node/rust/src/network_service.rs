@@ -179,6 +179,7 @@ impl NetworkService {
 
         let network_service = Arc::new(NetworkServiceInner {
             network: service::ChainNetwork::new(service::Config {
+                now: ffi::Instant::now(),
                 chains,
                 known_nodes,
                 connections_capacity: 32,
@@ -461,7 +462,7 @@ impl NetworkService {
                                         );
                                     }
 
-                                    insert.insert().await;
+                                    insert.insert(&ffi::Instant::now()).await;
                                 }
                                 Err(error) => {
                                     log::warn!(
