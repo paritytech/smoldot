@@ -888,11 +888,16 @@ where
     ///
     /// See also [`ChainNetwork::pending_outcome_ok`].
     ///
+    /// `is_unreachable` should be `true` if the address is invalid or unreachable and should
+    /// thus never be attempted again unless it is re-discovered. It should be `false` if the
+    /// address might only be temporarily unreachable, such as because of a timeout. If `false`
+    /// is passed, the address might be attempted again in the future.
+    ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    pub async fn pending_outcome_err(&self, id: PendingId) {
+    pub async fn pending_outcome_err(&self, id: PendingId, is_unreachable: bool) {
         let mut lock = self.ephemeral_guarded.lock().await;
         let (expected_peer_id, multiaddr, _) = lock.pending_ids.get(id.0).unwrap();
         let multiaddr = multiaddr.clone(); // Solves borrowck issues.
@@ -920,19 +925,22 @@ where
 
         let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
 
-        // Update the list of addresses.
+        // Updates the addresses book.
         // TODO: O(n)
         for chain in &mut lock.chains {
             if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
-                // TODO: only remove if the reason for the reach failure is a permanent error, such as unreachable peer; timeouts shouldn't lead to remove address
-                // Do not remove last remaining address, in order to prevent the addresses list
-                // from ever becoming empty.
-                debug_assert!(!addrs.is_empty());
-                if addrs.len() <= 1 {
-                    continue;
-                }
+                if is_unreachable {
+                    // Do not remove last remaining address, in order to prevent the addresses
+                    // list from ever becoming empty.
+                    debug_assert!(!addrs.is_empty());
+                    if addrs.len() <= 1 {
+                        continue;
+                    }
 
-                addrs.remove(&multiaddr);
+                    addrs.remove(&multiaddr);
+                } else {
+                    addrs.set_disconnected(&multiaddr);
+                }
             }
         }
 
