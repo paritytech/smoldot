@@ -92,6 +92,10 @@ pub struct Config<TNow> {
     pub handshake_timeout: Duration,
 
     /// Maximum number of addresses kept in memory per network identity.
+    ///
+    /// > **Note**: As the number of network identities kept in memory is capped, having a
+    /// >           maximum number of addresses per peer ensures that the total number of
+    /// >           addresses is capped as well.
     pub max_addresses_per_peer: NonZeroUsize,
 
     /// Number of events that can be buffered internally before connections are back-pressured.
