@@ -1779,6 +1779,7 @@ where
             let peer_id = ephemeral_guarded.chains[chain_index]
                 .kbuckets
                 .closest_entries(&random_peer_id)
+                // TODO: instead of filtering by connectd only, connect to nodes if not connected
                 .find(|(_, addresses)| addresses.iter_connected().count() != 0)
                 .map(|(peer_id, _)| peer_id.clone());
             peer_id
