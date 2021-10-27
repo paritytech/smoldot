@@ -1774,12 +1774,20 @@ where
             peer_id::PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
         };
 
-        // TODO: use k-buckets for that
+        let queried_peer = {
+            let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+            let peer_id = ephemeral_guarded.chains[chain_index]
+                .kbuckets
+                .closest_entries(&random_peer_id)
+                // TODO: instead of filtering by connectd only, connect to nodes if not connected
+                .find(|(_, addresses)| addresses.iter_connected().count() != 0)
+                .map(|(peer_id, _)| peer_id.clone());
+            peer_id
+        };
 
-        if let Some(target) = self.inner.peers_list().await.next() {
-            // TODO: better peer selection
+        if let Some(queried_peer) = queried_peer {
             let outcome = self
-                .kademlia_find_node(&target, now, chain_index, random_peer_id.as_bytes())
+                .kademlia_find_node(&queried_peer, now, chain_index, random_peer_id.as_bytes())
                 .await
                 .map_err(DiscoveryError::FindNode)?;
             Ok(DiscoveryInsert {

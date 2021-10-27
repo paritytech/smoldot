@@ -105,6 +105,21 @@ where
             distance,
         })
     }
+
+    /// Returns the list of entries in the k-buckets, ordered by increasing distance with the
+    /// target.
+    pub fn closest_entries(&self, target: &K) -> impl Iterator<Item = (&K, &V)> {
+        // TODO: this is extremely unoptimized
+        let target_hashed = Key::new(target.as_ref());
+        let mut list = self.iter().collect::<Vec<_>>();
+        list.sort_by_key(|(key, _)| {
+            let key_hashed = Key::new(key.as_ref());
+            distance_log2(&key_hashed, &target_hashed)
+                .map(|d| u16::from(d) + 1)
+                .unwrap_or(0)
+        });
+        list.into_iter()
+    }
 }
 
 impl<K, V, TNow> KBuckets<K, V, TNow> {
