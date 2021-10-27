@@ -15,14 +15,39 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-declare class SmoldotError extends Error {
+/**
+ * Thrown in case of a problem when initializing the chain.
+ */
+ declare class AddChainError extends Error {
+  constructor(message: string);
+}
+
+/**
+ * Thrown in case the API user tries to use a chain or client that has already been destroyed.
+ */
+declare class AlreadyDestroyedError extends Error {
+}
+
+/**
+ * Thrown when trying to send a JSON-RPC message to a chain whose JSON-RPC system hasn't been
+ * enabled.
+ */
+declare class JsonRpcDisabledError extends Error {
+}
+
+/**
+ * Thrown in case the underlying client encounters an unexpected crash.
+ *
+ * This is always an internal bug in smoldot and is never supported to happen.
+ */
+declare class CrashError extends Error {
   constructor(message: string);
 }
 
 /**
  * Client with zero or more active connections to blockchains.
  */
-export interface SmoldotClient {
+export interface Client {
   /**
    * Connects to a chain.
    *
@@ -39,14 +64,21 @@ export interface SmoldotClient {
    * Smoldot tries to distribute CPU resources equally between all active `SmoldotChain` objects.
    *
    * @param options Configuration of the chain to add.
+   *
+   * @throws {AddChainError} If the chain can't be added.
+   * @throws {AlreadyDestroyedError} If the client has been terminated earlier.
+   * @throws {CrashError} If the background client has crashed.
    */
-  addChain(options: SmoldotAddChainOptions): Promise<SmoldotChain>;
+  addChain(options: AddChainOptions): Promise<Chain>;
 
   /**
    * Terminates the client.
    *
    * Afterwards, trying to use the client or any of its chains again will lead to an exception
    * being thrown.
+   *
+   * @throws {AlreadyDestroyedError} If the client has already been terminated earlier.
+   * @throws {CrashError} If the background client has crashed.
    */
   terminate(): void;
 }
@@ -54,7 +86,7 @@ export interface SmoldotClient {
 /**
  * Active connection to a blockchain.
  */
-export interface SmoldotChain {
+export interface Chain {
   /**
    * Enqueues a JSON-RPC request that the client will process as soon as possible.
    *
@@ -71,6 +103,10 @@ export interface SmoldotChain {
    * The available methods are documented here: <https://polkadot.js.org/docs/substrate/rpc>
    *
    * @param rpc JSON-encoded RPC request.
+   *
+   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {JsonRpcDisabledError} If no JSON-RPC callback was passed in the options of the chain.
+   * @throws {CrashError} If the background client has crashed.
    */
   sendJsonRpc(rpc: string): void;
 
@@ -85,6 +121,9 @@ export interface SmoldotChain {
    * automatically keeps alive all relay chains that have an active parachains. There is no need
    * to track parachains and relaychains, or to destroy them in the correct order, as this is
    * handled automatically.
+   *
+   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {CrashError} If the background client has crashed.
    */
   remove(): void;
 }
@@ -92,23 +131,23 @@ export interface SmoldotChain {
 /**
  * @param JSON-RPC-formatted response.
  */
-export type SmoldotJsonRpcCallback = (response: string) => void;
+export type JsonRpcCallback = (response: string) => void;
 
 /**
  * @param level How important this message is. 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
  * @param target Name of the sub-system that the message concerns.
  * @param message Human-readable message that developers can use to figure out what is happening.
  */
-export type SmoldotLogCallback = (level: number, target: string, message: string) => void;
+export type LogCallback = (level: number, target: string, message: string) => void;
 
 /**
  * Configuration of a client.
  */
-export interface SmoldotOptions {
+export interface ClientOptions {
   /**
    * Callback that the client will invoke in order to report a log event.
    */
-  logCallback?: SmoldotLogCallback;
+  logCallback?: LogCallback;
 
   /**
    * The client will never call the callback with a value of `level` superior to this value.
@@ -157,7 +196,7 @@ export interface SmoldotOptions {
 /**
  * Configuration of a blockchain.
  */
-export interface SmoldotAddChainOptions {
+export interface AddChainOptions {
   /**
    * JSON-encoded specification of the chain.
    *
@@ -195,12 +234,12 @@ export interface SmoldotAddChainOptions {
    * this reason, this parameter is a list of potential relay chains in which only one chain
    * should match, rather than a single `SmoldotChain` corresponding to the relay chain.
    */
-  potentialRelayChains?: SmoldotChain[];
+  potentialRelayChains?: Chain[];
 
   /**
    * Callback invoked by smoldot in response to calling `sendJsonRpc`.
    */
-  jsonRpcCallback?: SmoldotJsonRpcCallback;
+  jsonRpcCallback?: JsonRpcCallback;
 }
 
 export interface HealthChecker {
@@ -225,7 +264,7 @@ export interface Smoldot {
    *
    * @param options Configuration of the client. Defaults to `{}`.
    */
-  start(options?: SmoldotOptions): Promise<SmoldotClient>;
+  start(options?: ClientOptions): Promise<Client>;
   healthChecker(): HealthChecker;
 }
 

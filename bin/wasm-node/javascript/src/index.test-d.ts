@@ -1,4 +1,4 @@
-import smoldot, { Smoldot, SmoldotClient } from 'smoldot';
+import smoldot, { Smoldot, Client } from 'smoldot';
 
 // Test the export type
 

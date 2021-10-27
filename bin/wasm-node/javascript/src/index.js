@@ -18,7 +18,19 @@
 import { Worker, workerOnError, workerOnMessage } from './compat-nodejs.js';
 export * from './health.js';
 
-export class SmoldotError extends Error {
+export class AlreadyDestroyedError extends Error {
+}
+
+export class AddChainError extends Error {
+  constructor(message) {
+    super(message);
+  }
+}
+
+export class JsonRpcDisabledError extends Error {
+}
+
+export class CrashError extends Error {
   constructor(message) {
     super(message);
   }
@@ -104,16 +116,16 @@ export async function start(config) {
           if (workerError)
             throw workerError;
           if (chainId === null)
-            throw new SmoldotError('Chain has already been removed');
+            throw new AlreadyDestroyedError();
           if (!chainsJsonRpcCallbacks.has(chainId))
-            throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
+            throw new JsonRpcDisabledError();
           worker.postMessage({ ty: 'request', request, chainId });
         },
         remove: () => {
           if (workerError)
             throw workerError;
           if (chainId === null)
-            throw new SmoldotError('Chain has already been removed');
+            throw new AlreadyDestroyedError();
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
@@ -131,7 +143,7 @@ export async function start(config) {
       const expected = pendingConfirmations.shift();
       // `expected` was pushed by the `addChain` method.
       // Reject the promise that `addChain` returned to the user.
-      expected.reject(message.error);
+      expected.reject(new AddChainError(message.error));
 
     } else if (message.kind == 'chainRemoved') {
       pendingConfirmations.shift();
@@ -155,12 +167,12 @@ export async function start(config) {
       "https://github.com/paritytech/smoldot/issues with the following message:"
     );
     console.error(error);
-    workerError = error;
+    workerError = new CrashError(error.toString());
 
     // Reject all promises returned by `addChain`.
     for (var pending of pendingConfirmations) {
       if (pending.ty == 'chainAdded')
-        pending.reject(error);
+        pending.reject(workerError);
     }
     pendingConfirmations = [];
   });
@@ -220,7 +232,7 @@ export async function start(config) {
     terminate: () => {
       worker.terminate();
       if (!workerError)
-        workerError = new Error("terminate() has been called");
+        workerError = new AlreadyDestroyedError();
     }
   }
 }
