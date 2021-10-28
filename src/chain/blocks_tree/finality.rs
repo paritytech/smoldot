@@ -140,6 +140,7 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// If necessary, the current best block will be updated to be a descendant of the
     /// newly-finalized block.
+    // TODO: should return the pruned blocks as well
     pub fn set_finalized_block(
         &mut self,
         block_hash: &[u8; 32],

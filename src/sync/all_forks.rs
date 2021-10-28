@@ -162,6 +162,12 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TRq, TSrc> {
     blocks: pending_blocks::PendingBlocks<PendingBlock, TRq, TSrc>,
+
+    /// Justification waiting to be verified.
+    ///
+    /// This justification came with a block header that has been successfully verified in the
+    /// past.
+    pending_justification_verify: Option<Vec<u8>>,
 }
 
 struct PendingBlock {
@@ -200,6 +206,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     verify_bodies: config.full,
                     banned_blocks: Vec::new(), // TODO:
                 }),
+                pending_justification_verify: None,
             },
         }
     }
@@ -702,7 +709,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
-    pub fn process_one(self) -> ProcessOne<TBl, TRq, TSrc> {
+    pub fn process_one(mut self) -> ProcessOne<TBl, TRq, TSrc> {
+        if let Some(justification_to_verify) = self.inner.pending_justification_verify.take() {
+            return ProcessOne::JustificationVerify(JustificationVerify {
+                parent: self,
+                justification_to_verify,
+            });
+        }
+
         let block = self.inner.blocks.unverified_leaves().find(|block| {
             block.parent_block_hash == self.chain.finalized_block_hash()
                 || self
@@ -1092,29 +1106,15 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             None
         };
 
-        let justification_verification = if let Some(justification) = justification {
-            match self.parent.chain.verify_justification(&justification) {
-                Ok(success) => {
-                    let finalized = success
-                        .apply()
-                        .map(|b| (b.header, b.user_data))
-                        .collect::<Vec<_>>();
-                    self.parent
-                        .inner
-                        .blocks
-                        .set_finalized_block_height(finalized.last().unwrap().0.number);
-                    JustificationVerification::NewFinalized(finalized)
-                }
-                Err(err) => JustificationVerification::JustificationVerificationError(err),
-            }
-        } else {
-            JustificationVerification::NoJustification
-        };
+        // Store the justification in `pending_justification_verify`.
+        // A `HeaderVerify` can only exist if `pending_justification_verify` is `None`, meaning
+        // that there's no risk of accidental overwrite.
+        debug_assert!(self.parent.inner.pending_justification_verify.is_none());
+        self.parent.inner.pending_justification_verify = justification;
 
         match result {
             Ok(is_new_best) => HeaderVerifyOutcome::Success {
                 is_new_best,
-                justification_verification,
                 sync: self.parent,
             },
             Err((error, user_data)) => HeaderVerifyOutcome::Error {
@@ -1123,6 +1123,55 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 user_data,
             },
         }
+    }
+
+    /// Do not actually proceed with the verification.
+    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.parent
+    }
+}
+
+/// Justification verification to be performed.
+///
+/// Internally holds the [`AllForksSync`].
+pub struct JustificationVerify<TBl, TRq, TSrc> {
+    parent: AllForksSync<TBl, TRq, TSrc>,
+    /// Justification that can be verified.
+    justification_to_verify: Vec<u8>,
+}
+
+impl<TBl, TRq, TSrc> JustificationVerify<TBl, TRq, TSrc> {
+    /// Perform the verification.
+    pub fn perform(
+        mut self,
+    ) -> (
+        AllForksSync<TBl, TRq, TSrc>,
+        JustificationVerifyOutcome<TBl>,
+    ) {
+        let outcome = match self
+            .parent
+            .chain
+            .verify_justification(&self.justification_to_verify)
+        {
+            Ok(success) => {
+                let finalized_blocks_iter = success.apply();
+                let updates_best_block = finalized_blocks_iter.updates_best_block();
+                let finalized_blocks = finalized_blocks_iter
+                    .map(|b| (b.header, b.user_data))
+                    .collect::<Vec<_>>();
+                self.parent
+                    .inner
+                    .blocks
+                    .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+                JustificationVerifyOutcome::NewFinalized {
+                    finalized_blocks,
+                    updates_best_block,
+                }
+            }
+            Err(err) => JustificationVerifyOutcome::Error(err),
+        };
+
+        (self.parent, outcome)
     }
 
     /// Do not actually proceed with the verification.
@@ -1145,6 +1194,9 @@ pub enum ProcessOne<TBl, TRq, TSrc> {
 
     /// A header is ready for verification.
     HeaderVerify(HeaderVerify<TBl, TRq, TSrc>),
+
+    /// A justification is ready for verification.
+    JustificationVerify(JustificationVerify<TBl, TRq, TSrc>),
 }
 
 /// Outcome of calling [`HeaderVerify::perform`].
@@ -1153,9 +1205,6 @@ pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// If a justification was attached to this block, it has also been verified. Contains the
-        /// outcome.
-        justification_verification: JustificationVerification<TBl>,
         /// State machine yielded back. Use to continue the processing.
         sync: AllForksSync<TBl, TRq, TSrc>,
     },
@@ -1180,22 +1229,22 @@ pub enum HeaderVerifyError {
     VerificationFailed(verify::header_only::Error),
 }
 
-/// Information about the verification of a justification that was stored for this block.
+/// Information about the outcome of verifying a justification.
 #[derive(Debug)]
-pub enum JustificationVerification<TBl> {
-    /// No information about finality
-    NoJustification,
-    /// A justification was available for the newly-verified block, but it failed to verify.
-    JustificationVerificationError(blocks_tree::JustificationVerifyError),
+pub enum JustificationVerifyOutcome<TBl> {
     /// Justification verification successful. The block and all its ancestors is now finalized.
-    NewFinalized(Vec<(header::Header, TBl)>),
-}
-
-impl<TBl> JustificationVerification<TBl> {
-    /// Returns `true` for [`JustificationVerification::NewFinalized`].
-    pub fn is_success(&self) -> bool {
-        matches!(self, JustificationVerification::NewFinalized(_))
-    }
+    NewFinalized {
+        /// List of finalized blocks, in decreasing block number.
+        // TODO: use `Vec<u8>` instead of `Header`?
+        finalized_blocks: Vec<(header::Header, TBl)>,
+        // TODO: missing pruned blocks
+        /// If `true`, this operation modifies the best block of the non-finalized chain.
+        /// This can happen if the previous best block isn't a descendant of the now finalized
+        /// block.
+        updates_best_block: bool,
+    },
+    /// Problem while verifying justification.
+    Error(blocks_tree::JustificationVerifyError),
 }
 
 /// State of the processing of blocks.

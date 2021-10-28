@@ -455,6 +455,8 @@ impl SyncBackground {
                     }
                 }
 
+                all::ProcessOne::VerifyJustification(_) => todo!(), // TODO: not implemented
+
                 all::ProcessOne::VerifyHeader(verify) => {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
