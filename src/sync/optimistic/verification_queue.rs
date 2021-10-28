@@ -25,7 +25,7 @@ use core::{
 };
 use itertools::Itertools as _;
 
-use super::{RequestId, SourceId}; // TODO: ?
+use super::SourceId; // TODO: ?
 
 /// Queue of block requests, either waiting to be started, in progress, or completed.
 pub(super) struct VerificationQueue<TRq, TBl> {
@@ -153,12 +153,10 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     ///
     /// Returns `Ok` if the request has updated the queue, and `Err` if the request isn't relevant
     /// to anything in the queue and has been silently discarded.
-    // TODO: why are we passing a RequestId?
     pub fn insert_request(
         &mut self,
         block_height: NonZeroU64,
         num_blocks: NonZeroU32,
-        request_id: RequestId,
         source: SourceId,
         user_data: TRq,
     ) -> Result<(), TRq> {
@@ -211,11 +209,8 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         };
 
         // Now update the state of the queue.
-        self.verification_queue[insert_pos].ty = VerificationQueueEntryTy::Requested {
-            id: request_id,
-            source,
-            user_data,
-        };
+        self.verification_queue[insert_pos].ty =
+            VerificationQueueEntryTy::Requested { source, user_data };
 
         // `verification_queue` must always end with an entry of type `Missing`. Add it, if
         // necessary.
@@ -274,16 +269,18 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
 
     /// Marks a request previously inserted with [`VerificationQueue::insert_request`] as done.
     ///
+    /// The `request_find` closure is used to find which request is concerned.
+    ///
     /// The number of blocks in the result doesn't have to match the number of blocks that was
     /// passed to [`VerificationQueue::insert_request`].
     ///
     /// # Panic
     ///
-    /// Panics if the [`RequestId`] is invalid.
+    /// Panics if no request could be found.
     ///
     pub fn finish_request(
         &mut self,
-        request_id: RequestId,
+        request_find: impl Fn(&TRq) -> bool,
         result: Result<impl Iterator<Item = TBl>, ()>,
     ) -> (TRq, SourceId) {
         // Find the position of that request in the queue.
@@ -291,10 +288,10 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             .verification_queue
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| match entry.ty {
-                VerificationQueueEntryTy::Requested { id, source, .. } if id == request_id => {
-                    Some((index, source))
-                }
+            .filter_map(|(index, entry)| match &entry.ty {
+                VerificationQueueEntryTy::Requested {
+                    source, user_data, ..
+                } if request_find(user_data) => Some((index, *source)),
                 _ => None,
             })
             .next()
@@ -397,17 +394,12 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     }
 
     /// Consumes the queue and returns an iterator to all the requests that were inside of it.
-    pub fn into_requests(self) -> impl Iterator<Item = (TRq, RequestId, SourceId)> {
+    pub fn into_requests(self) -> impl Iterator<Item = (TRq, SourceId)> {
         self.verification_queue
             .into_iter()
             .filter_map(|queue_elem| {
-                if let VerificationQueueEntryTy::Requested {
-                    id,
-                    user_data,
-                    source,
-                } = queue_elem.ty
-                {
-                    Some((user_data, id, source))
+                if let VerificationQueueEntryTy::Requested { user_data, source } = queue_elem.ty {
+                    Some((user_data, source))
                 } else {
                     None
                 }
@@ -441,7 +433,7 @@ pub(super) struct SourceDrain<'a, TRq, TBl> {
 }
 
 impl<'a, TRq, TBl> Iterator for SourceDrain<'a, TRq, TBl> {
-    type Item = (RequestId, TRq);
+    type Item = TRq;
 
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: unoptimized
@@ -456,7 +448,7 @@ impl<'a, TRq, TBl> Iterator for SourceDrain<'a, TRq, TBl> {
             })?;
 
         match mem::replace(&mut entry.ty, VerificationQueueEntryTy::Missing) {
-            VerificationQueueEntryTy::Requested { id, user_data, .. } => Some((id, user_data)),
+            VerificationQueueEntryTy::Requested { user_data, .. } => Some(user_data),
             _ => unreachable!(),
         }
     }
@@ -500,7 +492,6 @@ struct VerificationQueueEntry<TRq, TBl> {
 enum VerificationQueueEntryTy<TRq, TBl> {
     Missing,
     Requested {
-        id: RequestId,
         /// User-chosen data for this request.
         user_data: TRq,
         // Index of this source within [`OptimisticSyncInner::sources`].
