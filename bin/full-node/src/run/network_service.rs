@@ -279,7 +279,14 @@ impl NetworkService {
                                 peer_id,
                                 announce,
                             } => {
-                                tracing::debug!(%chain_index, %peer_id, ?announce, "block-announce");
+                                let decoded = announce.decode();
+                                tracing::debug!(
+                                    %chain_index, %peer_id,
+                                    hash = %HashDisplay(&decoded.header.hash()),
+                                    number = decoded.header.number,
+                                    is_best = ?decoded.is_best,
+                                    "block-announce"
+                                );
                                 break Event::BlockAnnounce {
                                     chain_index,
                                     peer_id,
