@@ -38,13 +38,13 @@ use crate::{
     verify,
 };
 
-use alloc::{vec, vec::Vec};
-
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
+use hashbrown::HashMap;
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -1017,9 +1017,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     self.inner = AllSyncInner::Optimistic { inner: sync };
                     ProcessOne::AllSync(self)
                 }
-                optimistic::ProcessOne::Verify(inner) => {
+                optimistic::ProcessOne::VerifyBlock(inner) => {
                     ProcessOne::VerifyBodyHeader(HeaderBodyVerify {
                         inner: HeaderBodyVerifyInner::Optimistic(inner),
+                        shared: self.shared,
+                    })
+                }
+                optimistic::ProcessOne::VerifyJustification(inner) => {
+                    ProcessOne::VerifyJustification(JustificationVerify {
+                        inner: JustificationVerifyInner::Optimistic(inner),
                         shared: self.shared,
                     })
                 }
@@ -1521,6 +1527,35 @@ pub enum ResponseOutcome {
     AllAlreadyInChain,
 }
 
+// TODO: doc
+#[derive(Debug, Clone)]
+pub struct Block<TBl> {
+    /// Header of the block.
+    pub header: header::Header,
+
+    /// SCALE-encoded justification of this block, if any.
+    pub justification: Option<Vec<u8>>,
+
+    /// User data associated to the block.
+    pub user_data: TBl,
+
+    /// Extra fields for full block verifications.
+    pub full: Option<BlockFull>,
+}
+
+// TODO: doc
+#[derive(Debug, Clone)]
+pub struct BlockFull {
+    /// List of SCALE-encoded extrinsics that form the block's body.
+    pub body: Vec<Vec<u8>>,
+
+    /// Changes to the storage made by this block compared to its parent.
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+
+    /// List of changes to the offchain storage that this block performs.
+    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+}
+
 pub struct HeaderVerify<TRq, TSrc, TBl> {
     inner: HeaderVerifyInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
@@ -1628,6 +1663,13 @@ enum JustificationVerifyInner<TRq, TSrc, TBl> {
     AllForks(
         all_forks::JustificationVerify<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
     ),
+    Optimistic(
+        optimistic::JustificationVerify<
+            OptimisticRequestExtra<TRq>,
+            OptimisticSourceExtra<TSrc>,
+            TBl,
+        >,
+    ),
 }
 
 impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
@@ -1647,13 +1689,53 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                         shared: self.shared,
                     },
                     JustificationVerifyOutcome::NewFinalized {
-                        finalized_blocks,
+                        finalized_blocks: finalized_blocks
+                            .into_iter()
+                            .map(|b| Block {
+                                full: None, // TODO: wrong
+                                header: b.0,
+                                justification: None, // TODO: wrong
+                                user_data: b.1,
+                            })
+                            .collect(),
                         updates_best_block,
                     },
                 ),
                 (sync, all_forks::JustificationVerifyOutcome::Error(error)) => (
                     AllSync {
                         inner: AllSyncInner::AllForks(sync),
+                        shared: self.shared,
+                    },
+                    JustificationVerifyOutcome::Error(error),
+                ),
+            },
+            JustificationVerifyInner::Optimistic(verify) => match verify.perform() {
+                (inner, optimistic::JustificationVerification::Finalized { finalized_blocks }) => (
+                    // TODO: transition to all_forks
+                    AllSync {
+                        inner: AllSyncInner::Optimistic { inner },
+                        shared: self.shared,
+                    },
+                    JustificationVerifyOutcome::NewFinalized {
+                        finalized_blocks: finalized_blocks
+                            .into_iter()
+                            .map(|b| Block {
+                                header: b.header,
+                                justification: b.justification,
+                                user_data: b.user_data,
+                                full: b.full.map(|b| BlockFull {
+                                    body: b.body,
+                                    offchain_storage_changes: b.offchain_storage_changes,
+                                    storage_top_trie_changes: b.storage_top_trie_changes,
+                                }),
+                            })
+                            .collect(),
+                        updates_best_block: false,
+                    },
+                ),
+                (inner, optimistic::JustificationVerification::Reset { error, .. }) => (
+                    AllSync {
+                        inner: AllSyncInner::Optimistic { inner },
                         shared: self.shared,
                     },
                     JustificationVerifyOutcome::Error(error),
@@ -1669,8 +1751,7 @@ pub enum JustificationVerifyOutcome<TBl> {
     /// Justification verification successful. The block and all its ancestors is now finalized.
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
-        // TODO: use `Vec<u8>` instead of `Header`?
-        finalized_blocks: Vec<(header::Header, TBl)>,
+        finalized_blocks: Vec<Block<TBl>>,
         // TODO: missing pruned blocks
         /// If `true`, this operation modifies the best block of the non-finalized chain.
         /// This can happen if the previous best block isn't a descendant of the now finalized
@@ -1728,7 +1809,9 @@ pub struct HeaderBodyVerify<TRq, TSrc, TBl> {
 }
 
 enum HeaderBodyVerifyInner<TRq, TSrc, TBl> {
-    Optimistic(optimistic::Verify<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>),
+    Optimistic(
+        optimistic::BlockVerify<OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
+    ),
 }
 
 impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
@@ -1772,17 +1855,6 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
         sync: AllSync<TRq, TSrc, TBl>,
     },
 
-    /// Block has been successfully verified and finalized.
-    // TODO: should refactor that so that `ProcessOne` verifies justifications separately from blocks; the present API doesn't make sense for the all_forks strategy
-    Finalized {
-        /// State machine yielded back. Use to continue the processing.
-        sync: AllSync<TRq, TSrc, TBl>,
-        /// List of blocks that have been finalized. Includes the block that has just been
-        /// verified itself.
-        // TODO leaky type
-        finalized_blocks: Vec<optimistic::Block<TBl>>,
-    },
-
     /// Block verification failed.
     Error {
         /// State machine yielded back. Use to continue the processing.
@@ -1808,9 +1880,6 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 /// Error that can happen when verifying a block body.
 #[derive(Debug, derive_more::Display)]
 pub enum BlockVerificationError {
-    /// Error while verifying a justification.
-    // TODO: this should be a separate verification process; need some refactoring
-    JustificationError(blocks_tree::JustificationVerifyError),
     /// Error while decoding a header.
     InvalidHeader(header::Error),
     /// Error while verifying a header.
@@ -1840,30 +1909,12 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     },
                 }
             }
-            optimistic::BlockVerification::Finalized {
-                sync,
-                finalized_blocks,
-                ..
-            } => {
-                // TODO: transition to all_forks
-                BlockVerification::Finalized {
-                    sync: AllSync {
-                        inner: AllSyncInner::Optimistic { inner: sync },
-                        shared,
-                    },
-                    finalized_blocks,
-                }
-            }
             optimistic::BlockVerification::Reset { sync, reason, .. } => BlockVerification::Error {
                 sync: AllSync {
                     inner: AllSyncInner::Optimistic { inner: sync },
                     shared,
                 },
                 error: match reason {
-                    optimistic::ResetCause::JustificationError(err) => {
-                        // TODO: justifications should be verified separately
-                        BlockVerificationError::JustificationError(err)
-                    }
                     optimistic::ResetCause::InvalidHeader(err) => {
                         BlockVerificationError::InvalidHeader(err)
                     }
