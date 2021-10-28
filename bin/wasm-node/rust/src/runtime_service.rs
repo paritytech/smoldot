@@ -58,13 +58,11 @@ use smoldot::{
     informant::HashDisplay,
     metadata,
     network::protocol,
-    sync::download_tree,
     trie::{self, proof_verify},
 };
-use std::{iter, mem, pin::Pin, sync::Arc};
+use std::{iter, mem, pin::Pin, sync::Arc, time::Duration};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
-pub use smoldot::sync::download_tree::RuntimeError;
 
 /// Configuration for a runtime service.
 pub struct Config<'a> {
@@ -171,24 +169,22 @@ impl RuntimeService {
             }
         };
 
-        let runtime_service = Arc::new({
-            let runtimes = slab::Slab::with_capacity(2);
-            let runtime_id = runtimes.insert(genesis_runtime);
-            let tree = async_tree::AsyncTree::new(runtime_id);
-            RuntimeService {
-                log_target,
-                sync_service: config.sync_service,
-                guarded: Mutex::new(Guarded {
-                    all_blocks_subscriptions: Vec::new(),
-                    finalized_blocks_subscriptions: Vec::new(),
-                    best_blocks_subscriptions: Vec::new(),
-                    runtime_version_subscriptions: Vec::new(),
-                    best_near_head_of_chain,
-                    tree: Some(tree),
-                    runtimes,
-                }),
-            }
+        let runtimes = slab::Slab::with_capacity(2);
+        let runtime_id = runtimes.insert(genesis_runtime);
+        let tree = async_tree::AsyncTree::new(async_tree::Config {
+            finalized_async_user_data: Some(runtime_id),
+            retry_after_failed: Duration::from_secs(10),
         });
+
+        let guarded = Arc::new(Mutex::new(Guarded {
+            all_blocks_subscriptions: Vec::new(),
+            finalized_blocks_subscriptions: Vec::new(),
+            best_blocks_subscriptions: Vec::new(),
+            runtime_version_subscriptions: Vec::new(),
+            best_near_head_of_chain,
+            tree: Some(tree),
+            runtimes,
+        }));
 
         // Spawns a task that downloads the runtime code at every block to check whether it has
         // changed.
@@ -454,7 +450,7 @@ impl RuntimeService {
         ));
 
         sync_service::SubscribeAll {
-            finalized_block_scale_encoded_header: tree.finalized_block_header().to_vec(),
+            finalized_block_scale_encoded_header: guarded.finalized_block.header.clone(),
             new_blocks,
             non_finalized_blocks_ancestry_order,
         }
@@ -465,11 +461,10 @@ impl RuntimeService {
         self: &'a Arc<RuntimeService>,
     ) -> RuntimeLock<'a> {
         let guarded = self.guarded.lock().await;
-        let block_hash = *guarded.tree.as_ref().unwrap().finalized_block_hash();
         RuntimeLock {
             service: self,
             inner: RuntimeLockInner::InTree(guarded),
-            block_hash,
+            block_index: None,
         }
     }
 
@@ -498,13 +493,13 @@ impl RuntimeService {
             .tree
             .as_ref()
             .unwrap()
-            .block_runtime(block_hash)
+            .block_async_user_data(block_index)
             .is_some()
         {
             return Some(RuntimeLock {
                 service: self,
                 inner: RuntimeLockInner::InTree(guarded),
-                block_hash: *block_hash,
+                block_index,
             });
         }
 
@@ -516,7 +511,7 @@ impl RuntimeService {
                 scale_encoded_header,
                 virtual_machine,
             },
-            block_hash: *block_hash,
+            block_index,
         })
     }
 
@@ -658,13 +653,17 @@ async fn is_near_head_of_chain_heuristic(
 pub struct RuntimeLock<'a> {
     service: &'a Arc<RuntimeService>,
     inner: RuntimeLockInner<'a>,
-    /// Index of the block to make the call against.
-    block_index: async_tree::NodeIndex,
 }
 
 enum RuntimeLockInner<'a> {
+    /// Call made against [`Guarded::finalized_block`].
+    Finalized(MutexGuard<'a, Guarded>),
     /// Block is found in [`Guarded::tree`].
-    InTree(MutexGuard<'a, Guarded>),
+    InTree {
+        guarded: MutexGuard<'a, Guarded>,
+        /// Index of the block to make the call against.
+        block_index: async_tree::NodeIndex,
+    },
     /// Block information directly inlined in this enum.
     OutOfTree {
         scale_encoded_header: Vec<u8>,
@@ -678,12 +677,15 @@ impl<'a> RuntimeLock<'a> {
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
         match &self.inner {
-            RuntimeLockInner::InTree(guarded) => {
+            RuntimeLockInner::InTree {
+                guarded,
+                block_index,
+            } => {
                 &guarded
                     .tree
                     .as_ref()
                     .unwrap()
-                    .block_user_data(self.block_index)
+                    .block_user_data(*block_index)
                     .header
             }
             RuntimeLockInner::OutOfTree {
@@ -696,12 +698,15 @@ impl<'a> RuntimeLock<'a> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> [u8; 32] {
         match &self.inner {
-            RuntimeLockInner::InTree(guarded) => {
+            RuntimeLockInner::InTree {
+                guarded,
+                block_index,
+            } => {
                 guarded
                     .tree
                     .as_ref()
                     .unwrap()
-                    .block_user_data(self.block_index)
+                    .block_user_data(*block_index)
                     .hash
             }
             RuntimeLockInner::OutOfTree {
@@ -713,14 +718,12 @@ impl<'a> RuntimeLock<'a> {
 
     pub fn runtime(&self) -> &executor::host::HostVmPrototype {
         match &self.inner {
-            RuntimeLockInner::InTree(guarded) => {
+            RuntimeLockInner::InTree {
+                guarded,
+                block_index,
+            } => {
                 let tree = guarded.tree.as_ref().unwrap();
-                let index = tree
-                    .input_iter_unordered()
-                    .find(|(_, b, _, _)| b.hash == self.block_hash)
-                    .unwrap()
-                    .0;
-                let runtime_index = *tree.block_async_user_data(index).unwrap();
+                let runtime_index = *tree.block_async_user_data(*block_index).unwrap();
                 guarded.runtimes[runtime_index]
                     .runtime
                     .as_ref()
@@ -748,10 +751,10 @@ impl<'a> RuntimeLock<'a> {
         let block_hash = self.block_hash();
         let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
         let virtual_machine = match self.inner {
-            RuntimeLockInner::InTree(lock) => {
+            RuntimeLockInner::Finalized(guarded) | RuntimeLockInner::InTree { guarded, .. } => {
                 // Unlock `guarded` before doing anything that takes a long time, such as the
                 // network request below.
-                drop(lock);
+                drop(guarded);
                 None
             }
             RuntimeLockInner::OutOfTree {
@@ -1019,6 +1022,19 @@ impl RuntimeCallError {
     }
 }
 
+/// Error when analyzing the runtime.
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeError {
+    /// The `:code` key of the storage is empty.
+    CodeNotFound,
+    /// Error while parsing the `:heappages` storage value.
+    InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Error while compiling the runtime.
+    Build(executor::host::NewErr),
+    /// Error when determining the runtime specification.
+    CoreVersion(executor::CoreVersionError),
+}
+
 /// Error that can happen when calling [`RuntimeService::metadata`].
 #[derive(Debug, derive_more::Display)]
 pub enum MetadataError {
@@ -1174,9 +1190,17 @@ async fn run_background(
                     &original_guarded,
                 )
                 .await,
-                tree: Some(download_tree::DownloadTree::from_finalized_block(
-                    subscription.finalized_block_scale_encoded_header,
-                )),
+                finalized_block: Block {
+                    header: subscription.finalized_block_scale_encoded_header,
+                    hash: header::hash_from_scale_encoded_header(
+                        &subscription.finalized_block_scale_encoded_header,
+                    ),
+                },
+                tree: Some(async_tree::AsyncTree::new(async_tree::Config {
+                    finalized_async_user_data: None,
+                    retry_after_failed: Duration::from_secs(10), // TODO: DRY
+                })),
+                runtimes: slab::Slab::with_capacity(2), // TODO: constant
             })),
             blocks_stream: subscription.new_blocks.boxed(),
             wake_up_new_necessary_download: future::pending().boxed().fuse(),
@@ -1194,6 +1218,7 @@ async fn run_background(
                 .input_insert_block(
                     block.scale_encoded_header,
                     &block.parent_hash,
+                    true, // FIXME: no /!\
                     block.is_new_best,
                 );
         }
@@ -1206,7 +1231,13 @@ async fn run_background(
                 // The `Background` object is manipulating a temporary runtime service. Check if
                 // it is possible to write to the original runtime service.
                 let mut temporary_guarded = background.guarded.try_lock().unwrap();
-                if temporary_guarded.tree.as_ref().unwrap().has_output() {
+                if temporary_guarded
+                    .tree
+                    .as_ref()
+                    .unwrap()
+                    .finalized_async_user_data()
+                    .is_some()
+                {
                     log::debug!(target: &log_target, "Background worker now in sync");
 
                     let mut original_guarded_lock = original_guarded.lock().await;
@@ -1291,13 +1322,8 @@ async fn run_background(
                                 error
                             );
 
-<<<<<<< HEAD
-                            let mut guarded = background.runtime_service.guarded.lock().await;
-                            guarded.tree.as_mut().unwrap().async_op_failure(download_id, &ffi::Instant::now());
-=======
                             let mut guarded = background.guarded.lock().await;
-                            guarded.tree.as_mut().unwrap().runtime_download_failure(download_id, &ffi::Instant::now());
->>>>>>> main
+                            guarded.tree.as_mut().unwrap().async_op_failure(download_id, &ffi::Instant::now());
                         }
                     }
 
