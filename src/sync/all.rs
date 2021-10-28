@@ -1005,6 +1005,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         shared: self.shared,
                     })
                 }
+                all_forks::ProcessOne::JustificationVerify(verify) => {
+                    ProcessOne::VerifyJustification(JustificationVerify {
+                        inner: JustificationVerifyInner::AllForks(verify),
+                        shared: self.shared,
+                    })
+                }
             },
             AllSyncInner::Optimistic { inner } => match inner.process_one() {
                 optimistic::ProcessOne::Idle { sync } => {
@@ -1470,6 +1476,9 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// Ready to start verifying a header.
     VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
 
+    /// Ready to start verifying a justification.
+    VerifyJustification(JustificationVerify<TRq, TSrc, TBl>),
+
     /// Ready to start verifying a header and a body.
     VerifyBodyHeader(HeaderBodyVerify<TRq, TSrc, TBl>),
 
@@ -1545,18 +1554,15 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         match self.inner {
             HeaderVerifyInner::AllForks(verify) => {
                 match verify.perform(now_from_unix_epoch, user_data) {
-                    all_forks::HeaderVerifyOutcome::Success {
-                        is_new_best,
-                        sync,
-                        justification_verification,
-                    } => HeaderVerifyOutcome::Success {
-                        is_new_best,
-                        is_new_finalized: justification_verification.is_success(),
-                        sync: AllSync {
-                            inner: AllSyncInner::AllForks(sync),
-                            shared: self.shared,
-                        },
-                    },
+                    all_forks::HeaderVerifyOutcome::Success { is_new_best, sync } => {
+                        HeaderVerifyOutcome::Success {
+                            is_new_best,
+                            sync: AllSync {
+                                inner: AllSyncInner::AllForks(sync),
+                                shared: self.shared,
+                            },
+                        }
+                    }
                     all_forks::HeaderVerifyOutcome::Error {
                         sync,
                         error,
@@ -1588,8 +1594,6 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// True if the newly-verified block is considered the latest finalized block.
-        is_new_finalized: bool,
         /// State machine yielded back. Use to continue the processing.
         sync: AllSync<TRq, TSrc, TBl>,
     },
@@ -1612,6 +1616,69 @@ pub enum HeaderVerifyError {
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.
     VerificationFailed(verify::header_only::Error),
+}
+
+// TODO: should be used by the optimistic syncing as well
+pub struct JustificationVerify<TRq, TSrc, TBl> {
+    inner: JustificationVerifyInner<TRq, TSrc, TBl>,
+    shared: Shared<TRq>,
+}
+
+enum JustificationVerifyInner<TRq, TSrc, TBl> {
+    AllForks(
+        all_forks::JustificationVerify<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+    ),
+}
+
+impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
+    /// Perform the verification.
+    pub fn perform(self) -> (AllSync<TRq, TSrc, TBl>, JustificationVerifyOutcome<TBl>) {
+        match self.inner {
+            JustificationVerifyInner::AllForks(verify) => match verify.perform() {
+                (
+                    sync,
+                    all_forks::JustificationVerifyOutcome::NewFinalized {
+                        finalized_blocks,
+                        updates_best_block,
+                    },
+                ) => (
+                    AllSync {
+                        inner: AllSyncInner::AllForks(sync),
+                        shared: self.shared,
+                    },
+                    JustificationVerifyOutcome::NewFinalized {
+                        finalized_blocks,
+                        updates_best_block,
+                    },
+                ),
+                (sync, all_forks::JustificationVerifyOutcome::Error(error)) => (
+                    AllSync {
+                        inner: AllSyncInner::AllForks(sync),
+                        shared: self.shared,
+                    },
+                    JustificationVerifyOutcome::Error(error),
+                ),
+            },
+        }
+    }
+}
+
+/// Information about the outcome of verifying a justification.
+#[derive(Debug)]
+pub enum JustificationVerifyOutcome<TBl> {
+    /// Justification verification successful. The block and all its ancestors is now finalized.
+    NewFinalized {
+        /// List of finalized blocks, in decreasing block number.
+        // TODO: use `Vec<u8>` instead of `Header`?
+        finalized_blocks: Vec<(header::Header, TBl)>,
+        // TODO: missing pruned blocks
+        /// If `true`, this operation modifies the best block of the non-finalized chain.
+        /// This can happen if the previous best block isn't a descendant of the now finalized
+        /// block.
+        updates_best_block: bool,
+    },
+    /// Problem while verifying justification.
+    Error(blocks_tree::JustificationVerifyError),
 }
 
 pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {
