@@ -707,10 +707,10 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                 .chain
                 .verify_header(block.scale_encoded_header, now_from_unix_epoch)
             {
-                Ok(blocks_tree::HeaderVerifySuccess::Duplicate) => todo!(),
                 Ok(blocks_tree::HeaderVerifySuccess::Insert {
                     insert,
-                    ..  // TODO: check is_new_best?
+                    is_new_best: true,
+                    ..
                 }) => {
                     let header = insert.header().into();
                     insert.insert(Block {
@@ -721,12 +721,14 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                     });
                     None
                 }
-                Err(err) => {
-                    Some(err)
-                }
+                Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
+                | Ok(blocks_tree::HeaderVerifySuccess::Insert {
+                    is_new_best: false, ..
+                }) => Some(ResetCause::NonCanonical),
+                Err(err) => Some(ResetCause::HeaderError(err)),
             };
 
-            if let Some(error) = error {
+            if let Some(reason) = error {
                 if let Some(src) = self.inner.sources.get_mut(&source_id) {
                     src.banned = true;
                 }
@@ -750,7 +752,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                         chain: self.chain,
                     },
                     previous_best_height,
-                    reason: ResetCause::HeaderError(error),
+                    reason,
                 }
             } else {
                 let new_best_hash = self.chain.best_block_hash();
