@@ -154,7 +154,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     next_source_id: SourceId,
 
     /// Queue of block requests, either waiting to be started, in progress, or completed.
-    verification_queue: verification_queue::VerificationQueue<TRq, RequestSuccessBlock<TBl>>,
+    verification_queue:
+        verification_queue::VerificationQueue<(RequestId, TRq), RequestSuccessBlock<TBl>>,
 
     /// Justification, if any, of the block that has just been verified.
     pending_encoded_justification: Option<(Vec<u8>, SourceId)>,
@@ -173,7 +174,7 @@ impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
             verification_queue::VerificationQueue::new(chain.best_block_header().number + 1),
         );
 
-        for (user_data, request_id, source) in former_queue.into_requests() {
+        for ((request_id, user_data), source) in former_queue.into_requests() {
             let _was_in = self
                 .obsolete_requests
                 .insert(request_id, (source, user_data));
@@ -343,7 +344,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 .inner
                 .verification_queue
                 .into_requests()
-                .map(|(user_data, request_id, _)| (request_id, user_data))
+                .map(|((request_id, user_data), _)| (request_id, user_data))
                 .collect(),
         }
     }
@@ -414,6 +415,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         &'_ mut self,
         source_id: SourceId,
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
+        // TODO: doesn't take obsolete requests into account /!\
         let src_user_data = self.inner.sources.remove(&source_id).unwrap().user_data;
         let drain = RequestsDrain {
             iter: self.inner.verification_queue.drain_source(source_id),
@@ -508,12 +510,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         match self.inner.verification_queue.insert_request(
             detail.block_height,
             detail.num_blocks,
-            request_id,
             detail.source_id,
-            user_data,
+            (request_id, user_data),
         ) {
             Ok(()) => {}
-            Err(user_data) => {
+            Err((_, user_data)) => {
                 self.inner
                     .obsolete_requests
                     .insert(request_id, (detail.source_id, user_data));
@@ -555,10 +556,10 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
 
         let outcome_is_err = outcome.is_err();
 
-        let (user_data, source_id) = self
+        let ((_, user_data), source_id) = self
             .inner
             .verification_queue
-            .finish_request(request_id, outcome.map_err(|_| ()));
+            .finish_request(|(rq, _)| *rq == request_id, outcome.map_err(|_| ()));
 
         self.inner
             .sources
@@ -1397,7 +1398,7 @@ pub enum RequestFail {
 
 /// Iterator that drains requests after a source has been removed.
 pub struct RequestsDrain<'a, TRq, TBl> {
-    iter: verification_queue::SourceDrain<'a, TRq, TBl>,
+    iter: verification_queue::SourceDrain<'a, (RequestId, TRq), TBl>,
 }
 
 impl<'a, TRq, TBl> Iterator for RequestsDrain<'a, TRq, TBl> {
