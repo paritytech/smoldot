@@ -49,7 +49,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     // Setup the logging system of the binary.
     if !matches!(cli_output, cli::Output::None) {
-        let mut env_filter = tracing_subscriber::filter::EnvFilter::new("INFO");
+        let mut env_filter = tracing_subscriber::filter::EnvFilter::new("DEBUG");
         if matches!(cli_output, cli::Output::Informant) {
             env_filter = env_filter.add_directive(tracing::Level::WARN.into()); // TODO: display warnings in a nicer way ; in particular, immediately put the informant on top of warnings
         } else {
