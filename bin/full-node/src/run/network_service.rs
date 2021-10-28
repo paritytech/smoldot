@@ -360,7 +360,7 @@ impl NetworkService {
             (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
                 let network_service = Arc::downgrade(&network_service);
                 async move {
-                    let mut next_discovery = Duration::from_secs(5);
+                    let mut next_discovery = Duration::from_secs(1);
 
                     loop {
                         futures_timer::Delay::new(next_discovery).await;
