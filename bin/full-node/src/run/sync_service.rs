@@ -34,7 +34,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p,
     network::{self, protocol::BlockData, service::BlocksRequestError},
-    sync::{all, optimistic},
+    sync::all,
 };
 use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::SystemTime};
 use tracing::Instrument as _;
@@ -187,7 +187,7 @@ impl SyncService {
 }
 
 enum ToDatabase {
-    FinalizedBlocks(Vec<optimistic::Block<()>>),
+    FinalizedBlocks(Vec<all::Block<()>>),
 }
 
 struct SyncBackground {
@@ -413,15 +413,21 @@ impl SyncBackground {
                     let _enter = span.enter();
 
                     match verify.perform() {
-                        (sync_out, all::JustificationVerifyOutcome::NewFinalized { finalized_blocks, updates_best_block }) => {
+                        (
+                            sync_out,
+                            all::JustificationVerifyOutcome::NewFinalized {
+                                finalized_blocks,
+                                updates_best_block,
+                            },
+                        ) => {
                             span.record("outcome", &"success");
                             self.sync = sync_out;
 
                             if updates_best_block {
                                 let fut = self.network_service.set_local_best_block(
                                     self.network_chain_index,
-                                    sync_out.best_block_hash(),
-                                    sync_out.best_block_number(),
+                                    self.sync.best_block_hash(),
+                                    self.sync.best_block_number(),
                                 );
                                 fut.await;
                             }
@@ -430,25 +436,26 @@ impl SyncBackground {
                             // There is nothing to do, but this is used to update the
                             // best block shown on the informant.
                             let mut lock = self.sync_state.lock().await;
-                            lock.best_block_hash = sync_out.best_block_hash();
-                            lock.best_block_number = sync_out.best_block_number();
+                            lock.best_block_hash = self.sync.best_block_hash();
+                            lock.best_block_number = self.sync.best_block_number();
                             drop(lock);
 
                             if let Some(last_finalized) = finalized_blocks.last() {
                                 let mut lock = self.sync_state.lock().await;
-                                lock.finalized_block_hash = last_finalized.0.hash();
-                                lock.finalized_block_number = last_finalized.0.number;
+                                lock.finalized_block_hash = last_finalized.header.hash();
+                                lock.finalized_block_number = last_finalized.header.number;
                             }
 
                             // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
                             for block in &finalized_blocks {
-                                for (key, value) in &block.storage_top_trie_changes {
+                                for (key, value) in
+                                    &block.full.as_ref().unwrap().storage_top_trie_changes
+                                {
                                     if let Some(value) = value {
                                         self.finalized_block_storage
                                             .insert(key.clone(), value.clone());
                                     } else {
-                                        let _was_there =
-                                            self.finalized_block_storage.remove(key);
+                                        let _was_there = self.finalized_block_storage.remove(key);
                                         // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
                                         // assert!(_was_there.is_some());
                                     }
@@ -460,7 +467,6 @@ impl SyncBackground {
                                 .await
                                 .unwrap();
 
-                            self.sync = sync_out;
                             continue;
                         }
                         (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
@@ -619,8 +625,11 @@ async fn start_database_write(
                             a
                         }),
                         true, // TODO: is_new_best?
-                        block.body.iter(),
+                        block.full.as_ref().unwrap().body.iter(),
                         block
+                            .full
+                            .as_ref()
+                            .unwrap()
                             .storage_top_trie_changes
                             .iter()
                             .map(|(k, v)| (k, v.as_ref())),

@@ -38,13 +38,13 @@ use crate::{
     verify,
 };
 
-use alloc::{vec, vec::Vec};
-
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
+use hashbrown::HashMap;
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -1527,6 +1527,35 @@ pub enum ResponseOutcome {
     AllAlreadyInChain,
 }
 
+// TODO: doc
+#[derive(Debug, Clone)]
+pub struct Block<TBl> {
+    /// Header of the block.
+    pub header: header::Header,
+
+    /// SCALE-encoded justification of this block, if any.
+    pub justification: Option<Vec<u8>>,
+
+    /// User data associated to the block.
+    pub user_data: TBl,
+
+    /// Extra fields for full block verifications.
+    pub full: Option<BlockFull>,
+}
+
+// TODO: doc
+#[derive(Debug, Clone)]
+pub struct BlockFull {
+    /// List of SCALE-encoded extrinsics that form the block's body.
+    pub body: Vec<Vec<u8>>,
+
+    /// Changes to the storage made by this block compared to its parent.
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+
+    /// List of changes to the offchain storage that this block performs.
+    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+}
+
 pub struct HeaderVerify<TRq, TSrc, TBl> {
     inner: HeaderVerifyInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
@@ -1660,7 +1689,15 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                         shared: self.shared,
                     },
                     JustificationVerifyOutcome::NewFinalized {
-                        finalized_blocks,
+                        finalized_blocks: finalized_blocks
+                            .into_iter()
+                            .map(|b| Block {
+                                full: None, // TODO: wrong
+                                header: b.0,
+                                justification: None, // TODO: wrong
+                                user_data: b.1,
+                            })
+                            .collect(),
                         updates_best_block,
                     },
                 ),
@@ -1682,7 +1719,16 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                     JustificationVerifyOutcome::NewFinalized {
                         finalized_blocks: finalized_blocks
                             .into_iter()
-                            .map(|b| (b.header, b.user_data))
+                            .map(|b| Block {
+                                header: b.header,
+                                justification: b.justification,
+                                user_data: b.user_data,
+                                full: b.full.map(|b| BlockFull {
+                                    body: b.body,
+                                    offchain_storage_changes: b.offchain_storage_changes,
+                                    storage_top_trie_changes: b.storage_top_trie_changes,
+                                }),
+                            })
                             .collect(),
                         updates_best_block: false,
                     },
@@ -1705,8 +1751,7 @@ pub enum JustificationVerifyOutcome<TBl> {
     /// Justification verification successful. The block and all its ancestors is now finalized.
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
-        // TODO: use `Vec<u8>` instead of `Header`?
-        finalized_blocks: Vec<(header::Header, TBl)>,
+        finalized_blocks: Vec<Block<TBl>>,
         // TODO: missing pruned blocks
         /// If `true`, this operation modifies the best block of the non-finalized chain.
         /// This can happen if the previous best block isn't a descendant of the now finalized

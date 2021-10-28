@@ -211,20 +211,26 @@ pub struct Block<TBl> {
     /// Header of the block.
     pub header: header::Header,
 
-    /// List of SCALE-encoded extrinsics that form the block's body.
-    pub body: Vec<Vec<u8>>,
-
     /// SCALE-encoded justification of this block, if any.
     pub justification: Option<Vec<u8>>,
+
+    /// User data associated to the block.
+    pub user_data: TBl,
+
+    /// Extra fields for full block verifications.
+    pub full: Option<BlockFull>,
+}
+
+// TODO: doc
+pub struct BlockFull {
+    /// List of SCALE-encoded extrinsics that form the block's body.
+    pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// List of changes to the offchain storage that this block performs.
     pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
-
-    /// User data associated to the block.
-    pub user_data: TBl,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
@@ -706,14 +712,11 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                     ..  // TODO: check is_new_best?
                 }) => {
                     let header = insert.header().into();
-                    // TODO: half of the fields of `Block` are irrelevant for headers-only
                     insert.insert(Block {
                         header,
-                        body: Vec::new(),
                         justification: block.scale_encoded_justification.clone(),
-                        storage_top_trie_changes: Default::default(),
-                        offchain_storage_changes: Default::default(),
                         user_data: block.user_data,
+                        full: None,
                     });
                     None
                 }
@@ -899,12 +902,13 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         let header = insert.header().into();
                         insert.insert(Block {
                             header,
-                            body: mem::take(&mut shared.block_body),
-                            // Set to `Some` below if the justification check success.
-                            justification: None,
-                            storage_top_trie_changes,
-                            offchain_storage_changes,
+                            justification: None, // TODO: /!\
                             user_data: shared.block_user_data.take().unwrap(),
+                            full: Some(BlockFull {
+                                body: mem::take(&mut shared.block_body),
+                                storage_top_trie_changes,
+                                offchain_storage_changes,
+                            }),
                         })
                     };
 
