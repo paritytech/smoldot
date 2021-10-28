@@ -126,7 +126,15 @@ impl FramedInProgress {
                 };
 
                 if (*byte & 0x80) == 0 {
-                    assert_eq!(n, buffer.len() - 1);
+                    // Note: this assertion holds true because of the implementation of `update`
+                    // below.
+                    debug_assert_eq!(n, buffer.len() - 1);
+
+                    // We want to avoid LEB128 numbers such as `[0x81, 0x0]`.
+                    if n >= 1 && *byte == 0x0 {
+                        return Some(Err(FramedError::NonMinimalLengthPrefix));
+                    }
+
                     return Some(Ok(out));
                 }
             }
@@ -187,6 +195,9 @@ impl FramedInProgress {
 pub enum FramedError {
     /// The variable-length prefix is too large and cannot possibly represent a valid size.
     LengthPrefixTooLarge,
+    /// The variable-length prefix doesn't use the minimum possible LEB128 representation of
+    /// this number.
+    NonMinimalLengthPrefix,
     /// Maximum length of the frame has been exceeded.
     #[display(
         fmt = "Maximum length of the frame ({}) has been exceeded",
