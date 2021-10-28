@@ -34,7 +34,7 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain, header,
+    chain,
     libp2p::PeerId,
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
@@ -66,7 +66,7 @@ pub struct Config {
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: mpsc::Receiver<network_service::Event>,
+    pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
 
     /// Extra fields used when the chain is a parachain.
     /// If `None`, this chain is a standalone chain or a relay chain.
@@ -124,17 +124,14 @@ impl SyncService {
         } else {
             (config.tasks_executor)(
                 "sync-relay".into(),
-                Box::pin(
-                    standalone::start_standalone_chain(
-                        log_target,
-                        config.chain_information,
-                        from_foreground,
-                        config.network_service.0.clone(),
-                        config.network_service.1,
-                        config.network_events_receiver,
-                    )
-                    .await,
-                ),
+                Box::pin(standalone::start_standalone_chain(
+                    log_target,
+                    config.chain_information,
+                    from_foreground,
+                    config.network_service.0.clone(),
+                    config.network_service.1,
+                    config.network_events_receiver,
+                )),
             );
         }
 
@@ -272,43 +269,7 @@ impl SyncService {
                 Err(_) => continue,
             };
 
-            if result.len() != 1 {
-                continue;
-            }
-
-            let result = result.remove(0);
-
-            if result.header.is_none() && fields.header {
-                continue;
-            }
-            if result
-                .header
-                .as_ref()
-                .map_or(false, |h| header::decode(h).is_err())
-            {
-                continue;
-            }
-            if result.body.is_none() && fields.body {
-                continue;
-            }
-            // Note: the presence of a justification isn't checked and can't be checked, as not
-            // all blocks have a justification in the first place.
-            if result.hash != hash {
-                continue;
-            }
-            if result.header.as_ref().map_or(false, |h| {
-                header::hash_from_scale_encoded_header(&h) != result.hash
-            }) {
-                continue;
-            }
-            match (&result.header, &result.body) {
-                (Some(_), Some(_)) => {
-                    // TODO: verify correctness of body
-                }
-                _ => {}
-            }
-
-            return Ok(result);
+            return Ok(result.remove(0));
         }
 
         Err(())

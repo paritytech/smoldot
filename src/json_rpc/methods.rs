@@ -18,7 +18,7 @@
 //! List of requests and how to answer them.
 
 use super::parse;
-use crate::{header, util};
+use crate::header;
 
 use alloc::{
     boxed::Box,
@@ -26,7 +26,6 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::convert::TryFrom as _;
 
 /// Parses a JSON call (usually received from a JSON-RPC server).
 ///
@@ -308,7 +307,7 @@ define_methods! {
     state_call() -> () [state_callAt], // TODO:
     state_getKeys() -> (), // TODO:
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
-    state_getMetadata() -> HexString,
+    state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:
     state_getReadProof() -> (), // TODO:
     state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion [chain_getRuntimeVersion],
@@ -426,13 +425,10 @@ impl<'a> serde::Deserialize<'a> for AccountId {
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub extrinsics: Vec<Extrinsic>,
+    pub extrinsics: Vec<HexString>,
     pub header: Header,
     pub justification: Option<HexString>,
 }
-
-#[derive(Debug, Clone)]
-pub struct Extrinsic(pub Vec<u8>);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Header {
@@ -607,7 +603,7 @@ impl serde::Serialize for Block {
 
         #[derive(serde::Serialize)]
         struct SerdeBlockInner<'a> {
-            extrinsics: &'a [Extrinsic],
+            extrinsics: &'a [HexString],
             header: &'a Header,
             justification: Option<&'a HexString>, // TODO: unsure of the type
         }
@@ -619,21 +615,6 @@ impl serde::Serialize for Block {
                 justification: self.justification.as_ref(),
             },
         }
-        .serialize(serializer)
-    }
-}
-
-impl serde::Serialize for Extrinsic {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let length_prefix = util::encode_scale_compact_usize(self.0.len());
-        format!(
-            "0x{}{}",
-            hex::encode(length_prefix.as_ref()),
-            hex::encode(&self.0[..])
-        )
         .serialize(serializer)
     }
 }

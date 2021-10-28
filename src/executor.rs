@@ -29,7 +29,7 @@
 //! sub-module is [`runtime_host`].
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, fmt, str};
+use core::{fmt, str};
 
 mod allocator; // TODO: make public after refactoring
 pub mod host;

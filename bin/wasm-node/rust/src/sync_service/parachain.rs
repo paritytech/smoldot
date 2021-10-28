@@ -19,6 +19,7 @@ use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
 use crate::{ffi, network_service, runtime_service};
 
 use futures::{channel::mpsc, prelude::*};
+use itertools::Itertools as _;
 use smoldot::{
     chain::{self, async_tree},
     executor::{host, read_only_runtime_host},
@@ -28,7 +29,7 @@ use smoldot::{
     network::protocol,
     sync::{all_forks::sources, para},
 };
-use std::{collections::HashMap, iter, sync::Arc};
+use std::{collections::HashMap, iter, sync::Arc, time::Duration};
 
 /// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain(
@@ -38,8 +39,11 @@ pub(super) async fn start_parachain(
     parachain_id: u32,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_chain_index: usize,
-    mut from_network_service: mpsc::Receiver<network_service::Event>,
+    from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
+    // Necessary for the `select!` loop below.
+    let mut from_network_service = from_network_service.fuse();
+
     // Parahead of the genesis block.
     let chainspec_finalized_parahead = chain_information
         .as_ref()
@@ -96,7 +100,10 @@ pub(super) async fn start_parachain(
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
         // is fetched, this parahead is reported to our subscriptions.
         let mut async_tree =
-            async_tree::AsyncTree::<ffi::Instant, [u8; 32], Vec<u8>>::new(finalized_parahead);
+            async_tree::AsyncTree::<ffi::Instant, [u8; 32], _>::new(async_tree::Config {
+                finalized_async_user_data: finalized_parahead,
+                retry_after_failed: Duration::from_secs(5),
+            });
         for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
             let parent = async_tree
@@ -305,10 +312,11 @@ pub(super) async fn start_parachain(
                     // Log and update the `async_tree` accordingly.
                     match parahead_result {
                         Ok(parahead) => {
-                            // TODO: print more info
                             log::debug!(
                                 target: &log_target,
-                                "Successfully fetched parahead",
+                                "Successfully fetched parahead of blake2 hash {} for relay chain block(s) {}",
+                                HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
                             );
 
                             async_tree.async_op_finished(async_op_id, parahead);
@@ -324,7 +332,8 @@ pub(super) async fn start_parachain(
                                 } else {
                                     log::Level::Debug
                                 },
-                                "Failed to fetch the parachain head from relay chain: {}",
+                                "Failed to fetch the parachain head from relay chain blocks {}: {}",
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
                                 error
                             );
 
@@ -399,9 +408,10 @@ pub(super) async fn start_parachain(
                     }
                 },
 
-                network_event = from_network_service.select_next_some() => {
+                network_event = from_network_service.next() => {
                     // Something happened on the network.
-                    match network_event {
+                    // We expect the networking channel to never close, so the event is unwrapped.
+                    match network_event.unwrap() {
                         network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {

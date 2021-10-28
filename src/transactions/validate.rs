@@ -35,7 +35,7 @@ pub struct Config<'a, TTx> {
     /// The runtime of this block must be the one in [`Config::runtime`].
     pub scale_encoded_header: &'a [u8],
 
-    /// Double-SCALE-encoded transaction.
+    /// SCALE-encoded transaction.
     pub scale_encoded_transaction: TTx,
 
     /// Source of the transaction.
@@ -176,7 +176,7 @@ pub enum UnknownTransaction {
 }
 
 /// Problem encountered during a call to [`validate_transaction`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// Error while decoding the block header against which to make the call.
     InvalidHeader(header::Error),
@@ -200,7 +200,7 @@ pub enum Error {
 }
 
 /// Error that can happen during the decoding.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub struct DecodeError();
 
 /// Errors that can occur while checking the validity of a transaction.

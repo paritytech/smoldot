@@ -21,7 +21,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{convert::TryFrom as _, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 /// Grandpa configuration of a chain, as extracted from the genesis block.
 ///

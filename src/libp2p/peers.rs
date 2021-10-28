@@ -53,16 +53,12 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    convert::TryFrom as _,
     num::{NonZeroU32, NonZeroUsize},
     ops::{Add, Sub},
     task::Poll,
     time::Duration,
 };
-use futures::{
-    lock::{Mutex, MutexGuard},
-    prelude::*,
-}; // TODO: no_std-ize
+use futures::{lock::Mutex, prelude::*}; // TODO: no_std-ize
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
@@ -455,17 +451,14 @@ where
                     // Update the state of `guarded` to match the fact that the connection has
                     // been removed from `inner`.
                     let (
-                        peer_id,
-                        peer_is_desired,
-                        num_peer_connections,
-                        was_established,
+                        (peer_id, peer_is_desired, num_peer_connections, was_established),
                         user_data,
                     ) = match self.removed_from_inner(
                         &mut *guarded,
                         connection_id,
                         local_connection_index,
                     ) {
-                        (Some((a, b, c, d)), e) => (a, b, c, d, e),
+                        (Some(a), b) => (a, b),
                         (None, _) => {
                             // A ping failure event can only happen after a connection has been
                             // established, in which case `removed_from_inner` is guaranteed to
@@ -640,6 +633,7 @@ where
                             .inner
                             .reject_notifications_in(*connection_id, *substream_id)
                             .await;
+                    } else {
                         guarded
                             .peers_notifications_in
                             .insert((peer_index, *notifications_protocol_index));

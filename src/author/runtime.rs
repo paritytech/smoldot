@@ -397,7 +397,7 @@ impl BlockBuild {
                     if result.is_ok() {
                         // TODO: probably wrong because of double-SCALE-encoding issue
                         shared.block_body.push(match &mut shared.stage {
-                            Stage::ApplyExtrinsic(ext) => mem::replace(ext, Vec::new()),
+                            Stage::ApplyExtrinsic(ext) => mem::take(ext),
                             _ => unreachable!(),
                         });
                     }

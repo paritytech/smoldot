@@ -23,7 +23,7 @@
 //! See <https://en.wikipedia.org/wiki/LEB128>.
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom as _, mem};
+use core::{cmp, mem};
 
 /// Returns an LEB128-encoded integer as a list of bytes.
 ///
@@ -102,7 +102,15 @@ impl FramedInProgress {
     pub fn new(max_len: usize) -> Self {
         FramedInProgress {
             max_len,
-            buffer: Vec::with_capacity(32), // Reserve enough for the length prefix.
+            buffer: Vec::with_capacity({
+                // If the `max_size` is reasonably small, just allocate enough for the message,
+                // otherwise reserve just enough for the length prefix.
+                if max_len <= 32 * 1024 {
+                    max_len
+                } else {
+                    4 * mem::size_of::<usize>()
+                }
+            }),
             inner: FramedInner::Length,
         }
     }

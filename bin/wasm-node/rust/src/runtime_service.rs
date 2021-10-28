@@ -102,7 +102,10 @@ pub struct RuntimeService {
     sync_service: Arc<sync_service::SyncService>,
 
     /// Fields behind a `Mutex`. Should only be locked for short-lived operations.
-    guarded: Mutex<Guarded>,
+    guarded: Arc<Mutex<Guarded>>,
+
+    /// Handle to abort the background task.
+    background_task_abort: future::AbortHandle,
 }
 
 impl RuntimeService {
@@ -193,15 +196,24 @@ impl RuntimeService {
         // This is strictly speaking not necessary as long as there is no active subscription.
         // However, in practice, there is most likely always going to be one. It is way easier to
         // always have a task active rather than create and destroy it.
+        let background_task_abort;
         (config.tasks_executor)("runtime-download".into(), {
-            let runtime_service = runtime_service.clone();
-            async move {
-                run_background(runtime_service).await;
-            }
-            .boxed()
+            let log_target = log_target.clone();
+            let sync_service = config.sync_service.clone();
+            let guarded = guarded.clone();
+            let (abortable, abort) = future::abortable(async move {
+                run_background(log_target, sync_service, guarded).await;
+            });
+            background_task_abort = abort;
+            abortable.map(|_| ()).boxed()
         });
 
-        runtime_service
+        Arc::new(RuntimeService {
+            log_target,
+            sync_service: config.sync_service,
+            guarded,
+            background_task_abort,
+        })
     }
 
     /// Returns the current runtime version, plus an unlimited stream that produces one item every
@@ -513,7 +525,19 @@ impl RuntimeService {
     /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
-    pub async fn metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
+    pub async fn metadata(
+        self: Arc<RuntimeService>,
+        block_hash: &[u8; 32],
+    ) -> Result<Vec<u8>, MetadataError> {
+        self.metadata_inner(Some(block_hash)).await
+    }
+
+    /// Obtain the metadata of the runtime of the current best block.
+    ///
+    /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
+    /// >           of the best block can change at any time. This method should ideally be called
+    /// >           again after every runtime change.
+    pub async fn best_block_metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
         // First, try the cache.
         {
             let guarded = self.guarded.lock().await;
@@ -536,12 +560,23 @@ impl RuntimeService {
             }
         }
 
-        let (mut runtime_call_lock, virtual_machine) = self
-            .recent_best_block_runtime_lock()
-            .await
-            .start("Metadata_metadata", iter::empty::<Vec<u8>>())
-            .await
-            .map_err(MetadataError::CallError)?;
+        self.metadata_inner(None).await
+    }
+
+    async fn metadata_inner(
+        self: Arc<RuntimeService>,
+        block_hash: Option<&[u8; 32]>,
+    ) -> Result<Vec<u8>, MetadataError> {
+        let (mut runtime_call_lock, virtual_machine) = if let Some(block_hash) = block_hash {
+            self.runtime_lock(block_hash)
+                .await
+                .ok_or(MetadataError::RuntimeFetch)?
+        } else {
+            self.recent_best_block_runtime_lock().await
+        }
+        .start("Metadata_metadata", iter::empty::<Vec<u8>>())
+        .await
+        .map_err(MetadataError::CallError)?;
 
         let mut query = metadata::query_metadata(virtual_machine);
         let (metadata_result, virtual_machine) = loop {
@@ -586,23 +621,36 @@ impl RuntimeService {
     /// The way this method is implemented is opaque and cannot be relied on. The return value
     /// should only ever be shown to the user and not used for any meaningful logic.
     pub async fn is_near_head_of_chain_heuristic(&self) -> bool {
-        // The runtime service adds a delay between the moment a best block is reported by the
-        // sync service and the moment it is reported by the runtime service.
-        // Because of this, any "far from head of chain" to "near head of chain" transition
-        // must take that delay into account. The other way around ("near" to "far") is
-        // unaffected.
-
-        // If the sync service is far from the head, the runtime service is also far.
-        if !self.sync_service.is_near_head_of_chain_heuristic().await {
-            return false;
-        }
-
-        // If the sync service is near, report the result of `is_near_head_of_chain_heuristic()`
-        // when called at the latest best block that the runtime service reported through its API,
-        // to make sure that we don't report "near" while having reported only blocks that were
-        // far.
-        self.guarded.lock().await.best_near_head_of_chain
+        is_near_head_of_chain_heuristic(&self.sync_service, &self.guarded).await
     }
+}
+
+impl Drop for RuntimeService {
+    fn drop(&mut self) {
+        self.background_task_abort.abort();
+    }
+}
+
+async fn is_near_head_of_chain_heuristic(
+    sync_service: &sync_service::SyncService,
+    guarded: &Mutex<Guarded>,
+) -> bool {
+    // The runtime service adds a delay between the moment a best block is reported by the
+    // sync service and the moment it is reported by the runtime service.
+    // Because of this, any "far from head of chain" to "near head of chain" transition
+    // must take that delay into account. The other way around ("near" to "far") is
+    // unaffected.
+
+    // If the sync service is far from the head, the runtime service is also far.
+    if !sync_service.is_near_head_of_chain_heuristic().await {
+        return false;
+    }
+
+    // If the sync service is near, report the result of `is_near_head_of_chain_heuristic()`
+    // when called at the latest best block that the runtime service reported through its API,
+    // to make sure that we don't report "near" while having reported only blocks that were
+    // far.
+    guarded.lock().await.best_near_head_of_chain
 }
 
 /// See [`RuntimeService::recent_best_block_runtime_lock`].
@@ -983,6 +1031,8 @@ pub enum MetadataError {
     /// Error in the metadata-specific runtime API.
     #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
     MetadataQuery(metadata::Error),
+    /// Error while fetching the runtime of the desired block.
+    RuntimeFetch,
 }
 
 struct Guarded {
@@ -1088,20 +1138,22 @@ impl Guarded {
     }
 }
 
-async fn run_background(original_runtime_service: Arc<RuntimeService>) {
+async fn run_background(
+    log_target: String,
+    sync_service: Arc<sync_service::SyncService>,
+    original_guarded: Arc<Mutex<Guarded>>,
+) {
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.
-        let subscription = original_runtime_service
-            .sync_service
-            .subscribe_all(16)
-            .await;
+        let subscription = sync_service.subscribe_all(16).await;
 
         log::debug!(
-            target: &original_runtime_service.log_target,
+            target: &log_target,
             "Reinitialized background worker to finalized block {}",
-            HashDisplay(&header::hash_from_scale_encoded_header(&subscription.finalized_block_scale_encoded_header))
-            // TODO: print block height
+            HashDisplay(&header::hash_from_scale_encoded_header(
+                &subscription.finalized_block_scale_encoded_header
+            )) // TODO: print block height
         );
 
         // In order to bootstrap the new runtime service, a fresh temporary runtime service is
@@ -1110,22 +1162,22 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
         // over the original runtime service.
         // TODO: if subscription.finalized is equal to current finalized, skip the whole process below?
         let mut background = Background {
-            runtime_service: Arc::new(RuntimeService {
-                log_target: original_runtime_service.log_target.clone(),
-                sync_service: original_runtime_service.sync_service.clone(),
-                guarded: Mutex::new(Guarded {
-                    all_blocks_subscriptions: Vec::new(),
-                    best_blocks_subscriptions: Vec::new(),
-                    finalized_blocks_subscriptions: Vec::new(),
-                    runtime_version_subscriptions: Vec::new(),
-                    best_near_head_of_chain: original_runtime_service
-                        .is_near_head_of_chain_heuristic()
-                        .await,
-                    tree: Some(download_tree::DownloadTree::from_finalized_block(
-                        subscription.finalized_block_scale_encoded_header,
-                    )),
-                }),
-            }),
+            log_target: log_target.clone(),
+            sync_service: sync_service.clone(),
+            guarded: Arc::new(Mutex::new(Guarded {
+                all_blocks_subscriptions: Vec::new(),
+                best_blocks_subscriptions: Vec::new(),
+                finalized_blocks_subscriptions: Vec::new(),
+                runtime_version_subscriptions: Vec::new(),
+                best_near_head_of_chain: is_near_head_of_chain_heuristic(
+                    &sync_service,
+                    &original_guarded,
+                )
+                .await,
+                tree: Some(download_tree::DownloadTree::from_finalized_block(
+                    subscription.finalized_block_scale_encoded_header,
+                )),
+            })),
             blocks_stream: subscription.new_blocks.boxed(),
             wake_up_new_necessary_download: future::pending().boxed().fuse(),
             runtime_downloads: stream::FuturesUnordered::new(),
@@ -1133,7 +1185,6 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
 
         for block in subscription.non_finalized_blocks_ancestry_order {
             let _ = background
-                .runtime_service
                 .guarded
                 .try_lock()
                 .unwrap()
@@ -1151,28 +1202,25 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
 
         // Inner loop. Process incoming events.
         loop {
-            if !Arc::ptr_eq(&background.runtime_service, &original_runtime_service) {
+            if !Arc::ptr_eq(&background.guarded, &original_guarded) {
                 // The `Background` object is manipulating a temporary runtime service. Check if
                 // it is possible to write to the original runtime service.
-                let mut temporary_guarded = background.runtime_service.guarded.try_lock().unwrap();
+                let mut temporary_guarded = background.guarded.try_lock().unwrap();
                 if temporary_guarded.tree.as_ref().unwrap().has_output() {
-                    log::debug!(
-                        target: &original_runtime_service.log_target,
-                        "Background worker now in sync"
-                    );
+                    log::debug!(target: &log_target, "Background worker now in sync");
 
-                    let mut original_guarded = original_runtime_service.guarded.lock().await;
-                    original_guarded.best_near_head_of_chain =
+                    let mut original_guarded_lock = original_guarded.lock().await;
+                    original_guarded_lock.best_near_head_of_chain =
                         temporary_guarded.best_near_head_of_chain;
-                    original_guarded.tree = Some(temporary_guarded.tree.take().unwrap());
+                    original_guarded_lock.tree = Some(temporary_guarded.tree.take().unwrap());
 
                     drop(temporary_guarded);
 
-                    original_guarded.all_blocks_subscriptions.clear();
+                    original_guarded_lock.all_blocks_subscriptions.clear();
                     // TODO: correct? especially for the runtime?
-                    original_guarded.notify_subscribers(true, true, true);
+                    original_guarded_lock.notify_subscribers(true, true, true);
 
-                    background.runtime_service = original_runtime_service.clone();
+                    background.guarded = original_guarded.clone();
                 }
             }
 
@@ -1185,16 +1233,16 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         None => break, // Break out of the inner loop in order to reset the background.
                         Some(sync_service::Notification::Block(new_block)) => {
                             log::debug!(
-                                target: &original_runtime_service.log_target,
+                                target: &log_target,
                                 "New sync service block: hash={}, parent={}, is_new_best={}",
                                 HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
                                 HashDisplay(&new_block.parent_hash),
                                 new_block.is_new_best
                             );
 
-                            let near_head_of_chain = background.runtime_service.sync_service.is_near_head_of_chain_heuristic().await;
+                            let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
 
-                            let mut guarded = background.runtime_service.guarded.lock().await;
+                            let mut guarded = background.guarded.lock().await;
                             // TODO: note that this code is never reached for parachains
                             if new_block.is_new_best {
                                 guarded.best_near_head_of_chain = near_head_of_chain;
@@ -1204,7 +1252,7 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             log::debug!(
-                                target: &original_runtime_service.log_target,
+                                target: &log_target,
                                 "New sync service finalization: hash={}, new_best={}",
                                 HashDisplay(&hash), HashDisplay(&best_block_hash)
                             );
@@ -1220,19 +1268,19 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                     match download_result {
                         Ok((storage_code, storage_heap_pages)) => {
                             log::debug!(
-                                target: &original_runtime_service.log_target,
+                                target: &log_target,
                                 "Successfully finished download of id {:?}",
                                 download_id
                             );
 
                             // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
-                            background.runtime_service.guarded.lock().await.best_near_head_of_chain = true;
+                            background.guarded.lock().await.best_near_head_of_chain = true;
 
                             background.runtime_download_finished(download_id, storage_code, storage_heap_pages).await;
                         }
                         Err(error) => {
                             log::log!(
-                                target: &original_runtime_service.log_target,
+                                target: &log_target,
                                 if error.is_network_problem() {
                                     log::Level::Debug
                                 } else {
@@ -1243,8 +1291,13 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
                                 error
                             );
 
+<<<<<<< HEAD
                             let mut guarded = background.runtime_service.guarded.lock().await;
                             guarded.tree.as_mut().unwrap().async_op_failure(download_id, &ffi::Instant::now());
+=======
+                            let mut guarded = background.guarded.lock().await;
+                            guarded.tree.as_mut().unwrap().runtime_download_failure(download_id, &ffi::Instant::now());
+>>>>>>> main
                         }
                     }
 
@@ -1256,7 +1309,11 @@ async fn run_background(original_runtime_service: Arc<RuntimeService>) {
 }
 
 struct Background {
-    runtime_service: Arc<RuntimeService>,
+    log_target: String,
+
+    sync_service: Arc<sync_service::SyncService>,
+
+    guarded: Arc<Mutex<Guarded>>,
 
     /// Stream of blocks updates coming from the sync service.
     /// Initially has a dummy value.
@@ -1287,7 +1344,7 @@ impl Background {
         storage_code: Option<Vec<u8>>,
         storage_heap_pages: Option<Vec<u8>>,
     ) {
-        let mut guarded = self.runtime_service.guarded.lock().await;
+        let mut guarded = self.guarded.lock().await;
 
         // This search is `O(n)` but the number of items in `runtimes` is normally extremely low,
         // so this shouldn't be an issue.
@@ -1418,7 +1475,7 @@ impl Background {
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
     async fn start_necessary_downloads(&mut self) {
-        let mut guarded = self.runtime_service.guarded.lock().await;
+        let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
         loop {
@@ -1447,7 +1504,7 @@ impl Background {
             };
 
             log::debug!(
-                target: &self.runtime_service.log_target,
+                target: &self.log_target,
                 "Starting new download, id={:?}, block={}",
                 download_params.id,
                 HashDisplay(&download_params.block_hash)
@@ -1455,7 +1512,7 @@ impl Background {
 
             // Dispatches a runtime download task to `runtime_downloads`.
             self.runtime_downloads.push(Box::pin({
-                let sync_service = self.runtime_service.sync_service.clone();
+                let sync_service = self.sync_service.clone();
 
                 async move {
                     let result = sync_service
@@ -1483,7 +1540,7 @@ impl Background {
 
     /// Updates `self` to take into account that the sync service has finalized the given block.
     async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
-        let mut guarded = self.runtime_service.guarded.lock().await;
+        let mut guarded = self.guarded.lock().await;
 
         guarded
             .tree

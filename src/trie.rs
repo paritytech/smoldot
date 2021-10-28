@@ -84,6 +84,8 @@
 //! mostly depends on the number of modifications that are performed on it, and only a bit on the
 //! size of the trie.
 
+use crate::util;
+
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::{iter, mem};
 
@@ -206,6 +208,21 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
             }
         }
     }
+}
+
+/// Returns the Merkle value of a trie containing the entries passed as parameter, where the keys
+/// are the SCALE-codec-encoded indices of these entries.
+///
+/// > **Note**: In isolation, this function seems highly specific. In practice, it is notably used
+/// >           in order to build the trie root of the list of extrinsics of a block.
+pub fn ordered_root(entries: impl Iterator<Item = impl AsRef<[u8]>>) -> [u8; 32] {
+    // TODO: optimize this
+    let mut trie = Trie::new();
+    for (idx, value) in entries.enumerate() {
+        let key = util::encode_scale_compact_usize(idx);
+        trie.insert(key.as_ref(), value.as_ref());
+    }
+    trie.root_merkle_value(None)
 }
 
 #[cfg(test)]

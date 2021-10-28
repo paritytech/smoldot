@@ -15,8 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Contains a light client implementation usable from a browser environment, using the
-//! `wasm-bindgen` library.
+//! Contains a light client implementation usable from a browser environment.
 
 #![recursion_limit = "512"]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -26,20 +25,21 @@ use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec,
-    informant::HashDisplay,
+    informant::{BytesDisplay, HashDisplay},
     json_rpc::{self, methods},
     libp2p::{connection, multiaddr, peer_id},
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
-    convert::TryFrom as _,
     num::NonZeroU32,
     pin::Pin,
     str,
     sync::Arc,
     task,
+    time::Duration,
 };
 
+mod alloc;
 pub mod ffi;
 
 mod json_rpc_service;
@@ -48,15 +48,6 @@ mod network_service;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
-
-// Use the default "system" allocator. In the context of Wasm, this uses the `dlmalloc` library.
-// See <https://github.com/rust-lang/rust/tree/1.47.0/library/std/src/sys/wasm>.
-//
-// While the `wee_alloc` crate is usually the recommended choice in WebAssembly, testing has shown
-// that using it makes memory usage explode from ~100MiB to ~2GiB and more (the environment then
-// refuses to allocate 4GiB).
-#[global_allocator]
-static ALLOC: std::alloc::System = std::alloc::System;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -138,7 +129,7 @@ impl Client {
         let _ = log::set_boxed_logger(Box::new(ffi::Logger))
             .map(|()| log::set_max_level(max_log_level));
         std::panic::set_hook(Box::new(|info| {
-            ffi::throw(info.to_string());
+            ffi::panic(info.to_string());
         }));
 
         // Fool-proof check to make sure that randomness is properly implemented.
@@ -153,7 +144,8 @@ impl Client {
         // The `new_task_tx` and `new_task_rx` variables are used when spawning a new task is
         // required. Send a task on `new_task_tx` to start running it.
         // TODO: update comment ^
-        let (new_task_tx, mut new_task_rx) = mpsc::unbounded();
+        let (new_task_tx, mut new_task_rx) =
+            mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
 
         // This is the main future that executes the entire client.
         ffi::spawn_background_task(async move {
@@ -191,6 +183,24 @@ impl Client {
             }
         });
 
+        // Spawn a constantly-running task that periodically prints the total memory usage of
+        // the node.
+        new_task_tx
+            .unbounded_send((
+                "memory-printer".to_owned(),
+                Box::pin(async move {
+                    loop {
+                        ffi::Delay::new(Duration::from_secs(60)).await;
+
+                        // For the unwrap below to fail, the quantity of allocated would have to
+                        // not fit in a `u64`, which as of 2021 is basically impossible.
+                        let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
+                        log::info!(target: "smoldot", "Node memory usage: {}", BytesDisplay(mem));
+                    }
+                }),
+            ))
+            .unwrap();
+
         Client {
             new_task_tx,
             public_api_chains: slab::Slab::with_capacity(2),
@@ -203,6 +213,18 @@ impl Client {
         &mut self,
         config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
+        // Fail any new chain initialization if the amount of free memory is too low. This
+        // avoids running into OOM errors. The threshold is completely empirical and should
+        // probably be updated regularly to account for changes in the implementation.
+        if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+            return ChainId(
+                self.public_api_chains
+                    .insert(PublicApiChain::Erroneous(format!(
+                        "Wasm node is running low on memory and will prevent any new chain from being added"
+                    ))),
+            );
+        }
+
         // Decode the chain specification.
         let chain_spec =
             match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
@@ -218,8 +240,15 @@ impl Client {
         // present in the chain specs, it is possible to start sync at the finalized block it
         // describes.
         let genesis_chain_information =
-            match chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec) {
-                Ok(ci) => ci,
+            match chain_spec.as_chain_information() {
+                Ok(ci) => match chain::chain_information::ValidChainInformation::try_from(ci) {
+                    Ok(ci) => ci,
+                    Err(err) => {
+                        return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                            format!("Invalid genesis chain information: {}", err),
+                        )));
+                    }
+                },
                 Err(err) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
                         format!("Failed to build genesis chain information: {}", err),
@@ -227,7 +256,16 @@ impl Client {
                 }
             };
         let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
-            light_sync_state.as_chain_information()
+            match chain::chain_information::ValidChainInformation::try_from(
+                light_sync_state.as_chain_information(),
+            ) {
+                Ok(ci) => ci,
+                Err(err) => {
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                        format!("Invalid checkpoint in chain specification: {}", err),
+                    )));
+                }
+            }
         } else {
             genesis_chain_information.clone()
         };
@@ -609,6 +647,7 @@ impl Client {
 
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
                 if running_chain.2.get() == 1 {
+                    log::info!("Shutting down chain {}", running_chain.1);
                     self.chains_by_key.remove(&key);
                 } else {
                     running_chain.2 = NonZeroU32::new(running_chain.2.get() - 1).unwrap();
@@ -826,6 +865,7 @@ async fn start_services(
                     .as_ref()
                     .finalized_block_header
                     .hash(),
+                finalized_block_height: chain_information.as_ref().finalized_block_header.number,
                 best_block: (
                     chain_information.as_ref().finalized_block_header.number,
                     chain_information.as_ref().finalized_block_header.hash(),

@@ -46,7 +46,7 @@
 //! ```
 
 use alloc::{format, string::String};
-use core::{cmp, convert::TryFrom as _, fmt, iter};
+use core::{cmp, fmt, iter};
 
 /// Values used to build the informant line. Implements the [`core::fmt::Display`] trait.
 // TODO: some fields here aren't printed; remove them once what is printed is final
@@ -221,6 +221,44 @@ impl<'a> fmt::Display for HashDisplay<'a> {
             write!(f, "{:04x}", val)?;
         }
         Ok(())
+    }
+}
+
+/// Implements `fmt::Display` and displays a number of bytes in a nice way.
+pub struct BytesDisplay(pub u64);
+
+impl fmt::Display for BytesDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut value = self.0 as f64;
+
+        if value < 1000.0 {
+            return write!(f, "{} B", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} kiB", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} MiB", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} GiB", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} TiB", value);
+        }
+        value /= 1024.0;
+
+        write!(f, "{:.1}PiB", value)
+
+        // Hopefully we never have to go above petabytes.
     }
 }
 

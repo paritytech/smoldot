@@ -55,7 +55,6 @@ use smoldot::{
 };
 use std::{
     collections::HashMap,
-    convert::TryFrom as _,
     iter,
     num::NonZeroU32,
     pin::Pin,
@@ -210,11 +209,12 @@ impl JsonRpcService {
                     blocks.best_block = best_block_hash;
                 }
 
-                let mut tasks = stream::FuturesUnordered::new();
+                let mut main_tasks = stream::FuturesUnordered::new();
+                let mut secondary_tasks = stream::FuturesUnordered::new();
 
                 for _ in 0..max_parallel_requests.get() {
                     let background = background.clone();
-                    tasks.push(
+                    main_tasks.push(
                         async move {
                             loop {
                                 let message = background.new_requests_rx.lock().await.next().await;
@@ -234,15 +234,16 @@ impl JsonRpcService {
                 }
 
                 loop {
-                    if tasks.is_empty() {
+                    if main_tasks.is_empty() {
                         break;
                     }
 
                     futures::select! {
-                        () = tasks.select_next_some() => {},
+                        () = main_tasks.select_next_some() => {},
+                        () = secondary_tasks.select_next_some() => {},
                         task = new_child_tasks_rx.next() => {
                             let task = task.unwrap();
-                            tasks.push(task);
+                            secondary_tasks.push(task);
                         }
                         block = best_blocks_subscription.next() => {
                             match block {
@@ -592,7 +593,7 @@ impl Background {
                             .body
                             .unwrap()
                             .into_iter()
-                            .map(methods::Extrinsic)
+                            .map(methods::HexString)
                             .collect(),
                         header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
                             .unwrap(),
@@ -858,8 +859,14 @@ impl Background {
                     )
                     .await;
             }
-            methods::MethodCall::state_getMetadata {} => {
-                let response = match self.runtime_service.clone().metadata().await {
+            methods::MethodCall::state_getMetadata { hash } => {
+                let result = if let Some(hash) = hash {
+                    self.runtime_service.clone().metadata(&hash.0).await
+                } else {
+                    self.runtime_service.clone().best_block_metadata().await
+                };
+
+                let response = match result {
                     Ok(metadata) => {
                         methods::Response::state_getMetadata(methods::HexString(metadata))
                             .to_json_response(request_id)
@@ -1178,16 +1185,6 @@ impl Background {
                     // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
                     // is finished and that the block notifications report blocks that are
                     // believed to be near the head of the chain.
-                    // Note that since it is the `sync_service` that is used for block
-                    // subscriptions (as opposed to the `runtime_service`), it would also make
-                    // sense for the `sync_service` that is used to determine `is_syncing`.
-                    // Unfortunately, this means that the runtime version will likely change
-                    // *after* `isSyncing` becomes `false`, which causes issues in PolkadotJS
-                    // Because of this, we report `isSyncing` equal to `false` only after the
-                    // runtime service has obtained the runtime of the best block.
-                    // Additionally, using the `runtime_service` instead of the `sync_service`
-                    // means that, when it comes to parachains, `isSyncing` will be `true` for as
-                    // long as we haven't found any peer.
                     is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
                     peers: u64::try_from(self.sync_service.syncing_peers().await.len())
                         .unwrap_or(u64::max_value()),
@@ -1356,7 +1353,10 @@ impl Background {
                                 transactions_service::TransactionStatus::Retracted(block) => {
                                     methods::TransactionStatus::Retracted(block)
                                 }
-                                transactions_service::TransactionStatus::Dropped => {
+                                transactions_service::TransactionStatus::GapInChain |
+                                transactions_service::TransactionStatus::MaxPendingTransactionsReached |
+                                transactions_service::TransactionStatus::Invalid(_) |
+                                transactions_service::TransactionStatus::ValidateError(_) => {
                                     methods::TransactionStatus::Dropped
                                 }
                                 transactions_service::TransactionStatus::Finalized(block) => {

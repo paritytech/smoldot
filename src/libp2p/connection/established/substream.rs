@@ -926,15 +926,13 @@ where
                             None,
                         )
                     }
-                    Err(error) => {
-                        return (
-                            Some(SubstreamInner::NotificationsInClosed),
-                            Some(Event::NotificationsInClose {
-                                protocol_index,
-                                outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
-                            }),
-                        );
-                    }
+                    Err(error) => (
+                        Some(SubstreamInner::NotificationsInClosed),
+                        Some(Event::NotificationsInClose {
+                            protocol_index,
+                            outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
+                        }),
+                    ),
                 }
             }
             SubstreamInner::NotificationsInClosed => {
@@ -1151,11 +1149,8 @@ where
             SubstreamInner::PingOut { queued_pings, .. }
             | SubstreamInner::PingOutNegotiating { queued_pings, .. }
             | SubstreamInner::PingOutFailed { queued_pings, .. } => {
-                if let Some(num_pings) = NonZeroUsize::new(queued_pings.len()) {
-                    Some(Event::PingOutError { num_pings })
-                } else {
-                    None
-                }
+                NonZeroUsize::new(queued_pings.len())
+                    .map(|num_pings| Event::PingOutError { num_pings })
             }
         }
     }

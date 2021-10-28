@@ -22,7 +22,7 @@
 use super::{encode_babe_epoch_information, AccessError, SqliteFullDatabase};
 use crate::chain::chain_information;
 
-use std::{convert::TryFrom as _, fs, path::Path};
+use std::{fs, path::Path};
 
 /// Opens the database using the given [`Config`].
 ///

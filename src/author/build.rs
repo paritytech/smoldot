@@ -25,7 +25,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {

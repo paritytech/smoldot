@@ -131,7 +131,7 @@
 
 use crate::{chain::chain_information, header};
 
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 use num_traits::{cast::ToPrimitive as _, identities::One as _};
 
 /// Configuration for [`verify_header`].
@@ -176,6 +176,8 @@ pub struct VerifySuccess {
     /// provided as [`VerifyConfig::parent_block_next_epoch`], and the value previously in
     /// [`VerifyConfig::parent_block_next_epoch`] must instead be passed as
     /// [`VerifyConfig::parent_block_epoch`].
+    ///
+    /// The new epoch information is guaranteed to be valid.
     pub epoch_transition_target: Option<chain_information::BabeEpochInformation>,
 }
 
@@ -194,6 +196,9 @@ pub enum VerifyError {
     UnexpectedEpochChangeLog,
     /// Block is the first block after a new epoch, but it is missing an epoch change digest log.
     MissingEpochChangeLog,
+    /// The header contains an epoch change that would put the Babe configuration in an
+    /// non-sensical state.
+    InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
     /// Block header signature is invalid.
@@ -364,6 +369,13 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             allowed_slots: epoch_cfg.allowed_slots,
         }),
     };
+
+    // Make sure that the header wouldn't put Babe in a non-sensical state.
+    if let Some(epoch_transition_target) = &epoch_transition_target {
+        if let Err(err) = epoch_transition_target.validate() {
+            return Err(VerifyError::InvalidBabeParametersChange(err));
+        }
+    }
 
     // The signature in the seal applies to the header from where the signature isn't present.
     // Build the hash that is expected to be signed.

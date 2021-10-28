@@ -5,7 +5,7 @@ authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krie
 description = "Substrate/Polkadot full node using smoldot"
 repository = "https://github.com/paritytech/smoldot"
 license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
-edition = "2018"
+edition = "2021"
 publish = false
 default-run = "full-node"
 
@@ -31,4 +31,4 @@ smoldot = { version = "0.1.0", path = "../..", default-features = false, feature
 structopt = { version = "0.3.25", default-features = false, features = ["color", "suggestions", "wrap_help"] }
 terminal_size = "0.1.17"
 tracing = { version = "0.1.29", features = ["attributes"] }
-tracing-subscriber = { version = "0.2.25", default-features = false, features = ["ansi", "chrono", "json", "fmt", "parking_lot", "smallvec"] }
+tracing-subscriber = { version = "0.2.25", default-features = false, features = ["ansi", "chrono", "env-filter", "json", "fmt", "parking_lot", "smallvec"] }

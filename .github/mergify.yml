@@ -1,3 +1,12 @@
+queue_rules:
+  - name: default
+    conditions:
+      - check-success=all-ci
+      - check-success=all-deploy
+      - label=automerge
+      - base=main
+      - "#changes-requested-reviews-by=0"
+      
 pull_request_rules:
   - name: automatic merge when CI passes on main
     conditions:
@@ -7,6 +16,6 @@ pull_request_rules:
       - base=main
       - "#changes-requested-reviews-by=0"
     actions:
-      merge:
-        strict: true
+      queue:
+        name: default
         method: squash

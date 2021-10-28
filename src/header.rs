@@ -71,10 +71,10 @@
 // TODO: consider rewriting the encoding/decoding into a more legible style
 // TODO: consider nom for decoding
 
-use crate::util;
+use crate::{trie, util};
 
 use alloc::{vec, vec::Vec};
-use core::{convert::TryFrom, fmt, iter, slice};
+use core::{fmt, iter, slice};
 
 mod aura;
 mod babe;
@@ -111,6 +111,12 @@ pub fn hash_from_scale_encoded_header_vectored(
     let mut out = [0; 32];
     out.copy_from_slice(result.as_bytes());
     out
+}
+
+/// Returns the value appropriate for [`Header::extrinsics_root`]. Must be passed the list of
+/// transactions in that block.
+pub fn extrinsics_root(transactions: impl Iterator<Item = impl AsRef<[u8]>>) -> [u8; 32] {
+    trie::ordered_root(transactions)
 }
 
 /// Attempt to decode the given SCALE-encoded header.
@@ -224,6 +230,8 @@ pub struct HeaderRef<'a> {
     /// The state trie merkle root
     pub state_root: &'a [u8; 32],
     /// The merkle root of the extrinsics.
+    ///
+    /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: &'a [u8; 32],
     /// List of auxiliary data appended to the block header.
     pub digest: DigestRef<'a>,
@@ -288,6 +296,8 @@ pub struct Header {
     /// The state trie merkle root
     pub state_root: [u8; 32],
     /// The merkle root of the extrinsics.
+    ///
+    /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: [u8; 32],
     /// List of auxiliary data appended to the block header.
     pub digest: Digest,

@@ -186,7 +186,7 @@ impl NetworkService {
                     }
                 }
                 .instrument(
-                    tracing::debug_span!(parent: None, "listener", address = %listen_address),
+                    tracing::trace_span!(parent: None, "listener", address = %listen_address),
                 ),
             ))
         }
@@ -230,15 +230,15 @@ impl NetworkService {
                 tasks_executor: config.tasks_executor,
             }),
             network: service::ChainNetwork::new(service::Config {
+                now: Instant::now(),
                 chains,
                 known_nodes,
                 connections_capacity: 100, // TODO: ?
                 peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
                 handshake_timeout: Duration::from_secs(8),
-                // TODO: we use an abnormally large channel in order to by pass https://github.com/paritytech/smoldot/issues/615
-                // once the issue is solved, this should be restored to a smaller value, such as 64
-                pending_api_events_buffer_size: NonZeroUsize::new(2048).unwrap(),
+                max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
+                pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
                 randomness_seed: rand::random(),
             }),
         });
@@ -381,8 +381,8 @@ impl NetworkService {
                         {
                             Ok(insert) => {
                                 insert
-                                    .insert()
-                                    .instrument(tracing::debug_span!("insert"))
+                                    .insert(&Instant::now())
+                                    .instrument(tracing::trace_span!("insert"))
                                     .await
                             }
                             Err(error) => {
@@ -391,7 +391,7 @@ impl NetworkService {
                         }
                     }
                 }
-                .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
+                .instrument(tracing::trace_span!(parent: None, "kademlia-discovery"))
             }));
 
             (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
@@ -411,7 +411,7 @@ impl NetworkService {
                         next_round = cmp::min(next_round * 2, Duration::from_secs(5));
                     }
                 }
-                .instrument(tracing::debug_span!(parent: None, "slots-assign"))
+                .instrument(tracing::trace_span!(parent: None, "slots-assign"))
             }));
         }
 
@@ -431,7 +431,7 @@ impl NetworkService {
 
                     let start_connect = network_service.network.next_start_connect(Instant::now()).await;
 
-                    let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
+                    let span = tracing::trace_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                     let _enter = span.enter();
 
                     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
@@ -440,7 +440,7 @@ impl NetworkService {
                         Ok(socket) => socket,
                         Err(_) => {
                             tracing::debug!(%start_connect.multiaddr, "not-tcp");
-                            network_service.network.pending_outcome_err(start_connect.id).await;
+                            network_service.network.pending_outcome_err(start_connect.id, true).await;
                             continue;
                         }
                     };
@@ -455,7 +455,7 @@ impl NetworkService {
                     }));
                 }
             }
-            .instrument(tracing::debug_span!(parent: None, "tcp-dial"))
+            .instrument(tracing::trace_span!(parent: None, "tcp-dial"))
         }));
 
         Ok((network_service, receivers))
@@ -485,7 +485,7 @@ impl NetworkService {
     /// Sends a blocks request to the given peer.
     // TODO: more docs
     // TODO: proper error type
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "trace", skip(self))]
     pub async fn blocks_request(
         self: Arc<Self>,
         target: PeerId, // TODO: by value?
@@ -509,7 +509,7 @@ pub enum InitError {
 }
 
 /// Asynchronous task managing a specific TCP connection.
-#[tracing::instrument(skip(tcp_socket, network_service))]
+#[tracing::instrument(level = "trace", skip(tcp_socket, network_service))]
 async fn connection_task(
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
     timeout: Instant,
@@ -530,14 +530,14 @@ async fn connection_task(
         futures::pin_mut!(tcp_socket);
         futures::select! {
             _ = timeout => {
-                network_service.network.pending_outcome_err(id).await;
+                network_service.network.pending_outcome_err(id, false).await;
                 return;
             }
             result = tcp_socket => {
                 match result {
                     Ok(s) => s,
                     Err(_) => {
-                        network_service.network.pending_outcome_err(id).await;
+                        network_service.network.pending_outcome_err(id, true).await;
                         return;
                     }
                 }
@@ -565,7 +565,7 @@ async fn connection_task(
         let (read_buffer, write_buffer) = match tcp_socket.buffers() {
             Ok(b) => b,
             Err(error) => {
-                tracing::info!(%error, "task-finished");
+                tracing::debug!(%error, "task-finished");
                 // TODO: report disconnect to service
                 return;
             }
@@ -590,7 +590,7 @@ async fn connection_task(
         {
             Ok(rw) => rw,
             Err(error) => {
-                tracing::info!(%error, "task-finished");
+                tracing::debug!(%error, "task-finished");
                 return;
             }
         };
@@ -612,9 +612,9 @@ async fn connection_task(
             // Make sure to finish closing the TCP socket.
             tcp_socket
                 .flush_close()
-                .instrument(tracing::debug_span!("flush-close"))
+                .instrument(tracing::trace_span!("flush-close"))
                 .await;
-            tracing::info!("task-finished");
+            tracing::debug!("task-finished");
             return;
         }
 
@@ -630,7 +630,7 @@ async fn connection_task(
 
         if write_closed && !tcp_socket.is_closed() {
             tcp_socket.close();
-            tracing::info!("write-closed");
+            tracing::debug!("write-closed");
         }
 
         tcp_socket.advance(read_bytes, written_bytes);

@@ -24,8 +24,58 @@
 //! of the tree, is only implicitly there.
 //!
 //! When a block is inserted in the [`AsyncTree`], it is marked as "pending".
+//! TODO: finish doc
 //!
-// TODO: finish docs
+//! # Example
+//!
+//! ```
+//! use smoldot::chain::async_tree;
+//! use std::time::{Instant, Duration};
+//!
+//! let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+//!     finalized_async_user_data: "hello",
+//!     retry_after_failed: Duration::from_secs(5),
+//! });
+//!
+//! // Insert a new best block, parent of the finalized block.
+//! // When doing so, we insert a "user data", a value opaque to the tree and that can be
+//! // retreived later. Here we pass "my block".
+//! let _my_block_index = tree.input_insert_block("my block", None, false, true);
+//!
+//! // When calling `next_necessary_async_op`, the tree now generates a new asynchronous
+//! // operation id.
+//! let async_op_id = match tree.next_necessary_async_op(&Instant::now()) {
+//!     async_tree::NextNecessaryAsyncOp::Ready(params) => {
+//!         assert_eq!(params.block_index, _my_block_index);
+//!         assert_eq!(*params.block_user_data, "my block");
+//!         params.id
+//!     }
+//!     async_tree::NextNecessaryAsyncOp::NotReady { when: _ } => {
+//!         // In this example, this variant can't be returned. In practice, however, you need
+//!         // to call `next_necessary_async_op` again after `when`.
+//!         panic!();
+//!     }
+//! };
+//!
+//! // The user is now responsible for performing this asynchronous operation.
+//! // When it is finished, call `async_op_finished`.
+//! // Just like when inserting a new block, we insert another "user data" in all the blocks that
+//! // have this asynchronous operation associated to them.
+//! tree.async_op_finished(async_op_id, "world");
+//!
+//! // You can now advance the best and finalized block of the tree. Calling this function tries
+//! // to update the tree to match the best and finalized block of the input, except that only
+//! // blocks whose asynchronous operation is finished are considered.
+//! match tree.try_advance_output() {
+//!     Some(async_tree::OutputUpdate::Block(block)) => {
+//!         assert_eq!(block.index, _my_block_index);
+//!         assert_eq!(*block.user_data, "my block");
+//!         assert_eq!(*block.async_op_user_data, "world");
+//!         assert!(block.is_new_best);
+//!     }
+//!     _ => unreachable!() // Unreachable in this example.
+//! }
+//! ```
 
 use crate::chain::fork_tree;
 use alloc::vec::Vec;
@@ -57,6 +107,15 @@ pub struct AsyncOpParams<'a, TBl> {
     pub block_user_data: &'a TBl,
 }
 
+/// Configuration for [`AsyncTree::new`].
+pub struct Config<TAsync> {
+    /// Outcome of the asynchronous operation of the finalized block.
+    pub finalized_async_user_data: TAsync,
+
+    /// After an asynchronous operation fails, retry after this given duration.
+    pub retry_after_failed: Duration,
+}
+
 pub struct AsyncTree<TNow, TBl, TAsync> {
     /// State of all the non-finalized blocks.
     non_finalized_blocks: fork_tree::ForkTree<Block<TNow, TBl, TAsync>>,
@@ -86,6 +145,9 @@ pub struct AsyncTree<TNow, TBl, TAsync> {
 
     /// Identifier to assign to the next asynchronous operation.
     next_async_op_id: AsyncOpId,
+
+    /// See [`Config::retry_after_failed`].
+    retry_after_failed: Duration,
 }
 
 impl<TNow, TBl, TAsync> AsyncTree<TNow, TBl, TAsync>
@@ -94,15 +156,16 @@ where
     TAsync: Clone,
 {
     /// Returns a new empty [`AsyncTree`].
-    pub fn new(finalized_async_user_data: TAsync) -> Self {
+    pub fn new(config: Config<TAsync>) -> Self {
         AsyncTree {
             best_block_index: None,
-            finalized_async_user_data,
+            finalized_async_user_data: config.finalized_async_user_data,
             non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
             input_finalized_index: None,
             input_best_block_next_weight: 2,
             finalized_block_weight: 1, // `0` is reserved for blocks who are never best.
             next_async_op_id: AsyncOpId(0),
+            retry_after_failed: config.retry_after_failed,
         }
     }
 
@@ -269,6 +332,17 @@ where
             })
     }
 
+    /// Returns the blocks targeted by this asynchronous operation.
+    pub fn async_op_blocks(&self, async_op_id: AsyncOpId) -> impl Iterator<Item = &TBl> {
+        self.non_finalized_blocks
+            .iter_unordered()
+            .map(|(_, b)| b)
+            .filter(move |b| {
+                matches!(b.async_op, AsyncOpState::InProgress { async_op_id: id, .. } if id == async_op_id)
+            })
+            .map(|b| &b.user_data)
+    }
+
     /// Injects into the state of the data structure a completed operation.
     ///
     /// This "destroys" the [`AsyncOpId`].
@@ -289,11 +363,11 @@ where
             .non_finalized_blocks
             .iter_unordered()
             .map(|(_, b)| b)
-            .filter(|b| match b.async_op {
+            .filter(|b| {
+                matches!(b.async_op,
                 AsyncOpState::InProgress {
                     async_op_id: id, ..
-                } if id == async_op_id => true,
-                _ => false,
+                } if id == async_op_id)
             })
             .count();
 
@@ -335,7 +409,7 @@ where
     /// Panics if the [`AsyncOpId`] is invalid.
     ///
     pub fn async_op_failure(&mut self, async_op_id: AsyncOpId, now: &TNow) {
-        let new_timeout = now.clone() + Duration::from_secs(10); // TODO: hardcoded value
+        let new_timeout = now.clone() + self.retry_after_failed;
 
         // Update the blocks that were performing this operation.
         // The blocks are iterated from child to parent, so that we can check, for each node,

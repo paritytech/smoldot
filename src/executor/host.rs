@@ -181,10 +181,10 @@
 //! ```
 
 use super::{allocator, vm};
-use crate::util;
+use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, format, string::String, vec::Vec};
-use core::{convert::TryFrom as _, fmt, hash::Hasher as _, iter, str};
+use core::{fmt, hash::Hasher as _, iter, str};
 use parity_scale_codec::DecodeAll as _;
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
@@ -688,7 +688,7 @@ impl ReadyToRun {
 
                 let result = self.inner.vm.read_memory(ptr, $size);
                 match result {
-                    Ok(v) => v,
+                    Ok(v) => *<&[u8; $size]>::try_from(v.as_ref()).unwrap(),
                     Err(vm::OutOfBoundsError) => {
                         drop(result);
                         return HostVm::Error {
@@ -907,16 +907,12 @@ impl ReadyToRun {
             HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
             HostFunction::ext_crypto_ed25519_verify_version_1 => {
                 let success = {
-                    // TODO: copy overhead?
                     let public_key = ed25519_zebra::VerificationKey::try_from(
-                        expect_pointer_constant_size!(2, 32).as_ref(),
+                        expect_pointer_constant_size!(2, 32),
                     );
                     if let Ok(public_key) = public_key {
-                        // TODO: copy overhead?
-                        let signature = ed25519_zebra::Signature::from(
-                            <[u8; 64]>::try_from(expect_pointer_constant_size!(0, 64).as_ref())
-                                .unwrap(),
-                        );
+                        let signature =
+                            ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
                         let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
                         public_key.verify(&signature, &message).is_ok()
                     } else {
@@ -936,14 +932,12 @@ impl ReadyToRun {
                 let success = {
                     // The `unwrap()` below can only panic if the input is the wrong length, which
                     // we know can't happen.
-                    // TODO: copy overhead?
-                    let signing_public_key = schnorrkel::PublicKey::from_bytes(
-                        expect_pointer_constant_size!(2, 32).as_ref(),
-                    )
-                    .unwrap();
+                    let signing_public_key =
+                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
+                            .unwrap();
 
                     let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
-                    let signature = expect_pointer_constant_size!(0, 64).as_ref().to_owned(); // TODO: to_owned() :-/
+                    let signature = expect_pointer_constant_size!(0, 64);
 
                     signing_public_key
                         .verify_simple_preaudit_deprecated(b"substrate", &message, &signature)
@@ -959,16 +953,12 @@ impl ReadyToRun {
                 let success = {
                     // The two `unwrap()`s below can only panic if the input is the wrong
                     // length, which we know can't happen.
-                    // TODO: copy overhead?
-                    let signing_public_key = schnorrkel::PublicKey::from_bytes(
-                        expect_pointer_constant_size!(2, 32).as_ref(),
-                    )
-                    .unwrap();
-                    // TODO: copy overhead?
-                    let signature = schnorrkel::Signature::from_bytes(
-                        expect_pointer_constant_size!(0, 64).as_ref(),
-                    )
-                    .unwrap();
+                    let signing_public_key =
+                        schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
+                            .unwrap();
+                    let signature =
+                        schnorrkel::Signature::from_bytes(&expect_pointer_constant_size!(0, 64))
+                            .unwrap();
 
                     signing_public_key
                         .verify_simple(b"substrate", expect_pointer_size!(1).as_ref(), &signature)
@@ -991,10 +981,8 @@ impl ReadyToRun {
                     BadSignature,
                 }
 
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
+                let sig = expect_pointer_constant_size!(0, 65);
+                let msg = expect_pointer_constant_size!(1, 32);
                 let is_v2 = matches!(
                     host_fn,
                     HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
@@ -1040,10 +1028,8 @@ impl ReadyToRun {
                     BadSignature,
                 }
 
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let sig = expect_pointer_constant_size!(0, 65).as_ref().to_owned();
-                // TODO: to_owned() :-/ difficult-to-solve borrowck issues otherwise
-                let msg = expect_pointer_constant_size!(1, 32).as_ref().to_owned();
+                let sig = expect_pointer_constant_size!(0, 65);
+                let msg = expect_pointer_constant_size!(1, 32);
                 let is_v2 = matches!(
                     host_fn,
                     HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2
@@ -1249,6 +1235,7 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
+                // TODO: don't use parity_scale_codec
                 let decode_result = Vec::<Vec<u8>>::decode_all(expect_pointer_size!(0).as_ref());
 
                 let elements = match decode_result {
@@ -1261,14 +1248,7 @@ impl ReadyToRun {
                     }
                 };
 
-                // TODO: optimize this
-                let mut trie = crate::trie::Trie::new();
-                for (idx, value) in elements.into_iter().enumerate() {
-                    let key = util::encode_scale_compact_usize(idx);
-                    trie.insert(key.as_ref(), value);
-                }
-                let out = trie.root_merkle_value(None);
-
+                let out = trie::ordered_root(elements.into_iter());
                 self.inner
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }

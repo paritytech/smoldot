@@ -51,7 +51,7 @@
 // TODO: the code of this module is rather complicated; either simplify it or write a lot of tests, including fuzzing tests
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU32};
+use core::{cmp, fmt, mem, num::NonZeroU32};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.

@@ -76,7 +76,7 @@
 //!
 
 use crate::metadata::decode as metadata;
-use core::{convert::TryFrom, hash::Hasher as _};
+use core::hash::Hasher as _;
 
 /// Returns the key in the storage at which events can be found.
 ///

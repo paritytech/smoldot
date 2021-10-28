@@ -17,10 +17,9 @@
 
 use super::methods;
 
-use core::{convert::TryFrom as _, iter};
+use core::iter;
 
 /// Produces the input to pass to the `TransactionPaymentApi_query_info` runtime call.
-// TODO: single-encoded or double-encoded tx?
 pub fn payment_info_parameters(
     extrinsic: &'_ [u8],
 ) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_ {

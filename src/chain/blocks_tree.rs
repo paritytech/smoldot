@@ -67,7 +67,7 @@ use crate::{
 };
 
 use alloc::{sync::Arc, vec::Vec};
-use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU64, time::Duration};
+use core::{cmp, fmt, mem, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
 mod best_block;
@@ -165,6 +165,17 @@ impl<T> NonFinalizedTree<T> {
     /// Returns the number of non-finalized blocks in the chain.
     pub fn len(&self) -> usize {
         self.inner.as_ref().unwrap().blocks.len()
+    }
+
+    /// Returns the header of all known non-finalized blocks in the chain without any specific
+    /// order.
+    pub fn iter_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+        self.inner
+            .as_ref()
+            .unwrap()
+            .blocks
+            .iter_unordered()
+            .map(|(_, b)| (&b.header).into())
     }
 
     /// Returns the header of all known non-finalized blocks in the chain.

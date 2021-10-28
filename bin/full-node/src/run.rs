@@ -25,10 +25,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id::PeerId},
 };
-use std::{
-    borrow::Cow, convert::TryFrom as _, fs, io, iter, path::PathBuf, sync::Arc, thread,
-    time::Duration,
-};
+use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
 use tracing::Instrument as _;
 
 mod json_rpc_service;
@@ -38,19 +35,33 @@ mod sync_service;
 /// Runs the node using the given configuration. Catches SIGINT signals and stops if one is
 /// detected.
 pub async fn run(cli_options: cli::CliOptionsRun) {
+    // Determine the actual CLI output by replacing `Auto` with the actual value.
+    let cli_output = if let cli::Output::Auto = cli_options.output {
+        if atty::is(atty::Stream::Stderr) && cli_options.log.is_empty() {
+            cli::Output::Informant
+        } else {
+            cli::Output::Logs
+        }
+    } else {
+        cli_options.output
+    };
+    debug_assert!(!matches!(cli_output, cli::Output::Auto));
+
     // Setup the logging system of the binary.
-    if matches!(
-        cli_options.output,
-        cli::Output::Informant | cli::Output::Logs | cli::Output::LogsJson
-    ) {
+    if !matches!(cli_output, cli::Output::None) {
+        let mut env_filter = tracing_subscriber::filter::EnvFilter::new("INFO");
+        if matches!(cli_output, cli::Output::Informant) {
+            env_filter = env_filter.add_directive(tracing::Level::WARN.into()); // TODO: display warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+        } else {
+            for filter in cli_options.log {
+                env_filter = env_filter.add_directive(filter);
+            }
+        }
+
         let builder = tracing_subscriber::fmt()
             .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ACTIVE)
-            .with_max_level(if matches!(cli_options.output, cli::Output::Informant) {
-                tracing::Level::WARN // TODO: display warnings in a nicer way ; in particular, immediately put the informant on top of warnings
-            } else {
-                tracing::Level::TRACE // TODO: configurable?
-            })
+            .with_env_filter(env_filter)
             .with_writer(io::stdout);
 
         // Because calling `builder.json()` changes the type of `builder`, we do it at the end
@@ -60,7 +71,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         // While this is poor programming practices and we would prefer using a crate that doesn't
         // rely on global variables, the `tracing` crate is currently one of the best logging
         // crates in the Rust ecosystem at the time of writing of this comment.
-        if matches!(cli_options.output, cli::Output::LogsJson) {
+        if matches!(cli_output, cli::Output::LogsJson) {
             builder.json().init();
         } else {
             builder
@@ -87,8 +98,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     };
 
     // TODO: don't unwrap?
-    let genesis_chain_information =
-        chain::chain_information::ChainInformation::from_chain_spec(&chain_spec).unwrap();
+    let genesis_chain_information = chain_spec.as_chain_information().unwrap();
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
     let (relay_chain_spec, _parachain_id) =
@@ -121,7 +131,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let relay_genesis_chain_information = if let Some(relay_chain_spec) = &relay_chain_spec {
         // TODO: don't unwrap?
-        Some(chain::chain_information::ChainInformation::from_chain_spec(relay_chain_spec).unwrap())
+        Some(relay_chain_spec.as_chain_information().unwrap())
     } else {
         None
     };
@@ -243,7 +253,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 Box::new(move |task| threads_pool.spawn_ok(task))
             },
         })
-        .instrument(tracing::debug_span!("network-service-init"))
+        .instrument(tracing::trace_span!("network-service-init"))
         .await
         .unwrap();
 
@@ -258,7 +268,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_service: (network_service.clone(), 0),
         database,
     })
-    .instrument(tracing::debug_span!("sync-service-init"))
+    .instrument(tracing::trace_span!("sync-service-init"))
     .await;
 
     let relay_chain_sync_service = if let Some(relay_chain_database) = relay_chain_database {
@@ -272,7 +282,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
             })
-            .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
+            .instrument(tracing::trace_span!("relay-chain-sync-service-init"))
             .await,
         )
     } else {
@@ -357,7 +367,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     loop {
         futures::select! {
             _ = informant_timer.next() => {
-                if matches!(cli_options.output, cli::Output::Informant) {
+                if matches!(cli_output, cli::Output::Informant) {
                     // We end the informant line with a `\r` so that it overwrites itself every time.
                     // If any other line gets printed, it will overwrite the informant, and the
                     // informant will then print itself below, which is a fine behaviour.
@@ -458,7 +468,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
-#[tracing::instrument(skip(chain_spec))]
+#[tracing::instrument(level = "trace", skip(chain_spec))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: &chain::chain_information::ChainInformation,
@@ -527,7 +537,7 @@ async fn open_database(
 /// in the background while showing a small progress bar to the user.
 ///
 /// If `path` is `None`, the database is opened in memory.
-#[tracing::instrument]
+#[tracing::instrument(level = "trace")]
 async fn background_open_database(
     path: Option<PathBuf>,
 ) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {

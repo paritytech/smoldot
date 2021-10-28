@@ -62,12 +62,7 @@
 
 use crate::{chain::chain_information, header, util};
 
-use core::{
-    convert::TryFrom,
-    fmt,
-    iter::{self, FromIterator},
-    num::NonZeroU64,
-};
+use core::{fmt, iter, num::NonZeroU64};
 use parking_lot::Mutex;
 
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
@@ -1290,6 +1285,12 @@ fn decode_babe_epoch_information(
     ))(value)
     .map(|(_, v)| v)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
+
+    let result = match result {
+        Ok(r) if r.validate().is_ok() => Ok(r),
+        Ok(_) => Err(()),
+        Err(()) => Err(()),
+    };
 
     result
         .map_err(|()| CorruptedError::InvalidBabeEpochInformation)

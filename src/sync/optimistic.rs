@@ -54,9 +54,7 @@ use crate::{
 
 use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{
-    cmp,
-    convert::TryFrom as _,
-    fmt, iter, mem,
+    cmp, fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
     time::Duration,
 };
@@ -297,6 +295,14 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// >           best block might be reverted in the future.
     pub fn best_block_hash(&self) -> [u8; 32] {
         self.chain.best_block_hash()
+    }
+
+    /// Returns the header of all known non-finalized blocks in the chain without any specific
+    /// order.
+    pub fn non_finalized_blocks_unordered(
+        &'_ self,
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+        self.chain.iter_unordered()
     }
 
     /// Returns the header of all known non-finalized blocks in the chain.

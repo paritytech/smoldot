@@ -33,7 +33,7 @@
 //! function. The first parameter is a `para_id` found in the chain specification of the
 //! parachain of parathread.
 
-use core::{convert::TryFrom as _, iter};
+use core::iter;
 
 /// Produces the input to pass to the `ParachainHost_persisted_validation_data` runtime call.
 pub fn persisted_validation_data_parameters(

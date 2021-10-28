@@ -70,7 +70,7 @@ use super::{
 };
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, fmt, iter};
+use core::{fmt, iter};
 
 /// Cache containing intermediate calculation steps.
 ///

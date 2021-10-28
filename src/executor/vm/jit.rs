@@ -25,9 +25,7 @@ use super::{
 use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
 use core::{
     cell::RefCell,
-    cmp,
-    convert::TryFrom,
-    fmt,
+    cmp, fmt,
     pin::Pin,
     task::{Context, Poll, Waker},
 };
