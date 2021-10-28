@@ -169,7 +169,7 @@ impl SyncService {
 
         (config.tasks_executor)(Box::pin(
             start_database_write(config.database, messages_rx).instrument(
-                tracing::trace_span!(parent: None, "database-write", root = ?finalized_block_hash), // TDOO: better display
+                tracing::debug_span!(parent: None, "database-write", root = %HashDisplay(&finalized_block_hash)),
             ),
         ));
 
@@ -316,7 +316,7 @@ impl SyncBackground {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
 
-                    let span = tracing::trace_span!(
+                    let span = tracing::debug_span!(
                         "block-verification",
                         hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
                         outcome = tracing::field::Empty, is_new_best = tracing::field::Empty,
@@ -405,7 +405,7 @@ impl SyncBackground {
                 }
 
                 all::ProcessOne::VerifyJustification(verify) => {
-                    let span = tracing::trace_span!(
+                    let span = tracing::debug_span!(
                         "justification-verification",
                         outcome = tracing::field::Empty,
                         error = tracing::field::Empty,
@@ -482,7 +482,7 @@ impl SyncBackground {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
 
-                    let span = tracing::trace_span!(
+                    let span = tracing::debug_span!(
                         "header-verification",
                         hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
                         outcome = tracing::field::Empty, error = tracing::field::Empty,
@@ -612,7 +612,7 @@ async fn start_database_write(
         match messages_rx.next().await {
             None => break,
             Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
-                let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
+                let span = tracing::debug_span!("blocks-db-write", len = finalized_blocks.len());
                 let _enter = span.enter();
 
                 let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
