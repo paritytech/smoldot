@@ -221,11 +221,9 @@ export interface Smoldot {
   /**
    * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
    *
-   * Can never fail.
-   *
    * @param options Configuration of the client. Defaults to `{}`.
    */
-  start(options?: SmoldotOptions): Promise<SmoldotClient>;
+  start(options?: SmoldotOptions): SmoldotClient;
   healthChecker(): HealthChecker;
 }
 
