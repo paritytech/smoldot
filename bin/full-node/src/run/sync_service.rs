@@ -53,7 +53,7 @@ pub struct Config {
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: mpsc::Receiver<network_service::Event>,
+    pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
 }
 
 /// Identifier for a blocks request to be performed.
@@ -204,7 +204,7 @@ struct SyncBackground {
     sync_state: Arc<Mutex<SyncState>>,
     network_service: Arc<network_service::NetworkService>,
     network_chain_index: usize,
-    from_network_service: mpsc::Receiver<network_service::Event>,
+    from_network_service: stream::BoxStream<'static, network_service::Event>,
     to_database: mpsc::Sender<ToDatabase>,
 
     peers_source_id_map: hashbrown::HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
@@ -527,11 +527,9 @@ impl SyncBackground {
             }
 
             futures::select! {
-                network_event = self.from_network_service.next() => {
-                    let network_event = match network_event {
-                        Some(m) => m,
-                        None => return,
-                    };
+                network_event = self.from_network_service.next().fuse() => {
+                    // We expect the network events channel to never shut down.
+                    let network_event = network_event.unwrap();
 
                     match network_event {
                         network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
