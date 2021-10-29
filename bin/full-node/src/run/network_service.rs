@@ -107,19 +107,17 @@ pub enum Event {
 }
 
 pub struct NetworkService {
-    /// Fields behind a mutex.
-    ///
-    /// A regular `Mutex` is used in order to avoid futures cancellation issues.
-    guarded: parking_lot::Mutex<Guarded>,
+    /// Actual network service.
+    inner: Arc<Inner>,
 
-    /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<Instant>,
+    /// Handles connected to all the background tasks of the network service. Makes it possible to
+    /// abort everything.
+    abort_handles: Vec<future::AbortHandle>,
 }
 
-/// Fields of [`NetworkService`] behind a mutex.
-struct Guarded {
-    /// See [`Config::tasks_executor`].
-    tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+struct Inner {
+    /// Data structure holding the entire state of the networking.
+    network: service::ChainNetwork<Instant>,
 }
 
 impl NetworkService {
@@ -224,11 +222,8 @@ impl NetworkService {
             });
         }
 
-        // Initialize the network service.
-        let network_service = Arc::new(NetworkService {
-            guarded: parking_lot::Mutex::new(Guarded {
-                tasks_executor: config.tasks_executor,
-            }),
+        // Initialize the inner network service.
+        let inner = Arc::new(Inner {
             network: service::ChainNetwork::new(service::Config {
                 now: Instant::now(),
                 chains,
@@ -243,21 +238,15 @@ impl NetworkService {
             }),
         });
 
+        let mut abort_handles = Vec::new();
+
         // Spawn a task pulling events from the network and transmitting them to the event senders.
-        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-            // TODO: keeping a Weak here doesn't really work to shut down tasks
-            let network_service = Arc::downgrade(&network_service);
-            async move {
+        (config.tasks_executor)(Box::pin({
+            let inner = inner.clone();
+            let future = async move {
                 loop {
                     let event = loop {
-                        let network_service = match network_service.upgrade() {
-                            Some(ns) => ns,
-                            None => {
-                                return;
-                            }
-                        };
-
-                        match network_service.network.next_event(Instant::now()).await {
+                        match inner.network.next_event(Instant::now()).await {
                             service::Event::Connected(peer_id) => {
                                 tracing::debug!(%peer_id, "connected");
                             }
@@ -359,30 +348,27 @@ impl NetworkService {
                         }
                     }
                 }
-            }
-            .instrument(tracing::debug_span!(parent: None, "network-events-poll"))
+            };
+
+            let (abortable, abort_handle) = future::abortable(
+                future.instrument(tracing::debug_span!(parent: None, "network-events-poll")),
+            );
+            abort_handles.push(abort_handle);
+            abortable.map(|_| ())
         }));
 
         // Spawn tasks dedicated to the Kademlia discovery.
-        for chain_index in 0..network_service.network.num_chains() {
-            (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-                let network_service = Arc::downgrade(&network_service);
-                async move {
+        for chain_index in 0..inner.network.num_chains() {
+            (config.tasks_executor)(Box::pin({
+                let inner = inner.clone();
+                let future = async move {
                     let mut next_discovery = Duration::from_secs(1);
 
                     loop {
                         futures_timer::Delay::new(next_discovery).await;
                         next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
-                        let network_service = match network_service.upgrade() {
-                            Some(ns) => ns,
-                            None => {
-                                tracing::debug!("discovery-finish");
-                                return;
-                            }
-                        };
-
-                        match network_service
+                        match inner
                             .network
                             .kademlia_discovery_round(Instant::now(), chain_index)
                             .await
@@ -398,46 +384,47 @@ impl NetworkService {
                             }
                         }
                     }
-                }
-                .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
+                };
+
+                let (abortable, abort_handle) = future::abortable(
+                    future.instrument(tracing::debug_span!(parent: None, "kademlia-discovery")),
+                );
+                abort_handles.push(abort_handle);
+                abortable.map(|_| ())
             }));
 
-            (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-                let network_service = Arc::downgrade(&network_service);
-                async move {
+            (config.tasks_executor)(Box::pin({
+                let inner = inner.clone();
+                let future = async move {
                     let mut next_round = Duration::from_millis(500);
 
                     loop {
-                        let network_service = match network_service.upgrade() {
-                            Some(ns) => ns,
-                            None => return,
-                        };
-
-                        network_service.network.assign_slots(chain_index).await;
+                        inner.network.assign_slots(chain_index).await;
 
                         futures_timer::Delay::new(next_round).await;
                         next_round = cmp::min(next_round * 2, Duration::from_secs(5));
                     }
-                }
-                .instrument(tracing::debug_span!(parent: None, "slots-assign"))
+                };
+
+                let (abortable, abort_handle) = future::abortable(
+                    future.instrument(tracing::debug_span!(parent: None, "slots-assign")),
+                );
+                abort_handles.push(abort_handle);
+                abortable.map(|_| ())
             }));
         }
 
-        // Spawn task dedicated to opening connections.
-        (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
-            let network_service = Arc::downgrade(&network_service);
-            async move {
-                loop {
-                    // TODO: stupid way to shut down task
-                    let network_service = match network_service.upgrade() {
-                        Some(ns) => ns,
-                        None => {
-                            tracing::debug!("task-finish");
-                            return;
-                        }
-                    };
+        // A channel is used to communicate new tasks dedicated to handling connections.
+        let (connec_tx, mut connec_rx) = mpsc::channel(num_cpus::get());
 
-                    let start_connect = network_service.network.next_start_connect(Instant::now()).await;
+        // Spawn task dedicated to opening connections.
+        // TODO: spawn multiple of these tasks and block them on the connection attempt; not possible now because `next_start_connect` has a bug
+        (config.tasks_executor)(Box::pin({
+            let inner = inner.clone();
+            let mut connec_tx = connec_tx.clone();
+            let future = async move {
+                loop {
+                    let start_connect = inner.network.next_start_connect(Instant::now()).await;
 
                     let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                     let _enter = span.enter();
@@ -448,35 +435,75 @@ impl NetworkService {
                         Ok(socket) => socket,
                         Err(_) => {
                             tracing::debug!(%start_connect.multiaddr, "not-tcp");
-                            network_service.network.pending_outcome_err(start_connect.id, true).await;
+                            inner
+                                .network
+                                .pending_outcome_err(start_connect.id, true)
+                                .await;
                             continue;
                         }
                     };
 
                     // TODO: handle dialing timeout here
 
-                    let network_service2 = network_service.clone();
-                    (network_service.guarded.lock().tasks_executor)(Box::pin({
-                        connection_task(socket, start_connect.timeout, network_service2, start_connect.id).instrument(
-                            tracing::debug_span!(parent: None, "connection", address = %start_connect.multiaddr),
-                        )
-                    }));
+                    let inner = inner.clone();
+
+                    // Ignore errors, as it is possible for the destination task to have been
+                    // aborted already.
+                    let _ = connec_tx.send(connection_task(socket, start_connect.timeout, inner, start_connect.id).instrument(
+                        tracing::debug_span!(parent: None, "connection", address = %start_connect.multiaddr),
+                    ).boxed()).await;
                 }
-            }
-            .instrument(tracing::debug_span!(parent: None, "tcp-dial"))
+            };
+
+            let (abortable, abort_handle) = future::abortable(
+                future.instrument(tracing::debug_span!(parent: None, "tcp-dial")),
+            );
+            abort_handles.push(abort_handle);
+            abortable.map(|_| ())
         }));
 
-        Ok((network_service, receivers))
+        // Spawn task dedicated to processing connections.
+        // A single task is responsible for all connections, thereby ensuring that the networking
+        // won't use more than a single CPU core.
+        (config.tasks_executor)(Box::pin({
+            let future = async move {
+                let mut connections = stream::FuturesUnordered::new();
+                loop {
+                    futures::select! {
+                        new_connec = connec_rx.select_next_some() => {
+                            connections.push(new_connec);
+                        },
+                        () = connections.select_next_some() => {},
+                    }
+                }
+            };
+
+            let (abortable, abort_handle) = future::abortable(
+                future.instrument(tracing::debug_span!(parent: None, "connections-executor")),
+            );
+            abort_handles.push(abort_handle);
+            abortable.map(|_| ())
+        }));
+
+        let network_service = Arc::new(NetworkService {
+            inner,
+            abort_handles: {
+                abort_handles.shrink_to_fit();
+                abort_handles
+            },
+        });
+
+        Ok((network_service, receivers)) // TODO: receivers should keep alive the network service
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
     pub async fn num_established_connections(&self) -> usize {
-        self.network.num_established_connections().await
+        self.inner.network.num_established_connections().await
     }
 
     /// Returns the number of peers we have a substream with.
     pub async fn num_peers(&self, chain_index: usize) -> usize {
-        self.network.num_peers(chain_index).await
+        self.inner.network.num_peers(chain_index).await
     }
 
     pub async fn set_local_best_block(
@@ -485,7 +512,8 @@ impl NetworkService {
         best_hash: [u8; 32],
         best_number: u64,
     ) {
-        self.network
+        self.inner
+            .network
             .set_local_best_block(chain_index, best_hash, best_number)
             .await
     }
@@ -500,9 +528,18 @@ impl NetworkService {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
-        self.network
+        self.inner
+            .network
             .blocks_request(Instant::now(), &target, chain_index, config)
             .await
+    }
+}
+
+impl Drop for NetworkService {
+    fn drop(&mut self) {
+        for handle in &mut self.abort_handles {
+            handle.abort();
+        }
     }
 }
 
@@ -521,7 +558,7 @@ pub enum InitError {
 async fn connection_task(
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
     timeout: Instant,
-    network_service: Arc<NetworkService>,
+    network_service: Arc<Inner>,
     id: service::PendingId,
 ) {
     // Finishing ongoing connection process.
