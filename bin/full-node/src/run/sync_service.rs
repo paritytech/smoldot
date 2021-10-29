@@ -34,7 +34,7 @@ use smoldot::{
     informant::HashDisplay,
     libp2p,
     network::{self, protocol::BlockData, service::BlocksRequestError},
-    sync::{all, optimistic},
+    sync::all,
 };
 use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::SystemTime};
 use tracing::Instrument as _;
@@ -169,7 +169,7 @@ impl SyncService {
 
         (config.tasks_executor)(Box::pin(
             start_database_write(config.database, messages_rx).instrument(
-                tracing::trace_span!(parent: None, "database-write", root = ?finalized_block_hash), // TDOO: better display
+                tracing::debug_span!(parent: None, "database-write", root = %HashDisplay(&finalized_block_hash)),
             ),
         ));
 
@@ -187,7 +187,7 @@ impl SyncService {
 }
 
 enum ToDatabase {
-    FinalizedBlocks(Vec<optimistic::Block<()>>),
+    FinalizedBlocks(Vec<all::Block<()>>),
 }
 
 struct SyncBackground {
@@ -316,7 +316,7 @@ impl SyncBackground {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
 
-                    let span = tracing::trace_span!(
+                    let span = tracing::debug_span!(
                         "block-verification",
                         hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
                         outcome = tracing::field::Empty, is_new_best = tracing::field::Empty,
@@ -342,57 +342,6 @@ impl SyncBackground {
                                 );
                                 span.record("outcome", &"failure");
                                 span.record("error", &tracing::field::display(error));
-                                self.sync = sync_out;
-                                break;
-                            }
-                            all::BlockVerification::Finalized {
-                                sync: sync_out,
-                                finalized_blocks,
-                            } => {
-                                span.record("outcome", &"success");
-                                span.record("is_new_best", &true);
-
-                                let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_index,
-                                    sync_out.best_block_hash(),
-                                    sync_out.best_block_number(),
-                                );
-                                fut.await;
-
-                                // Processing has made a step forward.
-                                // There is nothing to do, but this is used to update the
-                                // best block shown on the informant.
-                                let mut lock = self.sync_state.lock().await;
-                                lock.best_block_hash = sync_out.best_block_hash();
-                                lock.best_block_number = sync_out.best_block_number();
-                                drop(lock);
-
-                                if let Some(last_finalized) = finalized_blocks.last() {
-                                    let mut lock = self.sync_state.lock().await;
-                                    lock.finalized_block_hash = last_finalized.header.hash();
-                                    lock.finalized_block_number = last_finalized.header.number;
-                                }
-
-                                // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
-                                for block in &finalized_blocks {
-                                    for (key, value) in &block.storage_top_trie_changes {
-                                        if let Some(value) = value {
-                                            self.finalized_block_storage
-                                                .insert(key.clone(), value.clone());
-                                        } else {
-                                            let _was_there =
-                                                self.finalized_block_storage.remove(key);
-                                            // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
-                                            // assert!(_was_there.is_some());
-                                        }
-                                    }
-                                }
-
-                                self.to_database
-                                    .send(ToDatabase::FinalizedBlocks(finalized_blocks))
-                                    .await
-                                    .unwrap();
-
                                 self.sync = sync_out;
                                 break;
                             }
@@ -455,11 +404,85 @@ impl SyncBackground {
                     }
                 }
 
+                all::ProcessOne::VerifyJustification(verify) => {
+                    let span = tracing::debug_span!(
+                        "justification-verification",
+                        outcome = tracing::field::Empty,
+                        error = tracing::field::Empty,
+                    );
+                    let _enter = span.enter();
+
+                    match verify.perform() {
+                        (
+                            sync_out,
+                            all::JustificationVerifyOutcome::NewFinalized {
+                                finalized_blocks,
+                                updates_best_block,
+                            },
+                        ) => {
+                            span.record("outcome", &"success");
+                            self.sync = sync_out;
+
+                            if updates_best_block {
+                                let fut = self.network_service.set_local_best_block(
+                                    self.network_chain_index,
+                                    self.sync.best_block_hash(),
+                                    self.sync.best_block_number(),
+                                );
+                                fut.await;
+                            }
+
+                            // Processing has made a step forward.
+                            // There is nothing to do, but this is used to update the
+                            // best block shown on the informant.
+                            let mut lock = self.sync_state.lock().await;
+                            lock.best_block_hash = self.sync.best_block_hash();
+                            lock.best_block_number = self.sync.best_block_number();
+                            drop(lock);
+
+                            if let Some(last_finalized) = finalized_blocks.last() {
+                                let mut lock = self.sync_state.lock().await;
+                                lock.finalized_block_hash = last_finalized.header.hash();
+                                lock.finalized_block_number = last_finalized.header.number;
+                            }
+
+                            // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
+                            for block in &finalized_blocks {
+                                for (key, value) in
+                                    &block.full.as_ref().unwrap().storage_top_trie_changes
+                                {
+                                    if let Some(value) = value {
+                                        self.finalized_block_storage
+                                            .insert(key.clone(), value.clone());
+                                    } else {
+                                        let _was_there = self.finalized_block_storage.remove(key);
+                                        // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
+                                        // assert!(_was_there.is_some());
+                                    }
+                                }
+                            }
+
+                            self.to_database
+                                .send(ToDatabase::FinalizedBlocks(finalized_blocks))
+                                .await
+                                .unwrap();
+
+                            continue;
+                        }
+                        (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
+                            span.record("outcome", &"failure");
+                            span.record("error", &tracing::field::display(error));
+                            self.sync = sync_out;
+                            continue;
+                        }
+                    }
+                }
+
                 all::ProcessOne::VerifyHeader(verify) => {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
 
-                    let span = tracing::trace_span!(
+                    let span = tracing::debug_span!(
                         "header-verification",
                         hash_to_verify = %HashDisplay(&hash_to_verify), height = %height_to_verify,
                         outcome = tracing::field::Empty, error = tracing::field::Empty,
@@ -589,7 +612,7 @@ async fn start_database_write(
         match messages_rx.next().await {
             None => break,
             Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
-                let span = tracing::trace_span!("blocks-db-write", len = finalized_blocks.len());
+                let span = tracing::debug_span!("blocks-db-write", len = finalized_blocks.len());
                 let _enter = span.enter();
 
                 let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
@@ -602,8 +625,11 @@ async fn start_database_write(
                             a
                         }),
                         true, // TODO: is_new_best?
-                        block.body.iter(),
+                        block.full.as_ref().unwrap().body.iter(),
                         block
+                            .full
+                            .as_ref()
+                            .unwrap()
                             .storage_top_trie_changes
                             .iter()
                             .map(|(k, v)| (k, v.as_ref())),

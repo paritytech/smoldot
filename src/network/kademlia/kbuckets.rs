@@ -222,15 +222,15 @@ where
                 }
             }
             PeerState::Disconnected if bucket.entries.is_full() => {
-                if bucket.pending_entry.is_none() {
-                    bucket.pending_entry = Some((
-                        self.key.clone(),
-                        value,
-                        now.clone() + self.inner.pending_timeout,
-                    ));
-                } else {
+                if matches!(bucket.pending_entry, Some((_, _, ref exp)) if *exp > *now) {
                     return Err(());
                 }
+
+                bucket.pending_entry = Some((
+                    self.key.clone(),
+                    value,
+                    now.clone() + self.inner.pending_timeout,
+                ));
             }
             PeerState::Disconnected => {
                 debug_assert!(!bucket.entries.is_full());

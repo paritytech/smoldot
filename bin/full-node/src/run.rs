@@ -49,7 +49,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     // Setup the logging system of the binary.
     if !matches!(cli_output, cli::Output::None) {
-        let mut env_filter = tracing_subscriber::filter::EnvFilter::new("INFO");
+        let mut env_filter = tracing_subscriber::filter::EnvFilter::new("DEBUG");
         if matches!(cli_output, cli::Output::Informant) {
             env_filter = env_filter.add_directive(tracing::Level::WARN.into()); // TODO: display warnings in a nicer way ; in particular, immediately put the informant on top of warnings
         } else {
@@ -60,7 +60,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
         let builder = tracing_subscriber::fmt()
             .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ACTIVE)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ENTER)
             .with_env_filter(env_filter)
             .with_writer(io::stdout);
 
@@ -253,7 +253,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 Box::new(move |task| threads_pool.spawn_ok(task))
             },
         })
-        .instrument(tracing::trace_span!("network-service-init"))
+        .instrument(tracing::debug_span!("network-service-init"))
         .await
         .unwrap();
 
@@ -268,7 +268,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_service: (network_service.clone(), 0),
         database,
     })
-    .instrument(tracing::trace_span!("sync-service-init"))
+    .instrument(tracing::debug_span!("sync-service-init"))
     .await;
 
     let relay_chain_sync_service = if let Some(relay_chain_database) = relay_chain_database {
@@ -282,7 +282,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
             })
-            .instrument(tracing::trace_span!("relay-chain-sync-service-init"))
+            .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
             .await,
         )
     } else {

@@ -186,7 +186,7 @@ impl NetworkService {
                     }
                 }
                 .instrument(
-                    tracing::trace_span!(parent: None, "listener", address = %listen_address),
+                    tracing::debug_span!(parent: None, "listener", address = %listen_address),
                 ),
             ))
         }
@@ -279,7 +279,14 @@ impl NetworkService {
                                 peer_id,
                                 announce,
                             } => {
-                                tracing::debug!(%chain_index, %peer_id, ?announce, "block-announce");
+                                let decoded = announce.decode();
+                                tracing::debug!(
+                                    %chain_index, %peer_id,
+                                    hash = %HashDisplay(&decoded.header.hash()),
+                                    number = decoded.header.number,
+                                    is_best = ?decoded.is_best,
+                                    "block-announce"
+                                );
                                 break Event::BlockAnnounce {
                                     chain_index,
                                     peer_id,
@@ -353,6 +360,7 @@ impl NetworkService {
                     }
                 }
             }
+            .instrument(tracing::debug_span!(parent: None, "network-events-poll"))
         }));
 
         // Spawn tasks dedicated to the Kademlia discovery.
@@ -360,7 +368,7 @@ impl NetworkService {
             (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
                 let network_service = Arc::downgrade(&network_service);
                 async move {
-                    let mut next_discovery = Duration::from_secs(5);
+                    let mut next_discovery = Duration::from_secs(1);
 
                     loop {
                         futures_timer::Delay::new(next_discovery).await;
@@ -382,7 +390,7 @@ impl NetworkService {
                             Ok(insert) => {
                                 insert
                                     .insert(&Instant::now())
-                                    .instrument(tracing::trace_span!("insert"))
+                                    .instrument(tracing::debug_span!("insert"))
                                     .await
                             }
                             Err(error) => {
@@ -391,7 +399,7 @@ impl NetworkService {
                         }
                     }
                 }
-                .instrument(tracing::trace_span!(parent: None, "kademlia-discovery"))
+                .instrument(tracing::debug_span!(parent: None, "kademlia-discovery"))
             }));
 
             (network_service.guarded.try_lock().unwrap().tasks_executor)(Box::pin({
@@ -411,7 +419,7 @@ impl NetworkService {
                         next_round = cmp::min(next_round * 2, Duration::from_secs(5));
                     }
                 }
-                .instrument(tracing::trace_span!(parent: None, "slots-assign"))
+                .instrument(tracing::debug_span!(parent: None, "slots-assign"))
             }));
         }
 
@@ -431,7 +439,7 @@ impl NetworkService {
 
                     let start_connect = network_service.network.next_start_connect(Instant::now()).await;
 
-                    let span = tracing::trace_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
+                    let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                     let _enter = span.enter();
 
                     // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
@@ -450,12 +458,12 @@ impl NetworkService {
                     let network_service2 = network_service.clone();
                     (network_service.guarded.lock().tasks_executor)(Box::pin({
                         connection_task(socket, start_connect.timeout, network_service2, start_connect.id).instrument(
-                            tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
+                            tracing::debug_span!(parent: None, "connection", address = %start_connect.multiaddr),
                         )
                     }));
                 }
             }
-            .instrument(tracing::trace_span!(parent: None, "tcp-dial"))
+            .instrument(tracing::debug_span!(parent: None, "tcp-dial"))
         }));
 
         Ok((network_service, receivers))
@@ -612,7 +620,7 @@ async fn connection_task(
             // Make sure to finish closing the TCP socket.
             tcp_socket
                 .flush_close()
-                .instrument(tracing::trace_span!("flush-close"))
+                .instrument(tracing::debug_span!("flush-close"))
                 .await;
             tracing::debug!("task-finished");
             return;

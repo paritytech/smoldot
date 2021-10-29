@@ -525,10 +525,7 @@ impl Task {
                     let verified_hash = verify.hash();
                     match verify.perform(ffi::unix_time(), ()) {
                         all::HeaderVerifyOutcome::Success {
-                            sync,
-                            is_new_best,
-                            is_new_finalized,
-                            ..
+                            sync, is_new_best, ..
                         } => {
                             self.sync = sync;
 
@@ -540,11 +537,6 @@ impl Task {
                             );
 
                             self.best_block_updated |= is_new_best;
-                            // It is possible that finalizing this new block has modified
-                            // the best block as well.
-                            // TODO: ^ this is really a footgun; make it clearer in the syncing API
-                            self.best_block_updated |= is_new_finalized;
-                            self.finalized_block_updated |= is_new_finalized;
 
                             // Notify of the new block.
                             self.dispatch_all_subscribers({
@@ -571,6 +563,42 @@ impl Task {
                                 target: &self.log_target,
                                 "Error while verifying header {}: {}",
                                 HashDisplay(&verified_hash),
+                                error
+                            );
+
+                            continue;
+                        }
+                    }
+                }
+
+                all::ProcessOne::VerifyJustification(verify) => {
+                    // Justification to verify.
+                    match verify.perform() {
+                        (
+                            sync,
+                            all::JustificationVerifyOutcome::NewFinalized {
+                                updates_best_block,
+                                ..
+                            },
+                        ) => {
+                            self.sync = sync;
+
+                            log::debug!(
+                                target: &self.log_target,
+                                "Successfully verified justification"
+                            );
+
+                            self.best_block_updated |= updates_best_block;
+                            self.finalized_block_updated = true;
+                            continue;
+                        }
+
+                        (sync, all::JustificationVerifyOutcome::Error(error)) => {
+                            self.sync = sync;
+
+                            log::warn!(
+                                target: &self.log_target,
+                                "Error while verifying justification: {}",
                                 error
                             );
 
