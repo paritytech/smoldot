@@ -528,6 +528,7 @@ where
         when_connected: TNow,
         remote_addr: multiaddr::Multiaddr,
     ) -> ConnectionId {
+        // TODO: update k-buckets
         self.inner
             .add_incoming_connection(when_connected, remote_addr)
             .await
@@ -1052,21 +1053,16 @@ where
                     let _was_in = ephemeral_guarded.connections.remove(peer_id);
                     debug_assert!(_was_in);
 
-                    for idx in &chain_indices {
-                        // Update the k-buckets.
-                        if let Some(mut entry) = ephemeral_guarded.chains[*idx]
-                            .kbuckets
-                            .entry(peer_id)
-                            .into_occupied()
-                        {
+                    // Update the k-buckets.
+                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
+                    for chain in &mut ephemeral_guarded.chains {
+                        if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
                             entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(address);
                         }
+                    }
 
-                        // Insert the address back in `discovered_peers` so that we potentially try
-                        // to connect again to it.
-                        // TODO: insert `address` back in the k-buckets
-
+                    for idx in &chain_indices {
                         guarded.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
                     }
 
@@ -1078,7 +1074,22 @@ where
                         _ => unreachable!(),
                     };
                 }
-                peers::Event::Disconnected { .. } => {
+                peers::Event::Disconnected {
+                    peer_id,
+                    user_data: address,
+                    ..
+                } => {
+                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+
+                    // Update the k-buckets.
+                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
+                    for chain in &mut ephemeral_guarded.chains {
+                        if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
+                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.get_mut().set_disconnected(address);
+                        }
+                    }
+
                     guarded.to_process_pre_event = None;
                 }
 
