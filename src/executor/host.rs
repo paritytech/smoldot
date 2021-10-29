@@ -971,6 +971,7 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_sign_version_1 => todo!(),
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => todo!(),
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
@@ -2404,6 +2405,7 @@ externalities! {
     ext_crypto_sr25519_verify_version_1,
     ext_crypto_sr25519_verify_version_2,
     ext_crypto_ecdsa_generate_version_1,
+    ext_crypto_ecdsa_sign_version_1,
     ext_crypto_ecdsa_public_keys_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_2,
@@ -2505,6 +2507,7 @@ impl HostFunction {
             HostFunction::ext_crypto_sr25519_verify_version_1 => 3,
             HostFunction::ext_crypto_sr25519_verify_version_2 => 3,
             HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_sign_version_1 => todo!(),
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => todo!(),
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => 2,
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => 2,
