@@ -401,8 +401,11 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 }
             },
 
-            network_message = main_network_events_receiver.next() => {
-                if let network_service::Event::BlockAnnounce { chain_index: 0, announce, .. } = network_message.unwrap() {
+            network_event = main_network_events_receiver.next().fuse() => {
+                // We expect the network events channel to never shut down.
+                let network_event = network_event.unwrap();
+
+                if let network_service::Event::BlockAnnounce { chain_index: 0, announce, .. } = network_event {
                     let decoded = announce.decode();
                     match network_known_best {
                         Some(n) if n >= decoded.header.number => {},

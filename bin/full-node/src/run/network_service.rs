@@ -27,7 +27,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use core::{cmp, pin::Pin, time::Duration};
+use core::{cmp, pin::Pin, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use futures_timer::Delay;
 use smoldot::{
@@ -124,7 +124,7 @@ impl NetworkService {
     /// Initializes the network service with the given configuration.
     pub async fn new(
         mut config: Config,
-    ) -> Result<(Arc<Self>, Vec<mpsc::Receiver<Event>>), InitError> {
+    ) -> Result<(Arc<Self>, Vec<stream::BoxStream<'static, Event>>), InitError> {
         let (mut senders, receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
             .unzip();
@@ -485,6 +485,7 @@ impl NetworkService {
             abortable.map(|_| ())
         }));
 
+        // Build the final network service.
         let network_service = Arc::new(NetworkService {
             inner,
             abort_handles: {
@@ -493,7 +494,20 @@ impl NetworkService {
             },
         });
 
-        Ok((network_service, receivers)) // TODO: receivers should keep alive the network service
+        // Adjust the receivers to keep the `network_service` alive.
+        let receivers = receivers
+            .into_iter()
+            .map(|rx| {
+                let mut network_service = Some(network_service.clone());
+                rx.chain(stream::poll_fn(move |_| {
+                    drop(network_service.take());
+                    Poll::Ready(None)
+                }))
+                .boxed()
+            })
+            .collect();
+
+        Ok((network_service, receivers))
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
