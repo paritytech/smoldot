@@ -264,7 +264,7 @@ export interface Smoldot {
    *
    * @param options Configuration of the client. Defaults to `{}`.
    */
-  start(options?: ClientOptions): Promise<Client>;
+  start(options?: ClientOptions): Client;
   healthChecker(): HealthChecker;
 }
 

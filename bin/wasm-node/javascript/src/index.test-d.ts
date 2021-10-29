@@ -6,8 +6,8 @@ import smoldot, { Smoldot, Client } from 'smoldot';
 
 // Test when supplying all options and all params to logCallback
 
-// $ExpectType Promise<Client>
-let sp = smoldot.start({
+// $ExpectType Client
+let sm = smoldot.start({
   maxLogLevel: 3,
   logCallback: (level, target, message) => { },
   forbidTcp: false,
@@ -17,10 +17,9 @@ let sp = smoldot.start({
 
 // Test when not supplying optional options and optional params
 
-// $ExpectType Promise<Client>
-sp = smoldot.start();
-
-sp.then(async (sm) => {
+(async () => {
+  // $ExpectType Client
+  sm = smoldot.start();
   // $ExpectType Promise<Chain>
   const chain1 = sm.addChain({ chainSpec: '' });
   // $ExpectType Promise<Chain>
@@ -33,4 +32,4 @@ sp.then(async (sm) => {
   chain2.remove();
   // $ExpectType void
   sm.terminate();
-});
+})();
