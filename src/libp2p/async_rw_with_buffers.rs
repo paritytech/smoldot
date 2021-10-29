@@ -367,7 +367,8 @@ where
 
                     match write_result {
                         Poll::Ready(Ok(0)) => {
-                            panic!(); // TODO: what does that mean?
+                            // It is not legal for `poll_write` to return 0 bytes written.
+                            unreachable!()
                         }
                         Poll::Ready(Ok(n)) => {
                             pending = false;
