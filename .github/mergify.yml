@@ -6,6 +6,7 @@ queue_rules:
       - label=automerge
       - base=main
       - "#changes-requested-reviews-by=0"
+      - "#approved-reviews-by>=1"
       
 pull_request_rules:
   - name: automatic merge when CI passes on main
@@ -15,6 +16,7 @@ pull_request_rules:
       - label=automerge
       - base=main
       - "#changes-requested-reviews-by=0"
+      - "#approved-reviews-by>=1"
     actions:
       queue:
         name: default
