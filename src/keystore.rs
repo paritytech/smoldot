@@ -15,34 +15,58 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// TODO: doc
+
 #![cfg(all(feature = "std"))]
 #![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
 
-#![allow(dead_code)] // TODO: this whole module is a draft
-
-use std::path;
+use futures::lock::Mutex;
+use rand::SeedableRng as _;
 
 /// Namespace of the key.
+// TODO: document
 pub type KeyNamespace = [u8; 4];
 
-/// Access to private keys through various methods.
+/// Collection of keypairs.
+///
+/// This module doesn't give you access to the content of private keys, only to signing
+/// capabilities.
 pub struct Keystore {
-    keys: hashbrown::HashMap<Vec<u8>, KeyAccess>,
+    guarded: Mutex<Guarded>,
 }
 
 impl Keystore {
     /// Initializes a new keystore.
-    pub fn new() -> Self {
+    ///
+    /// Must be passed bytes of entropy that are used to generate private keys.
+    pub fn new(randomness_seed: [u8; 32]) -> Self {
         Keystore {
-            keys: hashbrown::HashMap::with_capacity(32),
+            guarded: Mutex::new(Guarded {
+                gen_rng: rand_chacha::ChaCha20Rng::from_seed(randomness_seed),
+                keys: hashbrown::HashMap::with_capacity(32),
+            }),
         }
     }
 
     /// Generates a new key and inserts it in the keystore.
     ///
     /// Returns the corresponding public key.
-    pub fn generate(&self, namespace: KeyNamespace) -> [u8; 32] {
-        todo!()
+    // TODO: add a `save: bool` parameter that saves the key to the file system
+    pub async fn generate_ed25519(&self, namespace: KeyNamespace) -> [u8; 32] {
+        let mut guarded = self.guarded.lock().await;
+
+        // Note: it is in principle possible to generate some entropy from the PRNG, then unlock
+        // the mutex while the private key is being generated. This reduces the time during which
+        // the mutex is locked, but in practice generating a key is a rare enough event that this
+        // is not worth the effort.
+        let private_key = ed25519_zebra::SigningKey::new(&mut guarded.gen_rng);
+        let public_key = ed25519_zebra::VerificationKey::from(&private_key);
+        guarded.keys.insert(
+            (namespace, public_key.into()),
+            PrivateKey::MemoryEd25519(private_key),
+        );
+
+        public_key.into()
     }
 
     /// Signs the given payload using the private key associated to the public key passed as
@@ -53,15 +77,28 @@ impl Keystore {
         public_key: &[u8; 32],
         payload: &[u8],
     ) -> Result<[u8; 64], SignError> {
-        todo!()
+        let guarded = self.guarded.lock().await;
+        let key = guarded
+            .keys
+            .get(&(key_namespace, *public_key))
+            .ok_or(SignError::UnknownPublicKey)?;
+
+        match key {
+            PrivateKey::MemoryEd25519(key) => Ok(key.sign(payload).into()),
+        }
     }
+}
+
+struct Guarded {
+    gen_rng: rand_chacha::ChaCha20Rng,
+    keys: hashbrown::HashMap<(KeyNamespace, [u8; 32]), PrivateKey>,
 }
 
 pub enum SignError {
     UnknownPublicKey,
 }
 
-enum KeyAccess {
-    Memory,
-    File(path::PathBuf),
+enum PrivateKey {
+    MemoryEd25519(ed25519_zebra::SigningKey),
+    // TODO: File(path::PathBuf),
 }
