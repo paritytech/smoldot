@@ -453,9 +453,12 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             },
 
             _ = ctrlc_rx => {
-                // Adding a new line after the informant so that the user's shell doesn't
-                // overwrite it.
-                eprintln!("");
+                if matches!(cli_output, cli::Output::Informant) {
+                    // Adding a new line after the informant so that the user's shell doesn't
+                    // overwrite it.
+                    eprintln!("");
+                }
+
                 return
             },
         }
