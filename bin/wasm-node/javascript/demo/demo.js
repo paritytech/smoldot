@@ -45,7 +45,7 @@ const client = smoldot.start({
 // By calling it now, we let smoldot start syncing that chain in the background even before a
 // WebSocket connection has been established.
 client
-    .then(client => client.addChain({ chainSpec: westend }))
+    .addChain({ chainSpec: westend })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
@@ -80,7 +80,7 @@ wsServer.on('request', function (request) {
     // `relay` and `para` are of type `SmoldotChain`.
     let chain;
     if (request.resource == '/westend') {
-        chain = client.then(async client => {
+        chain = (async () => {
             return {
                 relay: await client.addChain({
                     chainSpec: westend,
@@ -89,10 +89,10 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
-        });
+        })();
 
     } else if (request.resource == '/westmint') {
-        chain = client.then(async client => {
+        chain = (async () => {
             const relay = await client.addChain({
                 chainSpec: westend,
             });
@@ -106,9 +106,9 @@ wsServer.on('request', function (request) {
             });
 
             return { relay, para };
-        });
+        })();
     } else if (request.resource == '/adz') {
-        chain = client.then(async client => {
+        chain = (async () => {
             const relay = await client.addChain({
                 chainSpec: westend,
             });
@@ -122,9 +122,9 @@ wsServer.on('request', function (request) {
             });
 
             return { relay, para };
-        });
+        })();
     } else if (request.resource == '/kusama') {
-        chain = client.then(async client => {
+        chain = (async () => {
             return {
                 relay: await client.addChain({
                     chainSpec: kusama,
@@ -133,9 +133,9 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
-        });
+        })();
     } else if (request.resource == '/statemine') {
-        chain = client.then(async client => {
+        chain = (async () => {
             const relay = await client.addChain({
                 chainSpec: kusama,
             });
@@ -149,9 +149,9 @@ wsServer.on('request', function (request) {
             });
 
             return { relay, para };
-        });
+        })();
     } else if (request.resource == '/polkadot') {
-        chain = client.then(async client => {
+        chain = (async () => {
             return {
                 relay: await client.addChain({
                     chainSpec: polkadot,
@@ -160,9 +160,9 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
-        });
+        })();
     } else if (request.resource == '/rococo') {
-        chain = client.then(async client => {
+        chain = (async () => {
             return {
                 relay: await client.addChain({
                     chainSpec: rococo,
@@ -171,7 +171,7 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
-        });
+        })();
     } else {
         request.reject(404);
         return;

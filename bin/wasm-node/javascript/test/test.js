@@ -24,32 +24,30 @@ const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
 test('invalid chain spec throws error', async t => {
   await client
     .start({ logCallback: () => { } })
-    .then(client => client.addChain({
+    .addChain({
       chainSpec: "invalid chain spec",
-    }))
+    })
     .then((chain) => t.fail())
     .catch(() => t.pass());
 });
 
 test('system_name works', async t => {
+  let promiseResolve;
+  const promise = new Promise((resolve, reject) => promiseResolve = resolve);
+
   await client
     .start({ logCallback: () => { } })
-    .then(client => {
-      let promiseResolve;
-      const promise = new Promise((resolve, reject) => promiseResolve = resolve);
-
-      return client.addChain({
-        chainSpec: westendSpec,
-        jsonRpcCallback: (resp) => {
-          if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-light"}') {
-            promiseResolve();
-          }
+    .addChain({
+      chainSpec: westendSpec,
+      jsonRpcCallback: (resp) => {
+        if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-light"}') {
+          promiseResolve();
         }
-      })
-        .then((chain) => {
-          chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
-        })
-        .then(() => promise)
-        .then(() => t.pass());
-    });
+      }
+    })
+    .then((chain) => {
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
+    })
+    .then(() => promise)
+    .then(() => t.pass());
 });
