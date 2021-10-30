@@ -649,6 +649,11 @@ async fn connection_task(
         {
             Ok(rw) => rw,
             Err(error) => {
+                // Make sure to finish closing the TCP socket.
+                tcp_socket
+                    .flush_close()
+                    .instrument(tracing::debug_span!("flush-close"))
+                    .await;
                 tracing::debug!(%error, "task-finished");
                 return;
             }
@@ -665,16 +670,6 @@ async fn connection_task(
                 "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
                 "write-close" = read_write.outgoing_buffer.is_none(),
             );
-        }
-
-        if read_write.outgoing_buffer.is_none() && read_buffer.is_none() {
-            // Make sure to finish closing the TCP socket.
-            tcp_socket
-                .flush_close()
-                .instrument(tracing::debug_span!("flush-close"))
-                .await;
-            tracing::debug!("task-finished");
-            return;
         }
 
         let read_bytes = read_write.read_bytes;
