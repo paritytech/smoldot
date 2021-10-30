@@ -1930,11 +1930,13 @@ where
     /// destined to the connection through the [`ReadWrite`].
     ///
     /// If an error is returned, the connection should be destroyed altogether and the
-    /// [`ConnectionId`] is no longer valid.
+    /// [`ConnectionId`] is no longer valid. You should continue calling this function until
+    /// an error is returned, even if the [`ReadWrite`] indicates a full shutdown.
     ///
     /// # Panic
     ///
-    /// Panics if `connection_id` isn't a valid connection.
+    /// Panics if the [`ConnectionId`] isn't a valid connection. Once this function returns an
+    /// error, is no longer valid to call this function with this [`ConnectionId`].
     ///
     pub async fn read_write(
         &self,

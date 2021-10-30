@@ -924,11 +924,6 @@ async fn connection_task(
             }
         };
 
-        if read_write.is_dead() {
-            log::debug!(target: "connections", "Connection({:?}, {}) => Closed gracefully", id, expected_peer_id);
-            return;
-        }
-
         let read_buffer_has_data = read_write.incoming_buffer.map_or(false, |b| !b.is_empty());
         let read_buffer_closed = read_write.incoming_buffer.is_none();
         let read_bytes = read_write.read_bytes;
