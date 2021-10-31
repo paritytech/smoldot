@@ -113,7 +113,7 @@ pub struct SlotClaim {
     /// UNIX time when the slot starts. Can be inferior to the value passed to
     /// [`Config::now_from_unix_epoch`] if the slot has already started.
     pub slot_start_from_unix_epoch: Duration,
-    /// UNIX time when the slot ends. Always inferior to the value passed to
+    /// UNIX time when the slot ends. Always superior to the value passed to
     /// [`Config::now_from_unix_epoch`].
     pub slot_end_from_unix_epoch: Duration,
     /// Slot number of the claim. Used when building the block.
