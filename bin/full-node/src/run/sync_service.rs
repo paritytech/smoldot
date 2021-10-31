@@ -269,7 +269,7 @@ impl SyncBackground {
                             .keystore
                             .keys()
                             .await
-                            .filter(|(namespace, _)| namespace == b"AURA")
+                            .filter(|(namespace, _)| namespace == b"aura")
                             .map(|(_, key)| key)
                             .collect::<Vec<_>>(); // TODO: collect overhead :-/
 
