@@ -21,7 +21,7 @@
 #![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
 
 use futures::lock::Mutex;
-use rand::SeedableRng as _;
+use rand::{Rng as _, SeedableRng as _};
 
 /// Namespace of the key.
 // TODO: document
@@ -38,13 +38,22 @@ pub struct Keystore {
 impl Keystore {
     /// Initializes a new keystore.
     ///
-    /// Must be passed bytes of entropy that are used to generate private keys.
+    /// Must be passed bytes of entropy that are used to avoid hash collision attacks and to
+    /// generate private keys.
     pub fn new(randomness_seed: [u8; 32]) -> Self {
+        let mut gen_rng = rand_chacha::ChaCha20Rng::from_seed(randomness_seed);
+
+        let keys = hashbrown::HashMap::with_capacity_and_hasher(32, {
+            ahash::RandomState::with_seeds(
+                gen_rng.sample(rand::distributions::Standard),
+                gen_rng.sample(rand::distributions::Standard),
+                gen_rng.sample(rand::distributions::Standard),
+                gen_rng.sample(rand::distributions::Standard),
+            )
+        });
+
         Keystore {
-            guarded: Mutex::new(Guarded {
-                gen_rng: rand_chacha::ChaCha20Rng::from_seed(randomness_seed),
-                keys: hashbrown::HashMap::with_capacity(32),
-            }),
+            guarded: Mutex::new(Guarded { gen_rng, keys }),
         }
     }
 
@@ -91,7 +100,7 @@ impl Keystore {
 
 struct Guarded {
     gen_rng: rand_chacha::ChaCha20Rng,
-    keys: hashbrown::HashMap<(KeyNamespace, [u8; 32]), PrivateKey>,
+    keys: hashbrown::HashMap<(KeyNamespace, [u8; 32]), PrivateKey, ahash::RandomState>,
 }
 
 pub enum SignError {
