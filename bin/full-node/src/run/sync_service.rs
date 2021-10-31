@@ -207,7 +207,7 @@ struct SyncBackground {
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
     block_author_sync_source: all::SourceId,
 
-    /// State of the authoring. If `None`, the builder must be (re)created.
+    /// State of the authoring. If `None`, the builder should be (re)created.
     block_authoring: Option<author::build::Builder>,
 
     /// Holds, in parallel of the database, the storage of the latest finalized block.
@@ -254,33 +254,37 @@ impl SyncBackground {
             // authoring slot is ready.
             let mut authoring_ready_future = {
                 let block_authoring = match &mut self.block_authoring {
-                    Some(ba) => ba,
+                    Some(ba) => Some(ba),
                     block_authoring @ None => {
-                        block_authoring.insert(author::build::Builder::new(author::build::Config {
-                            consensus: author::build::ConfigConsensus::Aura {
-                                current_authorities: todo!(),
-                                local_authorities: iter::empty(),
-                                now_from_unix_epoch: SystemTime::now()
-                                    .duration_since(SystemTime::UNIX_EPOCH)
-                                    .unwrap(),
-                                slot_duration: todo!(),
-                            },
-                            // TODO: really need Babe
-                        }))
+                        Some(
+                            block_authoring.insert(author::build::Builder::new(
+                                author::build::Config {
+                                    consensus: author::build::ConfigConsensus::Aura {
+                                        current_authorities: todo!(),
+                                        local_authorities: iter::empty(),
+                                        now_from_unix_epoch: SystemTime::now()
+                                            .duration_since(SystemTime::UNIX_EPOCH)
+                                            .unwrap(),
+                                        slot_duration: todo!(),
+                                    },
+                                    // TODO: really need Babe
+                                },
+                            )),
+                        )
                     }
                 };
 
                 match &block_authoring {
-                    author::build::Builder::Ready(_) => {
+                    Some(author::build::Builder::Ready(_)) => {
                         future::Either::Left(future::Either::Left(future::ready(())))
                     }
-                    author::build::Builder::WaitSlot(when) => {
+                    Some(author::build::Builder::WaitSlot(when)) => {
                         let delay = (UNIX_EPOCH + when.when())
                             .duration_since(SystemTime::now())
                             .unwrap_or(Duration::new(0, 0));
                         future::Either::Right(futures_timer::Delay::new(delay).fuse())
                     }
-                    author::build::Builder::AllSync => {
+                    None | Some(author::build::Builder::AllSync) => {
                         future::Either::Left(future::Either::Right(future::pending::<()>()))
                     }
                 }
