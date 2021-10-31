@@ -309,6 +309,14 @@ impl SyncBackground {
                                 )),
                             )
                         }
+                        (
+                            block_authoring @ None,
+                            chain_information::ChainInformationConsensusRef::Babe {
+                                finalized_block_epoch_information,
+                                finalized_next_epoch_transition,
+                                slots_per_epoch,
+                            },
+                        ) => todo!(),
                         (None, _) => todo!(),
                     };
 
