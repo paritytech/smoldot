@@ -68,9 +68,6 @@ pub enum Builder {
 
     /// Block production is ready to start.
     Ready(AuthoringStart),
-
-    /// Currently authoring a block.
-    Authoring(BuilderAuthoring),
 }
 
 impl Builder {

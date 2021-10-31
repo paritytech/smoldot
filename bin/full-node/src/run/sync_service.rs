@@ -29,6 +29,7 @@ use crate::run::network_service;
 use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
+    author,
     database::full_sqlite,
     executor, header,
     informant::HashDisplay,
@@ -36,7 +37,13 @@ use smoldot::{
     network::{self, protocol::BlockData, service::BlocksRequestError},
     sync::all,
 };
-use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    iter,
+    num::NonZeroU64,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tracing::Instrument as _;
 
 /// Configuration for a [`SyncService`].
@@ -113,7 +120,7 @@ impl SyncService {
                 .finalized_block_storage_top_trie(&config.database.finalized_block_hash().unwrap())
                 .unwrap();
 
-            let sync = all::AllSync::new(all::Config {
+            let mut sync = all::AllSync::new(all::Config {
                 chain_information: config
                     .database
                     .to_chain_information(&config.database.finalized_block_hash().unwrap())
@@ -152,8 +159,12 @@ impl SyncService {
                 }),
             });
 
+            let block_author_sync_source = sync.add_source(None, 0, [0; 32]); // TODO: proper values?
+
             SyncBackground {
                 sync,
+                block_author_sync_source,
+                block_authoring: None,
                 finalized_block_storage,
                 sync_state: sync_state.clone(),
                 network_service: config.network_service.0,
@@ -191,7 +202,13 @@ enum ToDatabase {
 }
 
 struct SyncBackground {
-    sync: all::AllSync<future::AbortHandle, libp2p::PeerId, ()>,
+    sync: all::AllSync<future::AbortHandle, Option<libp2p::PeerId>, ()>,
+
+    /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
+    block_author_sync_source: all::SourceId,
+
+    /// State of the authoring. If `None`, the builder must be (re)created.
+    block_authoring: Option<author::build::Builder>,
 
     /// Holds, in parallel of the database, the storage of the latest finalized block.
     /// At the time of writing, this state is stable around ~3MiB for Polkadot, meaning that it is
@@ -233,7 +250,63 @@ impl SyncBackground {
                 lock.best_block_number = self.sync.best_block_number();
             }
 
+            // Creating the block authoring state and prepare a future that is ready when an
+            // authoring slot is ready.
+            let mut authoring_ready_future = {
+                let block_authoring = match &mut self.block_authoring {
+                    Some(ba) => ba,
+                    block_authoring @ None => {
+                        block_authoring.insert(author::build::Builder::new(author::build::Config {
+                            consensus: author::build::ConfigConsensus::Aura {
+                                current_authorities: todo!(),
+                                local_authorities: iter::empty(),
+                                now_from_unix_epoch: SystemTime::now()
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap(),
+                                slot_duration: todo!(),
+                            },
+                            // TODO: really need Babe
+                        }))
+                    }
+                };
+
+                match &block_authoring {
+                    author::build::Builder::Ready(_) => {
+                        future::Either::Left(future::Either::Left(future::ready(())))
+                    }
+                    author::build::Builder::WaitSlot(when) => {
+                        let delay = (UNIX_EPOCH + when.when())
+                            .duration_since(SystemTime::now())
+                            .unwrap_or(Duration::new(0, 0));
+                        future::Either::Right(futures_timer::Delay::new(delay).fuse())
+                    }
+                    author::build::Builder::AllSync => {
+                        future::Either::Left(future::Either::Right(future::pending::<()>()))
+                    }
+                }
+            };
+
             futures::select! {
+                () = authoring_ready_future => {
+                    // Ready to author a block. Call `author_block()`.
+                    // While a block is being authored, the whole syncing state machine is
+                    // deliberately frozen.
+                    match self.block_authoring {
+                        Some(author::build::Builder::Ready(_)) => {
+                            self.author_block().await;
+                            continue;
+                        }
+                        Some(author::build::Builder::WaitSlot(when)) => {
+                            self.block_authoring = Some(author::build::Builder::Ready(when.start()));
+                            self.author_block().await;
+                            continue;
+                        }
+                        None | Some(author::build::Builder::AllSync) => {
+                            unreachable!()
+                        }
+                    }
+                },
+
                 network_event = self.from_network_service.next().fuse() => {
                     // We expect the network events channel to never shut down.
                     let network_event = network_event.unwrap();
@@ -242,7 +315,7 @@ impl SyncBackground {
                         network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
                             if chain_index == self.network_chain_index =>
                         {
-                            let id = self.sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            let id = self.sync.add_source(Some(peer_id.clone()), best_block_number, best_block_hash);
                             self.peers_source_id_map.insert(peer_id, id);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
@@ -306,6 +379,89 @@ impl SyncBackground {
         }
     }
 
+    /// Authors a block, then imports it and gossips it out.
+    ///
+    /// # Panic
+    ///
+    /// The [`SyncBackground::block_authoring`] must be [`author::build::Builder::Ready`].
+    ///
+    async fn author_block(&mut self) {
+        let authoring_start = match self.block_authoring.take() {
+            Some(author::build::Builder::Ready(authoring)) => authoring,
+            _ => panic!(),
+        };
+
+        let span = tracing::debug_span!(
+            "block-authoring",
+            parent_hash = %HashDisplay(&self.sync.best_block_hash()),
+            parent_number = self.sync.best_block_number(),
+        );
+        let _enter = span.enter();
+
+        let mut block_authoring = authoring_start.start(author::build::AuthoringStartConfig {
+            parent_hash: &self.sync.best_block_hash(),
+            parent_number: self.sync.best_block_number(),
+            now_from_unix_epoch: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap(),
+            parent_runtime: todo!(),
+            top_trie_root_calculation_cache: None, // TODO: pretty important
+        });
+
+        // Actual block production now happening.
+        let block = loop {
+            match block_authoring {
+                author::build::BuilderAuthoring::StorageGet(get) => {
+                    block_authoring = get.inject_value(Some(iter::once::<Vec<u8>>(todo!())));
+                    continue;
+                }
+                author::build::BuilderAuthoring::Error(error) => {
+                    // TODO: prevent the block authoring from trying again immediately after
+                    tracing::warn!(%error, "block-author-error");
+                    return;
+                }
+                author::build::BuilderAuthoring::NextKey(next_key) => {
+                    block_authoring = next_key.inject_key(Some::<Vec<u8>>(todo!()));
+                    continue;
+                }
+                author::build::BuilderAuthoring::ApplyExtrinsic(apply) => {
+                    // TODO: actually implement including transactions in the blocks
+                    block_authoring = apply.finish();
+                    continue;
+                }
+                author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
+                    if let Err(error) = result {
+                        // TODO: include transaction bytes or something?
+                        tracing::warn!(%error, "block-author-transaction-inclusion-error");
+                    }
+
+                    // TODO: actually implement including transactions in the blocks
+                    block_authoring = resume.finish();
+                    continue;
+                }
+                author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
+                    block_authoring =
+                        prefix_key.inject_keys_ordered(iter::once::<Vec<u8>>(todo!()));
+                    continue;
+                }
+                author::build::BuilderAuthoring::Seal(seal) => {
+                    let header = seal.scale_encoded_header();
+                    break seal.inject_sr25519_signature(todo!());
+                }
+            }
+        };
+
+        // TODO: announce the block
+
+        self.sync.block_announce(
+            self.block_author_sync_source,
+            block.scale_encoded_header.clone(),
+            true,
+        );
+
+        // TODO: store the newly-created block locally
+    }
+
     // TODO: handle obsolete requests
     async fn start_requests(&mut self) {
         loop {
@@ -314,7 +470,8 @@ impl SyncBackground {
             // first request, but enforce one ongoing request per source.
             let (source_id, _, mut request_info) =
                 match self.sync.desired_requests().find(|(source_id, _, _)| {
-                    self.sync.source_num_ongoing_requests(*source_id) == 0
+                    self.sync.source_user_data(*source_id).is_some()
+                        && self.sync.source_num_ongoing_requests(*source_id) == 0
                 }) {
                     Some(v) => v,
                     None => break,
@@ -334,7 +491,9 @@ impl SyncBackground {
                     request_bodies,
                     request_justification,
                 } => {
-                    let peer_id = self.sync.source_user_data_mut(source_id).clone();
+                    let peer_id = self.sync.source_user_data_mut(source_id).clone().unwrap();
+
+                    // TODO: handle requests to the block author source
 
                     let request = self.network_service.clone().blocks_request(
                         peer_id,
