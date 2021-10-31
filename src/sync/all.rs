@@ -212,6 +212,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns consensus information about the current best block of the chain.
+    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+        match &self.inner {
+            AllSyncInner::AllForks(sync) => todo!(), // TODO:
+            AllSyncInner::Optimistic { inner } => inner.best_block_consensus(),
+            AllSyncInner::GrandpaWarpSync { .. } => todo!(), // TODO: ?!
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {

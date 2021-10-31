@@ -30,6 +30,7 @@ use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     author,
+    chain::chain_information,
     database::full_sqlite,
     executor, header,
     informant::HashDisplay,
@@ -260,36 +261,56 @@ impl SyncBackground {
             // Creating the block authoring state and prepare a future that is ready when an
             // authoring slot is ready.
             let mut authoring_ready_future = {
-                let block_authoring = match &mut self.block_authoring {
-                    Some(ba) => Some(ba),
-                    block_authoring @ None => {
-                        // Calling `keys()` on the keystore is racy, but that's considered
-                        // acceptable and part of the design of the node.
-                        let local_authorities = self
-                            .keystore
-                            .keys()
-                            .await
-                            .filter(|(namespace, _)| namespace == b"aura")
-                            .map(|(_, key)| key)
-                            .collect::<Vec<_>>(); // TODO: collect overhead :-/
+                // TODO: overhead to call best_block_consensus() multiple times
+                let local_authorities = {
+                    let namespace_filter = match self.sync.best_block_consensus() {
+                        chain_information::ChainInformationConsensusRef::Aura { .. } => {
+                            Some(b"aura")
+                        }
+                        chain_information::ChainInformationConsensusRef::Babe { .. } => {
+                            Some(b"babe")
+                        }
+                        chain_information::ChainInformationConsensusRef::AllAuthorized => None, // TODO: is that correct?
+                    };
 
-                        Some(
-                            block_authoring.insert(author::build::Builder::new(
-                                author::build::Config {
-                                    consensus: author::build::ConfigConsensus::Aura {
-                                        current_authorities: todo!(),
-                                        local_authorities: local_authorities.iter(),
-                                        now_from_unix_epoch: SystemTime::now()
-                                            .duration_since(SystemTime::UNIX_EPOCH)
-                                            .unwrap(),
-                                        slot_duration: todo!(),
-                                    },
-                                    // TODO: really need Babe
-                                },
-                            )),
-                        )
-                    }
+                    // Calling `keys()` on the keystore is racy, but that's considered
+                    // acceptable and part of the design of the node.
+                    self.keystore
+                        .keys()
+                        .await
+                        .filter(|(namespace, _)| namespace_filter.map_or(true, |n| namespace == n))
+                        .map(|(_, key)| key)
+                        .collect::<Vec<_>>() // TODO: collect overhead :-/
                 };
+
+                let block_authoring =
+                    match (&mut self.block_authoring, self.sync.best_block_consensus()) {
+                        (Some(ba), _) => Some(ba),
+                        (
+                            block_authoring @ None,
+                            chain_information::ChainInformationConsensusRef::Aura {
+                                finalized_authorities_list, // TODO: field name not appropriate; should probably change the chain_information module
+                                slot_duration,
+                            },
+                        ) => {
+                            Some(
+                                block_authoring.insert(author::build::Builder::new(
+                                    author::build::Config {
+                                        consensus: author::build::ConfigConsensus::Aura {
+                                            current_authorities: finalized_authorities_list,
+                                            local_authorities: local_authorities.iter(),
+                                            now_from_unix_epoch: SystemTime::now()
+                                                .duration_since(SystemTime::UNIX_EPOCH)
+                                                .unwrap(),
+                                            slot_duration,
+                                        },
+                                        // TODO: really need Babe
+                                    },
+                                )),
+                            )
+                        }
+                        (None, _) => todo!(),
+                    };
 
                 match &block_authoring {
                     Some(author::build::Builder::Ready(_)) => {

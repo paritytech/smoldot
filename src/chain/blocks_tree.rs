@@ -282,6 +282,75 @@ impl<T> NonFinalizedTree<T> {
         }
     }
 
+    /// Returns consensus information about the current best block of the chain.
+    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+        let inner = self.inner.as_ref().unwrap();
+        match (
+            &inner.finalized_consensus,
+            inner
+                .current_best
+                .map(|idx| &inner.blocks.get(idx).unwrap().consensus),
+        ) {
+            (FinalizedConsensus::AllAuthorized, _) => {
+                chain_information::ChainInformationConsensusRef::AllAuthorized
+            }
+            (
+                FinalizedConsensus::Aura {
+                    authorities_list,
+                    slot_duration,
+                },
+                None,
+            ) => chain_information::ChainInformationConsensusRef::Aura {
+                finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
+                    authorities_list,
+                ),
+                slot_duration: *slot_duration,
+            },
+            (
+                FinalizedConsensus::Aura { slot_duration, .. },
+                Some(BlockConsensus::Aura { authorities_list }),
+            ) => chain_information::ChainInformationConsensusRef::Aura {
+                finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
+                    authorities_list,
+                ),
+                slot_duration: *slot_duration,
+            },
+            (
+                FinalizedConsensus::Babe {
+                    block_epoch_information,
+                    next_epoch_transition,
+                    slots_per_epoch,
+                },
+                None,
+            ) => chain_information::ChainInformationConsensusRef::Babe {
+                slots_per_epoch: *slots_per_epoch,
+                finalized_block_epoch_information: block_epoch_information
+                    .as_ref()
+                    .map(|info| From::from(&**info)),
+                finalized_next_epoch_transition: next_epoch_transition.as_ref().into(),
+            },
+            (
+                FinalizedConsensus::Babe {
+                    slots_per_epoch, ..
+                },
+                Some(BlockConsensus::Babe {
+                    current_epoch,
+                    next_epoch,
+                }),
+            ) => chain_information::ChainInformationConsensusRef::Babe {
+                slots_per_epoch: *slots_per_epoch,
+                finalized_block_epoch_information: current_epoch
+                    .as_ref()
+                    .map(|info| From::from(&**info)),
+                finalized_next_epoch_transition: next_epoch.as_ref().into(),
+            },
+
+            // Any mismatch of consensus engine between the finalized and best block is not
+            // supported at the moment.
+            _ => unreachable!(),
+        }
+    }
+
     /// Returns true if the block with the given hash is in the [`NonFinalizedTree`].
     pub fn contains_non_finalized_block(&self, hash: &[u8; 32]) -> bool {
         self.inner

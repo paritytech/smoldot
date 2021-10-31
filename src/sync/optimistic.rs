@@ -308,6 +308,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         self.chain.best_block_hash()
     }
 
+    /// Returns consensus information about the current best block of the chain.
+    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+        self.chain.best_block_consensus()
+    }
+
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn non_finalized_blocks_unordered(
