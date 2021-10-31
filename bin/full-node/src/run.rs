@@ -23,6 +23,7 @@ use smoldot::{
     database::full_sqlite,
     header,
     informant::HashDisplay,
+    keystore,
     libp2p::{connection, multiaddr, peer_id::PeerId},
 };
 use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
@@ -267,6 +268,8 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
+        // TODO: add `//Alice` to the keystore
+        keystore: Arc::new(keystore::Keystore::new(rand::random())),
     })
     .instrument(tracing::debug_span!("sync-service-init"))
     .await;
@@ -281,6 +284,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 network_events_receiver: network_events_receivers.next().unwrap(),
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
+                keystore: Arc::new(keystore::Keystore::new(rand::random())),
             })
             .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
             .await,

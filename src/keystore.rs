@@ -78,6 +78,15 @@ impl Keystore {
         public_key.into()
     }
 
+    /// Returns the list of all keys known to this keystore.
+    ///
+    /// > **Note**: Keep in mind that this function is racy, as keys can be added and removed
+    /// >           in parallel.
+    pub async fn keys(&self) -> impl Iterator<Item = (KeyNamespace, [u8; 32])> {
+        let guarded = self.guarded.lock().await;
+        guarded.keys.keys().cloned().collect::<Vec<_>>().into_iter()
+    }
+
     /// Signs the given payload using the private key associated to the public key passed as
     /// parameter.
     pub async fn sign(

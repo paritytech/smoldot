@@ -33,7 +33,7 @@ use smoldot::{
     database::full_sqlite,
     executor, header,
     informant::HashDisplay,
-    libp2p,
+    keystore, libp2p,
     network::{self, protocol::BlockData, service::BlocksRequestError},
     sync::all,
 };
@@ -53,6 +53,9 @@ pub struct Config {
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<full_sqlite::SqliteFullDatabase>,
+
+    /// Stores of key to use for all block-production-related purposes.
+    pub keystore: Arc<keystore::Keystore>,
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
@@ -165,6 +168,7 @@ impl SyncService {
                 sync,
                 block_author_sync_source,
                 block_authoring: None,
+                keystore: config.keystore,
                 finalized_block_storage,
                 sync_state: sync_state.clone(),
                 network_service: config.network_service.0,
@@ -209,6 +213,9 @@ struct SyncBackground {
 
     /// State of the authoring. If `None`, the builder should be (re)created.
     block_authoring: Option<author::build::Builder>,
+
+    /// See [`Config::keystore`].
+    keystore: Arc<keystore::Keystore>,
 
     /// Holds, in parallel of the database, the storage of the latest finalized block.
     /// At the time of writing, this state is stable around ~3MiB for Polkadot, meaning that it is
@@ -256,12 +263,22 @@ impl SyncBackground {
                 let block_authoring = match &mut self.block_authoring {
                     Some(ba) => Some(ba),
                     block_authoring @ None => {
+                        // Calling `keys()` on the keystore is racy, but that's considered
+                        // acceptable and part of the design of the node.
+                        let local_authorities = self
+                            .keystore
+                            .keys()
+                            .await
+                            .filter(|(namespace, _)| namespace == b"AURA")
+                            .map(|(_, key)| key)
+                            .collect::<Vec<_>>(); // TODO: collect overhead :-/
+
                         Some(
                             block_authoring.insert(author::build::Builder::new(
                                 author::build::Config {
                                     consensus: author::build::ConfigConsensus::Aura {
                                         current_authorities: todo!(),
-                                        local_authorities: iter::empty(),
+                                        local_authorities: local_authorities.iter(),
                                         now_from_unix_epoch: SystemTime::now()
                                             .duration_since(SystemTime::UNIX_EPOCH)
                                             .unwrap(),
