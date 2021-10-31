@@ -220,6 +220,92 @@ struct SyncBackground {
 }
 
 impl SyncBackground {
+    #[tracing::instrument(level = "trace", skip(self))]
+    async fn run(mut self) {
+        loop {
+            self.start_requests().await;
+            self = self.process_blocks().await;
+
+            // Update the current best block, used for CLI-related purposes.
+            {
+                let mut lock = self.sync_state.lock().await;
+                lock.best_block_hash = self.sync.best_block_hash();
+                lock.best_block_number = self.sync.best_block_number();
+            }
+
+            futures::select! {
+                network_event = self.from_network_service.next().fuse() => {
+                    // We expect the network events channel to never shut down.
+                    let network_event = network_event.unwrap();
+
+                    match network_event {
+                        network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
+                            if chain_index == self.network_chain_index =>
+                        {
+                            let id = self.sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
+                            self.peers_source_id_map.insert(peer_id, id);
+                        },
+                        network_service::Event::Disconnected { peer_id, chain_index }
+                            if chain_index == self.network_chain_index =>
+                        {
+                            let id = self.peers_source_id_map.remove(&peer_id).unwrap();
+                            let (_, requests) = self.sync.remove_source(id);
+                            for (_, abort) in requests {
+                                abort.abort();
+                            }
+                        },
+                        network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
+                            if chain_index == self.network_chain_index =>
+                        {
+                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                            let decoded = announce.decode();
+                            // TODO: stupid to re-encode header
+                            // TODO: log the outcome
+                            match self.sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                                all::BlockAnnounceOutcome::HeaderVerify => {},
+                                all::BlockAnnounceOutcome::TooOld { .. } => {},
+                                all::BlockAnnounceOutcome::AlreadyInChain => {},
+                                all::BlockAnnounceOutcome::NotFinalizedChain => {},
+                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
+                                all::BlockAnnounceOutcome::Discarded => {},
+                                all::BlockAnnounceOutcome::Disjoint {} => {},
+                            }
+                        },
+                        _ => {
+                            // Different chain index.
+                        }
+                    }
+                },
+
+                (request_id, result) = self.block_requests_finished.select_next_some() => {
+                    // `result` is an error if the block request got cancelled by the sync state
+                    // machine.
+                    // TODO: clarify this piece of code
+                    if let Ok(result) = result {
+                        let result = result.map_err(|_| ());
+                        let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
+                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
+                            scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
+                            scale_encoded_justification: block.justification,
+                            user_data: (),
+                        })));
+
+                        match response_outcome {
+                            all::ResponseOutcome::Outdated
+                            | all::ResponseOutcome::Queued
+                            | all::ResponseOutcome::NotFinalizedChain { .. }
+                            | all::ResponseOutcome::AllAlreadyInChain { .. } => {
+                            }
+                            all::ResponseOutcome::WarpSyncFinished { .. } => {
+                                unreachable!()
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+
     // TODO: handle obsolete requests
     async fn start_requests(&mut self) {
         loop {
@@ -511,92 +597,6 @@ impl SyncBackground {
         }
 
         self
-    }
-
-    #[tracing::instrument(level = "trace", skip(self))]
-    async fn run(mut self) {
-        loop {
-            self.start_requests().await;
-            self = self.process_blocks().await;
-
-            // Update the current best block, used for CLI-related purposes.
-            {
-                let mut lock = self.sync_state.lock().await;
-                lock.best_block_hash = self.sync.best_block_hash();
-                lock.best_block_number = self.sync.best_block_number();
-            }
-
-            futures::select! {
-                network_event = self.from_network_service.next().fuse() => {
-                    // We expect the network events channel to never shut down.
-                    let network_event = network_event.unwrap();
-
-                    match network_event {
-                        network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            let id = self.sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
-                            self.peers_source_id_map.insert(peer_id, id);
-                        },
-                        network_service::Event::Disconnected { peer_id, chain_index }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            let id = self.peers_source_id_map.remove(&peer_id).unwrap();
-                            let (_, requests) = self.sync.remove_source(id);
-                            for (_, abort) in requests {
-                                abort.abort();
-                            }
-                        },
-                        network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                            let decoded = announce.decode();
-                            // TODO: stupid to re-encode header
-                            // TODO: log the outcome
-                            match self.sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify => {},
-                                all::BlockAnnounceOutcome::TooOld { .. } => {},
-                                all::BlockAnnounceOutcome::AlreadyInChain => {},
-                                all::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
-                                all::BlockAnnounceOutcome::Discarded => {},
-                                all::BlockAnnounceOutcome::Disjoint {} => {},
-                            }
-                        },
-                        _ => {
-                            // Different chain index.
-                        }
-                    }
-                },
-
-                (request_id, result) = self.block_requests_finished.select_next_some() => {
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
-                    // TODO: clarify this piece of code
-                    if let Ok(result) = result {
-                        let result = result.map_err(|_| ());
-                        let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
-                            scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
-                            scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justification: block.justification,
-                            user_data: (),
-                        })));
-
-                        match response_outcome {
-                            all::ResponseOutcome::Outdated
-                            | all::ResponseOutcome::Queued
-                            | all::ResponseOutcome::NotFinalizedChain { .. }
-                            | all::ResponseOutcome::AllAlreadyInChain { .. } => {
-                            }
-                            all::ResponseOutcome::WarpSyncFinished { .. } => {
-                                unreachable!()
-                            }
-                        }
-                    }
-                },
-            }
-        }
     }
 }
 
