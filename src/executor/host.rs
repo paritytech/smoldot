@@ -724,6 +724,18 @@ impl ReadyToRun {
             }};
         }
 
+        // TODO: implement all functions and remove this macro
+        macro_rules! host_fn_not_implemented {
+            () => {{
+                return HostVm::Error {
+                    error: Error::HostFunctionNotImplemented {
+                        function: host_fn.name(),
+                    },
+                    prototype: self.inner.into_prototype(),
+                };
+            }};
+        }
+
         // Handle the function calls.
         // Some of these enum variants simply change the state of `self`, while most of them
         // instead return an `ExternalVm` to the user.
@@ -842,15 +854,15 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_storage_child_set_version_1 => todo!(),
-            HostFunction::ext_storage_child_get_version_1 => todo!(),
-            HostFunction::ext_storage_child_read_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_version_1 => todo!(),
-            HostFunction::ext_storage_child_storage_kill_version_1 => todo!(),
-            HostFunction::ext_storage_child_exists_version_1 => todo!(),
-            HostFunction::ext_storage_child_clear_prefix_version_1 => todo!(),
-            HostFunction::ext_storage_child_root_version_1 => todo!(),
-            HostFunction::ext_storage_child_next_key_version_1 => todo!(),
+            HostFunction::ext_storage_child_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_read_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_storage_kill_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_exists_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_clear_prefix_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_storage_child_next_key_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_storage_start_transaction_version_1 => {
                 if self.inner.within_storage_transaction {
                     return HostVm::Error {
@@ -890,21 +902,33 @@ impl ReadyToRun {
                     rollback: false,
                 }
             }
-            HostFunction::ext_default_child_storage_get_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_read_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_2 => todo!(),
-            HostFunction::ext_default_child_storage_storage_kill_version_3 => todo!(),
-            HostFunction::ext_default_child_storage_clear_prefix_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_clear_prefix_version_2 => todo!(),
-            HostFunction::ext_default_child_storage_set_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_clear_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_next_key_version_1 => todo!(),
-            HostFunction::ext_default_child_storage_root_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_public_keys_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_read_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_storage_kill_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_storage_kill_version_2 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_storage_kill_version_3 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_clear_prefix_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_clear_prefix_version_2 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_exists_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_next_key_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_default_child_storage_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_verify_version_1 => {
                 let success = {
                     let public_key = ed25519_zebra::VerificationKey::try_from(
@@ -925,9 +949,9 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_crypto_sr25519_public_keys_version_1 => todo!(),
-            HostFunction::ext_crypto_sr25519_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_sr25519_sign_version_1 => todo!(),
+            HostFunction::ext_crypto_sr25519_public_keys_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_sr25519_generate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_sr25519_sign_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_sr25519_verify_version_1 => {
                 let success = {
                     // The `unwrap()` below can only panic if the input is the wrong length, which
@@ -970,9 +994,9 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_ecdsa_sign_version_1 => todo!(),
-            HostFunction::ext_crypto_ecdsa_public_keys_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_generate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ecdsa_sign_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
                 // TODO: clean up
@@ -1188,30 +1212,40 @@ impl ReadyToRun {
                     inner: self.inner,
                 })
             }
-            HostFunction::ext_offchain_is_validator_version_1 => todo!(),
-            HostFunction::ext_offchain_submit_transaction_version_1 => todo!(),
-            HostFunction::ext_offchain_network_state_version_1 => todo!(),
-            HostFunction::ext_offchain_timestamp_version_1 => todo!(),
-            HostFunction::ext_offchain_sleep_until_version_1 => todo!(),
-            HostFunction::ext_offchain_random_seed_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_set_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_get_version_1 => todo!(),
-            HostFunction::ext_offchain_local_storage_clear_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_start_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_add_header_version_1 => todo!(),
-            HostFunction::ext_offchain_http_request_write_body_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_wait_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_headers_version_1 => todo!(),
-            HostFunction::ext_offchain_http_response_read_body_version_1 => todo!(),
-            HostFunction::ext_sandbox_instantiate_version_1 => todo!(),
-            HostFunction::ext_sandbox_invoke_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_new_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_get_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_set_version_1 => todo!(),
-            HostFunction::ext_sandbox_memory_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
-            HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
+            HostFunction::ext_offchain_is_validator_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_submit_transaction_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_network_state_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_timestamp_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_sleep_until_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_random_seed_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_local_storage_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_local_storage_compare_and_set_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_local_storage_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_local_storage_clear_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_http_request_start_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_http_request_add_header_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_http_request_write_body_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_http_response_wait_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_offchain_http_response_headers_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_offchain_http_response_read_body_version_1 => {
+                host_fn_not_implemented!()
+            }
+            HostFunction::ext_sandbox_instantiate_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_invoke_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_new_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_get_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_set_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_memory_teardown_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_instance_teardown_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_root_version_1 => {
                 let decode_result =
                     Vec::<(Vec<u8>, Vec<u8>)>::decode_all(expect_pointer_size!(0).as_ref());
@@ -1254,7 +1288,7 @@ impl ReadyToRun {
                 self.inner
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
-            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
@@ -2324,6 +2358,12 @@ pub enum Error {
     FreeError {
         /// Pointer that was expected to be free'd.
         pointer: u32,
+    },
+    /// The host function isn't implemented.
+    // TODO: this variant should eventually disappear as all functions are implemented
+    HostFunctionNotImplemented {
+        /// Name of the function being called.
+        function: &'static str,
     },
 }
 
