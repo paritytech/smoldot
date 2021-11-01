@@ -229,22 +229,25 @@ mod util;
 /// println!("{:?}", genesis_block_header);
 /// ```
 pub fn calculate_genesis_block_header(chain_spec: &chain_spec::ChainSpec) -> header::Header {
-    let state_root = {
-        let mut calculation = trie::calculate_root::root_merkle_value(None);
+    let state_root = match chain_spec.genesis_storage() {
+        chain_spec::GenesisStorage::TrieRootHash(hash) => *hash,
+        chain_spec::GenesisStorage::Items(genesis_storage) => {
+            let mut calculation = trie::calculate_root::root_merkle_value(None);
 
-        loop {
-            match calculation {
-                trie::calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
-                    break hash
-                }
-                trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                    calculation =
-                        keys.inject(chain_spec.genesis_storage().map(|(k, _)| k.iter().cloned()));
-                }
-                trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                    let key: alloc::vec::Vec<u8> = val.key().collect();
-                    let value = chain_spec.genesis_storage_value(&key[..]);
-                    calculation = val.inject(value);
+            loop {
+                match calculation {
+                    trie::calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
+                        break hash
+                    }
+                    trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
+                        calculation =
+                            keys.inject(genesis_storage.iter().map(|(k, _)| k.iter().cloned()));
+                    }
+                    trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
+                        let key: alloc::vec::Vec<u8> = val.key().collect();
+                        let value = genesis_storage.value(&key[..]);
+                        calculation = val.inject(value);
+                    }
                 }
             }
         }

@@ -61,9 +61,9 @@ impl ChainSpec {
             serde_json::from_slice(json.as_ref()).map_err(ParseError)?;
 
         // TODO: we don't support child tries in the genesis block
-        assert!({
-            let structs::Genesis::Raw(genesis) = &client_spec.genesis;
-            genesis.children_default.is_empty()
+        assert!(match &client_spec.genesis {
+            structs::Genesis::Raw(genesis) => genesis.children_default.is_empty(),
+            structs::Genesis::StateRootHash(_) => true,
         });
         Ok(ChainSpec { client_spec })
     }
@@ -71,15 +71,22 @@ impl ChainSpec {
     /// Builds the [`ChainInformation`] corresponding to the genesis block contained in this chain
     /// spec.
     pub fn as_chain_information(&self) -> Result<ChainInformation, FromGenesisStorageError> {
+        let genesis_storage = match self.genesis_storage() {
+            GenesisStorage::Items(items) => items,
+            GenesisStorage::TrieRootHash(_) => {
+                return Err(FromGenesisStorageError::UnknownStorageItems)
+            }
+        };
+
         let consensus = {
             let aura_genesis_config =
                 aura_config::AuraGenesisConfiguration::from_genesis_storage(|k| {
-                    self.genesis_storage_value(k).map(|v| v.to_owned())
+                    genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
             let babe_genesis_config =
                 babe_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
-                    self.genesis_storage_value(k).map(|v| v.to_owned())
+                    genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
             match (aura_genesis_config, babe_genesis_config) {
@@ -126,7 +133,7 @@ impl ChainSpec {
         let finality = {
             let grandpa_genesis_config =
                 grandpa::chain_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
-                    self.genesis_storage_value(k).map(|v| v.to_owned())
+                    genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
             match grandpa_genesis_config {
@@ -213,16 +220,12 @@ impl ChainSpec {
             .map(|p| (p.relay_chain.as_str(), p.para_id))
     }
 
-    /// Returns the list of storage keys and values of the genesis block.
-    pub fn genesis_storage(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> + Clone {
-        let structs::Genesis::Raw(genesis) = &self.client_spec.genesis;
-        genesis.top.iter().map(|(k, v)| (&k.0[..], &v.0[..]))
-    }
-
-    /// Returns the genesis storage value for a key
-    pub fn genesis_storage_value(&self, key: &[u8]) -> Option<&[u8]> {
-        let structs::Genesis::Raw(genesis) = &self.client_spec.genesis;
-        genesis.top.get(key).map(|value| &value.0[..])
+    /// Gives access to what is known about the storage of the genesis block of the chain.
+    pub fn genesis_storage(&self) -> GenesisStorage {
+        match &self.client_spec.genesis {
+            structs::Genesis::Raw(raw) => GenesisStorage::Items(GenesisStorageItems { raw }),
+            structs::Genesis::StateRootHash(hash) => GenesisStorage::TrieRootHash(&hash.0),
+        }
     }
 
     /// Returns a list of arbitrary properties contained in the chain specs, such as the name of
@@ -247,6 +250,44 @@ impl ChainSpec {
             .map(|state| LightSyncState {
                 inner: state.decode(),
             })
+    }
+}
+
+/// See [`ChainSpec::genesis_storage`].
+pub enum GenesisStorage<'a> {
+    /// The items of the genesis storage are known.
+    Items(GenesisStorageItems<'a>),
+    /// The items of the genesis storage are unknown, but we know the hash of the root node
+    /// of the trie.
+    TrieRootHash(&'a [u8; 32]),
+}
+
+impl<'a> GenesisStorage<'a> {
+    /// Returns `Some` for [`GenesisStorage::Items`], and `None` otherwise.
+    pub fn into_genesis_items(self) -> Option<GenesisStorageItems<'a>> {
+        match self {
+            GenesisStorage::Items(items) => Some(items),
+            GenesisStorage::TrieRootHash(_) => None,
+        }
+    }
+}
+
+/// See [`GenesisStorage`].
+pub struct GenesisStorageItems<'a> {
+    raw: &'a structs::RawGenesis,
+}
+
+impl<'a> GenesisStorageItems<'a> {
+    /// Returns the list of storage keys and values of the genesis block.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&[u8], &[u8])> + Clone {
+        self.raw.top.iter().map(|(k, v)| (&k.0[..], &v.0[..]))
+    }
+
+    /// Returns the genesis storage value for a specific key.
+    ///
+    /// Returns `None` if there is no value corresponding to that key.
+    pub fn value(&self, key: &[u8]) -> Option<&[u8]> {
+        self.raw.top.get(key).map(|value| &value.0[..])
     }
 }
 
@@ -341,6 +382,8 @@ pub enum FromGenesisStorageError {
     BabeConfigLoad(babe_config::FromGenesisStorageError),
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,
+    /// Chain specification doesn't contain the list of storage items.
+    UnknownStorageItems,
 }
 
 #[cfg(test)]

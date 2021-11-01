@@ -119,15 +119,15 @@ impl RuntimeService {
         let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
         // Build the runtime of the genesis block.
-        let genesis_runtime = {
-            let code = config
-                .chain_spec
-                .genesis_storage()
+        let genesis_runtime = if let chain_spec::GenesisStorage::Items(genesis_storage) =
+            config.chain_spec.genesis_storage()
+        {
+            let code = genesis_storage
+                .iter()
                 .find(|(k, _)| k == b":code")
                 .map(|(_, v)| v.to_vec());
-            let heap_pages = config
-                .chain_spec
-                .genesis_storage()
+            let heap_pages = genesis_storage
+                .iter()
                 .find(|(k, _)| k == b":heappages")
                 .map(|(_, v)| v.to_vec());
 
@@ -148,9 +148,8 @@ impl RuntimeService {
                         }
                         metadata::Query::StorageGet(get) => {
                             let key = get.key_as_vec();
-                            let value = config
-                                .chain_spec
-                                .genesis_storage()
+                            let value = genesis_storage
+                                .iter()
                                 .find(|(k, _)| &**k == key)
                                 .map(|(_, v)| v);
                             query = get.inject_value(value.map(iter::once));
@@ -162,11 +161,13 @@ impl RuntimeService {
                 }
             }
 
-            Runtime {
+            Some(Runtime {
                 runtime,
                 runtime_code: code,
                 heap_pages,
-            }
+            })
+        } else {
+            None
         };
 
         let guarded = Arc::new(Mutex::new(Guarded {
@@ -175,12 +176,16 @@ impl RuntimeService {
             best_blocks_subscriptions: Vec::new(),
             runtime_version_subscriptions: Vec::new(),
             best_near_head_of_chain,
-            tree: Some(
+            tree: Some(if let Some(genesis_runtime) = genesis_runtime {
                 download_tree::DownloadTree::from_finalized_block_and_runtime(
                     config.genesis_block_scale_encoded_header,
                     genesis_runtime,
-                ),
-            ),
+                )
+            } else {
+                download_tree::DownloadTree::from_finalized_block(
+                    config.genesis_block_scale_encoded_header,
+                )
+            }),
         }));
 
         // Spawns a task that downloads the runtime code at every block to check whether it has

@@ -92,6 +92,7 @@ impl Default for ChainType {
 #[serde(deny_unknown_fields)]
 pub(super) enum Genesis {
     Raw(RawGenesis),
+    StateRootHash(HashHexString),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
