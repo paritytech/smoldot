@@ -133,18 +133,6 @@ impl Keystore {
         label: &'static [u8],
         transcript_items: impl Iterator<Item = (&'static [u8], either::Either<&'a [u8], u64>)> + 'a,
     ) -> impl core::future::Future<Output = Result<VrfSignature, SignVrfError>> + 'a {
-        let mut transcript = merlin::Transcript::new(label);
-        for (label, value) in transcript_items {
-            match value {
-                either::Left(bytes) => {
-                    transcript.append_message(label, &bytes);
-                }
-                either::Right(value) => {
-                    transcript.append_u64(label, value);
-                }
-            }
-        }
-
         async move {
             let guarded = self.guarded.lock().await;
             let key = guarded
@@ -155,6 +143,18 @@ impl Keystore {
             match key {
                 PrivateKey::MemoryEd25519(_) => Err(SignVrfError::WrongKeyAlgorithm),
                 PrivateKey::MemorySr25519(key) => {
+                    let mut transcript = merlin::Transcript::new(label);
+                    for (label, value) in transcript_items {
+                        match value {
+                            either::Left(bytes) => {
+                                transcript.append_message(label, &bytes);
+                            }
+                            either::Right(value) => {
+                                transcript.append_u64(label, value);
+                            }
+                        }
+                    }
+
                     let (_in_out, proof, _) = key.vrf_sign(transcript);
                     Ok(VrfSignature {
                         // TODO: should probably output the `_in_out` as well
