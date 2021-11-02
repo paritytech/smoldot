@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::header;
-use core::{num::NonZeroU64, time::Duration};
+use core::{fmt, num::NonZeroU64, time::Duration};
 
 /// Configuration for [`next_slot_claim`].
 pub struct Config<'a, TLocAuth> {
@@ -104,8 +104,12 @@ pub fn next_slot_claim<'a>(
     }
 }
 
+/// Process of determining the next Babe authoring slot.
+#[derive(Debug)]
 pub enum NextSlot {
+    /// Babe authoring slot has been determined.
     Finished(Option<SlotClaim>),
+    /// Generating a VRF signature is necessary in order to continue the process.
     SignVrf(SignVrf),
 }
 
@@ -117,13 +121,13 @@ pub struct SignVrf<'a> {
 }
 
 impl<'a> SignVrf<'a> {
-    /// Returns the label of the transcript.
-    pub fn transcript_label(&self) -> &'static [u8] {
+    /// Returns the label of the transcript for the Vrf.
+    pub fn vrf_transcript_label(&self) -> &'static [u8] {
         b"BABE"
     }
 
-    /// Returns the list of transcript items.
-    pub fn transcript_items(
+    /// Returns the list of transcript items for the Vrf.
+    pub fn vrf_transcript_items(
         &self,
     ) -> impl Iterator<Item = (&'static [u8], either::Either<impl AsRef<[u8]>, u64>)> {
         [
@@ -134,7 +138,15 @@ impl<'a> SignVrf<'a> {
     }
 
     /// Resumes determining the next available Babe slot.
-    pub fn resume(self, vrf_signature: &[u8; 32]) {}
+    pub fn resume(self, vrf_signature: &[u8; 32]) -> NextSlot {
+        todo!()
+    }
+}
+
+impl<'a> fmt::Debug for SignVrf<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("SignVrf").finish()
+    }
 }
 
 /// Slot happening now or in the future and that can be attributed to one of the authorities in

@@ -18,5 +18,6 @@
 // TODO: doc
 
 pub mod aura;
+pub mod babe;
 pub mod build;
 pub mod runtime;
