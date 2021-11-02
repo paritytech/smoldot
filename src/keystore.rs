@@ -57,7 +57,7 @@ impl Keystore {
         }
     }
 
-    /// Generates a new key and inserts it in the keystore.
+    /// Generates a new ed25519 key and inserts it in the keystore.
     ///
     /// Returns the corresponding public key.
     // TODO: add a `save: bool` parameter that saves the key to the file system
@@ -78,6 +78,26 @@ impl Keystore {
         public_key.into()
     }
 
+    /// Generates a new sr25519 key and inserts it in the keystore.
+    ///
+    /// Returns the corresponding public key.
+    // TODO: add a `save: bool` parameter that saves the key to the file system
+    pub async fn generate_sr25519(&self, namespace: KeyNamespace) -> [u8; 32] {
+        let mut guarded = self.guarded.lock().await;
+
+        // Note: it is in principle possible to generate some entropy from the PRNG, then unlock
+        // the mutex while the private key is being generated. This reduces the time during which
+        // the mutex is locked, but in practice generating a key is a rare enough event that this
+        // is not worth the effort.
+        let keypair = schnorrkel::Keypair::generate_with(&mut guarded.gen_rng);
+        let public_key = keypair.public.to_bytes();
+        guarded
+            .keys
+            .insert((namespace, public_key), PrivateKey::MemorySr25519(keypair));
+
+        public_key
+    }
+
     /// Signs the given payload using the private key associated to the public key passed as
     /// parameter.
     pub async fn sign(
@@ -94,6 +114,54 @@ impl Keystore {
 
         match key {
             PrivateKey::MemoryEd25519(key) => Ok(key.sign(payload).into()),
+            PrivateKey::MemorySr25519(key) => {
+                // TODO: is creating the signing context expensive?
+                let context = schnorrkel::signing_context(b"substrate");
+                Ok(key.sign(context.bytes(payload)).to_bytes())
+            }
+        }
+    }
+
+    // TODO: doc
+    ///
+    /// Note that the labels must be `'static` due to requirements from the underlying library.
+    // TODO: unclear why this can't be an async function; getting lifetime errors
+    pub fn sign_sr25519_vrf<'a>(
+        &'a self,
+        key_namespace: KeyNamespace,
+        public_key: &'a [u8; 32],
+        label: &'static [u8],
+        transcript_items: impl Iterator<Item = (&'static [u8], either::Either<&'a [u8], u64>)> + 'a,
+    ) -> impl core::future::Future<Output = Result<VrfSignature, SignVrfError>> + 'a {
+        let mut transcript = merlin::Transcript::new(label);
+        for (label, value) in transcript_items {
+            match value {
+                either::Left(bytes) => {
+                    transcript.append_message(label, &bytes);
+                }
+                either::Right(value) => {
+                    transcript.append_u64(label, value);
+                }
+            }
+        }
+
+        async move {
+            let guarded = self.guarded.lock().await;
+            let key = guarded
+                .keys
+                .get(&(key_namespace, *public_key))
+                .ok_or(SignVrfError::Sign(SignError::UnknownPublicKey))?;
+
+            match key {
+                PrivateKey::MemoryEd25519(_) => Err(SignVrfError::WrongKeyAlgorithm),
+                PrivateKey::MemorySr25519(key) => {
+                    let (_in_out, proof, _) = key.vrf_sign(transcript);
+                    Ok(VrfSignature {
+                        // TODO: should probably output the `_in_out` as well
+                        proof: proof.to_bytes(),
+                    })
+                }
+            }
         }
     }
 }
@@ -103,11 +171,21 @@ struct Guarded {
     keys: hashbrown::HashMap<(KeyNamespace, [u8; 32]), PrivateKey, ahash::RandomState>,
 }
 
+pub struct VrfSignature {
+    pub proof: [u8; 64],
+}
+
 pub enum SignError {
     UnknownPublicKey,
 }
 
+pub enum SignVrfError {
+    Sign(SignError),
+    WrongKeyAlgorithm,
+}
+
 enum PrivateKey {
     MemoryEd25519(ed25519_zebra::SigningKey),
+    MemorySr25519(schnorrkel::Keypair),
     // TODO: File(path::PathBuf),
 }
