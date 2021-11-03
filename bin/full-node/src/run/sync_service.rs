@@ -458,11 +458,19 @@ impl SyncBackground {
             top_trie_root_calculation_cache: None, // TODO: pretty important
         });
 
+        // Access the storage of the best block. Can return `̀None` if not syncing in full mode,
+        // in which case we shouldn't have reached this code.
+        let best_block_storage_access = self.sync.best_block_storage().unwrap();
+
         // Actual block production now happening.
         let block = loop {
             match block_authoring {
                 author::build::BuilderAuthoring::StorageGet(get) => {
-                    block_authoring = get.inject_value(Some(iter::once::<Vec<u8>>(todo!())));
+                    let key = get.key_as_vec(); // TODO: overhead?
+                    let value = best_block_storage_access.get(&key, || {
+                        self.finalized_block_storage.get(&key).map(|v| &v[..])
+                    });
+                    block_authoring = get.inject_value(value.map(iter::once));
                     continue;
                 }
                 author::build::BuilderAuthoring::Error(error) => {
@@ -495,13 +503,19 @@ impl SyncBackground {
                     continue;
                 }
                 author::build::BuilderAuthoring::Seal(seal) => {
+                    // TODO: correct key namespace and public key
                     let header = seal.scale_encoded_header();
-                    break seal.inject_sr25519_signature(todo!());
+                    let sign_future = self.keystore.sign(*b"aura", &[0; 32], header);
+                    let result = sign_future.await;
+                    match result {
+                        Ok(signature) => break seal.inject_sr25519_signature(signature),
+                        Err(_) => todo!(),
+                    }
                 }
             }
         };
 
-        // TODO: announce the block
+        // TODO: announce the block on the network
 
         self.sync.block_announce(
             self.block_author_sync_source,

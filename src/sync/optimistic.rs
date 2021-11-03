@@ -313,6 +313,17 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         self.chain.best_block_consensus()
     }
 
+    /// Returns access to the storage of the best block.
+    ///
+    /// Returns `None` if [`Config::full`] was `None`.
+    pub fn best_block_storage(&self) -> Option<BlockStorage<TRq, TSrc, TBl>> {
+        if self.inner.finalized_runtime.is_some() {
+            Some(BlockStorage { inner: self })
+        } else {
+            None
+        }
+    }
+
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn non_finalized_blocks_unordered(
@@ -643,6 +654,27 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     VerifyBlock(BlockVerify<TRq, TSrc, TBl>),
 
     VerifyJustification(JustificationVerify<TRq, TSrc, TBl>),
+}
+
+/// See [`OptimisticSync::best_block_storage`].
+pub struct BlockStorage<'a, TRq, TSrc, TBl> {
+    inner: &'a OptimisticSync<TRq, TSrc, TBl>,
+}
+
+impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
+    /// Returns the storage value at the given key. `None` if this key doesn't have any value.
+    pub fn get<'val: 'a>(
+        &'val self, // TODO: unclear lifetime
+        key: &[u8],
+        or_finalized: impl FnOnce() -> Option<&'val [u8]>,
+    ) -> Option<&'val [u8]> {
+        self.inner
+            .inner
+            .best_to_finalized_storage_diff
+            .get(key)
+            .map(|opt| opt.as_ref().map(|v| &v[..]))
+            .unwrap_or_else(or_finalized)
+    }
 }
 
 /// Start the processing of a block verification.
