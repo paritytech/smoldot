@@ -270,7 +270,12 @@ impl SyncBackground {
                         chain_information::ChainInformationConsensusRef::Babe { .. } => {
                             Some(b"babe")
                         }
-                        chain_information::ChainInformationConsensusRef::AllAuthorized => None, // TODO: is that correct?
+                        chain_information::ChainInformationConsensusRef::AllAuthorized => {
+                            // In `AllAuthorized` mode, all keys are accepted and there is no
+                            // filter on the namespace.
+                            // TODO: is that correct?
+                            None
+                        }
                     };
 
                     // Calling `keys()` on the keystore is racy, but that's considered
@@ -304,7 +309,6 @@ impl SyncBackground {
                                                 .unwrap(),
                                             slot_duration,
                                         },
-                                        // TODO: really need Babe
                                     },
                                 )),
                             )
@@ -316,7 +320,7 @@ impl SyncBackground {
                                 finalized_next_epoch_transition,
                                 slots_per_epoch,
                             },
-                        ) => todo!(),
+                        ) => None, // TODO: the block authoring doesn't support Babe at the moment
                         (None, _) => todo!(),
                     };
 
@@ -458,14 +462,14 @@ impl SyncBackground {
             top_trie_root_calculation_cache: None, // TODO: pretty important
         });
 
-        // Access the storage of the best block. Can return `̀None` if not syncing in full mode,
-        // in which case we shouldn't have reached this code.
-        let best_block_storage_access = self.sync.best_block_storage().unwrap();
-
         // Actual block production now happening.
         let block = loop {
             match block_authoring {
                 author::build::BuilderAuthoring::StorageGet(get) => {
+                    // Access the storage of the best block. Can return `̀None` if not syncing in full mode,
+                    // in which case we shouldn't have reached this code.
+                    let best_block_storage_access = self.sync.best_block_storage().unwrap();
+
                     let key = get.key_as_vec(); // TODO: overhead?
                     let value = best_block_storage_access.get(&key, || {
                         self.finalized_block_storage.get(&key).map(|v| &v[..])
@@ -504,12 +508,17 @@ impl SyncBackground {
                 }
                 author::build::BuilderAuthoring::Seal(seal) => {
                     // TODO: correct key namespace and public key
-                    let header = seal.scale_encoded_header();
-                    let sign_future = self.keystore.sign(*b"aura", &[0; 32], header);
-                    let result = sign_future.await;
-                    match result {
+                    let sign_future =
+                        self.keystore
+                            .sign(*b"aura", &[0; 32], seal.scale_encoded_header());
+                    match sign_future.await {
                         Ok(signature) => break seal.inject_sr25519_signature(signature),
-                        Err(_) => todo!(),
+                        Err(keystore::SignError::UnknownPublicKey) => {
+                            // Because the keystore is subject to race conditions, it is possible
+                            // for this situation to happen if the key has been removed from the
+                            // keystore in parallel of the block authoring process.
+                            todo!() // TODO: ?!
+                        }
                     }
                 }
             }
