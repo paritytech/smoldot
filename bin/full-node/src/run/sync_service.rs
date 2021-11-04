@@ -455,6 +455,8 @@ impl SyncBackground {
             _ => panic!(),
         };
 
+        // TODO: it is possible that the current best block is already the same authoring slot as the slot we want to claim ; unclear how to solve this
+
         let parent_number = self.sync.best_block_number();
         let span = tracing::info_span!(
             "block-authoring",
@@ -686,10 +688,7 @@ impl SyncBackground {
                 all::RequestDetail::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
-                    tracing::info!(
-                        // TODO: debug! instead
-                        "import-locally-authored-block"
-                    );
+                    tracing::debug!("import-locally-authored-block");
 
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(
