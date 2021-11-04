@@ -464,12 +464,71 @@ impl SyncBackground {
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .unwrap(),
                     parent_runtime,
-                    top_trie_root_calculation_cache: None, // TODO: pretty important
+                    top_trie_root_calculation_cache: None, // TODO: pretty important for performances
                 })
             };
 
+            // The block authoring process jumps through various states, interrupted when it needs
+            // access to the storage of the best block.
             loop {
                 match block_authoring {
+                    author::build::BuilderAuthoring::Seal(seal) => {
+                        // This is the last step of the authoring. The block creation is
+                        // successful, and the only thing remaining to do is sign the block
+                        // header. Signing is done through `self.keystore`.
+
+                        // A child span is used in order to measure the time it takes to sign
+                        // the block.
+                        let span = tracing::debug_span!("block-authoring-signing");
+                        let _enter = span.enter();
+
+                        // TODO: correct key namespace and public key
+                        let sign_future =
+                            self.keystore
+                                .sign(*b"aura", &[0; 32], seal.scale_encoded_header());
+                        match sign_future.await {
+                            Ok(signature) => break seal.inject_sr25519_signature(signature),
+                            Err(keystore::SignError::UnknownPublicKey) => {
+                                // Because the keystore is subject to race conditions, it is
+                                // possible for this situation to happen if the key has been
+                                // removed from the keystore in parallel of the block authoring
+                                // process.
+                                todo!() // TODO: ?!
+                            }
+                        }
+                    }
+
+                    author::build::BuilderAuthoring::Error(error) => {
+                        // Block authoring process stopped because of an error.
+
+                        // In order to prevent the block authoring from restarting immediately
+                        // after and failing again repeatedly, we switch the block authoring to
+                        // the same state as if it had successfully generated a block.
+                        self.block_authoring = Some(author::build::Builder::AllSync);
+                        tracing::warn!(%error, "block-author-error");
+                        span.record("error", &tracing::field::display(error));
+                        return;
+                    }
+
+                    // Part of the block production consists in adding transactions to the block.
+                    // These transactions are extracted from the transactions pool.
+                    author::build::BuilderAuthoring::ApplyExtrinsic(apply) => {
+                        // TODO: actually implement including transactions in the blocks
+                        block_authoring = apply.finish();
+                        continue;
+                    }
+                    author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
+                        if let Err(error) = result {
+                            // TODO: include transaction bytes or something?
+                            tracing::warn!(%error, "block-author-transaction-inclusion-error");
+                        }
+
+                        // TODO: actually implement including transactions in the blocks
+                        block_authoring = resume.finish();
+                        continue;
+                    }
+
+                    // Access to the best block storage.
                     author::build::BuilderAuthoring::StorageGet(get) => {
                         // Access the storage of the best block. Can return `̀None` if not syncing
                         // in full mode, in which case we shouldn't have reached this code.
@@ -491,53 +550,17 @@ impl SyncBackground {
                             prefix_key.inject_keys_ordered(iter::once::<Vec<u8>>(todo!()));
                         continue;
                     }
-                    author::build::BuilderAuthoring::Error(error) => {
-                        // TODO: prevent the block authoring from trying again immediately after
-                        tracing::warn!(%error, "block-author-error");
-                        span.record("error", &tracing::field::display(error));
-                        return;
-                    }
-                    author::build::BuilderAuthoring::ApplyExtrinsic(apply) => {
-                        // TODO: actually implement including transactions in the blocks
-                        block_authoring = apply.finish();
-                        continue;
-                    }
-                    author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
-                        if let Err(error) = result {
-                            // TODO: include transaction bytes or something?
-                            tracing::warn!(%error, "block-author-transaction-inclusion-error");
-                        }
-
-                        // TODO: actually implement including transactions in the blocks
-                        block_authoring = resume.finish();
-                        continue;
-                    }
-                    author::build::BuilderAuthoring::Seal(seal) => {
-                        // A child span is used in order to measure the time it takes to sign
-                        // the block.
-                        let span = tracing::debug_span!("block-authoring-signing");
-                        let _enter = span.enter();
-
-                        // TODO: correct key namespace and public key
-                        let sign_future =
-                            self.keystore
-                                .sign(*b"aura", &[0; 32], seal.scale_encoded_header());
-                        match sign_future.await {
-                            Ok(signature) => break seal.inject_sr25519_signature(signature),
-                            Err(keystore::SignError::UnknownPublicKey) => {
-                                // Because the keystore is subject to race conditions, it is
-                                // possible for this situation to happen if the key has been
-                                // removed from the keystore in parallel of the block authoring
-                                // process.
-                                todo!() // TODO: ?!
-                            }
-                        }
-                    }
                 }
             }
         };
 
         // Block has now finished being generated.
+
+        // Switch the block authoring to a state where we won't try to generate a new block again
+        // until something new happens.
+        // TODO: nothing prevents the node from generating two blocks at the same height at the moment
+        self.block_authoring = Some(author::build::Builder::AllSync);
+
         // The next step is to import the block in `self.sync`. This is done by pretending that
         // the local node is a source of block similar to networking peers.
         self.sync.block_announce(
@@ -686,8 +709,20 @@ impl SyncBackground {
                                 span.record("is_new_best", &true);
 
                                 // Processing has made a step forward.
-                                // There is nothing to do, but this is used to update to best block
-                                // shown on the informant.
+
+                                // Update the networking.
+                                let fut = self.network_service.set_local_best_block(
+                                    self.network_chain_index,
+                                    sync_out.best_block_hash(),
+                                    sync_out.best_block_number(),
+                                );
+                                fut.await;
+
+                                // Reset the block authoring, in order to potentially build a
+                                // block on top of this new best.
+                                self.block_authoring = None;
+
+                                // Update the externally visible best block state.
                                 let mut lock = self.sync_state.lock().await;
                                 lock.best_block_hash = sync_out.best_block_hash();
                                 lock.best_block_number = sync_out.best_block_number();
@@ -762,11 +797,12 @@ impl SyncBackground {
                                     self.sync.best_block_number(),
                                 );
                                 fut.await;
+
+                                // Reset the block authoring, in order to potentially build a
+                                // block on top of this new best.
+                                self.block_authoring = None;
                             }
 
-                            // Processing has made a step forward.
-                            // There is nothing to do, but this is used to update the
-                            // best block shown on the informant.
                             let mut lock = self.sync_state.lock().await;
                             lock.best_block_hash = self.sync.best_block_hash();
                             lock.best_block_number = self.sync.best_block_number();
