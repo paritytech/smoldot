@@ -297,22 +297,20 @@ impl SyncBackground {
                                 finalized_authorities_list, // TODO: field name not appropriate; should probably change the chain_information module
                                 slot_duration,
                             },
-                        ) => {
-                            Some(
-                                block_authoring.insert(author::build::Builder::new(
-                                    author::build::Config {
-                                        consensus: author::build::ConfigConsensus::Aura {
-                                            current_authorities: finalized_authorities_list,
-                                            local_authorities: local_authorities.iter(),
-                                            now_from_unix_epoch: SystemTime::now()
-                                                .duration_since(SystemTime::UNIX_EPOCH)
-                                                .unwrap(),
-                                            slot_duration,
-                                        },
+                        ) => Some(
+                            block_authoring.insert(author::build::Builder::new(
+                                author::build::Config {
+                                    consensus: author::build::ConfigConsensus::Aura {
+                                        current_authorities: finalized_authorities_list,
+                                        local_authorities: local_authorities.iter(),
+                                        now_from_unix_epoch: SystemTime::now()
+                                            .duration_since(SystemTime::UNIX_EPOCH)
+                                            .unwrap(),
+                                        slot_duration,
                                     },
-                                )),
-                            )
-                        }
+                                },
+                            )),
+                        ),
                         (
                             block_authoring @ None,
                             chain_information::ChainInformationConsensusRef::Babe {
@@ -452,15 +450,20 @@ impl SyncBackground {
         );
         let _enter = span.enter();
 
-        let mut block_authoring = authoring_start.start(author::build::AuthoringStartConfig {
-            parent_hash: &self.sync.best_block_hash(),
-            parent_number: self.sync.best_block_number(),
-            now_from_unix_epoch: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap(),
-            parent_runtime: todo!(),
-            top_trie_root_calculation_cache: None, // TODO: pretty important
-        });
+        let mut block_authoring = {
+            let best_block_storage_access = self.sync.best_block_storage().unwrap();
+            let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
+
+            authoring_start.start(author::build::AuthoringStartConfig {
+                parent_hash: &self.sync.best_block_hash(),
+                parent_number: self.sync.best_block_number(),
+                now_from_unix_epoch: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap(),
+                parent_runtime,
+                top_trie_root_calculation_cache: None, // TODO: pretty important
+            })
+        };
 
         // Actual block production now happening.
         let block = loop {

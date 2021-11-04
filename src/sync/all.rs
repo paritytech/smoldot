@@ -1510,6 +1510,13 @@ enum BlockStorageInner<'a, TRq, TSrc, TBl> {
 }
 
 impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
+    /// Returns the runtime built against this block.
+    pub fn runtime(&self) -> &host::HostVmPrototype {
+        match &self.inner {
+            BlockStorageInner::Optimistic(inner) => inner.runtime(),
+        }
+    }
+
     /// Returns the storage value at the given key. `None` if this key doesn't have any value.
     pub fn get<'val: 'a>(
         &'val self, // TODO: unclear lifetime
