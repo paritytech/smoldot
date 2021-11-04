@@ -497,12 +497,16 @@ impl SyncBackground {
 
                         match sign_future.await {
                             Ok(signature) => break seal.inject_sr25519_signature(signature),
-                            Err(keystore::SignError::UnknownPublicKey) => {
+                            Err(error) => {
                                 // Because the keystore is subject to race conditions, it is
                                 // possible for this situation to happen if the key has been
                                 // removed from the keystore in parallel of the block authoring
-                                // process.
-                                todo!() // TODO: ?!
+                                // process, or the key is maybe no longer accessible because of
+                                // another issue.
+                                tracing::warn!(%error, "signing-error");
+                                span.record("error", &tracing::field::display(error));
+                                self.block_authoring = None;
+                                return;
                             }
                         }
                     }

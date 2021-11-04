@@ -206,10 +206,12 @@ pub struct VrfSignature {
     pub proof: [u8; 64],
 }
 
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum SignError {
     UnknownPublicKey,
 }
 
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum SignVrfError {
     Sign(SignError),
     WrongKeyAlgorithm,
