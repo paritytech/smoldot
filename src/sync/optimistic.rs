@@ -496,7 +496,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 Some(RequestDetail {
                     block_height,
                     num_blocks: cmp::min(
-                        NonZeroU32::new(u32::try_from(source_avail_blocks).unwrap()).unwrap(),
+                        NonZeroU32::new(u32::try_from(source_avail_blocks).unwrap())?,
                         num_blocks,
                     ),
                     source_id: *source_id,

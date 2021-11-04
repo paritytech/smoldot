@@ -212,8 +212,11 @@ struct SyncBackground {
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
     block_author_sync_source: all::SourceId,
 
-    /// State of the authoring. If `None`, the builder should be (re)created.
-    block_authoring: Option<author::build::Builder>,
+    /// State of the authoring. If `None`, the builder should be (re)created. If `Some`, also
+    /// contains the list of public keys that were loaded from the keystore when creating the
+    /// builder.
+    // TODO: this list of public keys is a bit hacky
+    block_authoring: Option<(author::build::Builder, Vec<[u8; 32]>)>,
 
     /// See [`Config::keystore`].
     keystore: Arc<keystore::Keystore>,
@@ -298,8 +301,8 @@ impl SyncBackground {
                                 slot_duration,
                             },
                         ) => Some(
-                            block_authoring.insert(author::build::Builder::new(
-                                author::build::Config {
+                            block_authoring.insert((
+                                author::build::Builder::new(author::build::Config {
                                     consensus: author::build::ConfigConsensus::Aura {
                                         current_authorities: finalized_authorities_list,
                                         local_authorities: local_authorities.iter(),
@@ -308,7 +311,8 @@ impl SyncBackground {
                                             .unwrap(),
                                         slot_duration,
                                     },
-                                },
+                                }),
+                                local_authorities,
                             )),
                         ),
                         (
@@ -323,16 +327,16 @@ impl SyncBackground {
                     };
 
                 match &block_authoring {
-                    Some(author::build::Builder::Ready(_)) => {
+                    Some((author::build::Builder::Ready(_), _)) => {
                         future::Either::Left(future::Either::Left(future::ready(())))
                     }
-                    Some(author::build::Builder::WaitSlot(when)) => {
+                    Some((author::build::Builder::WaitSlot(when), _)) => {
                         let delay = (UNIX_EPOCH + when.when())
                             .duration_since(SystemTime::now())
                             .unwrap_or(Duration::new(0, 0));
                         future::Either::Right(futures_timer::Delay::new(delay).fuse())
                     }
-                    None | Some(author::build::Builder::AllSync) => {
+                    None | Some((author::build::Builder::AllSync, _)) => {
                         future::Either::Left(future::Either::Right(future::pending::<()>()))
                     }
                 }
@@ -344,16 +348,16 @@ impl SyncBackground {
                     // While a block is being authored, the whole syncing state machine is
                     // deliberately frozen.
                     match self.block_authoring {
-                        Some(author::build::Builder::Ready(_)) => {
+                        Some((author::build::Builder::Ready(_), _)) => {
                             self.author_block().await;
                             continue;
                         }
-                        Some(author::build::Builder::WaitSlot(when)) => {
-                            self.block_authoring = Some(author::build::Builder::Ready(when.start()));
+                        Some((author::build::Builder::WaitSlot(when), local_authorities)) => {
+                            self.block_authoring = Some((author::build::Builder::Ready(when.start()), local_authorities));
                             self.author_block().await;
                             continue;
                         }
-                        None | Some(author::build::Builder::AllSync) => {
+                        None | Some((author::build::Builder::AllSync, _)) => {
                             unreachable!()
                         }
                     }
@@ -438,8 +442,10 @@ impl SyncBackground {
     /// The [`SyncBackground::block_authoring`] must be [`author::build::Builder::Ready`].
     ///
     async fn author_block(&mut self) {
-        let authoring_start = match self.block_authoring.take() {
-            Some(author::build::Builder::Ready(authoring)) => authoring,
+        let (authoring_start, local_authorities) = match self.block_authoring.take() {
+            Some((author::build::Builder::Ready(authoring), local_authorities)) => {
+                (authoring, local_authorities)
+            }
             _ => panic!(),
         };
 
@@ -482,10 +488,13 @@ impl SyncBackground {
                         let span = tracing::debug_span!("block-authoring-signing");
                         let _enter = span.enter();
 
-                        // TODO: correct key namespace and public key
-                        let sign_future =
-                            self.keystore
-                                .sign(*b"aura", &[0; 32], seal.scale_encoded_header());
+                        // TODO: correct key namespace
+                        let sign_future = self.keystore.sign(
+                            *b"aura",
+                            &local_authorities[seal.authority_index()],
+                            seal.scale_encoded_header(),
+                        );
+
                         match sign_future.await {
                             Ok(signature) => break seal.inject_sr25519_signature(signature),
                             Err(keystore::SignError::UnknownPublicKey) => {
@@ -504,7 +513,7 @@ impl SyncBackground {
                         // In order to prevent the block authoring from restarting immediately
                         // after and failing again repeatedly, we switch the block authoring to
                         // the same state as if it had successfully generated a block.
-                        self.block_authoring = Some(author::build::Builder::AllSync);
+                        self.block_authoring = Some((author::build::Builder::AllSync, Vec::new()));
                         tracing::warn!(%error, "block-author-error");
                         span.record("error", &tracing::field::display(error));
                         return;
@@ -580,7 +589,7 @@ impl SyncBackground {
         // Switch the block authoring to a state where we won't try to generate a new block again
         // until something new happens.
         // TODO: nothing prevents the node from generating two blocks at the same height at the moment
-        self.block_authoring = Some(author::build::Builder::AllSync);
+        self.block_authoring = Some((author::build::Builder::AllSync, Vec::new()));
 
         // The next step is to import the block in `self.sync`. This is done by pretending that
         // the local node is a source of block similar to networking peers.
