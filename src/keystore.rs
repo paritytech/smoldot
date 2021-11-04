@@ -66,13 +66,20 @@ impl Keystore {
     ///
     /// # Panic
     ///
-    /// Panics if the key isn't a valid sr25519 private key.
+    /// Panics if the key isn't a valid sr25519 private key. This function is meant to be used
+    /// with hardcoded values which are known to be correct. Please do not call it with any
+    /// sort of user input.
     ///
-    pub fn insert_sr25519(&mut self, namespace: KeyNamespace, private_key: &[u8; 64]) -> [u8; 32] {
+    pub fn insert_sr25519_memory(
+        &mut self,
+        namespace: KeyNamespace,
+        private_key: &[u8; 64],
+    ) -> [u8; 32] {
         let private_key = schnorrkel::SecretKey::from_bytes(&private_key[..]).unwrap();
         let keypair = private_key.to_keypair();
         let public_key = keypair.public.to_bytes();
-        self.guarded.get_mut()
+        self.guarded
+            .get_mut()
             .keys
             .insert((namespace, public_key), PrivateKey::MemorySr25519(keypair));
 

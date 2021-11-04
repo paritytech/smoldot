@@ -270,7 +270,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         database,
         keystore: Arc::new({
             let mut keystore = keystore::Keystore::new(rand::random());
-            keystore.insert_sr25519(
+            keystore.insert_sr25519_memory(
                 *b"aura",
                 &[
                     // TODO: this is `//Alice`; remove and instead let user pass through CLI
