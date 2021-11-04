@@ -684,6 +684,45 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
             .map(|opt| opt.as_ref().map(|v| &v[..]))
             .unwrap_or_else(or_finalized)
     }
+
+    pub fn prefix_keys_ordered<'k: 'a>(
+        &'k self, // TODO: unclear lifetime
+        prefix: &'k [u8],
+        in_finalized_ordered: impl Iterator<Item = &'k [u8]> + 'k,
+    ) -> impl Iterator<Item = &'k [u8]> + 'k {
+        let mut in_finalized_filtered = in_finalized_ordered
+            .filter(|k| {
+                !self
+                    .inner
+                    .inner
+                    .best_to_finalized_storage_diff
+                    .contains_key(*k)
+            })
+            .peekable();
+
+        let mut diff_inserted = self
+            .inner
+            .inner
+            .best_to_finalized_storage_diff
+            .range(prefix.to_owned()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .filter(|(_, v)| v.is_some())
+            .map(|(k, _)| &k[..])
+            .peekable();
+
+        iter::from_fn(
+            move || match (in_finalized_filtered.peek(), diff_inserted.peek()) {
+                (Some(a), None) => in_finalized_filtered.next(),
+                (Some(a), Some(b)) if a < b => in_finalized_filtered.next(),
+                (Some(a), Some(b)) => {
+                    debug_assert_ne!(a, b);
+                    diff_inserted.next()
+                }
+                (None, Some(b)) => diff_inserted.next(),
+                (None, None) => None,
+            },
+        )
+    }
 }
 
 /// Start the processing of a block verification.

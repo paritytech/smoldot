@@ -1527,6 +1527,18 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
             BlockStorageInner::Optimistic(inner) => inner.get(key, or_finalized),
         }
     }
+
+    pub fn prefix_keys_ordered<'k: 'a>(
+        &'k self, // TODO: unclear lifetime
+        prefix: &'k [u8],
+        in_finalized_ordered: impl Iterator<Item = &'k [u8]> + 'k,
+    ) -> impl Iterator<Item = &'k [u8]> + 'k {
+        match &self.inner {
+            BlockStorageInner::Optimistic(inner) => {
+                inner.prefix_keys_ordered(prefix, in_finalized_ordered)
+            }
+        }
+    }
 }
 
 /// Outcome of calling [`AllSync::process_one`].

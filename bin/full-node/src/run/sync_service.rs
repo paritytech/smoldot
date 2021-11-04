@@ -546,8 +546,24 @@ impl SyncBackground {
                         continue;
                     }
                     author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
-                        block_authoring =
-                            prefix_key.inject_keys_ordered(iter::once::<Vec<u8>>(todo!()));
+                        // Access the storage of the best block. Can return `̀None` if not syncing
+                        // in full mode, in which case we shouldn't have reached this code.
+                        let best_block_storage_access = self.sync.best_block_storage().unwrap();
+
+                        let keys = best_block_storage_access
+                            .prefix_keys_ordered(
+                                prefix_key.prefix().as_ref(),
+                                self.finalized_block_storage
+                                    .range((prefix_key.prefix().as_ref().to_vec())..)
+                                    .take_while(|(k, _)| {
+                                        k.starts_with(prefix_key.prefix().as_ref())
+                                    })
+                                    .map(|(k, _)| &k[..]),
+                            )
+                            .map(|k| k.to_vec()) // TODO: overhead
+                            .collect::<Vec<_>>();
+
+                        block_authoring = prefix_key.inject_keys_ordered(keys.into_iter());
                         continue;
                     }
                 }
