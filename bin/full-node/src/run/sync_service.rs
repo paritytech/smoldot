@@ -697,7 +697,6 @@ impl SyncBackground {
 
                     let (_, _, scale_encoded_header, scale_encoded_extrinsics) =
                         self.authored_block.take().unwrap();
-                    self.block_authoring = None;
 
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(
