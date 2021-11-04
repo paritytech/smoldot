@@ -267,8 +267,8 @@ impl SyncBackground {
                 lock.best_block_number = self.sync.best_block_number();
             }
 
-            // Creating the block authoring state and prepare a future that is ready when an
-            // authoring slot is ready.
+            // Creating the block authoring state and prepare a future that is ready when something
+            // related to the block authoring is ready.
             let mut authoring_ready_future = {
                 // TODO: overhead to call best_block_consensus() multiple times
                 let local_authorities = {
@@ -342,8 +342,14 @@ impl SyncBackground {
                             .unwrap_or(Duration::new(0, 0));
                         future::Either::Right(futures_timer::Delay::new(delay).fuse())
                     }
-                    None | Some((author::build::Builder::AllSync, _)) => {
-                        future::Either::Left(future::Either::Right(future::pending::<()>()))
+                    None => future::Either::Left(future::Either::Right(future::pending::<()>())),
+                    Some((author::build::Builder::AllSync, _)) => {
+                        // If the block authoring is idle, which happens in case of error,
+                        // sleep for an arbitrary duration before resetting it.
+                        // This prevents the authoring from trying over and over again to generate
+                        // a bad block.
+                        let delay = Duration::from_secs(2);
+                        future::Either::Right(futures_timer::Delay::new(delay).fuse())
                     }
                 }
             };
@@ -363,7 +369,11 @@ impl SyncBackground {
                             self.author_block().await;
                             continue;
                         }
-                        None | Some((author::build::Builder::AllSync, _)) => {
+                        Some((author::build::Builder::AllSync, _)) => {
+                            self.block_authoring = None;
+                            continue;
+                        }
+                        None => {
                             unreachable!()
                         }
                     }
