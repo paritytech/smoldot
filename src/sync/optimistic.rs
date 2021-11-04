@@ -488,9 +488,6 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             .desired_requests(self.inner.download_ahead_blocks)
             .flat_map(move |e| sources.iter().map(move |s| (e, s)))
             .filter_map(|((block_height, num_blocks), (source_id, source))| {
-                if source.num_ongoing_requests != 0 {
-                    return None;
-                }
                 let source_avail_blocks = NonZeroU32::new(
                     u32::try_from(source.best_block_number.checked_sub(block_height.get())? + 1)
                         .unwrap(),
