@@ -57,6 +57,28 @@ impl Keystore {
         }
     }
 
+    /// Inserts an sr25519 private key in the keystore.
+    ///
+    /// Returns the corresponding public key.
+    ///
+    /// This is meant to be called with publicly-known private keys. Use
+    /// [`Keystore::generate_sr25519`] if the private key is meant to actually be private.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key isn't a valid sr25519 private key.
+    ///
+    pub fn insert_sr25519(&mut self, namespace: KeyNamespace, private_key: &[u8; 64]) -> [u8; 32] {
+        let private_key = schnorrkel::SecretKey::from_bytes(&private_key[..]).unwrap();
+        let keypair = private_key.to_keypair();
+        let public_key = keypair.public.to_bytes();
+        self.guarded.get_mut()
+            .keys
+            .insert((namespace, public_key), PrivateKey::MemorySr25519(keypair));
+
+        public_key
+    }
+
     /// Generates a new ed25519 key and inserts it in the keystore.
     ///
     /// Returns the corresponding public key.

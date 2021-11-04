@@ -443,7 +443,7 @@ impl SyncBackground {
             _ => panic!(),
         };
 
-        let span = tracing::debug_span!(
+        let span = tracing::info_span!(
             "block-authoring",
             parent_hash = %HashDisplay(&self.sync.best_block_hash()),
             parent_number = self.sync.best_block_number(),
