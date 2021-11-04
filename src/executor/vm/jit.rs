@@ -103,27 +103,39 @@ impl JitPrototype {
             for import in module.inner.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
-                        // TODO: don't panic below
-                        let function_index = match import.name().and_then(|name| {
-                            symbols(import.module(), name, &TryFrom::try_from(&f).unwrap()).ok()
-                        }) {
-                            Some(idx) => idx,
+                        let name = match import.name() {
+                            Some(name) => name,
                             None => {
                                 return Err(NewErr::ModuleError(ModuleError(format!(
                                     "unresolved import: `{}`:`{}`",
                                     import.module(),
-                                    import.name().unwrap_or("<unnamed>")
-                                ))));
+                                    "<unnamed>"
+                                ))))
                             }
                         };
+
+                        // TODO: don't panic below
+                        let function_index =
+                            match symbols(import.module(), name, &TryFrom::try_from(&f).unwrap())
+                                .ok()
+                            {
+                                Some(idx) => idx,
+                                None => {
+                                    return Err(NewErr::ModuleError(ModuleError(format!(
+                                        "unresolved import: `{}`:`{}`",
+                                        import.module(),
+                                        name,
+                                    ))));
+                                }
+                            };
 
                         let shared = shared.clone();
 
                         imports.push(wasmtime::Extern::Func(wasmtime::Func::new_async(
                             &store,
                             f.clone(),
-                            (),
-                            move |_, (), params, ret_val| {
+                            name.to_owned(),
+                            move |_, _name, params, ret_val| {
                                 // This closure is executed whenever the Wasm VM calls a
                                 // host function.
 
@@ -155,10 +167,10 @@ impl JitPrototype {
                                     let mut shared = shared.borrow_mut();
                                     if let Some(returned) = shared.return_value.take() {
                                         if let Some(returned) = returned {
-                                            assert_eq!(ret_val.len(), 1);
+                                            assert_eq!(ret_val.len(), 1, "{}", _name);
                                             ret_val[0] = From::from(returned);
                                         } else {
-                                            assert!(ret_val.is_empty());
+                                            assert!(ret_val.is_empty(), "{}", _name);
                                         }
                                         Poll::Ready(Ok(()))
                                     } else {
