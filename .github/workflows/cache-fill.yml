@@ -34,7 +34,7 @@ jobs:
     container:
       image: rust
     steps:
-    - uses: actions/checkout@v2.3.5
+    - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
     - run: cargo test --no-run --locked --workspace --all-features
 
@@ -43,7 +43,7 @@ jobs:
     container:
       image: rust
     steps:
-    - uses: actions/checkout@v2.3.5
+    - uses: actions/checkout@v2.4.0
     - run: apt-get update && apt-get install -y libc6-dev-i386
     - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
