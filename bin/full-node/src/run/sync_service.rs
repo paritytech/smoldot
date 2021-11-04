@@ -447,95 +447,106 @@ impl SyncBackground {
             "block-authoring",
             parent_hash = %HashDisplay(&self.sync.best_block_hash()),
             parent_number = self.sync.best_block_number(),
+            error = tracing::field::Empty,
         );
         let _enter = span.enter();
 
-        let mut block_authoring = {
-            let best_block_storage_access = self.sync.best_block_storage().unwrap();
-            let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
-
-            authoring_start.start(author::build::AuthoringStartConfig {
-                parent_hash: &self.sync.best_block_hash(),
-                parent_number: self.sync.best_block_number(),
-                now_from_unix_epoch: SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap(),
-                parent_runtime,
-                top_trie_root_calculation_cache: None, // TODO: pretty important
-            })
-        };
-
         // Actual block production now happening.
-        let block = loop {
-            match block_authoring {
-                author::build::BuilderAuthoring::StorageGet(get) => {
-                    // Access the storage of the best block. Can return `̀None` if not syncing in full mode,
-                    // in which case we shouldn't have reached this code.
-                    let best_block_storage_access = self.sync.best_block_storage().unwrap();
+        let block = {
+            let mut block_authoring = {
+                let best_block_storage_access = self.sync.best_block_storage().unwrap();
+                let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
 
-                    let key = get.key_as_vec(); // TODO: overhead?
-                    let value = best_block_storage_access.get(&key, || {
-                        self.finalized_block_storage.get(&key).map(|v| &v[..])
-                    });
-                    block_authoring = get.inject_value(value.map(iter::once));
-                    continue;
-                }
-                author::build::BuilderAuthoring::Error(error) => {
-                    // TODO: prevent the block authoring from trying again immediately after
-                    tracing::warn!(%error, "block-author-error");
-                    return;
-                }
-                author::build::BuilderAuthoring::NextKey(next_key) => {
-                    block_authoring = next_key.inject_key(Some::<Vec<u8>>(todo!()));
-                    continue;
-                }
-                author::build::BuilderAuthoring::ApplyExtrinsic(apply) => {
-                    // TODO: actually implement including transactions in the blocks
-                    block_authoring = apply.finish();
-                    continue;
-                }
-                author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
-                    if let Err(error) = result {
-                        // TODO: include transaction bytes or something?
-                        tracing::warn!(%error, "block-author-transaction-inclusion-error");
+                authoring_start.start(author::build::AuthoringStartConfig {
+                    parent_hash: &self.sync.best_block_hash(),
+                    parent_number: self.sync.best_block_number(),
+                    now_from_unix_epoch: SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap(),
+                    parent_runtime,
+                    top_trie_root_calculation_cache: None, // TODO: pretty important
+                })
+            };
+
+            loop {
+                match block_authoring {
+                    author::build::BuilderAuthoring::StorageGet(get) => {
+                        // Access the storage of the best block. Can return `̀None` if not syncing
+                        // in full mode, in which case we shouldn't have reached this code.
+                        let best_block_storage_access = self.sync.best_block_storage().unwrap();
+
+                        let key = get.key_as_vec(); // TODO: overhead?
+                        let value = best_block_storage_access.get(&key, || {
+                            self.finalized_block_storage.get(&key).map(|v| &v[..])
+                        });
+                        block_authoring = get.inject_value(value.map(iter::once));
+                        continue;
                     }
+                    author::build::BuilderAuthoring::NextKey(next_key) => {
+                        block_authoring = next_key.inject_key(Some::<Vec<u8>>(todo!()));
+                        continue;
+                    }
+                    author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
+                        block_authoring =
+                            prefix_key.inject_keys_ordered(iter::once::<Vec<u8>>(todo!()));
+                        continue;
+                    }
+                    author::build::BuilderAuthoring::Error(error) => {
+                        // TODO: prevent the block authoring from trying again immediately after
+                        tracing::warn!(%error, "block-author-error");
+                        span.record("error", &tracing::field::display(error));
+                        return;
+                    }
+                    author::build::BuilderAuthoring::ApplyExtrinsic(apply) => {
+                        // TODO: actually implement including transactions in the blocks
+                        block_authoring = apply.finish();
+                        continue;
+                    }
+                    author::build::BuilderAuthoring::ApplyExtrinsicResult { result, resume } => {
+                        if let Err(error) = result {
+                            // TODO: include transaction bytes or something?
+                            tracing::warn!(%error, "block-author-transaction-inclusion-error");
+                        }
 
-                    // TODO: actually implement including transactions in the blocks
-                    block_authoring = resume.finish();
-                    continue;
-                }
-                author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
-                    block_authoring =
-                        prefix_key.inject_keys_ordered(iter::once::<Vec<u8>>(todo!()));
-                    continue;
-                }
-                author::build::BuilderAuthoring::Seal(seal) => {
-                    // TODO: correct key namespace and public key
-                    let sign_future =
-                        self.keystore
-                            .sign(*b"aura", &[0; 32], seal.scale_encoded_header());
-                    match sign_future.await {
-                        Ok(signature) => break seal.inject_sr25519_signature(signature),
-                        Err(keystore::SignError::UnknownPublicKey) => {
-                            // Because the keystore is subject to race conditions, it is possible
-                            // for this situation to happen if the key has been removed from the
-                            // keystore in parallel of the block authoring process.
-                            todo!() // TODO: ?!
+                        // TODO: actually implement including transactions in the blocks
+                        block_authoring = resume.finish();
+                        continue;
+                    }
+                    author::build::BuilderAuthoring::Seal(seal) => {
+                        // A child span is used in order to measure the time it takes to sign
+                        // the block.
+                        let span = tracing::debug_span!("block-authoring-signing");
+                        let _enter = span.enter();
+
+                        // TODO: correct key namespace and public key
+                        let sign_future =
+                            self.keystore
+                                .sign(*b"aura", &[0; 32], seal.scale_encoded_header());
+                        match sign_future.await {
+                            Ok(signature) => break seal.inject_sr25519_signature(signature),
+                            Err(keystore::SignError::UnknownPublicKey) => {
+                                // Because the keystore is subject to race conditions, it is
+                                // possible for this situation to happen if the key has been
+                                // removed from the keystore in parallel of the block authoring
+                                // process.
+                                todo!() // TODO: ?!
+                            }
                         }
                     }
                 }
             }
         };
 
-        // TODO: announce the block on the network
-
+        // Block has now finished being generated.
+        // The next step is to import the block in `self.sync`. This is done by pretending that
+        // the local node is a source of block similar to networking peers.
         self.sync.block_announce(
             self.block_author_sync_source,
             block.scale_encoded_header.clone(),
-            true,
+            true, // Since the new block is a child of the current best block, it always becomes the new best.
         );
 
-        // TODO: store the newly-created block locally
+        // TODO: announce the block on the network, but only after it's been imported
     }
 
     // TODO: handle obsolete requests
