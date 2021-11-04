@@ -68,9 +68,6 @@ pub enum Builder {
 
     /// Block production is ready to start.
     Ready(AuthoringStart),
-
-    /// Currently authoring a block.
-    Authoring(BuilderAuthoring),
 }
 
 impl Builder {
@@ -349,9 +346,14 @@ pub struct Seal {
 }
 
 impl Seal {
-    /// Returns the SCALE-encoded header that must be signed.
+    /// Returns the SCALE-encoded header whose hash must be signed.
     pub fn scale_encoded_header(&self) -> &[u8] {
         &self.block.scale_encoded_header
+    }
+
+    /// Returns the data to sign. This is the hash of the SCALE-encoded header of the block.
+    pub fn to_sign(&self) -> [u8; 32] {
+        header::hash_from_scale_encoded_header(&self.block.scale_encoded_header)
     }
 
     /// Returns the index within the list of authorities of the authority that must sign the
@@ -364,7 +366,8 @@ impl Seal {
         }
     }
 
-    /// Injects the sr25519 signature of the SCALE-encoded header from the given authority.
+    /// Injects the sr25519 signature of the hash of the SCALE-encoded header from the given
+    /// authority.
     ///
     /// The method then returns the finished block.
     pub fn inject_sr25519_signature(mut self, signature: [u8; 64]) -> runtime::Success {
