@@ -484,6 +484,8 @@ impl SyncBackground {
             // The block authoring process jumps through various states, interrupted when it needs
             // access to the storage of the best block.
             loop {
+                // TODO: check that we're still within the first 4/6ths of the slot
+
                 match block_authoring {
                     author::build::BuilderAuthoring::Seal(seal) => {
                         // This is the last step of the authoring. The block creation is
@@ -496,10 +498,11 @@ impl SyncBackground {
                         let _enter = span.enter();
 
                         // TODO: correct key namespace
+                        let data_to_sign = seal.to_sign();
                         let sign_future = self.keystore.sign(
                             *b"aura",
                             &local_authorities[seal.authority_index()],
-                            seal.scale_encoded_header(),
+                            &data_to_sign,
                         );
 
                         match sign_future.await {
