@@ -169,6 +169,7 @@ impl SyncService {
                 sync,
                 block_author_sync_source,
                 block_authoring: None,
+                authored_block: None,
                 keystore: config.keystore,
                 finalized_block_storage,
                 sync_state: sync_state.clone(),
@@ -217,6 +218,11 @@ struct SyncBackground {
     /// builder.
     // TODO: this list of public keys is a bit hacky
     block_authoring: Option<(author::build::Builder, Vec<[u8; 32]>)>,
+
+    /// After a block has been authored, it is inserted here while waiting for the `sync` to
+    /// import it. Contains the block height, the block hash, the SCALE-encoded block header, and
+    /// the list of SCALE-encoded extrinsics of the block.
+    authored_block: Option<(u64, [u8; 32], Vec<u8>, Vec<Vec<u8>>)>,
 
     /// See [`Config::keystore`].
     keystore: Arc<keystore::Keystore>,
@@ -519,6 +525,7 @@ impl SyncBackground {
                         // the same state as if it had successfully generated a block.
                         self.block_authoring = Some((author::build::Builder::AllSync, Vec::new()));
                         tracing::warn!(%error, "block-author-error");
+                        // TODO: log the runtime logs
                         span.record("error", &tracing::field::display(error));
                         return;
                     }
@@ -584,9 +591,12 @@ impl SyncBackground {
         };
 
         // Block has now finished being generated.
+        let new_block_height = header::decode(&block.scale_encoded_header).unwrap().number; // TODO: looks a bit stupid
+        let new_block_hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
         tracing::info!(
-            hash = %HashDisplay(&header::hash_from_scale_encoded_header(&block.scale_encoded_header)),
+            hash = %HashDisplay(&new_block_hash),
             body_len = %block.body.len(),
+            runtime_logs = ?block.logs,
             "block-generated"
         );
 
@@ -603,7 +613,13 @@ impl SyncBackground {
             true, // Since the new block is a child of the current best block, it always becomes the new best.
         );
 
-        // TODO: announce the block on the network, but only after it's been imported
+        debug_assert!(self.authored_block.is_none());
+        self.authored_block = Some((
+            new_block_height,
+            new_block_hash,
+            block.scale_encoded_header,
+            block.body,
+        ));
     }
 
     // TODO: handle obsolete requests
@@ -613,10 +629,40 @@ impl SyncBackground {
             // that should be started in order for the syncing to proceed. We simply pick the
             // first request, but enforce one ongoing request per source.
             let (source_id, _, mut request_info) =
-                match self.sync.desired_requests().find(|(source_id, _, _)| {
-                    self.sync.source_user_data(*source_id).is_some()
-                        && self.sync.source_num_ongoing_requests(*source_id) == 0
-                }) {
+                match self
+                    .sync
+                    .desired_requests()
+                    .find(|(source_id, _, request_details)| {
+                        if *source_id != self.block_author_sync_source {
+                            // Remote source.
+                            self.sync.source_num_ongoing_requests(*source_id) == 0
+                        } else {
+                            // Locally-authored blocks source.
+                            match (request_details, &self.authored_block) {
+                                (
+                                    all::RequestDetail::BlocksRequest {
+                                        first_block_hash: None,
+                                        first_block_height,
+                                        ..
+                                    },
+                                    Some((authored_height, _, _, _)),
+                                ) if first_block_height == authored_height => true,
+                                (
+                                    all::RequestDetail::BlocksRequest {
+                                        first_block_hash: Some(first_block_hash),
+                                        first_block_height,
+                                        ..
+                                    },
+                                    Some((authored_height, authored_hash, _, _)),
+                                ) if first_block_hash == authored_hash
+                                    && first_block_height == authored_height =>
+                                {
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                    }) {
                     Some(v) => v,
                     None => break,
                 };
@@ -626,6 +672,31 @@ impl SyncBackground {
             request_info.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
             match request_info {
+                all::RequestDetail::BlocksRequest { .. }
+                    if source_id == self.block_author_sync_source =>
+                {
+                    // Create a request that is immediately answered right below.
+                    let request_id = self.sync.add_request(
+                        source_id,
+                        request_info,
+                        future::AbortHandle::new_pair().0, // Temporary dummy.
+                    );
+
+                    let (_, _, scale_encoded_header, scale_encoded_extrinsics) =
+                        self.authored_block.take().unwrap();
+
+                    // TODO: announce the block on the network, but only after it's been imported
+                    self.sync.blocks_request_response(
+                        request_id,
+                        Ok(iter::once(all::BlockRequestSuccessBlock {
+                            scale_encoded_header,
+                            scale_encoded_extrinsics,
+                            scale_encoded_justification: None,
+                            user_data: (),
+                        })),
+                    );
+                }
+
                 all::RequestDetail::BlocksRequest {
                     first_block_hash,
                     first_block_height,
