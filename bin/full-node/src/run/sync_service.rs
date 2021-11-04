@@ -455,10 +455,11 @@ impl SyncBackground {
             _ => panic!(),
         };
 
+        let parent_number = self.sync.best_block_number();
         let span = tracing::info_span!(
             "block-authoring",
             parent_hash = %HashDisplay(&self.sync.best_block_hash()),
-            parent_number = self.sync.best_block_number(),
+            parent_number,
             error = tracing::field::Empty,
         );
         let _enter = span.enter();
@@ -591,7 +592,6 @@ impl SyncBackground {
         };
 
         // Block has now finished being generated.
-        let new_block_height = header::decode(&block.scale_encoded_header).unwrap().number; // TODO: looks a bit stupid
         let new_block_hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
         tracing::info!(
             hash = %HashDisplay(&new_block_hash),
@@ -607,15 +607,23 @@ impl SyncBackground {
 
         // The next step is to import the block in `self.sync`. This is done by pretending that
         // the local node is a source of block similar to networking peers.
-        self.sync.block_announce(
+        match self.sync.block_announce(
             self.block_author_sync_source,
             block.scale_encoded_header.clone(),
             true, // Since the new block is a child of the current best block, it always becomes the new best.
-        );
+        ) {
+            all::BlockAnnounceOutcome::HeaderVerify
+            | all::BlockAnnounceOutcome::Disjoint
+            | all::BlockAnnounceOutcome::Discarded => {}
+            all::BlockAnnounceOutcome::TooOld { .. }
+            | all::BlockAnnounceOutcome::AlreadyInChain
+            | all::BlockAnnounceOutcome::NotFinalizedChain
+            | all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
+        }
 
         debug_assert!(self.authored_block.is_none());
         self.authored_block = Some((
-            new_block_height,
+            parent_number + 1,
             new_block_hash,
             block.scale_encoded_header,
             block.body,
@@ -675,6 +683,11 @@ impl SyncBackground {
                 all::RequestDetail::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
+                    tracing::info!(
+                        // TODO: debug! instead
+                        "import-locally-authored-block"
+                    );
+
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(
                         source_id,
@@ -684,6 +697,7 @@ impl SyncBackground {
 
                     let (_, _, scale_encoded_header, scale_encoded_extrinsics) =
                         self.authored_block.take().unwrap();
+                    self.block_authoring = None;
 
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(

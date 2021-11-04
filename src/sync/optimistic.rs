@@ -491,14 +491,14 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 if source.num_ongoing_requests != 0 {
                     return None;
                 }
-                let source_avail_blocks =
-                    source.best_block_number.checked_sub(block_height.get())?;
+                let source_avail_blocks = NonZeroU32::new(
+                    u32::try_from(source.best_block_number.checked_sub(block_height.get())? + 1)
+                        .unwrap(),
+                )
+                .unwrap();
                 Some(RequestDetail {
                     block_height,
-                    num_blocks: cmp::min(
-                        NonZeroU32::new(u32::try_from(source_avail_blocks).unwrap())?,
-                        num_blocks,
-                    ),
+                    num_blocks: cmp::min(source_avail_blocks, num_blocks),
                     source_id: *source_id,
                 })
             })
