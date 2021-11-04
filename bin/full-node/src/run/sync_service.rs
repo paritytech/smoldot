@@ -571,6 +571,11 @@ impl SyncBackground {
         };
 
         // Block has now finished being generated.
+        tracing::info!(
+            hash = %HashDisplay(&header::hash_from_scale_encoded_header(&block.scale_encoded_header)),
+            body_len = %block.body.len(),
+            "block-generated"
+        );
 
         // Switch the block authoring to a state where we won't try to generate a new block again
         // until something new happens.

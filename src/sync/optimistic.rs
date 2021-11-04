@@ -712,13 +712,13 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
 
         iter::from_fn(
             move || match (in_finalized_filtered.peek(), diff_inserted.peek()) {
-                (Some(a), None) => in_finalized_filtered.next(),
+                (Some(_), None) => in_finalized_filtered.next(),
                 (Some(a), Some(b)) if a < b => in_finalized_filtered.next(),
                 (Some(a), Some(b)) => {
                     debug_assert_ne!(a, b);
                     diff_inserted.next()
                 }
-                (None, Some(b)) => diff_inserted.next(),
+                (None, Some(_)) => diff_inserted.next(),
                 (None, None) => None,
             },
         )
