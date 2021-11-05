@@ -209,6 +209,7 @@ pub mod keystore;
 pub mod libp2p;
 pub mod metadata;
 pub mod network;
+pub mod ss58;
 pub mod sync;
 pub mod transactions;
 pub mod trie;
