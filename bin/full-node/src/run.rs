@@ -260,6 +260,14 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let mut network_events_receivers = network_events_receivers.into_iter();
 
+    let keystore = Arc::new({
+        let mut keystore = keystore::Keystore::new(rand::random());
+        for key in cli_options.keystore_memory {
+            keystore.insert_sr25519_memory(*b"aura", &key); // TODO: namespace?
+        }
+        keystore
+    });
+
     let sync_service = sync_service::SyncService::new(sync_service::Config {
         tasks_executor: {
             let threads_pool = threads_pool.clone();
@@ -268,20 +276,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
-        keystore: Arc::new({
-            let mut keystore = keystore::Keystore::new(rand::random());
-            keystore.insert_sr25519_memory(
-                *b"aura",
-                &[
-                    // TODO: this is `//Alice`; remove and instead let user pass through CLI
-                    51, 166, 243, 9, 63, 21, 138, 113, 9, 246, 121, 65, 11, 239, 26, 12, 84, 22,
-                    129, 69, 224, 206, 203, 77, 240, 6, 193, 194, 255, 251, 31, 9, 146, 90, 34, 93,
-                    151, 170, 0, 104, 45, 106, 89, 185, 91, 24, 120, 12, 16, 215, 3, 35, 54, 232,
-                    143, 52, 66, 180, 35, 97, 244, 166, 96, 17,
-                ],
-            ); // TODO: namespace?
-            keystore
-        }),
+        keystore,
     })
     .instrument(tracing::debug_span!("sync-service-init"))
     .await;
