@@ -122,75 +122,66 @@ pub fn decode_private_key(key: &str) -> Result<[u8; 64], ParsePrivateKeyError> {
 
 /// Turns a human-readable private key into a seed and a derivation path.
 pub fn parse_private_key(key: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyError> {
-    // TODO: this code was mostly copy-pasted from Substrate; use `nom` instead of regex to improve performances and readability
-    lazy_static::lazy_static! {
-        static ref SECRET_PHRASE_REGEX: regex::Regex = regex::Regex::new(r"^(?P<phrase>[\d\w ]+)?(?P<path>(//?[^/]+)*)(///(?P<password>.*))?$").unwrap();
-        static ref JUNCTION_REGEX: regex::Regex = regex::Regex::new(r"/(/?[^/]+)").unwrap();
-    }
+    let parse_result: Result<_, nom::Err<nom::error::Error<&str>>> =
+        nom::combinator::all_consuming(nom::sequence::tuple((
+            nom::branch::alt((
+                nom::combinator::map(
+                    nom::combinator::map_opt(
+                        nom::sequence::preceded(
+                            nom::bytes::complete::tag("0x"),
+                            nom::character::complete::hex_digit0,
+                        ),
+                        |hex| <[u8; 32]>::try_from(hex::decode(hex).ok()?).ok(),
+                    ),
+                    either::Left,
+                ),
+                nom::combinator::map(
+                    nom::bytes::complete::take_while1(|c| c != '/'),
+                    either::Right,
+                ),
+            )),
+            nom::multi::many0(nom::branch::alt((
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::complete::tag("/"),
+                        nom::bytes::complete::take_while1(|c| c != '/'),
+                    ),
+                    |code| DeriveJunction::from_components(false, code),
+                ),
+                nom::combinator::map(
+                    nom::sequence::preceded(
+                        nom::bytes::complete::tag("//"),
+                        nom::bytes::complete::take_while1(|c| c != '/'),
+                    ),
+                    |code| DeriveJunction::from_components(true, code),
+                ),
+            ))),
+            nom::combinator::opt(nom::sequence::preceded(
+                nom::bytes::complete::tag("///"),
+                |s| Ok(("", s)),
+            )),
+        )))(key);
 
-    let regex_captures = SECRET_PHRASE_REGEX
-        .captures(key)
-        .ok_or(ParsePrivateKeyError::InvalidFormat)?;
-
-    let phrase = regex_captures
-        .name("phrase")
-        .map(|r| r.as_str())
-        .unwrap_or(DEFAULT_SEED_PHRASE);
-
-    let path = JUNCTION_REGEX
-        .captures_iter(&regex_captures["path"])
-        .map(|junction| {
-            // The algorithm here is the same as in Substrate, but way more readable.
-            let (code, hard) = if let Some(stripped) = junction[1].strip_prefix('/') {
-                (stripped, true)
+    match parse_result {
+        Ok((_, (either::Left(seed), path, _password))) => {
+            // TODO: what if there's a password? do we just ignore it?
+            Ok(ParsedPrivateKey { seed, path })
+        }
+        Ok((_, (either::Right(phrase), path, password))) => {
+            let phrase = if phrase.is_empty() {
+                DEFAULT_SEED_PHRASE
             } else {
-                (&junction[1], false)
+                phrase
             };
 
-            let mut chain_code = [0; 32];
-            if let Ok(n) = str::parse::<u64>(code) {
-                chain_code[..8].copy_from_slice(&n.to_le_bytes());
-            } else {
-                // For some reason, a SCALE-compact-encoded length prefix is added in front of
-                // the path.
-                let code = code.as_bytes();
-                let code_len_prefix = crate::util::encode_scale_compact_usize(code.len());
-                let code_len_prefix = code_len_prefix.as_ref();
-
-                if code_len_prefix.len() + code.len() > 32 {
-                    let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
-                    hash.update(code_len_prefix);
-                    hash.update(code);
-                    chain_code.copy_from_slice(hash.finalize().as_bytes());
-                } else {
-                    chain_code[..code_len_prefix.len()].copy_from_slice(code_len_prefix);
-                    chain_code[code_len_prefix.len()..][..code.len()].copy_from_slice(code);
-                }
-            }
-
-            if hard {
-                DeriveJunction::Hard(chain_code)
-            } else {
-                DeriveJunction::Soft(chain_code)
-            }
-        })
-        .collect();
-
-    let password = regex_captures
-        .name("password")
-        .map(|m| m.as_str())
-        .unwrap_or("");
-
-    let seed = if let Some(stripped) = phrase.strip_prefix("0x") {
-        let decoded =
-            hex::decode(stripped).map_err(|_| ParsePrivateKeyError::InvalidSeedHexadecimal)?;
-        <[u8; 32]>::try_from(&decoded[..])
-            .map_err(|_| ParsePrivateKeyError::InvalidSeedHexadecimal)?
-    } else {
-        bip39_to_seed(phrase, password).map_err(ParsePrivateKeyError::Bip39Decode)?
-    };
-
-    Ok(ParsedPrivateKey { seed, path })
+            Ok(ParsedPrivateKey {
+                seed: bip39_to_seed(phrase, password.unwrap_or(""))
+                    .map_err(ParsePrivateKeyError::Bip39Decode)?,
+                path,
+            })
+        }
+        Err(_) => Err(ParsePrivateKeyError::InvalidFormat),
+    }
 }
 
 /// Successful outcome of [`parse_private_key`].
@@ -208,8 +199,6 @@ pub struct ParsedPrivateKey {
 pub enum ParsePrivateKeyError {
     /// Couldn't parse the string in any meaningful way.
     InvalidFormat,
-    /// Size or content of hexadecimal seed isn't valid.
-    InvalidSeedHexadecimal,
     /// Failed to decode the provided BIP39 seed phrase.
     Bip39Decode(Bip39ToSeedError),
 }
@@ -218,6 +207,38 @@ pub enum ParsePrivateKeyError {
 pub enum DeriveJunction {
     Soft([u8; 32]),
     Hard([u8; 32]),
+}
+
+impl DeriveJunction {
+    fn from_components(hard: bool, code: &str) -> DeriveJunction {
+        // The algorithm here is the same as in Substrate, but way more readable.
+        let mut chain_code = [0; 32];
+        if let Ok(n) = str::parse::<u64>(code) {
+            chain_code[..8].copy_from_slice(&n.to_le_bytes());
+        } else {
+            // For some reason, a SCALE-compact-encoded length prefix is added in front of
+            // the path.
+            let code = code.as_bytes();
+            let code_len_prefix = crate::util::encode_scale_compact_usize(code.len());
+            let code_len_prefix = code_len_prefix.as_ref();
+
+            if code_len_prefix.len() + code.len() > 32 {
+                let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
+                hash.update(code_len_prefix);
+                hash.update(code);
+                chain_code.copy_from_slice(hash.finalize().as_bytes());
+            } else {
+                chain_code[..code_len_prefix.len()].copy_from_slice(code_len_prefix);
+                chain_code[code_len_prefix.len()..][..code.len()].copy_from_slice(code);
+            }
+        }
+
+        if hard {
+            DeriveJunction::Hard(chain_code)
+        } else {
+            DeriveJunction::Soft(chain_code)
+        }
+    }
 }
 
 /// Turns a BIP39 seed phrase into a 32 bytes cryptographic seed.
