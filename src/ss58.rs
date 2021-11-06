@@ -135,23 +135,20 @@ pub fn parse_private_key(key: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyE
                     ),
                     either::Left,
                 ),
-                nom::combinator::map(
-                    nom::bytes::complete::take_while1(|c| c != '/'),
-                    either::Right,
-                ),
+                nom::combinator::map(nom::bytes::complete::take_till(|c| c == '/'), either::Right),
             )),
             nom::multi::many0(nom::branch::alt((
                 nom::combinator::map(
                     nom::sequence::preceded(
                         nom::bytes::complete::tag("/"),
-                        nom::bytes::complete::take_while1(|c| c != '/'),
+                        nom::bytes::complete::take_till1(|c| c == '/'),
                     ),
                     |code| DeriveJunction::from_components(false, code),
                 ),
                 nom::combinator::map(
                     nom::sequence::preceded(
                         nom::bytes::complete::tag("//"),
-                        nom::bytes::complete::take_while1(|c| c != '/'),
+                        nom::bytes::complete::take_till1(|c| c == '/'),
                     ),
                     |code| DeriveJunction::from_components(true, code),
                 ),
