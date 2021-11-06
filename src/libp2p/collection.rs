@@ -1095,6 +1095,9 @@ where
                     })
                     .unwrap();
 
+                let _index = guarded.connections_by_id.remove(&connection_id);
+                debug_assert_eq!(_index, Some(connection_index));
+
                 guarded.connections.remove(connection_index);
                 match mem::replace(&mut connection_lock.connection, ConnectionInner::Dead) {
                     ConnectionInner::PendingErrorReport { error } => {
