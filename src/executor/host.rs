@@ -804,6 +804,7 @@ impl ReadyToRun {
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove: None,
+                    is_v2: false,
                 })
             }
             HostFunction::ext_storage_clear_prefix_version_2 => {
@@ -826,6 +827,7 @@ impl ReadyToRun {
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove,
+                    is_v2: true,
                 })
             }
             HostFunction::ext_storage_root_version_1 => {
@@ -1765,6 +1767,9 @@ pub struct ExternalStorageClearPrefix {
 
     /// Maximum number of keys to remove.
     max_keys_to_remove: Option<u32>,
+
+    /// `true` if version 2 of the function is called, `false` for version 1.
+    is_v2: bool,
 }
 
 impl ExternalStorageClearPrefix {
@@ -1782,11 +1787,25 @@ impl ExternalStorageClearPrefix {
     }
 
     /// Resumes execution after having cleared the values.
-    pub fn resume(self) -> HostVm {
-        HostVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: None,
-        })
+    ///
+    /// Must be passed how many keys have been cleared, and whether some keys remaing to be
+    /// cleared.
+    pub fn resume(self, num_cleared: u32, some_keys_remain: bool) -> HostVm {
+        if self.is_v2 {
+            self.inner.alloc_write_and_return_pointer_size(
+                HostFunction::ext_storage_clear_prefix_version_2.name(),
+                [
+                    either::Left(if some_keys_remain { [1u8] } else { [0u8] }),
+                    either::Right(num_cleared.to_le_bytes()),
+                ]
+                .into_iter(),
+            )
+        } else {
+            HostVm::ReadyToRun(ReadyToRun {
+                inner: self.inner,
+                resume_value: None,
+            })
+        }
     }
 }
 
