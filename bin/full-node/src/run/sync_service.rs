@@ -274,10 +274,10 @@ impl SyncBackground {
                 let local_authorities = {
                     let namespace_filter = match self.sync.best_block_consensus() {
                         chain_information::ChainInformationConsensusRef::Aura { .. } => {
-                            Some(b"aura")
+                            Some(keystore::KeyNamespace::Aura)
                         }
                         chain_information::ChainInformationConsensusRef::Babe { .. } => {
-                            Some(b"babe")
+                            Some(keystore::KeyNamespace::Babe)
                         }
                         chain_information::ChainInformationConsensusRef::AllAuthorized => {
                             // In `AllAuthorized` mode, all keys are accepted and there is no
@@ -292,7 +292,7 @@ impl SyncBackground {
                     self.keystore
                         .keys()
                         .await
-                        .filter(|(namespace, _)| namespace_filter.map_or(true, |n| namespace == n))
+                        .filter(|(namespace, _)| namespace_filter.map_or(true, |n| *namespace == n))
                         .map(|(_, key)| key)
                         .collect::<Vec<_>>() // TODO: collect overhead :-/
                 };
@@ -512,7 +512,7 @@ impl SyncBackground {
                         // TODO: correct key namespace
                         let data_to_sign = seal.to_sign();
                         let sign_future = self.keystore.sign(
-                            *b"aura",
+                            keystore::KeyNamespace::Aura,
                             &local_authorities[seal.authority_index()],
                             &data_to_sign,
                         );
