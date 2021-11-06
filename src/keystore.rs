@@ -24,8 +24,28 @@ use futures::lock::Mutex;
 use rand::{Rng as _, SeedableRng as _};
 
 /// Namespace of the key.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 // TODO: document
-pub type KeyNamespace = [u8; 4];
+pub enum KeyNamespace {
+    Aura,
+    AuthorityDiscovery,
+    Babe,
+    Grandpa,
+    ImOnline,
+    // TODO: there exists other variants in Substrate but it's unclear whether they're in use (see https://github.com/paritytech/substrate/blob/cafe12e7785bf92e5dc04780c10e7f8330a15a4c/primitives/core/src/crypto.rs)
+}
+
+impl KeyNamespace {
+    fn as_string(&self) -> &'static [u8; 4] {
+        match self {
+            KeyNamespace::Aura => b"aura",
+            KeyNamespace::AuthorityDiscovery => b"audi",
+            KeyNamespace::Babe => b"babe",
+            KeyNamespace::Grandpa => b"gran",
+            KeyNamespace::ImOnline => b"imon",
+        }
+    }
+}
 
 /// Collection of keypairs.
 ///
