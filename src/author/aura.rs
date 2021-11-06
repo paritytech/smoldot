@@ -55,11 +55,17 @@ pub fn next_slot_claim<'a>(
 ) -> Option<SlotClaim> {
     let num_current_authorities = config.current_authorities.clone().count();
 
-    let current_slot = config.now_from_unix_epoch.as_secs() / config.slot_duration.get();
+    // Note that this calculation (and some other calculations down below) can overflow in the
+    // very distant future. This is considered acceptable.
+    let current_slot = u64::try_from(
+        config.now_from_unix_epoch.as_millis() / u128::from(config.slot_duration.get()),
+    )
+    .unwrap();
 
     let current_slot_index =
-        usize::try_from(current_slot.checked_div(u64::try_from(num_current_authorities).unwrap())?)
+        usize::try_from(current_slot.checked_rem(u64::try_from(num_current_authorities).unwrap())?)
             .unwrap();
+    debug_assert!(current_slot_index < num_current_authorities);
 
     let mut claim = None;
 
@@ -77,6 +83,7 @@ pub fn next_slot_claim<'a>(
         if index < current_slot_index {
             index += num_current_authorities;
         }
+        debug_assert!(index >= current_slot_index);
 
         let claimable_slot = current_slot + u64::try_from(index - current_slot_index).unwrap();
 
@@ -88,10 +95,10 @@ pub fn next_slot_claim<'a>(
 
     if let Some((slot_number, local_authorities_index)) = claim {
         let slot_start_from_unix_epoch =
-            Duration::from_secs(slot_number * config.slot_duration.get());
+            Duration::from_millis(slot_number.checked_mul(config.slot_duration.get()).unwrap());
         let slot_end_from_unix_epoch =
             slot_start_from_unix_epoch + Duration::from_secs(config.slot_duration.get());
-        debug_assert!(slot_end_from_unix_epoch < config.now_from_unix_epoch);
+        debug_assert!(slot_end_from_unix_epoch > config.now_from_unix_epoch);
 
         Some(SlotClaim {
             slot_start_from_unix_epoch,
