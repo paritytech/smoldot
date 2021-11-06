@@ -58,7 +58,7 @@ pub struct CliOptionsRun {
     pub color: ColorChoice,
     /// Ed25519 private key of network identity (32 bytes hexadecimal).
     #[structopt(long)]
-    pub node_key: Option<NodeKey>,
+    pub libp2p_key: Option<Libp2pKey>,
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
@@ -161,9 +161,9 @@ pub struct OutputParseError;
 // passed through the CLI, it is going to be present at several other locations in memory, plus on
 // the system. Any zero-ing here would be completely superfluous.
 #[derive(Debug)]
-pub struct NodeKey([u8; 32]);
+pub struct Libp2pKey([u8; 32]);
 
-impl core::str::FromStr for NodeKey {
+impl core::str::FromStr for Libp2pKey {
     type Err = NodeKeyParseError;
 
     fn from_str(mut s: &str) -> Result<Self, Self::Err> {
@@ -182,11 +182,11 @@ impl core::str::FromStr for NodeKey {
 
         ed25519_zebra::SigningKey::try_from(out).map_err(|_| NodeKeyParseError::BadKey)?;
 
-        Ok(NodeKey(out))
+        Ok(Libp2pKey(out))
     }
 }
 
-impl AsRef<[u8; 32]> for NodeKey {
+impl AsRef<[u8; 32]> for Libp2pKey {
     fn as_ref(&self) -> &[u8; 32] {
         &self.0
     }
