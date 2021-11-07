@@ -146,7 +146,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .create()
         .unwrap();
 
-    let (database, database_is_new) = open_database(
+    let (database, database_existed) = open_database(
         &chain_spec,
         &genesis_chain_information,
         cli_options.tmp,
@@ -382,7 +382,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     };*/
 
     tracing::info!(
-        %local_peer_id, %database_is_new,
+        %local_peer_id, database_is_new = %!database_existed,
         finalized_block_hash = %HashDisplay(&database_finalized_block_hash),
         finalized_block_number = %database_finalized_block_number,
         "successful-initialization"
