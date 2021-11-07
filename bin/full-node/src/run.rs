@@ -22,8 +22,8 @@ use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
     header,
+    identity::keystore,
     informant::HashDisplay,
-    keystore,
     libp2p::{connection, multiaddr, peer_id::PeerId},
 };
 use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};

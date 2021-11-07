@@ -33,8 +33,9 @@ use smoldot::{
     chain::chain_information,
     database::full_sqlite,
     executor, header,
+    identity::keystore,
     informant::HashDisplay,
-    keystore, libp2p,
+    libp2p,
     network::{self, protocol::BlockData, service::BlocksRequestError},
     sync::all,
 };
