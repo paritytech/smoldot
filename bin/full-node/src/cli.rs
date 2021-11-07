@@ -30,7 +30,7 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use smoldot::ss58;
+use smoldot::identity::ss58;
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
