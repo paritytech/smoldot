@@ -146,19 +146,38 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .create()
         .unwrap();
 
-    let database = open_database(&chain_spec, &genesis_chain_information, cli_options.tmp).await;
+    let (database, database_existed) = open_database(
+        &chain_spec,
+        &genesis_chain_information,
+        cli_options.tmp,
+        matches!(cli_output, cli::Output::Informant),
+    )
+    .await;
+
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
         Some(
             open_database(
                 &relay_chain_spec,
                 relay_genesis_chain_information.as_ref().unwrap(),
                 cli_options.tmp,
+                matches!(cli_output, cli::Output::Informant),
             )
-            .await,
+            .await
+            .0,
         )
     } else {
         None
     };
+
+    let database_finalized_block_hash = database.finalized_block_hash().unwrap();
+    let database_finalized_block_number = header::decode(
+        &database
+            .block_scale_encoded_header(&database_finalized_block_hash)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+    .number;
 
     // TODO: remove; just for testing
     /*let metadata = smoldot::metadata::metadata_from_runtime_code(
@@ -182,14 +201,15 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         connection::NoiseKey::new(&rand::random())
     };
 
+    let local_peer_id =
+        peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
+
     let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
         tasks_executor: {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
         },
-        service_name: peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key())
-            .into_peer_id()
-            .to_string(),
+        service_name: local_peer_id.to_string(),
         jaeger_agent: cli_options.jaeger,
     })
     .await
@@ -361,6 +381,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         })
     };*/
 
+    tracing::info!(
+        %local_peer_id, database_is_new = %!database_existed,
+        finalized_block_hash = %HashDisplay(&database_finalized_block_hash),
+        finalized_block_number = %database_finalized_block_number,
+        "successful-initialization"
+    );
+
     // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
     // a message will be sent on `ctrlc_rx`.
     // This should be performed after all the expensive initialization is done, as otherwise the
@@ -502,83 +529,77 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 ///
 /// If `tmp` is `true`, open the database in memory instead.
 ///
+/// The returned boolean is `true` if the database existed before.
+///
 /// # Panic
 ///
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
-#[tracing::instrument(level = "trace", skip(chain_spec))]
+#[tracing::instrument(level = "trace", skip(chain_spec, show_progress))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: &chain::chain_information::ChainInformation,
     tmp: bool,
-) -> Arc<full_sqlite::SqliteFullDatabase> {
-    Arc::new({
-        // Directory supposed to contain the database.
-        let db_path = if !tmp {
-            if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
-                Some(base.data_dir().join(chain_spec.id()).join("database"))
-            } else {
-                tracing::warn!(
-                    "Failed to fetch $HOME directory. Falling back to a temporary database. \
+    show_progress: bool,
+) -> (Arc<full_sqlite::SqliteFullDatabase>, bool) {
+    // Directory supposed to contain the database.
+    let db_path = if !tmp {
+        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+            Some(base.data_dir().join(chain_spec.id()).join("database"))
+        } else {
+            tracing::warn!(
+                "Failed to fetch $HOME directory. Falling back to a temporary database. \
                     If this is intended, please make this explicit by passing the `--tmp` flag \
                     instead."
-                );
-                None
-            }
-        } else {
+            );
             None
-        };
-
-        // The `unwrap()` here can panic for example in case of access denied.
-        match background_open_database(db_path.clone()).await.unwrap() {
-            // Database already exists and contains data.
-            full_sqlite::DatabaseOpen::Open(database) => {
-                if database.block_hash_by_number(0).unwrap().next().unwrap()
-                    != genesis_chain_information.finalized_block_header.hash()
-                {
-                    panic!(
-                        "Mismatch between database and chain specification. Shutting down node."
-                    );
-                }
-
-                let finalized_block_hash = database.finalized_block_hash().unwrap();
-                let finalized_block = database
-                    .block_scale_encoded_header(&finalized_block_hash)
-                    .unwrap()
-                    .unwrap();
-                eprintln!(
-                    "Loaded existing database (finalized: #{}, {})",
-                    header::decode(&finalized_block).unwrap().number,
-                    HashDisplay(&finalized_block_hash)
-                );
-                database
-            }
-
-            // The database doesn't exist or is empty.
-            full_sqlite::DatabaseOpen::Empty(empty) => {
-                // The finalized block is the genesis block. As such, it has an empty body and
-                // no justification.
-                empty
-                    .initialize(
-                        genesis_chain_information,
-                        iter::empty(),
-                        None,
-                        chain_spec.genesis_storage(),
-                    )
-                    .unwrap()
-            }
         }
-    })
+    } else {
+        None
+    };
+
+    // The `unwrap()` here can panic for example in case of access denied.
+    match background_open_database(db_path.clone(), show_progress)
+        .await
+        .unwrap()
+    {
+        // Database already exists and contains data.
+        full_sqlite::DatabaseOpen::Open(database) => {
+            if database.block_hash_by_number(0).unwrap().next().unwrap()
+                != genesis_chain_information.finalized_block_header.hash()
+            {
+                panic!("Mismatch between database and chain specification. Shutting down node.");
+            }
+
+            (Arc::new(database), true)
+        }
+
+        // The database doesn't exist or is empty.
+        full_sqlite::DatabaseOpen::Empty(empty) => {
+            // The finalized block is the genesis block. As such, it has an empty body and
+            // no justification.
+            let database = empty
+                .initialize(
+                    genesis_chain_information,
+                    iter::empty(),
+                    None,
+                    chain_spec.genesis_storage(),
+                )
+                .unwrap();
+            (Arc::new(database), false)
+        }
+    }
 }
 
 /// Since opening the database can take a long time, this utility function performs this operation
 /// in the background while showing a small progress bar to the user.
 ///
 /// If `path` is `None`, the database is opened in memory.
-#[tracing::instrument(level = "trace")]
+#[tracing::instrument(level = "trace", skip(show_progress))]
 async fn background_open_database(
     path: Option<PathBuf>,
+    show_progress: bool,
 ) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {
     let (tx, rx) = oneshot::channel();
     let mut rx = rx.fuse();
@@ -619,7 +640,9 @@ async fn background_open_database(
         futures::select! {
             res = rx => return res.unwrap(),
             _ = progress_timer.next() => {
-                eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
+                if show_progress {
+                    eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
+                }
             }
         }
     }
