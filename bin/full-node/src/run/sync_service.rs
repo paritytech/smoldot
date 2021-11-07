@@ -137,9 +137,12 @@ impl SyncService {
                 max_disjoint_headers: 1024,
                 max_requests_per_block: NonZeroU32::new(3).unwrap(),
                 download_ahead_blocks: {
-                    // Assuming a verification speed of 1k blocks/sec and a 95% latency of one second,
-                    // the number of blocks to download ahead of time in order to not block is 1000.
-                    NonZeroU32::new(1024).unwrap()
+                    // Assuming a verification speed of 1k blocks/sec and a 99th download time
+                    // percentile of two second, the number of blocks to download ahead of time
+                    // in order to not block is 2000.
+                    // In practice, however, the verification speed and download speed depend on
+                    // the chain and the machine of the user.
+                    NonZeroU32::new(2000).unwrap()
                 },
                 full: Some(all::ConfigFull {
                     finalized_runtime: {
