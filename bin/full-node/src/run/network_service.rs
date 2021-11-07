@@ -140,66 +140,6 @@ impl NetworkService {
             .map(|_| mpsc::channel(16))
             .unzip();
 
-        // For each listening address in the configuration, create a background task dedicated to
-        // listening on that address.
-        for listen_address in config.listen_addresses {
-            // Try to parse the requested address and create the corresponding listening socket.
-            let tcp_listener: async_std::net::TcpListener = {
-                let mut iter = listen_address.iter();
-                let proto1 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-                let proto2 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                if iter.next().is_some() {
-                    return Err(InitError::BadListenMultiaddr(listen_address));
-                }
-
-                let addr = match (proto1, proto2) {
-                    (Protocol::Ip4(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    (Protocol::Ip6(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    _ => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                match async_std::net::TcpListener::bind(addr).await {
-                    Ok(l) => l,
-                    Err(err) => {
-                        return Err(InitError::ListenerIo(listen_address, err));
-                    }
-                }
-            };
-
-            // Spawn a background task dedicated to this listener.
-            (config.tasks_executor)(Box::pin(
-                async move {
-                    loop {
-                        // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
-
-                        let (_socket, _addr) = match tcp_listener.accept().await {
-                            Ok(v) => v,
-                            Err(_) => {
-                                // Errors here can happen if the accept failed, for example if no file
-                                // descriptor is available.
-                                // A wait is added in order to avoid having a busy-loop failing to
-                                // accept connections.
-                                futures_timer::Delay::new(Duration::from_secs(2)).await;
-                                continue;
-                            }
-                        };
-
-                        todo!() // TODO: report new connection
-                    }
-                }
-                .instrument(
-                    tracing::debug_span!(parent: None, "listener", address = %listen_address),
-                ),
-            ))
-        }
-
         // TODO: code is messy
         let mut known_nodes =
             Vec::with_capacity(config.chains.iter().map(|c| c.bootstrap_nodes.len()).sum());
@@ -447,6 +387,85 @@ impl NetworkService {
         // A channel is used to communicate new tasks dedicated to handling connections.
         let (connec_tx, mut connec_rx) = mpsc::channel(num_cpus::get());
 
+        // For each listening address in the configuration, create a background task dedicated to
+        // listening on that address.
+        for listen_address in config.listen_addresses {
+            // Try to parse the requested address and create the corresponding listening socket.
+            let tcp_listener: async_std::net::TcpListener = {
+                let mut iter = listen_address.iter();
+                let proto1 = match iter.next() {
+                    Some(p) => p,
+                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
+                let proto2 = match iter.next() {
+                    Some(p) => p,
+                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
+
+                if iter.next().is_some() {
+                    return Err(InitError::BadListenMultiaddr(listen_address));
+                }
+
+                let addr = match (proto1, proto2) {
+                    (Protocol::Ip4(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
+                    (Protocol::Ip6(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
+                    _ => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
+
+                match async_std::net::TcpListener::bind(addr).await {
+                    Ok(l) => l,
+                    Err(err) => {
+                        return Err(InitError::ListenerIo(listen_address, err));
+                    }
+                }
+            };
+
+            // Spawn a background task dedicated to this listener.
+            (config.tasks_executor)(Box::pin({
+                let mut connec_tx = connec_tx.clone();
+                let inner = inner.clone();
+                let future = async move {
+                    loop {
+                        let (socket, addr) = match tcp_listener.accept().await {
+                            Ok(v) => v,
+                            Err(_) => {
+                                // Errors here can happen if the accept failed, for example if no file
+                                // descriptor is available.
+                                // A wait is added in order to avoid having a busy-loop failing to
+                                // accept connections.
+                                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                                continue;
+                            }
+                        };
+
+                        let multiaddr = Multiaddr::from(addr.ip()).with(Protocol::Tcp(addr.port()));
+
+                        tracing::debug!(%multiaddr, "incoming-connection");
+
+                        let connection_id = inner
+                            .network
+                            .add_incoming_connection(Instant::now(), multiaddr.clone())
+                            .await;
+
+                        // Ignore errors, as it is possible for the destination task to have been
+                        // aborted already.
+                        let inner = inner.clone();
+                        let _ = connec_tx.send(
+                            connection_task(socket, inner, connection_id).instrument(
+                                tracing::debug_span!(parent: None, "connection", address = %multiaddr),
+                            ).boxed()
+                        ).await;
+                    }
+                };
+
+                let (abortable, abort_handle) = future::abortable(future.instrument(
+                    tracing::trace_span!(parent: None, "listener", address = %listen_address),
+                ));
+                abort_handles.push(abort_handle);
+                abortable.map(|_| ())
+            }))
+        }
+
         // Spawn task dedicated to opening connections.
         // TODO: spawn multiple of these tasks and block them on the connection attempt; not possible now because `next_start_connect` has a bug
         (config.tasks_executor)(Box::pin({
@@ -475,18 +494,17 @@ impl NetworkService {
 
                     // TODO: handle dialing timeout here
 
-                    let inner = inner.clone();
-
                     // Ignore errors, as it is possible for the destination task to have been
                     // aborted already.
-                    let _ = connec_tx.send(connection_task(socket, start_connect.timeout, inner, start_connect.id).instrument(
-                        tracing::debug_span!(parent: None, "connection", address = %start_connect.multiaddr),
+                    let inner = inner.clone();
+                    let _ = connec_tx.send(pending_connection_task(socket, start_connect.timeout, inner, start_connect.id).instrument(
+                        tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
                     ).boxed()).await;
                 }
             };
 
             let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::debug_span!(parent: None, "tcp-dial")),
+                future.instrument(tracing::trace_span!(parent: None, "tcp-dial")),
             );
             abort_handles.push(abort_handle);
             abortable.map(|_| ())
@@ -509,7 +527,7 @@ impl NetworkService {
             };
 
             let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::debug_span!(parent: None, "connections-executor")),
+                future.instrument(tracing::trace_span!(parent: None, "connections-executor")),
             );
             abort_handles.push(abort_handle);
             abortable.map(|_| ())
@@ -599,7 +617,7 @@ pub enum InitError {
 
 /// Asynchronous task managing a specific TCP connection.
 #[tracing::instrument(level = "trace", skip(tcp_socket, network_service))]
-async fn connection_task(
+async fn pending_connection_task(
     tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
     timeout: Instant,
     network_service: Arc<Inner>,
@@ -635,7 +653,16 @@ async fn connection_task(
     };
 
     let id = network_service.network.pending_outcome_ok(id).await;
+    connection_task(tcp_socket, network_service, id).await;
+}
 
+/// Asynchronous task managing a specific TCP connection.
+#[tracing::instrument(level = "trace", skip(tcp_socket, network_service))]
+async fn connection_task(
+    tcp_socket: async_std::net::TcpStream,
+    network_service: Arc<Inner>,
+    id: service::ConnectionId,
+) {
     // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
     // out and waiting a bit before actually sending it out, in order to potentially merge
     // multiple writes in a row into one packet. In the implementation below, it is guaranteed
