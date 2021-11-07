@@ -36,6 +36,18 @@ pub enum KeyNamespace {
 }
 
 impl KeyNamespace {
+    /// Returns all existing variants of [`KeyNamespace`].
+    pub fn all() -> impl ExactSizeIterator<Item = KeyNamespace> {
+        [
+            KeyNamespace::Aura,
+            KeyNamespace::AuthorityDiscovery,
+            KeyNamespace::Babe,
+            KeyNamespace::Grandpa,
+            KeyNamespace::ImOnline,
+        ]
+        .into_iter()
+    }
+
     fn as_string(&self) -> &'static [u8; 4] {
         match self {
             KeyNamespace::Aura => b"aura",
@@ -92,16 +104,19 @@ impl Keystore {
     ///
     pub fn insert_sr25519_memory(
         &mut self,
-        namespace: KeyNamespace,
+        namespaces: impl Iterator<Item = KeyNamespace>,
         private_key: &[u8; 64],
     ) -> [u8; 32] {
         let private_key = schnorrkel::SecretKey::from_bytes(&private_key[..]).unwrap();
         let keypair = private_key.to_keypair();
         let public_key = keypair.public.to_bytes();
-        self.guarded
-            .get_mut()
-            .keys
-            .insert((namespace, public_key), PrivateKey::MemorySr25519(keypair));
+
+        for namespace in namespaces {
+            self.guarded.get_mut().keys.insert(
+                (namespace, public_key),
+                PrivateKey::MemorySr25519(keypair.clone()),
+            );
+        }
 
         public_key
     }
