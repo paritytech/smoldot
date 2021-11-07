@@ -27,6 +27,8 @@
 // TODO: doc
 // TODO: re-review this once finished
 
+use crate::run::jaeger_service;
+
 use core::{cmp, pin::Pin, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use futures_timer::Delay;
@@ -35,7 +37,7 @@ use smoldot::{
     libp2p::{
         async_rw_with_buffers, connection,
         multiaddr::{Multiaddr, Protocol},
-        peer_id::PeerId,
+        peer_id::{self, PeerId},
         read_write::ReadWrite,
     },
     network::{protocol, service},
@@ -61,6 +63,9 @@ pub struct Config {
     /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
     pub noise_key: connection::NoiseKey,
+
+    /// Service to use to report traces.
+    pub jaeger_service: Arc<jaeger_service::JaegerService>,
 }
 
 /// Configuration for one chain.
@@ -118,6 +123,12 @@ pub struct NetworkService {
 struct Inner {
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<Instant>,
+
+    /// Identity of the local node.
+    local_peer_id: PeerId,
+
+    /// Service to use to report traces.
+    jaeger_service: Arc<jaeger_service::JaegerService>,
 }
 
 impl NetworkService {
@@ -224,6 +235,10 @@ impl NetworkService {
 
         // Initialize the inner network service.
         let inner = Arc::new(Inner {
+            local_peer_id: peer_id::PublicKey::Ed25519(
+                *config.noise_key.libp2p_public_ed25519_key(),
+            )
+            .into_peer_id(),
             network: service::ChainNetwork::new(service::Config {
                 now: Instant::now(),
                 chains,
@@ -236,6 +251,7 @@ impl NetworkService {
                 pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
                 randomness_seed: rand::random(),
             }),
+            jaeger_service: config.jaeger_service,
         });
 
         let mut abort_handles = Vec::new();
@@ -269,6 +285,19 @@ impl NetworkService {
                                 announce,
                             } => {
                                 let decoded = announce.decode();
+
+                                let mut _jaeger_span = inner.jaeger_service.net_connection_span(
+                                    &inner.local_peer_id,
+                                    &peer_id,
+                                    "block-announce-received",
+                                );
+                                _jaeger_span.add_int_tag(
+                                    "number",
+                                    i64::try_from(decoded.header.number).unwrap(),
+                                );
+                                _jaeger_span
+                                    .add_string_tag("hash", &hex::encode(&decoded.header.hash()));
+
                                 tracing::debug!(
                                     %chain_index, %peer_id,
                                     hash = %HashDisplay(&decoded.header.hash()),
@@ -276,6 +305,7 @@ impl NetworkService {
                                     is_best = ?decoded.is_best,
                                     "block-announce"
                                 );
+
                                 break Event::BlockAnnounce {
                                     chain_index,
                                     peer_id,
