@@ -84,7 +84,6 @@
 use alloc::{string::String, vec::Vec};
 
 // TODO: unclear what purpose soft derivations serve
-// TODO: merge with keystore module?
 
 // TODO: need decoding of public keys as well
 
