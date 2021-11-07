@@ -219,6 +219,12 @@ struct SyncBackground {
     /// State of the authoring. If `None`, the builder should be (re)created. If `Some`, also
     /// contains the list of public keys that were loaded from the keystore when creating the
     /// builder.
+    ///
+    /// The difference between a value of `None` and a value of `Some(Builder::Idle)` is that
+    /// `None` indicates that we should try to author a block as soon as possible, while `Idle`
+    /// means that we shouldn't try again until some event occurs (at which point this field is
+    /// set to `None`). For instance, if the operation of building a block fails, the state is set
+    /// to `Idle` so as to avoid trying to create a block over and over again.
     // TODO: this list of public keys is a bit hacky
     block_authoring: Option<(author::build::Builder, Vec<[u8; 32]>)>,
 
@@ -346,7 +352,7 @@ impl SyncBackground {
                         future::Either::Right(futures_timer::Delay::new(delay).fuse())
                     }
                     None => future::Either::Left(future::Either::Right(future::pending::<()>())),
-                    Some((author::build::Builder::AllSync, _)) => {
+                    Some((author::build::Builder::Idle, _)) => {
                         // If the block authoring is idle, which happens in case of error,
                         // sleep for an arbitrary duration before resetting it.
                         // This prevents the authoring from trying over and over again to generate
@@ -372,7 +378,7 @@ impl SyncBackground {
                             self.author_block().await;
                             continue;
                         }
-                        Some((author::build::Builder::AllSync, _)) => {
+                        Some((author::build::Builder::Idle, _)) => {
                             self.block_authoring = None;
                             continue;
                         }
@@ -542,7 +548,7 @@ impl SyncBackground {
                         // In order to prevent the block authoring from restarting immediately
                         // after and failing again repeatedly, we switch the block authoring to
                         // the same state as if it had successfully generated a block.
-                        self.block_authoring = Some((author::build::Builder::AllSync, Vec::new()));
+                        self.block_authoring = Some((author::build::Builder::Idle, Vec::new()));
                         tracing::warn!(%error, "block-author-error");
                         // TODO: log the runtime logs
                         span.record("error", &tracing::field::display(error));
@@ -621,7 +627,7 @@ impl SyncBackground {
         // Switch the block authoring to a state where we won't try to generate a new block again
         // until something new happens.
         // TODO: nothing prevents the node from generating two blocks at the same height at the moment
-        self.block_authoring = Some((author::build::Builder::AllSync, Vec::new()));
+        self.block_authoring = Some((author::build::Builder::Idle, Vec::new()));
 
         // The next step is to import the block in `self.sync`. This is done by pretending that
         // the local node is a source of block similar to networking peers.
