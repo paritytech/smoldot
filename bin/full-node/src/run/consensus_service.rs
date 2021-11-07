@@ -24,7 +24,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::run::network_service;
+use crate::run::{jaeger_service, network_service};
 
 use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
@@ -66,6 +66,9 @@ pub struct Config {
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
     pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
+
+    /// Service to use to report traces.
+    pub jaeger_service: Arc<jaeger_service::JaegerService>,
 }
 
 /// Identifier for a blocks request to be performed.
@@ -183,6 +186,7 @@ impl ConsensusService {
                 to_database,
                 peers_source_id_map: Default::default(),
                 block_requests_finished: stream::FuturesUnordered::new(),
+                jaeger_service: config.jaeger_service,
             }
         };
 
@@ -261,6 +265,9 @@ struct SyncBackground {
             ),
         >,
     >,
+
+    /// How to report events about blocks.
+    jaeger_service: Arc<jaeger_service::JaegerService>,
 }
 
 impl SyncBackground {
@@ -486,6 +493,11 @@ impl SyncBackground {
         );
         let _enter = span.enter();
 
+        // TODO: should be the newly-created block's hash
+        let _jaeger_span = self
+            .jaeger_service
+            .block_span(&self.sync.best_block_hash(), "child-creation");
+
         // Actual block production now happening.
         let block = {
             let mut block_authoring = {
@@ -708,7 +720,14 @@ impl SyncBackground {
                 all::RequestDetail::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
-                    tracing::debug!("import-locally-authored-block");
+                    tracing::debug!("queue-locally-authored-block-for-import");
+
+                    let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
+                        self.authored_block.take().unwrap();
+
+                    let _jaeger_span = self
+                        .jaeger_service
+                        .block_span(&block_hash, "block-import-queue");
 
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(
@@ -716,9 +735,6 @@ impl SyncBackground {
                         request_info,
                         future::AbortHandle::new_pair().0, // Temporary dummy.
                     );
-
-                    let (_, _, scale_encoded_header, scale_encoded_extrinsics) =
-                        self.authored_block.take().unwrap();
 
                     // TODO: announce the block on the network, but only after it's been imported
                     self.sync.blocks_request_response(

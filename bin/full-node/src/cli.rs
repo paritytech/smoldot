@@ -65,6 +65,9 @@ pub struct CliOptionsRun {
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
     #[structopt(long, parse(try_from_str = ss58::decode_private_key))]
     pub keystore_memory: Vec<[u8; 64]>,
+    /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
+    #[structopt(long)]
+    pub jaeger: Option<SocketAddr>,
     /// Do not load or store anything on disk.
     #[structopt(long)]
     pub tmp: bool,

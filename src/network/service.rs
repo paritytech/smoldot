@@ -509,6 +509,11 @@ where
         self.num_chains
     }
 
+    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    pub fn noise_key(&self) -> &connection::NoiseKey {
+        self.inner.noise_key()
+    }
+
     /// Adds an incoming connection to the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known

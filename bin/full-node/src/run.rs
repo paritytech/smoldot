@@ -24,12 +24,16 @@ use smoldot::{
     header,
     identity::keystore,
     informant::HashDisplay,
-    libp2p::{connection, multiaddr, peer_id::PeerId},
+    libp2p::{
+        connection, multiaddr,
+        peer_id::{self, PeerId},
+    },
 };
 use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
 use tracing::Instrument as _;
 
 mod consensus_service;
+mod jaeger_service;
 mod json_rpc_service;
 mod network_service;
 
@@ -171,6 +175,26 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         smoldot::metadata::decode(&metadata).unwrap()
     );*/
 
+    let noise_key = if let Some(node_key) = cli_options.libp2p_key {
+        connection::NoiseKey::new(node_key.as_ref())
+    } else {
+        // TODO: load from disk or something instead
+        connection::NoiseKey::new(&rand::random())
+    };
+
+    let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
+        tasks_executor: {
+            let threads_pool = threads_pool.clone();
+            Box::new(move |task| threads_pool.spawn_ok(task))
+        },
+        service_name: peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key())
+            .into_peer_id()
+            .to_string(),
+        jaeger_agent: cli_options.jaeger,
+    })
+    .await
+    .unwrap();
+
     let (network_service, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
             listen_addresses: Vec::new(),
@@ -243,16 +267,12 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     .into_iter(),
             )
             .collect(),
-            noise_key: if let Some(node_key) = cli_options.libp2p_key {
-                connection::NoiseKey::new(node_key.as_ref())
-            } else {
-                // TODO: load from disk or something instead
-                connection::NoiseKey::new(&rand::random())
-            },
+            noise_key,
             tasks_executor: {
                 let threads_pool = threads_pool.clone();
                 Box::new(move |task| threads_pool.spawn_ok(task))
             },
+            jaeger_service: jaeger_service.clone(),
         })
         .instrument(tracing::debug_span!("network-service-init"))
         .await
@@ -277,6 +297,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_service: (network_service.clone(), 0),
         database,
         keystore,
+        jaeger_service: jaeger_service.clone(),
     })
     .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
@@ -292,6 +313,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
                 keystore: Arc::new(keystore::Keystore::new(rand::random())),
+                jaeger_service, // TODO: consider passing a different jaeger service with a different service name
             })
             .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,
