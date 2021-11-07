@@ -131,6 +131,9 @@ pub struct ChainConfig {
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
 
+    /// `true` if incoming block requests are allowed.
+    pub allow_inbound_block_requests: bool,
+
     pub in_slots: u32,
 
     pub out_slots: u32,
@@ -307,8 +310,7 @@ where
                 name: format!("/{}/sync/2", chain.protocol_id),
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
                 max_response_size: 16 * 1024 * 1024,
-                // TODO: make this configurable
-                inbound_allowed: false,
+                inbound_allowed: chain.allow_inbound_block_requests,
                 // The timeout needs to be long enough to potentially download the maximum
                 // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
                 // TODO: 128 seconds is way too long, so we put 16 seconds instead for now
@@ -1132,6 +1134,53 @@ where
                         },
                         _ => unreachable!(),
                     };
+                }
+                // Incoming requests of the "sync" protocol.
+                peers::Event::RequestIn {
+                    peer_id,
+                    request_id,
+                    protocol_index,
+                    request_payload,
+                    ..
+                } if ((*protocol_index - 1) % REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN) == 0 => {
+                    let chain_index = (*protocol_index - 1) / REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN;
+
+                    match protocol::decode_block_request(&request_payload) {
+                        Ok(config) => {
+                            return match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::RequestIn {
+                                    peer_id,
+                                    request_id,
+                                    request_payload,
+                                    ..
+                                } => Event::BlocksRequestIn {
+                                    peer_id,
+                                    chain_index,
+                                    config,
+                                    request: BlocksRequestIn {
+                                        service: self,
+                                        request_id,
+                                    },
+                                },
+                                _ => unreachable!(),
+                            };
+                        }
+                        Err(error) => {
+                            let _ = self.inner.respond(*request_id, Err(())).await;
+                            return match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::RequestIn {
+                                    peer_id,
+                                    request_id,
+                                    request_payload,
+                                    ..
+                                } => Event::ProtocolError {
+                                    peer_id,
+                                    error: ProtocolError::BadBlocksRequest(error),
+                                },
+                                _ => unreachable!(),
+                            };
+                        }
+                    }
                 }
                 // Only protocol 0 (identify) can receive requests at the moment.
                 peers::Event::RequestIn { .. } => unreachable!(),
@@ -2127,6 +2176,21 @@ pub enum Event<'a, TNow> {
         /// Object allowing sending back the answer.
         request: IdentifyRequestIn<'a, TNow>,
     },
+    /// A remote has sent a request for blocks.
+    ///
+    /// Can only happen for chains where [`ChainConfig::allow_inbound_block_requests`] is `true`.
+    ///
+    /// You are strongly encouraged to call [`BlocksRequestIn::respond`].
+    BlocksRequestIn {
+        /// Remote that has sent the request.
+        peer_id: PeerId,
+        /// Index of the chain concerned by the request.
+        chain_index: usize,
+        /// Information about the request.
+        config: protocol::BlocksRequestConfig,
+        /// Object allowing sending back the answer.
+        request: BlocksRequestIn<'a, TNow>,
+    },
     /*Transactions {
         peer_id: peer_id::PeerId,
         transactions: EncodedTransactions,
@@ -2316,6 +2380,45 @@ impl<'a, TNow> fmt::Debug for IdentifyRequestIn<'a, TNow> {
     }
 }
 
+/// See [`Event::BlocksRequestIn`].
+#[must_use]
+pub struct BlocksRequestIn<'a, TNow> {
+    service: &'a ChainNetwork<TNow>,
+    request_id: peers::RequestId,
+}
+
+impl<'a, TNow> BlocksRequestIn<'a, TNow>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
+    /// Queue the response to send back. The future provided by [`ChainNetwork::read_write`] will
+    /// automatically be woken up.
+    ///
+    /// Pass `None` in order to deny the request. Do this if blocks aren't available locally.
+    ///
+    /// Has no effect if the connection that sends the request no longer exists.
+    pub async fn respond(self, response: Option<Vec<protocol::BlockData>>) {
+        let response = if let Some(response) = response {
+            Ok(
+                protocol::build_block_response(response).fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                }),
+            )
+        } else {
+            Err(())
+        };
+
+        let _ = self.service.inner.respond(self.request_id, response).await;
+    }
+}
+
+impl<'a, TNow> fmt::Debug for BlocksRequestIn<'a, TNow> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("BlocksRequestIn").finish()
+    }
+}
+
 /// Error during [`ChainNetwork::kademlia_discovery_round`].
 #[derive(Debug, derive_more::Display)]
 pub enum DiscoveryError {
@@ -2416,4 +2519,6 @@ pub enum ProtocolError {
     BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
     BadGrandpaNotification(protocol::DecodeGrandpaNotificationError),
+    /// Error while decoding a received blocks request.
+    BadBlocksRequest(protocol::DecodeBlockRequestError),
 }

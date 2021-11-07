@@ -170,6 +170,7 @@ impl NetworkService {
                 } else {
                     None
                 },
+                allow_inbound_block_requests: true,
             });
         }
 
@@ -294,6 +295,7 @@ impl NetworkService {
                                 tracing::debug!(%peer_id, "identify-request");
                                 request.respond("smoldot").await;
                             }
+                            service::Event::BlocksRequestIn { .. } => todo!(), // TODO: implement
                             service::Event::GrandpaCommitMessage {
                                 chain_index,
                                 message,

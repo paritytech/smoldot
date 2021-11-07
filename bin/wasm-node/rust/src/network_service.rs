@@ -170,6 +170,7 @@ impl NetworkService {
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
                 role: protocol::Role::Light,
+                allow_inbound_block_requests: false,
             });
 
             known_nodes.extend(chain.bootstrap_nodes);
@@ -313,6 +314,7 @@ impl NetworkService {
                                     );
                                     request.respond("smoldot").await;
                                 }
+                                service::Event::BlocksRequestIn { .. } => unreachable!(),
                                 service::Event::GrandpaCommitMessage {
                                     chain_index,
                                     message,
