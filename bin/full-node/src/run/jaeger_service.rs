@@ -40,6 +40,7 @@ use std::{
     convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZeroU128, pin::Pin,
     sync::Arc,
 };
+use tracing::Instrument as _;
 
 /// Configuration for a [`JaegerService`].
 pub struct Config {
@@ -69,15 +70,18 @@ impl JaegerService {
             let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
 
             // Spawn a background task that pulls span information and sends them on the network.
-            (config.tasks_executor)(Box::pin(async move {
-                loop {
-                    let buf = traces_out.next().await;
-                    // UDP sending errors happen only either if the API is misused (in which case
-                    // panicking is desirable) or in case of missing priviledge, in which case a
-                    // panic is preferable in order to inform the user.
-                    udp_socket.send_to(&buf, jaeger_agent).await.unwrap();
+            (config.tasks_executor)(Box::pin(
+                async move {
+                    loop {
+                        let buf = traces_out.next().await;
+                        // UDP sending errors happen only either if the API is misused (in which case
+                        // panicking is desirable) or in case of missing priviledge, in which case a
+                        // panic is preferable in order to inform the user.
+                        udp_socket.send_to(&buf, jaeger_agent).await.unwrap();
+                    }
                 }
-            }));
+                .instrument(tracing::trace_span!(parent: None, "jaeger-service")),
+            ));
         }
 
         Ok(Arc::new(JaegerService { traces_in }))
