@@ -262,8 +262,8 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let keystore = Arc::new({
         let mut keystore = keystore::Keystore::new(rand::random());
-        for key in cli_options.keystore_memory {
-            keystore.insert_sr25519_memory(keystore::KeyNamespace::Aura, &key); // TODO: namespace?
+        for private_key in cli_options.keystore_memory {
+            keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
         }
         keystore
     });
