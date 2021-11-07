@@ -56,7 +56,7 @@ impl JsonRpcService {
 
         (config.tasks_executor)(
             async move { background.run().await }
-                .instrument(tracing::debug_span!(parent: None, "json-rpc-server"))
+                .instrument(tracing::trace_span!(parent: None, "json-rpc-server"))
                 .boxed(),
         );
 

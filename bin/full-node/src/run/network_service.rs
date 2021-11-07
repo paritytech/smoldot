@@ -259,6 +259,12 @@ impl NetworkService {
                                 best_hash,
                                 ..
                             } => {
+                                tracing::debug!(
+                                    %peer_id,
+                                    %best_number,
+                                    best_hash = %HashDisplay(&best_hash),
+                                    "chain-connected"
+                                );
                                 break Event::Connected {
                                     peer_id,
                                     chain_index,
@@ -270,6 +276,7 @@ impl NetworkService {
                                 peer_id,
                                 chain_index,
                             } => {
+                                tracing::debug!(%peer_id, "chain-disconnected");
                                 break Event::Disconnected {
                                     chain_index,
                                     peer_id,
@@ -321,7 +328,7 @@ impl NetworkService {
             };
 
             let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::debug_span!(parent: None, "network-events-poll")),
+                future.instrument(tracing::trace_span!(parent: None, "network-events-poll")),
             );
             abort_handles.push(abort_handle);
             abortable.map(|_| ())
@@ -346,7 +353,7 @@ impl NetworkService {
                             Ok(insert) => {
                                 insert
                                     .insert(&Instant::now())
-                                    .instrument(tracing::debug_span!("insert"))
+                                    .instrument(tracing::trace_span!("insert"))
                                     .await
                             }
                             Err(error) => {
@@ -357,7 +364,7 @@ impl NetworkService {
                 };
 
                 let (abortable, abort_handle) = future::abortable(
-                    future.instrument(tracing::debug_span!(parent: None, "kademlia-discovery")),
+                    future.instrument(tracing::trace_span!(parent: None, "kademlia-discovery")),
                 );
                 abort_handles.push(abort_handle);
                 abortable.map(|_| ())
@@ -377,7 +384,7 @@ impl NetworkService {
                 };
 
                 let (abortable, abort_handle) = future::abortable(
-                    future.instrument(tracing::debug_span!(parent: None, "slots-assign")),
+                    future.instrument(tracing::trace_span!(parent: None, "slots-assign")),
                 );
                 abort_handles.push(abort_handle);
                 abortable.map(|_| ())
@@ -452,7 +459,7 @@ impl NetworkService {
                         let inner = inner.clone();
                         let _ = connec_tx.send(
                             connection_task(socket, inner, connection_id).instrument(
-                                tracing::debug_span!(parent: None, "connection", address = %multiaddr),
+                                tracing::trace_span!(parent: None, "connection", address = %multiaddr),
                             ).boxed()
                         ).await;
                     }
@@ -484,6 +491,7 @@ impl NetworkService {
                         Ok(socket) => socket,
                         Err(_) => {
                             tracing::debug!(%start_connect.multiaddr, "not-tcp");
+                            drop(_enter);
                             inner
                                 .network
                                 .pending_outcome_err(start_connect.id, true)
@@ -497,6 +505,7 @@ impl NetworkService {
                     // Ignore errors, as it is possible for the destination task to have been
                     // aborted already.
                     let inner = inner.clone();
+                    drop(_enter);
                     let _ = connec_tx.send(pending_connection_task(socket, start_connect.timeout, inner, start_connect.id).instrument(
                         tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
                     ).boxed()).await;
@@ -709,7 +718,7 @@ async fn connection_task(
                 // Make sure to finish closing the TCP socket.
                 tcp_socket
                     .flush_close()
-                    .instrument(tracing::debug_span!("flush-close"))
+                    .instrument(tracing::trace_span!("flush-close"))
                     .await;
                 tracing::debug!(%error, "task-finished");
                 return;

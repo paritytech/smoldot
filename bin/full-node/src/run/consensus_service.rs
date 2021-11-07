@@ -194,7 +194,7 @@ impl ConsensusService {
 
         (config.tasks_executor)(Box::pin(
             start_database_write(config.database, messages_rx).instrument(
-                tracing::debug_span!(parent: None, "database-write", root = %HashDisplay(&finalized_block_hash)),
+                tracing::trace_span!(parent: None, "database-write", root = %HashDisplay(&finalized_block_hash)),
             ),
         ));
 
