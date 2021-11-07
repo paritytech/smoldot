@@ -28,6 +28,7 @@ database-sqlite = [
 std = [
     "async-std",
     "futures/thread-pool",
+    "schnorrkel/getrandom", # TODO: necessary for signing; clarify in docs and in source code
     "soketto",
     "wasmtime",
 ]

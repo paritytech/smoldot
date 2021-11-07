@@ -23,6 +23,7 @@ use smoldot::{
     database::full_sqlite,
     header,
     informant::HashDisplay,
+    keystore,
     libp2p::{connection, multiaddr, peer_id::PeerId},
 };
 use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
@@ -51,7 +52,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     if !matches!(cli_output, cli::Output::None) {
         let mut env_filter = tracing_subscriber::filter::EnvFilter::new("DEBUG");
         if matches!(cli_output, cli::Output::Informant) {
-            env_filter = env_filter.add_directive(tracing::Level::WARN.into()); // TODO: display warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+            env_filter = env_filter.add_directive(tracing::Level::INFO.into()); // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
         } else {
             for filter in cli_options.log {
                 env_filter = env_filter.add_directive(filter);
@@ -259,6 +260,14 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let mut network_events_receivers = network_events_receivers.into_iter();
 
+    let keystore = Arc::new({
+        let mut keystore = keystore::Keystore::new(rand::random());
+        for key in cli_options.keystore_memory {
+            keystore.insert_sr25519_memory(keystore::KeyNamespace::Aura, &key); // TODO: namespace?
+        }
+        keystore
+    });
+
     let sync_service = sync_service::SyncService::new(sync_service::Config {
         tasks_executor: {
             let threads_pool = threads_pool.clone();
@@ -267,6 +276,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
+        keystore,
     })
     .instrument(tracing::debug_span!("sync-service-init"))
     .await;
@@ -281,6 +291,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 network_events_receiver: network_events_receivers.next().unwrap(),
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
+                keystore: Arc::new(keystore::Keystore::new(rand::random())),
             })
             .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
             .await,

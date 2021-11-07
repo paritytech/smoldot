@@ -30,6 +30,7 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
+use smoldot::ss58;
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
@@ -61,6 +62,9 @@ pub struct CliOptionsRun {
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
+    /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
+    #[structopt(long, parse(try_from_str = ss58::decode_private_key))]
+    pub keystore_memory: Vec<[u8; 64]>,
     /// Do not load or store anything on disk.
     #[structopt(long)]
     pub tmp: bool,

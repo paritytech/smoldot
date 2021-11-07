@@ -77,6 +77,35 @@ impl Keystore {
         }
     }
 
+    /// Inserts an sr25519 private key in the keystore.
+    ///
+    /// Returns the corresponding public key.
+    ///
+    /// This is meant to be called with publicly-known private keys. Use
+    /// [`Keystore::generate_sr25519`] if the private key is meant to actually be private.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the key isn't a valid sr25519 private key. This function is meant to be used
+    /// with hardcoded values which are known to be correct. Please do not call it with any
+    /// sort of user input.
+    ///
+    pub fn insert_sr25519_memory(
+        &mut self,
+        namespace: KeyNamespace,
+        private_key: &[u8; 64],
+    ) -> [u8; 32] {
+        let private_key = schnorrkel::SecretKey::from_bytes(&private_key[..]).unwrap();
+        let keypair = private_key.to_keypair();
+        let public_key = keypair.public.to_bytes();
+        self.guarded
+            .get_mut()
+            .keys
+            .insert((namespace, public_key), PrivateKey::MemorySr25519(keypair));
+
+        public_key
+    }
+
     /// Generates a new ed25519 key and inserts it in the keystore.
     ///
     /// Returns the corresponding public key.
@@ -96,6 +125,15 @@ impl Keystore {
         );
 
         public_key.into()
+    }
+
+    /// Returns the list of all keys known to this keystore.
+    ///
+    /// > **Note**: Keep in mind that this function is racy, as keys can be added and removed
+    /// >           in parallel.
+    pub async fn keys(&self) -> impl Iterator<Item = (KeyNamespace, [u8; 32])> {
+        let guarded = self.guarded.lock().await;
+        guarded.keys.keys().cloned().collect::<Vec<_>>().into_iter()
     }
 
     /// Generates a new sr25519 key and inserts it in the keystore.
@@ -195,10 +233,12 @@ pub struct VrfSignature {
     pub proof: [u8; 64],
 }
 
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum SignError {
     UnknownPublicKey,
 }
 
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum SignVrfError {
     Sign(SignError),
     WrongKeyAlgorithm,
