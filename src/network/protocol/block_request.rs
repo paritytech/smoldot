@@ -107,6 +107,81 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
     iter::once(request_bytes)
 }
 
+/// Decodes a blocks request.
+// TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
+pub fn decode_block_request(
+    request_bytes: &[u8],
+) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
+    let request = schema::BlockRequest::decode(request_bytes)
+        .map_err(ProtobufDecodeError)
+        .map_err(DecodeBlockRequestError::ProtobufDecode)?;
+
+    Ok(BlocksRequestConfig {
+        start: match request.from_block {
+            Some(schema::block_request::FromBlock::Hash(h)) => BlocksRequestConfigStart::Hash(
+                <[u8; 32]>::try_from(&h[..])
+                    .map_err(|_| DecodeBlockRequestError::InvalidBlockHashLength)?,
+            ),
+            Some(schema::block_request::FromBlock::Number(n)) => {
+                BlocksRequestConfigStart::Number(u64::from_le_bytes(
+                    <[u8; 8]>::try_from(&n[..])
+                        .map_err(|_| DecodeBlockRequestError::InvalidBlockNumber)?,
+                ))
+            }
+            None => return Err(DecodeBlockRequestError::MissingStartBlock),
+        },
+        desired_count: NonZeroU32::new(request.max_blocks)
+            .ok_or(DecodeBlockRequestError::ZeroBlocksRequested)?,
+        direction: match schema::Direction::from_i32(request.direction)
+            .ok_or(DecodeBlockRequestError::InvalidDirection)?
+        {
+            schema::Direction::Ascending => BlocksRequestDirection::Ascending,
+            schema::Direction::Descending => BlocksRequestDirection::Descending,
+        },
+        // TODO: should detect and error if unknown field bit
+        fields: BlocksRequestFields {
+            header: (request.fields & (1 << 24)) != 0,
+            body: (request.fields & (1 << 25)) != 0,
+            justification: (request.fields & (1 << 28)) != 0,
+        },
+    })
+}
+
+/// Builds the bytes corresponding to a block response.
+pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = impl AsRef<[u8]>> {
+    // Note: while the API of this function allows for a zero-cost implementation, the protobuf
+    // library doesn't permit to avoid allocations.
+
+    let response = schema::BlockResponse {
+        blocks: response
+            .into_iter()
+            .map(|block| schema::BlockData {
+                hash: block.hash.to_vec(),
+                header: block.header.map_or(Vec::new(), |h| h.to_vec()),
+                body: block.body.map_or(Vec::new(), |b| b.to_vec()),
+                justification: block
+                    .justification
+                    .as_ref()
+                    .map_or(Vec::new(), |j| j.to_vec()),
+                is_empty_justification: block
+                    .justification
+                    .as_ref()
+                    .map_or(false, |j| j.is_empty()),
+                receipt: Vec::new(),
+                message_queue: Vec::new(),
+            })
+            .collect(),
+    };
+
+    let response_bytes = {
+        let mut buf = Vec::with_capacity(response.encoded_len());
+        response.encode(&mut buf).unwrap();
+        buf
+    };
+
+    iter::once(response_bytes)
+}
+
 /// Decodes a response to a block request.
 // TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
 pub fn decode_block_response(
@@ -170,6 +245,23 @@ pub struct BlockData {
 
     /// SCALE-encoded justification, if requested and available.
     pub justification: Option<Vec<u8>>,
+}
+
+/// Error potentially returned by [`decode_block_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum DecodeBlockRequestError {
+    /// Error while decoding the protobuf encoding.
+    ProtobufDecode(ProtobufDecodeError),
+    /// Zero blocks requested.
+    ZeroBlocksRequested,
+    /// Value in the direction field is invalid.
+    InvalidDirection,
+    /// Start block field is missing.
+    MissingStartBlock,
+    /// Invalid block number passed.
+    InvalidBlockNumber,
+    /// Block hash length isn't correct.
+    InvalidBlockHashLength,
 }
 
 /// Error potentially returned by [`decode_block_response`].
