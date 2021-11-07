@@ -17,8 +17,8 @@
 
 //! Background synchronization service.
 //!
-//! The [`SyncService`] manages a background task dedicated to synchronizing the chain with the
-//! network.
+//! The [`ConsensusService`] manages a background task dedicated to synchronizing the chain with
+//! the network and authoring blocks.
 //! Importantly, its design is oriented towards the particular use case of the full node.
 
 // TODO: doc
@@ -48,7 +48,7 @@ use std::{
 };
 use tracing::Instrument as _;
 
-/// Configuration for a [`SyncService`].
+/// Configuration for a [`ConsensusService`].
 pub struct Config {
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
@@ -72,7 +72,7 @@ pub struct Config {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct BlocksRequestId(usize);
 
-/// Summary of the state of the [`SyncService`].
+/// Summary of the state of the [`ConsensusService`].
 #[derive(Debug, Clone)]
 pub struct SyncState {
     pub best_block_number: u64,
@@ -82,13 +82,13 @@ pub struct SyncState {
 }
 
 /// Background task that verifies blocks and emits requests.
-pub struct SyncService {
+pub struct ConsensusService {
     /// State kept up-to-date with the background task.
     sync_state: Arc<Mutex<SyncState>>,
 }
 
-impl SyncService {
-    /// Initializes the [`SyncService`] with the given configuration.
+impl ConsensusService {
+    /// Initializes the [`ConsensusService`] with the given configuration.
     #[tracing::instrument(level = "trace", skip(config))]
     pub async fn new(mut config: Config) -> Arc<Self> {
         let (to_database, messages_rx) = mpsc::channel(4);
@@ -194,7 +194,7 @@ impl SyncService {
             ),
         ));
 
-        Arc::new(SyncService { sync_state })
+        Arc::new(ConsensusService { sync_state })
     }
 
     /// Returns a summary of the state of the service.

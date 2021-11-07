@@ -29,9 +29,9 @@ use smoldot::{
 use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
 use tracing::Instrument as _;
 
+mod consensus_service;
 mod json_rpc_service;
 mod network_service;
-mod sync_service;
 
 /// Runs the node using the given configuration. Catches SIGINT signals and stops if one is
 /// detected.
@@ -268,7 +268,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         keystore
     });
 
-    let sync_service = sync_service::SyncService::new(sync_service::Config {
+    let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
         tasks_executor: {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
@@ -278,12 +278,12 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         database,
         keystore,
     })
-    .instrument(tracing::debug_span!("sync-service-init"))
+    .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
 
-    let relay_chain_sync_service = if let Some(relay_chain_database) = relay_chain_database {
+    let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
         Some(
-            sync_service::SyncService::new(sync_service::Config {
+            consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: {
                     let threads_pool = threads_pool.clone();
                     Box::new(move |task| threads_pool.spawn_ok(task))
@@ -293,7 +293,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 database: relay_chain_database,
                 keystore: Arc::new(keystore::Keystore::new(rand::random())),
             })
-            .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
+            .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,
         )
     } else {
@@ -382,7 +382,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     // We end the informant line with a `\r` so that it overwrites itself every time.
                     // If any other line gets printed, it will overwrite the informant, and the
                     // informant will then print itself below, which is a fine behaviour.
-                    let sync_state = sync_service.sync_state().await;
+                    let sync_state = consensus_service.sync_state().await;
                     eprint!("{}\r", smoldot::informant::InformantLine {
                         enable_colors: match cli_options.color {
                             cli::ColorChoice::Always => true,
@@ -390,7 +390,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         },
                         chain_name: chain_spec.name(),
                         relay_chain: if let Some(relay_chain_spec) = &relay_chain_spec {
-                            let relay_sync_state = relay_chain_sync_service.as_ref().unwrap().sync_state().await;
+                            let relay_sync_state = relay_chain_consensus_service.as_ref().unwrap().sync_state().await;
                             Some(smoldot::informant::RelayChain {
                                 chain_name: relay_chain_spec.name(),
                                 best_number: relay_sync_state.best_block_number,
