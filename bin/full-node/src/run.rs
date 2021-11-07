@@ -217,7 +217,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let (network_service, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
-            listen_addresses: Vec::new(),
+            listen_addresses: cli_options.listen_addr,
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
                 protocol_id: chain_spec.protocol_id().to_owned(),
@@ -234,7 +234,11 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 },
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-                    for node in chain_spec.boot_nodes().iter() {
+                    for node in chain_spec
+                        .boot_nodes()
+                        .iter()
+                        .chain(cli_options.additional_bootnode.iter())
+                    {
                         let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
                         if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
                             let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap

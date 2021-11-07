@@ -30,7 +30,7 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use smoldot::identity::ss58;
+use smoldot::{identity::ss58, network::Multiaddr};
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
@@ -59,6 +59,12 @@ pub struct CliOptionsRun {
     /// Ed25519 private key of network identity (32 bytes hexadecimal).
     #[structopt(long)]
     pub libp2p_key: Option<Libp2pKey>,
+    /// Multiaddr to listen on.
+    #[structopt(long)]
+    pub listen_addr: Vec<Multiaddr>,
+    /// Multiaddr of an additional node to try to connect to on startup.
+    #[structopt(long)]
+    pub additional_bootnode: Vec<String>, // TODO: parse the value here
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
