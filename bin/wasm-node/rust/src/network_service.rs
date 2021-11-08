@@ -847,10 +847,10 @@ async fn connection_task(
 
         match result {
             Ok(ws) => ws,
-            Err(err) => {
+            Err(_err) => {
                 network_service
                     .network
-                    .pending_outcome_err(pending_id, err.is_some())
+                    .pending_outcome_err(pending_id, false) // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
                     .await;
                 return;
             }
