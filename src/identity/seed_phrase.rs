@@ -62,7 +62,7 @@ pub fn decode_ed25519_private_key(phrase: &str) -> Result<[u8; 32], ParsePrivate
             DeriveJunction::Soft(_) => todo!(), // TODO: return error
             DeriveJunction::Hard(cc) => {
                 let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
-                hash.update(crate::util::encode_scale_compact_usize(11).as_ref());
+                hash.update(crate::util::encode_scale_compact_usize(11).as_ref()); // Length of `"Ed25519HDKD"`
                 hash.update(b"Ed25519HDKD");
                 hash.update(&secret_key);
                 hash.update(&cc);
@@ -176,8 +176,7 @@ impl DeriveJunction {
         if let Ok(n) = str::parse::<u64>(code) {
             chain_code[..8].copy_from_slice(&n.to_le_bytes());
         } else {
-            // For some reason, a SCALE-compact-encoded length prefix is added in front of
-            // the path.
+            // A SCALE-compact-encoded length prefix is added in front of the path.
             let code = code.as_bytes();
             let code_len_prefix = crate::util::encode_scale_compact_usize(code.len());
             let code_len_prefix = code_len_prefix.as_ref();
