@@ -26,9 +26,9 @@ use alloc::{string::String, vec::Vec};
 pub const DEFAULT_SEED_PHRASE: &str =
     "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
 
-/// Decodes a human-readable private key using the sr25519 curve.
-pub fn decode_sr25519_private_key(key: &str) -> Result<[u8; 64], ParsePrivateKeyError> {
-    let parsed = parse_private_key(key)?;
+/// Decodes a human-readable private key (a.k.a. a seed phrase) using the sr25519 curve.
+pub fn decode_sr25519_private_key(phrase: &str) -> Result<[u8; 64], ParsePrivateKeyError> {
+    let parsed = parse_private_key(phrase)?;
 
     // Note: `from_bytes` can only panic if the slice is of the wrong length, which we know can
     // never happen.
@@ -52,9 +52,9 @@ pub fn decode_sr25519_private_key(key: &str) -> Result<[u8; 64], ParsePrivateKey
     Ok(secret_key.to_bytes())
 }
 
-/// Decodes a human-readable private key using the ed25519 curve.
-pub fn decode_ed25519_private_key(key: &str) -> Result<[u8; 32], ParsePrivateKeyError> {
-    let parsed = parse_private_key(key)?;
+/// Decodes a human-readable private key (a.k.a. a seed phrase) using the ed25519 curve.
+pub fn decode_ed25519_private_key(phrase: &str) -> Result<[u8; 32], ParsePrivateKeyError> {
+    let parsed = parse_private_key(phrase)?;
 
     let mut secret_key = parsed.seed;
     for junction in parsed.path {
@@ -62,7 +62,7 @@ pub fn decode_ed25519_private_key(key: &str) -> Result<[u8; 32], ParsePrivateKey
             DeriveJunction::Soft(_) => todo!(), // TODO: return error
             DeriveJunction::Hard(cc) => {
                 let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
-                hash.update(crate::util::encode_scale_compact_usize(11).as_ref());
+                hash.update(crate::util::encode_scale_compact_usize(11).as_ref()); // Length of `"Ed25519HDKD"`
                 hash.update(b"Ed25519HDKD");
                 hash.update(&secret_key);
                 hash.update(&cc);
@@ -74,11 +74,13 @@ pub fn decode_ed25519_private_key(key: &str) -> Result<[u8; 32], ParsePrivateKey
     Ok(secret_key)
 }
 
-/// Turns a human-readable private key into a seed and a derivation path.
-pub fn parse_private_key(key: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyError> {
+/// Turns a human-readable private key (a.k.a. a seed phrase) into a seed and a derivation path.
+pub fn parse_private_key(phrase: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyError> {
     let parse_result: Result<_, nom::Err<nom::error::Error<&str>>> =
         nom::combinator::all_consuming(nom::sequence::tuple((
+            // Either BIP39 words or some hexadecimal
             nom::branch::alt((
+                // Hexadecimal. Wrapped in `either::Left`
                 nom::combinator::map(
                     nom::combinator::map_opt(
                         nom::sequence::preceded(
@@ -89,9 +91,12 @@ pub fn parse_private_key(key: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyE
                     ),
                     either::Left,
                 ),
+                // BIP39. Wrapped in `either::Right`
                 nom::combinator::map(nom::bytes::complete::take_till(|c| c == '/'), either::Right),
             )),
+            // Derivation path
             nom::multi::many0(nom::branch::alt((
+                // Soft
                 nom::combinator::map(
                     nom::sequence::preceded(
                         nom::bytes::complete::tag("/"),
@@ -99,6 +104,7 @@ pub fn parse_private_key(key: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyE
                     ),
                     |code| DeriveJunction::from_components(false, code),
                 ),
+                // Hard
                 nom::combinator::map(
                     nom::sequence::preceded(
                         nom::bytes::complete::tag("//"),
@@ -107,18 +113,21 @@ pub fn parse_private_key(key: &str) -> Result<ParsedPrivateKey, ParsePrivateKeyE
                     |code| DeriveJunction::from_components(true, code),
                 ),
             ))),
+            // Optional password
             nom::combinator::opt(nom::sequence::preceded(
                 nom::bytes::complete::tag("///"),
-                |s| Ok(("", s)),
+                |s| Ok(("", s)), // Take the rest of the input after the `///`
             )),
-        )))(key);
+        )))(phrase);
 
     match parse_result {
         Ok((_, (either::Left(seed), path, _password))) => {
+            // Hexadecimal seed
             // TODO: what if there's a password? do we just ignore it?
             Ok(ParsedPrivateKey { seed, path })
         }
         Ok((_, (either::Right(phrase), path, password))) => {
+            // BIP39 words
             let phrase = if phrase.is_empty() {
                 DEFAULT_SEED_PHRASE
             } else {
@@ -167,8 +176,7 @@ impl DeriveJunction {
         if let Ok(n) = str::parse::<u64>(code) {
             chain_code[..8].copy_from_slice(&n.to_le_bytes());
         } else {
-            // For some reason, a SCALE-compact-encoded length prefix is added in front of
-            // the path.
+            // A SCALE-compact-encoded length prefix is added in front of the path.
             let code = code.as_bytes();
             let code_len_prefix = crate::util::encode_scale_compact_usize(code.len());
             let code_len_prefix = code_len_prefix.as_ref();
@@ -198,13 +206,15 @@ pub fn bip39_to_seed(phrase: &str, password: &str) -> Result<[u8; 32], Bip39ToSe
     let parsed = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, phrase)
         .map_err(|err| Bip39ToSeedError::WrongMnemonic(Bip39DecodeError(err)))?;
 
-    // Note that the `bip39` implementation of turning the mnemonic to a seed isn't conformant
-    // to the BIP39 specification. Instead, we do it manually.
+    // Note that the `bip39` library implementation that turns the mnemonic to a seed isn't
+    // conformant to the BIP39 specification. Instead, we do it manually.
 
     // `to_entropy_array()` returns the entropy as an array where only the first `entropy_len`
     // bytes are meaningful. `entropy_len` depends on the number of words provided.
     let (entropy, entropy_len) = parsed.to_entropy_array();
 
+    // These rules are part of the seed phrase format "specification" and have been copy-pasted
+    // from the Substrate code base.
     if entropy_len < 16 || entropy_len > 32 || entropy_len % 4 != 0 {
         return Err(Bip39ToSeedError::BadWordsCount);
     }
