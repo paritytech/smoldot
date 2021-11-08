@@ -195,7 +195,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     );*/
 
     let noise_key = if let Some(node_key) = cli_options.libp2p_key {
-        connection::NoiseKey::new(node_key.as_ref())
+        connection::NoiseKey::new(&node_key)
     } else {
         // TODO: load from disk or something instead
         connection::NoiseKey::new(&rand::random())

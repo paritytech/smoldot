@@ -2459,7 +2459,6 @@ dependencies = [
  "ctrlc",
  "derive_more",
  "directories",
- "ed25519-zebra",
  "fnv",
  "futures",
  "futures-timer",
