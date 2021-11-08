@@ -814,9 +814,9 @@ impl ReadyToRun {
                     Option::<u32>::decode_all(expect_pointer_size!(1).as_ref());
                 let max_keys_to_remove = match max_keys_to_remove {
                     Ok(l) => l,
-                    Err(err) => {
+                    Err(_) => {
                         return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
+                            error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
                         };
                     }
@@ -1254,9 +1254,9 @@ impl ReadyToRun {
 
                 let elements = match decode_result {
                     Ok(e) => e,
-                    Err(err) => {
+                    Err(_) => {
                         return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
+                            error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
                         }
                     }
@@ -1273,22 +1273,39 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
-                // TODO: don't use parity_scale_codec
-                let decode_result = Vec::<Vec<u8>>::decode_all(expect_pointer_size!(0).as_ref());
+                let result = {
+                    let input = expect_pointer_size!(0);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(nom::combinator::flat_map(
+                            crate::util::nom_scale_compact_usize,
+                            |num_elems| {
+                                nom::multi::many_m_n(
+                                    num_elems,
+                                    num_elems,
+                                    nom::combinator::flat_map(
+                                        crate::util::nom_scale_compact_usize,
+                                        |n| nom::bytes::complete::take(n),
+                                    ),
+                                )
+                            },
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
 
-                let elements = match decode_result {
-                    Ok(e) => e,
-                    Err(err) => {
-                        return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
-                            prototype: self.inner.into_prototype(),
-                        }
+                    match parsing_result {
+                        Ok(elements) => Ok(trie::ordered_root(&elements[..])),
+                        Err(_) => Err(()),
                     }
                 };
 
-                let out = trie::ordered_root(&elements[..]);
-                self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
+                match result {
+                    Ok(out) => self
+                        .inner
+                        .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out)),
+                    Err(()) => HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    },
+                }
             }
             HostFunction::ext_trie_keccak_256_ordered_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
@@ -2287,8 +2304,7 @@ pub enum Error {
         actual: usize,
     },
     /// Failed to decode a SCALE-encoded parameter.
-    // TODO: refactor and/or remove
-    ParamDecodeError(parity_scale_codec::Error),
+    ParamDecodeError,
     /// The type of one of the parameters is wrong.
     #[display(
         fmt = "Type mismatch in parameter #{}: {}, expected = {:?}, actual = {:?}",
