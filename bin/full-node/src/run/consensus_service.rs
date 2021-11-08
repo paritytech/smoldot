@@ -419,8 +419,13 @@ impl SyncBackground {
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
                             if chain_index == self.network_chain_index =>
                         {
-                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
+
+                            let _jaeger_span = self
+                                .jaeger_service
+                                .block_span(&decoded.header.hash(), "block-announce-process");
+
+                            let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             // TODO: stupid to re-encode header
                             // TODO: log the outcome
                             match self.sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
@@ -834,6 +839,9 @@ impl SyncBackground {
                         error = tracing::field::Empty,
                     );
                     let _enter = span.enter();
+                    let _jaeger_span = self
+                        .jaeger_service
+                        .block_span(&hash_to_verify, "body-verify");
 
                     let mut verify = verify.start(unix_time, ());
                     loop {
@@ -1012,6 +1020,9 @@ impl SyncBackground {
                         outcome = tracing::field::Empty, error = tracing::field::Empty,
                     );
                     let _enter = span.enter();
+                    let _jaeger_span = self
+                        .jaeger_service
+                        .block_span(&hash_to_verify, "header-verify");
 
                     match verify.perform(unix_time, ()) {
                         all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {
