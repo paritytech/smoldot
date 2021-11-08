@@ -34,6 +34,10 @@
 //! - A human-readable format for public keys.
 //! - A human-readable format for private keys.
 //!
+//! The formats unfortunately does not mention which asynchronous cryptographic algorithm (e.g.
+//! ed25519 or sr25519) is used for the public and private keys. This must be deduced from the
+//! context.
+//!
 //! ## Public keys
 //!
 //! Examples:
@@ -94,11 +98,12 @@ use alloc::{string::String, vec::Vec};
 pub const DEFAULT_SEED_PHRASE: &str =
     "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
 
-/// Decodes a human-readable private key.
-pub fn decode_private_key(key: &str) -> Result<[u8; 64], ParsePrivateKeyError> {
+/// Decodes a human-readable private key using the sr25519 curve.
+pub fn decode_sr25519_private_key(key: &str) -> Result<[u8; 64], ParsePrivateKeyError> {
     let parsed = parse_private_key(key)?;
 
-    // TODO: does building the sr25519 key lead to the same key as with ed25519?
+    // Note: `from_bytes` can only panic if the slice is of the wrong length, which we know can
+    // never happen.
     let mini_key = schnorrkel::MiniSecretKey::from_bytes(&parsed.seed).unwrap();
 
     let mut secret_key = mini_key
@@ -117,6 +122,28 @@ pub fn decode_private_key(key: &str) -> Result<[u8; 64], ParsePrivateKeyError> {
     }
 
     Ok(secret_key.to_bytes())
+}
+
+/// Decodes a human-readable private key using the ed25519 curve.
+pub fn decode_ed25519_private_key(key: &str) -> Result<[u8; 32], ParsePrivateKeyError> {
+    let parsed = parse_private_key(key)?;
+
+    let mut secret_key = parsed.seed;
+    for junction in parsed.path {
+        secret_key = match junction {
+            DeriveJunction::Soft(_) => todo!(), // TODO: return error
+            DeriveJunction::Hard(cc) => {
+                let mut hash = blake2_rfc::blake2b::Blake2b::new(32);
+                hash.update(crate::util::encode_scale_compact_usize(11).as_ref());
+                hash.update(b"Ed25519HDKD");
+                hash.update(&secret_key);
+                hash.update(&cc);
+                <[u8; 32]>::try_from(hash.finalize().as_bytes()).unwrap()
+            }
+        };
+    }
+
+    Ok(secret_key)
 }
 
 /// Turns a human-readable private key into a seed and a derivation path.
@@ -288,9 +315,9 @@ pub struct Bip39DecodeError(bip39::Error);
 #[cfg(test)]
 mod tests {
     #[test]
-    fn empty_matches() {
+    fn empty_matches_sr25519() {
         assert_eq!(
-            super::decode_private_key("").unwrap(),
+            super::decode_sr25519_private_key("").unwrap(),
             [
                 5, 214, 85, 132, 99, 13, 22, 205, 74, 246, 208, 190, 193, 15, 52, 187, 80, 74, 93,
                 203, 98, 219, 162, 18, 45, 73, 245, 166, 99, 118, 61, 10, 253, 25, 12, 206, 116,
@@ -301,28 +328,58 @@ mod tests {
     }
 
     #[test]
-    fn default_seed_is_correct() {
+    fn empty_matches_ed25519() {
         assert_eq!(
-            super::decode_private_key(
-                "bottom drive obey lake curtain smoke basket hold race lonely fit walk"
-            )
-            .unwrap(),
-            super::decode_private_key("").unwrap(),
-        );
-
-        assert_eq!(
-            super::decode_private_key(
-                "bottom drive obey lake curtain smoke basket hold race lonely fit walk//smoldot rules//125"
-            )
-            .unwrap(),
-            super::decode_private_key("//smoldot rules//125").unwrap(),
+            super::decode_ed25519_private_key("").unwrap(),
+            [
+                250, 199, 149, 157, 191, 231, 47, 5, 46, 90, 12, 60, 141, 101, 48, 242, 2, 176, 47,
+                216, 249, 245, 202, 53, 128, 236, 141, 235, 119, 151, 71, 158
+            ]
         );
     }
 
     #[test]
-    fn alice_matches() {
+    fn default_seed_is_correct_sr25519() {
         assert_eq!(
-            super::decode_private_key("//Alice").unwrap(),
+            super::decode_sr25519_private_key(
+                "bottom drive obey lake curtain smoke basket hold race lonely fit walk"
+            )
+            .unwrap(),
+            super::decode_sr25519_private_key("").unwrap(),
+        );
+
+        assert_eq!(
+            super::decode_sr25519_private_key(
+                "bottom drive obey lake curtain smoke basket hold race lonely fit walk//smoldot rules//125"
+            )
+            .unwrap(),
+            super::decode_sr25519_private_key("//smoldot rules//125").unwrap(),
+        );
+    }
+
+    #[test]
+    fn default_seed_is_correct_ed25519() {
+        assert_eq!(
+            super::decode_ed25519_private_key(
+                "bottom drive obey lake curtain smoke basket hold race lonely fit walk"
+            )
+            .unwrap(),
+            super::decode_ed25519_private_key("").unwrap(),
+        );
+
+        assert_eq!(
+            super::decode_ed25519_private_key(
+                "bottom drive obey lake curtain smoke basket hold race lonely fit walk//smoldot rules//125"
+            )
+            .unwrap(),
+            super::decode_ed25519_private_key("//smoldot rules//125").unwrap(),
+        );
+    }
+
+    #[test]
+    fn alice_matches_sr25519() {
+        assert_eq!(
+            super::decode_sr25519_private_key("//Alice").unwrap(),
             [
                 51, 166, 243, 9, 63, 21, 138, 113, 9, 246, 121, 65, 11, 239, 26, 12, 84, 22, 129,
                 69, 224, 206, 203, 77, 240, 6, 193, 194, 255, 251, 31, 9, 146, 90, 34, 93, 151,
@@ -333,9 +390,20 @@ mod tests {
     }
 
     #[test]
-    fn hex_seed_matches() {
+    fn alice_matches_ed25519() {
         assert_eq!(
-            super::decode_private_key(
+            super::decode_ed25519_private_key("//Alice").unwrap(),
+            [
+                171, 248, 229, 189, 190, 48, 198, 86, 86, 192, 163, 203, 209, 129, 255, 138, 86,
+                41, 74, 105, 223, 237, 210, 121, 130, 170, 206, 74, 118, 144, 145, 21
+            ]
+        );
+    }
+
+    #[test]
+    fn hex_seed_matches_sr25519() {
+        assert_eq!(
+            super::decode_sr25519_private_key(
                 "0x0000000000000000000000000000000000000000000000000000000000000000"
             )
             .unwrap(),
@@ -349,10 +417,32 @@ mod tests {
     }
 
     #[test]
-    fn multi_derivation_and_password() {
+    fn hex_seed_matches_ed25519() {
         assert_eq!(
-            super::decode_private_key("strong isolate job basic auto frozen want garlic autumn height riot desert//foo//2//baz///my_password").unwrap(),
+            super::decode_ed25519_private_key(
+                "0x0000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .unwrap(),
+            [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_derivation_and_password_sr25519() {
+        assert_eq!(
+            super::decode_sr25519_private_key("strong isolate job basic auto frozen want garlic autumn height riot desert//foo//2//baz///my_password").unwrap(),
             [144, 209, 243, 24, 75, 220, 185, 255, 47, 39, 160, 1, 179, 74, 230, 178, 26, 1, 64, 139, 194, 14, 123, 204, 213, 105, 88, 17, 142, 68, 198, 10, 101, 57, 5, 124, 59, 208, 57, 242, 223, 43, 140, 191, 21, 56, 88, 79, 192, 241, 237, 195, 169, 103, 244, 249, 36, 90, 106, 10, 109, 40, 29, 73]
+        );
+    }
+
+    #[test]
+    fn multi_derivation_and_password_ed25519() {
+        assert_eq!(
+            super::decode_ed25519_private_key("strong isolate job basic auto frozen want garlic autumn height riot desert//foo//2//baz///my_password").unwrap(),
+            [95, 205, 122, 218, 56, 195, 127, 158, 30, 205, 82, 84, 159, 120, 105, 63, 210, 155, 217, 74, 40, 142, 70, 179, 11, 75, 82, 143, 219, 208, 86, 245]
         );
     }
 }
