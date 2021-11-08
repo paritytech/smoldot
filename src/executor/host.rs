@@ -810,11 +810,23 @@ impl ReadyToRun {
             HostFunction::ext_storage_clear_prefix_version_2 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
 
-                let max_keys_to_remove =
-                    Option::<u32>::decode_all(expect_pointer_size!(1).as_ref());
+                let max_keys_to_remove = {
+                    let input = expect_pointer_size!(1);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(util::nom_option_decode(
+                            nom::number::complete::le_u32,
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
+
+                    match parsing_result {
+                        Ok(val) => Ok(val),
+                        Err(_) => Err(()),
+                    }
+                };
+
                 let max_keys_to_remove = match max_keys_to_remove {
                     Ok(l) => l,
-                    Err(_) => {
+                    Err(()) => {
                         return HostVm::Error {
                             error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
