@@ -30,7 +30,7 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use smoldot::{identity::ss58, network::Multiaddr};
+use smoldot::{identity::seed_phrase, network::Multiaddr};
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
@@ -69,7 +69,7 @@ pub struct CliOptionsRun {
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
-    #[structopt(long, parse(try_from_str = ss58::decode_sr25519_private_key))]
+    #[structopt(long, parse(try_from_str = seed_phrase::decode_sr25519_private_key))]
     // TODO: also automatically add the same keys through ed25519?
     pub keystore_memory: Vec<[u8; 64]>,
     /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
