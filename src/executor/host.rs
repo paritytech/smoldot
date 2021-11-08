@@ -1286,7 +1286,7 @@ impl ReadyToRun {
                     }
                 };
 
-                let out = trie::ordered_root(elements.into_iter());
+                let out = trie::ordered_root(&elements[..]);
                 self.inner
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }

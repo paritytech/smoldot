@@ -681,7 +681,7 @@ where
             match (&block.header, &block.body) {
                 (Some(header), Some(body)) => {
                     let decoded_header = header::decode(header).unwrap();
-                    let expected = header::extrinsics_root(body.iter());
+                    let expected = header::extrinsics_root(&body[..]);
                     if expected != *decoded_header.extrinsics_root {
                         return Err(BlocksRequestError::Entry {
                             index: block_index,
