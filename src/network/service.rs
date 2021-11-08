@@ -535,7 +535,6 @@ where
         when_connected: TNow,
         remote_addr: multiaddr::Multiaddr,
     ) -> ConnectionId {
-        // TODO: update k-buckets
         self.inner
             .add_incoming_connection(when_connected, remote_addr)
             .await
