@@ -215,14 +215,31 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
 ///
 /// > **Note**: In isolation, this function seems highly specific. In practice, it is notably used
 /// >           in order to build the trie root of the list of extrinsics of a block.
-pub fn ordered_root(entries: impl Iterator<Item = impl AsRef<[u8]>>) -> [u8; 32] {
-    // TODO: optimize this
-    let mut trie = Trie::new();
-    for (idx, value) in entries.enumerate() {
-        let key = util::encode_scale_compact_usize(idx);
-        trie.insert(key.as_ref(), value.as_ref());
+pub fn ordered_root(entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
+    let mut calculation = calculate_root::root_merkle_value(None);
+
+    loop {
+        match calculation {
+            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
+                return hash;
+            }
+            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
+                calculation = keys.inject((0..entries.len()).map(|num| {
+                    arrayvec::ArrayVec::<u8, 10>::try_from(
+                        util::encode_scale_compact_usize(num).as_ref(),
+                    )
+                    .unwrap()
+                    .into_iter()
+                }));
+            }
+            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
+                let key = value.key().collect::<arrayvec::ArrayVec<u8, 8>>();
+                let (_, key) =
+                    util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&key).unwrap();
+                calculation = value.inject(entries.get(key));
+            }
+        }
     }
-    trie.root_merkle_value(None)
 }
 
 #[cfg(test)]
