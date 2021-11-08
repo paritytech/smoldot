@@ -70,7 +70,8 @@
 //! The format for private keys consists in:
 //!
 //! - An optional [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki) seed
-//! phrase. If it is missing, then the [`DEFAULT_SEED_PHRASE`] is automatically used instead.
+//! phrase. If it is missing, then the [`seed_phrase::DEFAULT_SEED_PHRASE`] is automatically used
+//! instead.
 //!
 //! - An optional derivation path. When using one `/`, this is called a *soft* derivation. When
 //! using two `/`, this is called a *hard* derivation. Soft derivations are reversible and can
