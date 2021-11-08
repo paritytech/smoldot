@@ -1115,29 +1115,41 @@ where
 
                 // Incoming requests of the "identify" protocol.
                 peers::Event::RequestIn {
-                    protocol_index: 0, ..
+                    protocol_index: 0,
+                    request_payload,
+                    request_id,
+                    ..
                 } => {
-                    // TODO: check that request_payload is empty
-                    return match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::RequestIn {
-                            peer_id,
-                            request_id,
-                            connection_user_data: observed_addr,
-                            ..
-                        } => Event::IdentifyRequestIn {
-                            peer_id,
-                            request: IdentifyRequestIn {
-                                service: self,
+                    if request_payload.is_empty() {
+                        return match guarded.to_process_pre_event.take().unwrap() {
+                            peers::Event::RequestIn {
+                                peer_id,
                                 request_id,
-                                observed_addr,
+                                connection_user_data: observed_addr,
+                                ..
+                            } => Event::IdentifyRequestIn {
+                                peer_id,
+                                request: IdentifyRequestIn {
+                                    service: self,
+                                    request_id,
+                                    observed_addr,
+                                },
                             },
-                        },
-                        _ => unreachable!(),
-                    };
+                            _ => unreachable!(),
+                        };
+                    } else {
+                        let _ = self.inner.respond(*request_id, Err(())).await;
+                        return match guarded.to_process_pre_event.take().unwrap() {
+                            peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
+                                peer_id,
+                                error: ProtocolError::BadIdentifyRequest,
+                            },
+                            _ => unreachable!(),
+                        };
+                    }
                 }
                 // Incoming requests of the "sync" protocol.
                 peers::Event::RequestIn {
-                    peer_id,
                     request_id,
                     protocol_index,
                     request_payload,
@@ -1151,7 +1163,6 @@ where
                                 peers::Event::RequestIn {
                                     peer_id,
                                     request_id,
-                                    request_payload,
                                     ..
                                 } => Event::BlocksRequestIn {
                                     peer_id,
@@ -1168,12 +1179,7 @@ where
                         Err(error) => {
                             let _ = self.inner.respond(*request_id, Err(())).await;
                             return match guarded.to_process_pre_event.take().unwrap() {
-                                peers::Event::RequestIn {
-                                    peer_id,
-                                    request_id,
-                                    request_payload,
-                                    ..
-                                } => Event::ProtocolError {
+                                peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
                                     peer_id,
                                     error: ProtocolError::BadBlocksRequest(error),
                                 },
@@ -2519,6 +2525,8 @@ pub enum ProtocolError {
     BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
     BadGrandpaNotification(protocol::DecodeGrandpaNotificationError),
+    /// Received an invalid identify request.
+    BadIdentifyRequest,
     /// Error while decoding a received blocks request.
     BadBlocksRequest(protocol::DecodeBlockRequestError),
 }
