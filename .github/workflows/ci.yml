@@ -28,7 +28,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
-    - run: cargo test --locked --workspace --all-features
+    - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
 
   test-32bits:
     runs-on: ubuntu-latest
@@ -39,7 +39,7 @@ jobs:
     - run: apt-get update && apt-get install -y libc6-dev-i386
     - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
     - run: rustup target add i686-unknown-linux-gnu
-    - run: cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
+    - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
 
   wasm-node-check:
     runs-on: ubuntu-latest
@@ -52,7 +52,7 @@ jobs:
       with:
         node-version: '12'
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
-    - run: cd bin/wasm-node/javascript && npm install-ci-test
+    - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
   check-features:
     runs-on: ubuntu-latest
@@ -61,10 +61,10 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
-    - run: cargo check --package smoldot --locked --no-default-features
-    - run: cargo check --package smoldot --locked --no-default-features --features database-sqlite
-    - run: cargo check --package smoldot --locked --no-default-features --features std
-    - run: cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
 
   check-rustdoc-links:
     runs-on: ubuntu-latest

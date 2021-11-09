@@ -1415,7 +1415,7 @@ where
         debug_assert!(self.pending_event.is_none());
 
         match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
-            ConnectionInner::Established(connection) if self.shutting_down => {
+            ConnectionInner::Established(_) if self.shutting_down => {
                 // TODO: shut down should be graceful instead of an error
                 debug_assert!(self.pending_event.is_none());
                 self.connection = ConnectionInner::PendingErrorReport {

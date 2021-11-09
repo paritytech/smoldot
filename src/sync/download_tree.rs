@@ -187,7 +187,7 @@ where
                     })
                 } else {
                     Ok(RuntimeDownloadState::Unknown {
-                        same_as_parent: false,
+                        _same_as_parent: false,
                         state_root: *header.state_root,
                         timeout: None,
                     })
@@ -695,7 +695,7 @@ where
                 // Note: the value of `same_as_parent` is irrelevant for the finalized block.
                 self.finalized_block.runtime = Ok(RuntimeDownloadState::Unknown {
                     state_root,
-                    same_as_parent: false,
+                    _same_as_parent: false,
                     timeout,
                 });
             }
@@ -721,7 +721,7 @@ where
                     };
 
                     block.runtime = Ok(RuntimeDownloadState::Unknown {
-                        same_as_parent: false, // TODO: not implemented properly; should check if parent had same download id
+                        _same_as_parent: false, // TODO: not implemented properly; should check if parent had same download id
                         state_root,
                         timeout,
                     });
@@ -980,7 +980,7 @@ where
             parent_index,
             Block {
                 runtime: Ok(RuntimeDownloadState::Unknown {
-                    same_as_parent: !runtime_environment_update,
+                    _same_as_parent: !runtime_environment_update,
                     state_root: *decoded_header.state_root,
                     timeout: None,
                 }),
@@ -1484,7 +1484,7 @@ enum RuntimeDownloadState<TNow> {
         /// When in doubt, `false`.
         ///
         /// Value is irrelevant for the finalized block.
-        same_as_parent: bool,
+        _same_as_parent: bool, // TODO: unused
 
         /// State trie root of the block. Necessary in order to download the runtime.
         // TODO: redundant with header

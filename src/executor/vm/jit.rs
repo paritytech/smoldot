@@ -193,7 +193,7 @@ impl JitPrototype {
                         let limits = {
                             let heap_pages = u32::from(heap_pages);
                             let min = cmp::max(m.limits().min(), heap_pages);
-                            let max = m.limits().max(); // TODO: make sure it's > to min, otherwise error
+                            let _max = m.limits().max(); // TODO: make sure it's > to min, otherwise error
                             let num = min + heap_pages;
                             wasmtime::Limits::new(num, Some(num))
                         };

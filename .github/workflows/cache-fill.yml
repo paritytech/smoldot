@@ -36,7 +36,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
-    - run: cargo test --no-run --locked --workspace --all-features
+    - run: RUSTFLAGS=-Dwarnings cargo test --no-run --locked --workspace --all-features
 
   test-32bits:
     runs-on: ubuntu-latest
@@ -47,4 +47,4 @@ jobs:
     - run: apt-get update && apt-get install -y libc6-dev-i386
     - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
-    - run: cargo test --no-run --target i686-unknown-linux-gnu --locked --workspace --all-features
+    - run: RUSTFLAGS=-Dwarnings cargo test --no-run --target i686-unknown-linux-gnu --locked --workspace --all-features
