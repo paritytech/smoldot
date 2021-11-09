@@ -530,50 +530,84 @@ impl NetworkService {
         }
 
         // Spawn task dedicated to opening connections.
-        // TODO: spawn multiple of these tasks and block them on the connection attempt; not possible now because `next_start_connect` has a bug
-        (config.tasks_executor)(Box::pin({
-            let inner = inner.clone();
-            let mut connec_tx = connec_tx.clone();
-            let future = async move {
-                loop {
-                    let start_connect = inner.network.next_start_connect(Instant::now()).await;
+        // Multiple tasks are spawned, and each task blocks during the connection process, in
+        // order to limit the number of simultaneous connection attempts.
+        for _ in 0..16 {
+            (config.tasks_executor)(Box::pin({
+                let inner = inner.clone();
+                let mut connec_tx = connec_tx.clone();
+                let future = async move {
+                    loop {
+                        let start_connect = inner.network.next_start_connect(Instant::now()).await;
 
-                    let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
-                    let _enter = span.enter();
+                        let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
+                        let _enter = span.enter();
 
-                    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-                    // a `Future<dyn Output = Result<TcpStream, ...>>`.
-                    let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
-                        Ok(socket) => socket,
-                        Err(_) => {
-                            tracing::debug!(%start_connect.multiaddr, "not-tcp");
-                            drop(_enter);
-                            inner
-                                .network
-                                .pending_outcome_err(start_connect.id, true)
-                                .await;
-                            continue;
-                        }
-                    };
+                        // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
+                        // a `Future<dyn Output = Result<TcpStream, ...>>`.
+                        let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
+                            Ok(socket) => socket,
+                            Err(_) => {
+                                tracing::debug!(%start_connect.multiaddr, "not-tcp");
+                                drop(_enter);
+                                inner
+                                    .network
+                                    .pending_outcome_err(start_connect.id, true)
+                                    .await;
+                                continue;
+                            }
+                        };
+                        drop(_enter);
 
-                    // TODO: handle dialing timeout here
+                        // Finishing ongoing connection process.
+                        let socket = {
+                            let now = Instant::now();
+                            let mut timeout = Delay::new(if start_connect.timeout >= now {
+                                start_connect.timeout - now
+                            } else {
+                                // `timeout - now` would panic
+                                Duration::new(0, 0)
+                            })
+                            .fuse();
+                            let socket = socket.fuse();
+                            futures::pin_mut!(socket);
+                            futures::select! {
+                                _ = timeout => {
+                                    inner.network.pending_outcome_err(start_connect.id, false).await;
+                                    continue;
+                                }
+                                result = socket => {
+                                    match result {
+                                        Ok(s) => s,
+                                        Err(_) => {
+                                            inner.network.pending_outcome_err(start_connect.id, true).await;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        };
 
-                    // Ignore errors, as it is possible for the destination task to have been
-                    // aborted already.
-                    let inner = inner.clone();
-                    drop(_enter);
-                    let _ = connec_tx.send(pending_connection_task(socket, start_connect.timeout, inner, start_connect.id).instrument(
-                        tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
-                    ).boxed()).await;
-                }
-            };
+                        // Inform the underlying network state machine that this dialing attempt
+                        // has succeeded.
+                        let id = inner.network.pending_outcome_ok(start_connect.id).await;
 
-            let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::trace_span!(parent: None, "tcp-dial")),
-            );
-            abort_handles.push(abort_handle);
-            abortable.map(|_| ())
-        }));
+                        // Ignore errors, as it is possible for the destination task to have been
+                        // aborted already.
+                        let inner = inner.clone();
+                        let _ = connec_tx.send(connection_task(socket, inner, id).instrument(
+                            tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
+                        ).boxed()).await;
+                    }
+                };
+
+                let (abortable, abort_handle) = future::abortable(
+                    future.instrument(tracing::trace_span!(parent: None, "tcp-dial")),
+                );
+                abort_handles.push(abort_handle);
+                abortable.map(|_| ())
+            }));
+        }
 
         // Spawn task dedicated to processing connections.
         // A single task is responsible for all connections, thereby ensuring that the networking
@@ -685,47 +719,6 @@ pub enum InitError {
     ListenerIo(Multiaddr, io::Error),
     /// A listening address passed through the configuration isn't valid.
     BadListenMultiaddr(Multiaddr),
-}
-
-/// Asynchronous task managing a specific TCP connection.
-#[tracing::instrument(level = "trace", skip(tcp_socket, network_service))]
-async fn pending_connection_task(
-    tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
-    timeout: Instant,
-    network_service: Arc<Inner>,
-    id: service::PendingId,
-) {
-    // Finishing ongoing connection process.
-    let tcp_socket = {
-        let now = Instant::now();
-        let mut timeout = Delay::new(if timeout >= now {
-            timeout - now
-        } else {
-            // `timeout - now` would panic
-            Duration::new(0, 0)
-        })
-        .fuse();
-        let tcp_socket = tcp_socket.fuse();
-        futures::pin_mut!(tcp_socket);
-        futures::select! {
-            _ = timeout => {
-                network_service.network.pending_outcome_err(id, false).await;
-                return;
-            }
-            result = tcp_socket => {
-                match result {
-                    Ok(s) => s,
-                    Err(_) => {
-                        network_service.network.pending_outcome_err(id, true).await;
-                        return;
-                    }
-                }
-            }
-        }
-    };
-
-    let id = network_service.network.pending_outcome_ok(id).await;
-    connection_task(tcp_socket, network_service, id).await;
 }
 
 /// Asynchronous task managing a specific TCP connection.
