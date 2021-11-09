@@ -974,7 +974,7 @@ where
             }
         };
 
-        self.start_connect_needed.notify_additional_relaxed(1);
+        self.start_connect_needed.notify_additional(1);
     }
 
     /// Returns the next event produced by the service.
@@ -1035,7 +1035,7 @@ where
                     user_data: address,
                 } if *num_peer_connections == 0 => {
                     if *peer_is_desired {
-                        self.start_connect_needed.notify_additional_relaxed(1);
+                        self.start_connect_needed.notify_additional(1);
                     }
 
                     // TODO: O(n)
@@ -1423,7 +1423,7 @@ where
                     // it to be filled.
                     // TODO: correct?
                     // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.start_connect_needed.notify_additional_relaxed(1);
+                    self.start_connect_needed.notify_additional(1);
 
                     match guarded.to_process_pre_event.take().unwrap() {
                         peers::Event::NotificationsOutResult {
@@ -1501,7 +1501,7 @@ where
                     // it to be filled.
                     // TODO: correct?
                     // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.start_connect_needed.notify_additional_relaxed(1);
+                    self.start_connect_needed.notify_additional(1);
 
                     return Event::ChainDisconnected {
                         chain_index,
@@ -2047,7 +2047,7 @@ where
                 .await;
             chain.out_peers.insert(peer_id.clone());
 
-            self.start_connect_needed.notify_additional_relaxed(1);
+            self.start_connect_needed.notify_additional(1);
             return Some(peer_id.clone());
         }
 
