@@ -504,6 +504,26 @@ impl SyncBackground {
 
         // Actual block production now happening.
         let block = {
+            // Determine when the block should stop being authored.
+            //
+            // In order for the network to perform well, a block should be authored and propagated
+            // throughout the peer-to-peer network before the end of the slot. In order for this
+            // to happen, the block creation process itself should end a few seconds before the
+            // end of the slot. This threshold after which the block creation should end is
+            // arbitrary, but we define it here as 2/3rds of the block duration.
+            //
+            // Most parts of the block authorship can't be accelerated, in particular the
+            // initialization and the signing at the end. This end of authoring threshold is only
+            // checked when deciding whether to continue including more transactions in the block.
+            // TODO: use this
+            let _authoring_end = {
+                let start = authoring_start.slot_start_from_unix_epoch();
+                let end = authoring_start.slot_end_from_unix_epoch();
+                debug_assert!(start < end);
+                SystemTime::UNIX_EPOCH + start + (end - start) * 2 / 3
+            };
+
+            // Start the block authoring process.
             let mut block_authoring = {
                 let best_block_storage_access = self.sync.best_block_storage().unwrap();
                 let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
@@ -522,8 +542,6 @@ impl SyncBackground {
             // The block authoring process jumps through various states, interrupted when it needs
             // access to the storage of the best block.
             loop {
-                // TODO: check that we're still within the first 4/6ths of the slot
-
                 match block_authoring {
                     author::build::BuilderAuthoring::Seal(seal) => {
                         // This is the last step of the authoring. The block creation is
