@@ -189,6 +189,27 @@ pub struct AuthoringStart {
 }
 
 impl AuthoringStart {
+    /// Returns when the authoring slot start, as a UNIX timestamp (i.e. number of seconds since
+    /// the UNIX epoch, ignoring leap seconds).
+    pub fn slot_start_from_unix_epoch(&self) -> Duration {
+        match self.consensus {
+            WaitSlotConsensus::Aura(claim) => claim.slot_start_from_unix_epoch,
+        }
+    }
+
+    /// Returns when the authoring slot ends, as a UNIX timestamp (i.e. number of seconds since
+    /// the UNIX epoch, ignoring leap seconds).
+    ///
+    /// The block should finish being authored before the slot ends.
+    /// However, in order for the network to perform smoothly, the block should have been
+    /// authored **and** propagated throughout the entire peer-to-peer network before the slot
+    /// ends.
+    pub fn slot_end_from_unix_epoch(&self) -> Duration {
+        match self.consensus {
+            WaitSlotConsensus::Aura(claim) => claim.slot_end_from_unix_epoch,
+        }
+    }
+
     /// Start producing the block.
     pub fn start(self, config: AuthoringStartConfig) -> BuilderAuthoring {
         let inner_block_build = runtime::build_block(runtime::Config {
