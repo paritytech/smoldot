@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn transition_not_tried_connected() {
-        let mut addresses = super::Addresses::new();
+        let mut addresses = super::Addresses::with_capacity(0);
         assert!(addresses.is_empty());
 
         let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn transition_not_tried_pending_connected() {
-        let mut addresses = super::Addresses::new();
+        let mut addresses = super::Addresses::with_capacity(0);
         assert!(addresses.is_empty());
 
         let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn transition_not_tried_disconnected() {
-        let mut addresses = super::Addresses::new();
+        let mut addresses = super::Addresses::with_capacity(0);
 
         let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
         addresses.insert_discovered(addr.clone());
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn transition_connected_twice() {
-        let mut addresses = super::Addresses::new();
+        let mut addresses = super::Addresses::with_capacity(0);
 
         let addr: Multiaddr = "/ip4/1.2.3.4/tcp/5".parse().unwrap();
         addresses.insert_discovered(addr.clone());
