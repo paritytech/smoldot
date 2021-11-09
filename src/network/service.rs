@@ -188,9 +188,9 @@ pub struct ChainNetwork<TNow> {
     /// Generator for randomness.
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
 
-    /// Waker to wake up when [`ChainNetwork::next_start_connect`] should be called again by the
+    /// Event notified when [`ChainNetwork::next_start_connect`] should be called again by the
     /// user.
-    next_start_connect_waker: AtomicWaker,
+    start_connect_needed: event_listener::Event,
 }
 
 /// See [`ChainNetwork::next_event_guarded`].
@@ -484,7 +484,7 @@ where
             max_addresses_per_peer: config.max_addresses_per_peer,
             num_chains,
             randomness: Mutex::new(randomness),
-            next_start_connect_waker: AtomicWaker::new(),
+            start_connect_needed: event_listener::Event::new(),
         }
     }
 
@@ -974,7 +974,7 @@ where
             }
         };
 
-        self.next_start_connect_waker.wake();
+        self.start_connect_needed.notify_additional_relaxed(1);
     }
 
     /// Returns the next event produced by the service.
@@ -1035,7 +1035,7 @@ where
                     user_data: address,
                 } if *num_peer_connections == 0 => {
                     if *peer_is_desired {
-                        self.next_start_connect_waker.wake();
+                        self.start_connect_needed.notify_additional_relaxed(1);
                     }
 
                     // TODO: O(n)
@@ -1423,7 +1423,7 @@ where
                     // it to be filled.
                     // TODO: correct?
                     // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.next_start_connect_waker.wake();
+                    self.start_connect_needed.notify_additional_relaxed(1);
 
                     match guarded.to_process_pre_event.take().unwrap() {
                         peers::Event::NotificationsOutResult {
@@ -1501,7 +1501,7 @@ where
                     // it to be filled.
                     // TODO: correct?
                     // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.next_start_connect_waker.wake();
+                    self.start_connect_needed.notify_additional_relaxed(1);
 
                     return Event::ChainDisconnected {
                         chain_index,
@@ -1967,21 +1967,14 @@ where
             }
 
             // No valid desired peer has been found.
-            // We register a waker, unlock the mutex, and wait until the waker is invoked.
-            // The rest of the code of this state machine makes sure to invoke the waker when
+            // We start listening for an event, unlock the mutex, and wait until the event is
+            // notified. This needs to be done in this order, in particular the mutex needs to be
+            // unlocked after we start listening for events, to avoid race conditions.
+            // The rest of the code of this state machine makes sure to notify the event when
             // there is a potential new desired peer or known address.
-            // TODO: if `next_start_connect` is called multiple times simultaneously, all but the first will deadlock
-            let mut pending_lock: Option<MutexGuard<_>> = Some(pending_lock);
-            future::poll_fn(move |cx| {
-                if let Some(_lock) = pending_lock.take() {
-                    self.next_start_connect_waker.register(cx.waker());
-                    drop(_lock);
-                    Poll::Pending
-                } else {
-                    Poll::Ready(())
-                }
-            })
-            .await;
+            let event_listener = self.start_connect_needed.listen();
+            drop::<MutexGuard<_>>(pending_lock);
+            event_listener.await;
         }
     }
 
@@ -2054,7 +2047,7 @@ where
                 .await;
             chain.out_peers.insert(peer_id.clone());
 
-            self.next_start_connect_waker.wake();
+            self.start_connect_needed.notify_additional_relaxed(1);
             return Some(peer_id.clone());
         }
 
