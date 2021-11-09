@@ -498,10 +498,9 @@ impl SyncBackground {
         );
         let _enter = span.enter();
 
-        // TODO: should be the newly-created block's hash
-        let _jaeger_span = self
-            .jaeger_service
-            .block_span(&self.sync.best_block_hash(), "child-creation");
+        // We would like to create a span for authoring the new block, but the trace id depends on
+        // the block hash, which is only known at the end.
+        let block_author_jaeger_start_time = mick_jaeger::StartTime::now();
 
         // Actual block production now happening.
         let block = {
@@ -641,6 +640,10 @@ impl SyncBackground {
             runtime_logs = ?block.logs,
             "block-generated"
         );
+        let _jaeger_span = self
+            .jaeger_service
+            .block_span(&new_block_hash, "author")
+            .with_start_time_override(block_author_jaeger_start_time);
 
         // Switch the block authoring to a state where we won't try to generate a new block again
         // until something new happens.
