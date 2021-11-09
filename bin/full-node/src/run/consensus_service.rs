@@ -338,14 +338,9 @@ impl SyncBackground {
                                 local_authorities,
                             )),
                         ),
-                        (
-                            block_authoring @ None,
-                            chain_information::ChainInformationConsensusRef::Babe {
-                                finalized_block_epoch_information,
-                                finalized_next_epoch_transition,
-                                slots_per_epoch,
-                            },
-                        ) => None, // TODO: the block authoring doesn't support Babe at the moment
+                        (None, chain_information::ChainInformationConsensusRef::Babe { .. }) => {
+                            None // TODO: the block authoring doesn't support Babe at the moment
+                        }
                         (None, _) => todo!(),
                     };
 
@@ -621,9 +616,8 @@ impl SyncBackground {
                         block_authoring = get.inject_value(value.map(iter::once));
                         continue;
                     }
-                    author::build::BuilderAuthoring::NextKey(next_key) => {
-                        block_authoring = next_key.inject_key(Some::<Vec<u8>>(todo!()));
-                        continue;
+                    author::build::BuilderAuthoring::NextKey(_) => {
+                        todo!() // TODO: implement
                     }
                     author::build::BuilderAuthoring::PrefixKeys(prefix_key) => {
                         // Access the storage of the best block. Can return `̀None` if not syncing

@@ -26,11 +26,6 @@ pub(super) struct Addresses {
 }
 
 impl Addresses {
-    /// Creates a new empty list of addresses.
-    pub(super) fn new() -> Self {
-        Addresses { list: Vec::new() }
-    }
-
     /// Creates a new empty list of addresses with the given capacity pre-allocated.
     pub(super) fn with_capacity(cap: usize) -> Self {
         Addresses {
@@ -41,11 +36,6 @@ impl Addresses {
     /// Returns the number of addresses.
     pub(super) fn len(&self) -> usize {
         self.list.len()
-    }
-
-    /// Returns the list of addresses stored in this list.
-    pub(super) fn iter(&'_ self) -> impl Iterator<Item = &'_ multiaddr::Multiaddr> + '_ {
-        self.list.iter().map(|(a, _)| a)
     }
 
     /// Returns the list of addresses stored in this list that are marked as connected.

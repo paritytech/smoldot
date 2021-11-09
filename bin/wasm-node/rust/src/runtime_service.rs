@@ -465,19 +465,6 @@ impl RuntimeService {
     }
 
     // TODO: doc
-    pub async fn recent_finalized_block_runtime_lock<'a>(
-        self: &'a Arc<RuntimeService>,
-    ) -> RuntimeLock<'a> {
-        let guarded = self.guarded.lock().await;
-        let block_hash = *guarded.tree.as_ref().unwrap().finalized_block_hash();
-        RuntimeLock {
-            service: self,
-            inner: RuntimeLockInner::InTree(guarded),
-            block_hash,
-        }
-    }
-
-    // TODO: doc
     pub async fn recent_best_block_runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
     ) -> RuntimeLock<'a> {
@@ -698,25 +685,6 @@ impl<'a> RuntimeLock<'a> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.block_hash
-    }
-
-    pub fn runtime(&self) -> &executor::host::HostVmPrototype {
-        match &self.inner {
-            RuntimeLockInner::InTree(guarded) => {
-                let tree = guarded.tree.as_ref().unwrap();
-                tree.block_runtime(&self.block_hash)
-                    .unwrap()
-                    .runtime
-                    .as_ref()
-                    .unwrap()
-                    .virtual_machine
-                    .as_ref()
-                    .unwrap()
-            }
-            RuntimeLockInner::OutOfTree {
-                virtual_machine, ..
-            } => virtual_machine,
-        }
     }
 
     pub async fn start<'b>(

@@ -48,7 +48,8 @@ impl KeyNamespace {
         .into_iter()
     }
 
-    fn as_string(&self) -> &'static [u8; 4] {
+    // TODO: use or remove
+    /*fn as_string(&self) -> &'static [u8; 4] {
         match self {
             KeyNamespace::Aura => b"aura",
             KeyNamespace::AuthorityDiscovery => b"audi",
@@ -56,7 +57,7 @@ impl KeyNamespace {
             KeyNamespace::Grandpa => b"gran",
             KeyNamespace::ImOnline => b"imon",
         }
-    }
+    }*/
 }
 
 /// Collection of keypairs.

@@ -365,6 +365,7 @@ impl Key {
         }
     }
 
+    #[cfg(test)] // TODO: #[cfg(test)] is a bit crappy; figure out
     fn from_sha256_hash(hash: [u8; 32]) -> Self {
         Self { digest: hash }
     }

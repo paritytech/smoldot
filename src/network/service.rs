@@ -34,13 +34,11 @@ use core::{
     fmt, iter, mem,
     num::NonZeroUsize,
     ops::{Add, Sub},
-    task::Poll,
     time::Duration,
 };
 use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
-    task::AtomicWaker,
 };
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
@@ -1943,7 +1941,7 @@ where
 
                 // TODO: O(n)
                 for chain in &mut pending.chains {
-                    if let Some(addrs) = chain.kbuckets.get_mut(entry.key()) {
+                    if let Some(_) = chain.kbuckets.get_mut(entry.key()) {
                         // TODO: mark address as pending
                     }
                 }
