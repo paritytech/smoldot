@@ -33,6 +33,7 @@ use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Dur
 use tracing::Instrument as _;
 
 mod consensus_service;
+mod database_thread;
 mod jaeger_service;
 mod json_rpc_service;
 mod network_service;
@@ -153,9 +154,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         matches!(cli_output, cli::Output::Informant),
     )
     .await;
+    let database = Arc::new(database_thread::DatabaseThread::from(database));
 
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
-        Some(
+        Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
                 &relay_chain_spec,
                 relay_genesis_chain_information.as_ref().unwrap(),
@@ -164,17 +166,22 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             )
             .await
             .0,
-        )
+        )))
     } else {
         None
     };
 
-    let database_finalized_block_hash = database.finalized_block_hash().unwrap();
+    let database_finalized_block_hash = database
+        .with_database(|db| db.finalized_block_hash().unwrap())
+        .await;
     let database_finalized_block_number = header::decode(
         &database
-            .block_scale_encoded_header(&database_finalized_block_hash)
-            .unwrap()
-            .unwrap(),
+            .with_database(move |db| {
+                db.block_scale_encoded_header(&database_finalized_block_hash)
+                    .unwrap()
+                    .unwrap()
+            })
+            .await,
     )
     .unwrap()
     .number;
@@ -227,12 +234,14 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     chain::chain_information::ChainInformationFinality::Grandpa { .. }
                 ),
                 genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-                best_block: {
-                    let hash = database.finalized_block_hash().unwrap();
-                    let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
-                    let number = header::decode(&header).unwrap().number;
-                    (number, hash)
-                },
+                best_block: database
+                    .with_database(|database| {
+                        let hash = database.finalized_block_hash().unwrap();
+                        let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
+                        let number = header::decode(&header).unwrap().number;
+                        (number, hash)
+                    })
+                    .await,
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
                     for node in chain_spec
@@ -252,45 +261,48 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 },
             })
             .chain(
-                relay_chain_spec
-                    .as_ref()
-                    .map(|relay_chains_specs| {
-                        network_service::ChainConfig {
-                            protocol_id: relay_chains_specs.protocol_id().to_owned(),
-                            database: relay_chain_database.clone().unwrap(),
-                            has_grandpa_protocol: matches!(
-                                relay_genesis_chain_information.as_ref().unwrap().finality,
-                                chain::chain_information::ChainInformationFinality::Grandpa { .. }
-                            ),
-                            genesis_block_hash: relay_genesis_chain_information
-                                .as_ref()
-                                .unwrap()
-                                .finalized_block_header
-                                .hash(),
-                            best_block: {
-                                let db = relay_chain_database.as_ref().unwrap();
+                if let Some(relay_chains_specs) = &relay_chain_spec {
+                    Some(network_service::ChainConfig {
+                        protocol_id: relay_chains_specs.protocol_id().to_owned(),
+                        database: relay_chain_database.clone().unwrap(),
+                        has_grandpa_protocol: matches!(
+                            relay_genesis_chain_information.as_ref().unwrap().finality,
+                            chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                        ),
+                        genesis_block_hash: relay_genesis_chain_information
+                            .as_ref()
+                            .unwrap()
+                            .finalized_block_header
+                            .hash(),
+                        best_block: relay_chain_database
+                            .as_ref()
+                            .unwrap()
+                            .with_database(|db| {
                                 let hash = db.finalized_block_hash().unwrap();
                                 let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
                                 let number = header::decode(&header).unwrap().number;
                                 (number, hash)
-                            },
-                            bootstrap_nodes: {
-                                let mut list =
-                                    Vec::with_capacity(relay_chains_specs.boot_nodes().len());
-                                for node in relay_chains_specs.boot_nodes().iter() {
-                                    let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                                    if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                                        let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
-                                        list.push((peer_id, address));
-                                    } else {
-                                        panic!() // TODO:
-                                    }
+                            })
+                            .await,
+                        bootstrap_nodes: {
+                            let mut list =
+                                Vec::with_capacity(relay_chains_specs.boot_nodes().len());
+                            for node in relay_chains_specs.boot_nodes().iter() {
+                                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                                    list.push((peer_id, address));
+                                } else {
+                                    panic!() // TODO:
                                 }
-                                list
-                            },
-                        }
+                            }
+                            list
+                        },
                     })
-                    .into_iter(),
+                } else {
+                    None
+                }
+                .into_iter(),
             )
             .collect(),
             noise_key,
@@ -548,7 +560,7 @@ async fn open_database(
     genesis_chain_information: &chain::chain_information::ChainInformation,
     tmp: bool,
     show_progress: bool,
-) -> (Arc<full_sqlite::SqliteFullDatabase>, bool) {
+) -> (full_sqlite::SqliteFullDatabase, bool) {
     // Directory supposed to contain the database.
     let db_path = if !tmp {
         if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
@@ -578,7 +590,7 @@ async fn open_database(
                 panic!("Mismatch between database and chain specification. Shutting down node.");
             }
 
-            (Arc::new(database), true)
+            (database, true)
         }
 
         // The database doesn't exist or is empty.
@@ -593,7 +605,7 @@ async fn open_database(
                     chain_spec.genesis_storage(),
                 )
                 .unwrap();
-            (Arc::new(database), false)
+            (database, false)
         }
     }
 }

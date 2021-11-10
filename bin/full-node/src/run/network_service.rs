@@ -27,7 +27,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::run::jaeger_service;
+use crate::run::{database_thread, jaeger_service};
 
 use core::{cmp, pin::Pin, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
@@ -77,7 +77,7 @@ pub struct ChainConfig {
     pub bootstrap_nodes: Vec<(PeerId, Multiaddr)>,
 
     /// Database to use to read blocks from when answering requests.
-    pub database: Arc<full_sqlite::SqliteFullDatabase>,
+    pub database: Arc<database_thread::DatabaseThread>,
 
     /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
     /// the chains match.
@@ -130,7 +130,7 @@ struct Inner {
     network: service::ChainNetwork<Instant>,
 
     /// Databases to use to read blocks from when answering requests.
-    databases: Vec<Arc<full_sqlite::SqliteFullDatabase>>,
+    databases: Vec<Arc<database_thread::DatabaseThread>>,
 
     /// Identity of the local node.
     local_peer_id: PeerId,
@@ -339,7 +339,8 @@ impl NetworkService {
                                 };
 
                                 let response =
-                                    blocks_request_response(&inner.databases[chain_index], config);
+                                    blocks_request_response(&inner.databases[chain_index], config)
+                                        .await;
                                 request
                                     .respond(match response {
                                         Ok(b) => Some(b),
@@ -889,70 +890,74 @@ fn multiaddr_to_socket(
 }
 
 /// Builds the response to a block request by reading from the given database.
-fn blocks_request_response(
-    database: &full_sqlite::SqliteFullDatabase,
+async fn blocks_request_response(
+    database: &database_thread::DatabaseThread,
     config: protocol::BlocksRequestConfig,
 ) -> Result<Vec<protocol::BlockData>, full_sqlite::AccessError> {
-    let num_blocks = cmp::min(
-        usize::try_from(config.desired_count.get()).unwrap_or(usize::max_value()),
-        128,
-    );
+    database
+        .with_database(move |database| {
+            let num_blocks = cmp::min(
+                usize::try_from(config.desired_count.get()).unwrap_or(usize::max_value()),
+                128,
+            );
 
-    let mut output = Vec::with_capacity(num_blocks);
-    let mut next_block = config.start;
+            let mut output = Vec::with_capacity(num_blocks);
+            let mut next_block = config.start;
 
-    loop {
-        if output.len() >= num_blocks {
-            break;
-        }
+            loop {
+                if output.len() >= num_blocks {
+                    break;
+                }
 
-        let hash = match next_block {
-            protocol::BlocksRequestConfigStart::Hash(hash) => hash,
-            protocol::BlocksRequestConfigStart::Number(number) => {
-                // TODO: naive block selection ; should choose the best chain instead
-                match database.block_hash_by_number(number)?.next() {
+                let hash = match next_block {
+                    protocol::BlocksRequestConfigStart::Hash(hash) => hash,
+                    protocol::BlocksRequestConfigStart::Number(number) => {
+                        // TODO: naive block selection ; should choose the best chain instead
+                        match database.block_hash_by_number(number)?.next() {
+                            Some(h) => h,
+                            None => break,
+                        }
+                    }
+                };
+
+                let header = match database.block_scale_encoded_header(&hash)? {
                     Some(h) => h,
                     None => break,
-                }
+                };
+
+                next_block = {
+                    let decoded = header::decode(&header).unwrap();
+                    match config.direction {
+                        protocol::BlocksRequestDirection::Ascending => {
+                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
+                        }
+                        protocol::BlocksRequestDirection::Descending => {
+                            // TODO: right now, since we don't necessarily pick the best chain in `block_hash_by_number`, it is possible that the next block doesn't have the current block as parent
+                            protocol::BlocksRequestConfigStart::Number(decoded.number + 1)
+                        }
+                    }
+                };
+
+                output.push(protocol::BlockData {
+                    hash,
+                    header: if config.fields.header {
+                        Some(header)
+                    } else {
+                        None
+                    },
+                    body: if config.fields.body {
+                        Some(match database.block_extrinsics(&hash)? {
+                            Some(body) => body.collect(),
+                            None => break,
+                        })
+                    } else {
+                        None
+                    },
+                    justification: None, // TODO: justifications aren't saved in database at the moment
+                });
             }
-        };
 
-        let header = match database.block_scale_encoded_header(&hash)? {
-            Some(h) => h,
-            None => break,
-        };
-
-        next_block = {
-            let decoded = header::decode(&header).unwrap();
-            match config.direction {
-                protocol::BlocksRequestDirection::Ascending => {
-                    protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
-                }
-                protocol::BlocksRequestDirection::Descending => {
-                    // TODO: right now, since we don't necessarily pick the best chain in `block_hash_by_number`, it is possible that the next block doesn't have the current block as parent
-                    protocol::BlocksRequestConfigStart::Number(decoded.number + 1)
-                }
-            }
-        };
-
-        output.push(protocol::BlockData {
-            hash,
-            header: if config.fields.header {
-                Some(header)
-            } else {
-                None
-            },
-            body: if config.fields.body {
-                Some(match database.block_extrinsics(&hash)? {
-                    Some(body) => body.collect(),
-                    None => break,
-                })
-            } else {
-                None
-            },
-            justification: None, // TODO: justifications aren't saved in database at the moment
-        });
-    }
-
-    Ok(output)
+            Ok(output)
+        })
+        .await
 }

@@ -24,7 +24,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::run::{jaeger_service, network_service};
+use crate::run::{database_thread, jaeger_service, network_service};
 
 use core::{num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
@@ -54,7 +54,7 @@ pub struct Config {
     pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
 
     /// Database to use to read and write information about the chain.
-    pub database: Arc<full_sqlite::SqliteFullDatabase>,
+    pub database: Arc<database_thread::DatabaseThread>,
 
     /// Stores of key to use for all block-production-related purposes.
     pub keystore: Arc<keystore::Keystore>,
@@ -96,43 +96,62 @@ impl ConsensusService {
     pub async fn new(mut config: Config) -> Arc<Self> {
         let (to_database, messages_rx) = mpsc::channel(4);
 
-        let finalized_block_hash = config.database.finalized_block_hash().unwrap();
-        let best_block_hash = config.database.best_block_hash().unwrap();
+        // Perform the initial access to the database to load a bunch of information.
+        let (
+            finalized_block_hash,
+            finalized_block_number,
+            best_block_hash,
+            best_block_number,
+            finalized_block_storage,
+            finalized_chain_information,
+        ): (_, _, _, _, BTreeMap<Vec<u8>, Vec<u8>>, _) = config
+            .database
+            .with_database(|database| {
+                let finalized_block_hash = database.finalized_block_hash().unwrap();
+                let finalized_block_number = header::decode(
+                    &database
+                        .block_scale_encoded_header(&finalized_block_hash)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap()
+                .number;
+                let best_block_hash = database.best_block_hash().unwrap();
+                let best_block_number = header::decode(
+                    &database
+                        .block_scale_encoded_header(&best_block_hash)
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap()
+                .number;
+                let finalized_block_storage = database
+                    .finalized_block_storage_top_trie(&finalized_block_hash)
+                    .unwrap();
+                let finalized_chain_information = database
+                    .to_chain_information(&finalized_block_hash)
+                    .unwrap();
+                (
+                    finalized_block_hash,
+                    finalized_block_number,
+                    best_block_hash,
+                    best_block_number,
+                    finalized_block_storage,
+                    finalized_chain_information,
+                )
+            })
+            .await;
 
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_hash,
-            best_block_number: header::decode(
-                &config
-                    .database
-                    .block_scale_encoded_header(&best_block_hash)
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap()
-            .number,
+            best_block_number,
             finalized_block_hash,
-            finalized_block_number: header::decode(
-                &config
-                    .database
-                    .block_scale_encoded_header(&finalized_block_hash)
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap()
-            .number,
+            finalized_block_number,
         }));
 
         let background_sync = {
-            let finalized_block_storage: BTreeMap<Vec<u8>, Vec<u8>> = config
-                .database
-                .finalized_block_storage_top_trie(&config.database.finalized_block_hash().unwrap())
-                .unwrap();
-
             let mut sync = all::AllSync::new(all::Config {
-                chain_information: config
-                    .database
-                    .to_chain_information(&config.database.finalized_block_hash().unwrap())
-                    .unwrap(),
+                chain_information: finalized_chain_information,
                 sources_capacity: 32,
                 blocks_capacity: {
                     // This is the maximum number of blocks between two consecutive justifications.
@@ -1067,7 +1086,7 @@ impl SyncBackground {
 /// Starts the task that writes blocks to the database.
 #[tracing::instrument(level = "trace", skip(database, messages_rx))]
 async fn start_database_write(
-    database: Arc<full_sqlite::SqliteFullDatabase>,
+    database: Arc<database_thread::DatabaseThread>,
     mut messages_rx: mpsc::Receiver<ToDatabase>,
 ) {
     loop {
@@ -1075,38 +1094,42 @@ async fn start_database_write(
             None => break,
             Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
                 let span = tracing::debug_span!("blocks-db-write", len = finalized_blocks.len());
-                let _enter = span.enter();
 
-                let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
+                database
+                    .with_database(|database| {
+                        let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
 
-                for block in finalized_blocks {
-                    // TODO: overhead for building the SCALE encoding of the header
-                    let result = database.insert(
-                        &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        }),
-                        true, // TODO: is_new_best?
-                        block.full.as_ref().unwrap().body.iter(),
-                        block
-                            .full
-                            .as_ref()
-                            .unwrap()
-                            .storage_top_trie_changes
-                            .iter()
-                            .map(|(k, v)| (k, v.as_ref())),
-                    );
+                        for block in finalized_blocks {
+                            // TODO: overhead for building the SCALE encoding of the header
+                            let result = database.insert(
+                                &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
+                                    a.extend_from_slice(b.as_ref());
+                                    a
+                                }),
+                                true, // TODO: is_new_best?
+                                block.full.as_ref().unwrap().body.iter(),
+                                block
+                                    .full
+                                    .as_ref()
+                                    .unwrap()
+                                    .storage_top_trie_changes
+                                    .iter()
+                                    .map(|(k, v)| (k, v.as_ref())),
+                            );
 
-                    match result {
-                        Ok(()) => {}
-                        Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                        Err(err) => panic!("{}", err),
-                    }
-                }
+                            match result {
+                                Ok(()) => {}
+                                Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                                Err(err) => panic!("{}", err),
+                            }
+                        }
 
-                if let Some(new_finalized_hash) = new_finalized_hash {
-                    database.set_finalized(&new_finalized_hash).unwrap();
-                }
+                        if let Some(new_finalized_hash) = new_finalized_hash {
+                            database.set_finalized(&new_finalized_hash).unwrap();
+                        }
+                    })
+                    .instrument(span)
+                    .await;
             }
         }
     }
