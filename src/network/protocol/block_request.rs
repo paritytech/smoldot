@@ -95,6 +95,7 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
                 BlocksRequestDirection::Descending => schema::Direction::Descending as i32,
             },
             max_blocks: config.desired_count.get(),
+            support_multiple_justifications: false, // TODO: not implemented
         }
     };
 
@@ -163,12 +164,14 @@ pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = im
                     .justification
                     .as_ref()
                     .map_or(Vec::new(), |j| j.to_vec()),
+                justifications: Vec::new(), // TODO: implement
                 is_empty_justification: block
                     .justification
                     .as_ref()
                     .map_or(false, |j| j.is_empty()),
                 receipt: Vec::new(),
                 message_queue: Vec::new(),
+                indexed_body: Vec::new(),
             })
             .collect(),
     };
